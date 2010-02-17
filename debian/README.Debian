@@ -1,6 +1,10 @@
 MongoDB for Debian
 ------------------
 
+This is version 1.2.x of MongoDB, it is understood to be stable in terms of
+features and upstream. Additional information are in Bug #570148.
+    http://bugs.debian.org/cgi-bin/bugreport.cgi?bug=570148
+
 Binds only to localhost
   
   As mongo needs some tuning to become secure, it binds to localhost by
