@@ -9,3 +9,4 @@ mongodb-1.2: binary-or-shlib-defines-rpath ./usr/bin/mongoimport /usr/lib64/xulr
 mongodb-1.2: binary-or-shlib-defines-rpath ./usr/bin/mongorestore /usr/lib64/xulrunner-1.9.1
 mongodb-1.2: binary-or-shlib-defines-rpath ./usr/bin/mongos /usr/lib64/xulrunner-1.9.1
 mongodb-1.2: binary-or-shlib-defines-rpath ./usr/bin/mongosniff /usr/lib64/xulrunner-1.9.1
+mongodb-1.2: new-package-should-close-itp-bug
