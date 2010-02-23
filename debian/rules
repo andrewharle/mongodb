@@ -70,15 +70,15 @@ install: build
 	dh_prep
 	dh_installdirs
 
-	scons --prefix=$(CURDIR)/debian/mongodb-1.2/usr install
+	scons --prefix=$(CURDIR)/debian/mongodb/usr install
 
-	mkdir -p $(CURDIR)/debian/mongodb-1.2/usr/share/lintian/overrides/
+	mkdir -p $(CURDIR)/debian/mongodb/usr/share/lintian/overrides/
 	install -m 644 $(CURDIR)/debian/lintian-overrides \
-		$(CURDIR)/debian/mongodb-1.2/usr/share/lintian/overrides/mongodb-1.2
+		$(CURDIR)/debian/mongodb/usr/share/lintian/overrides/mongodb
 
-	mkdir -p $(CURDIR)/debian/mongodb-1.2/etc
+	mkdir -p $(CURDIR)/debian/mongodb/etc
 	install -m 644 $(CURDIR)/debian/mongodb.conf \
-		$(CURDIR)/debian/mongodb-1.2/etc/mongodb.conf
+		$(CURDIR)/debian/mongodb/etc/mongodb.conf
 
 # Build architecture-independent files here.
 binary-indep: build install
