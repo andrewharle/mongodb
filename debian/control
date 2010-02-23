@@ -1,4 +1,4 @@
-Source: mongodb-1.2
+Source: mongodb
 Section: database
 Priority: optional
 Maintainer: Antonin Kral <A.Kral@sh.cvut.cz>
@@ -6,7 +6,7 @@ Build-Depends: debhelper (>= 7), libpcre3, libpcre3-dev, scons, xulrunner-dev (>
 Standards-Version: 3.8.4
 Homepage: http://www.mongodb.org
 
-Package: mongodb-1.2
+Package: mongodb
 Architecture: i386 amd64
 Depends: ${shlibs:Depends}, ${misc:Depends}, adduser, xulrunner-dev
 Replaces: mongodb
