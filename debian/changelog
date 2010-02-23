@@ -1,7 +1,7 @@
-mongodb-1.2 (1.2.2-1) unstable; urgency=low
+mongodb-1.2 (1:1.2.2-1) unstable; urgency=low
 
-  * this is Initial upload of currently stable version of MongoDB 1.2.2
-    Please refer to Bug #570148 for clarification.
+  * this commit introduces stable version of MongoDB to Debian, hopefully to
+    be included in upcoming stable (Closes: #570148)
   * [2fede57] Upstream release 1.2.2, based on commit
     fc3d3acafc253da085f7d0cdcd91059cc9bcd8e3
   * [d21668d] versionString changed from "1.2.3-"  to "1.2.2"
