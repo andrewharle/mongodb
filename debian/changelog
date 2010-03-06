@@ -1,3 +1,10 @@
+mongodb (1:1.2.2-2) unstable; urgency=low
+
+  * [49232f8] removed upstart, it is buggy + not supported in Debian
+              (Closes: #572812)
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Sat, 06 Mar 2010 22:55:17 +0100
+
 mongodb (1:1.2.2-1) unstable; urgency=low
 
   * this commit introduces stable version of MongoDB to Debian, hopefully to
