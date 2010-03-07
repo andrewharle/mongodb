@@ -1,13 +1,15 @@
-mongodb (1:1.2.2-3) UNRELEASED; urgency=low
+mongodb (1:1.2.2-3) unstable; urgency=low
 
   * [aced2f4] removed unnecessary dependency (Closes: #572873)
+  * [ce78acd] Added call for tests to ensure correct build 
+    (Closes: #570106)
 
- -- Antonin Kral <A.Kral@sh.cvut.cz>  Sun, 07 Mar 2010 18:37:52 +0100
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Sun, 07 Mar 2010 21:07:37 +0100
 
 mongodb (1:1.2.2-2) unstable; urgency=low
 
   * [49232f8] removed upstart, it is buggy + not supported in Debian
-              (Closes: #572812)
+    (Closes: #572812)
 
  -- Antonin Kral <A.Kral@sh.cvut.cz>  Sat, 06 Mar 2010 22:55:17 +0100
 
