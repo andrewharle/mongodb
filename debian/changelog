@@ -1,3 +1,9 @@
+mongodb (1:1.2.2-3) UNRELEASED; urgency=low
+
+  * [aced2f4] removed unnecessary dependency (Closes: #572873)
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Sun, 07 Mar 2010 18:37:52 +0100
+
 mongodb (1:1.2.2-2) unstable; urgency=low
 
   * [49232f8] removed upstart, it is buggy + not supported in Debian
