@@ -37,6 +37,10 @@ build-stamp: configure-stamp
         #docbook-to-man debian/mongodb.sgml > mongodb.1
 	ls debian/*.1 > debian/mongodb.manpages
 
+	#run regression tests
+	scons --prefix=$(CURDIR)/debian/tmp-test smoke
+	rm -rf $(CURDIR)/debian/tmp-test
+
 	touch $@
 
 clean: 
@@ -62,6 +66,7 @@ clean:
 	rm -f buildscripts/*.pyc 
 	rm -f *.pyc
 	rm -f buildinfo.cpp
+	rm -rf $(CURDIR)/debian/tmp-test
 	dh_clean debian/files
 
 install: build
