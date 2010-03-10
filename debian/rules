@@ -66,7 +66,8 @@ clean:
 	rm -f buildscripts/*.pyc 
 	rm -f *.pyc
 	rm -f buildinfo.cpp
-	rm -rf $(CURDIR)/debian/tmp-test
+	rm -rf debian/tmp-test
+	rm -f debian/mongodb.upstart
 	dh_clean debian/files
 
 install: build

@@ -1,3 +1,9 @@
+mongodb (1:1.2.2-4) unstable; urgency=low
+
+  * ensure removal of upstart script as upload of repacked source is failing
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Wed, 10 Mar 2010 07:29:38 +0100
+
 mongodb (1:1.2.2-3) unstable; urgency=low
 
   * [aced2f4] removed unnecessary dependency (Closes: #572873)
