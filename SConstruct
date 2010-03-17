@@ -843,6 +843,8 @@ def concatjs(target, source, env):
 
     fullSource = ""
 
+    first = True
+
     for s in source:
         f = open( str(s) , 'r' )
         for l in f:
@@ -850,8 +852,21 @@ def concatjs(target, source, env):
             if len ( l ) == 0:
                 continue
             
-            fullSource += l + "\n"
+            if l == "}":
+                fullSource += "}"
+                continue
+
+            if first:
+                first = False
+            else:
+                fullSource += "\n"
+
+            fullSource += l
+
+    fullSource += "\n"
     
+    fullSource = re.compile( r'/\*\*.*?\*/' , re.M | re.S ).sub( "" , fullSource )
+
     out = open( outFile , 'w' )
     out.write( fullSource )
 
@@ -1080,7 +1095,8 @@ def jsSpec( suffix ):
     return apply( os.path.join, args )
 
 def jsDirTestSpec( dir ):
-    return mongo[0].abspath + " --nodb " + jsSpec( [ dir, "*.js" ] )
+    tests = Glob( jsSpec( [ dir, "*.js" ] ) )
+    return  [ mongo[0].abspath + " --nodb " + test.abspath for test in tests ]
 
 def runShellTest( env, target, source ):
     global mongodForTestsPort
@@ -1102,14 +1118,17 @@ def runShellTest( env, target, source ):
 # These tests require the mongo shell
 if not onlyServer and not noshell:
     addSmoketest( "smokeJs", [add_exe("mongo")], runShellTest )
-    addSmoketest( "smokeClone", [ "mongo", "mongod" ], [ jsDirTestSpec( "clone" ) ] )
-    addSmoketest( "smokeRepl", [ "mongo", "mongod", "mongobridge" ], [ jsDirTestSpec( "repl" ) ] )
-    addSmoketest( "smokeDisk", [ add_exe( "mongo" ), add_exe( "mongod" ) ], [ jsDirTestSpec( "disk" ) ] )
-    addSmoketest( "smokeAuth", [ add_exe( "mongo" ), add_exe( "mongod" ) ], [ jsDirTestSpec( "auth" ) ] )
-    addSmoketest( "smokeSharding", [ "mongo", "mongod", "mongos" ], [ jsDirTestSpec( "sharding" ) ] )
+    addSmoketest( "smokeClone", [ "mongo", "mongod" ], jsDirTestSpec( "clone" ) )
+    addSmoketest( "smokeRepl", [ "mongo", "mongod", "mongobridge" ], jsDirTestSpec( "repl" ) )
+    addSmoketest( "smokeDisk", [ add_exe( "mongo" ), add_exe( "mongod" ) ], jsDirTestSpec( "disk" ) )
+    addSmoketest( "smokeAuth", [ add_exe( "mongo" ), add_exe( "mongod" ) ], jsDirTestSpec( "auth" ) )
+    addSmoketest( "smokeSharding", [ "mongo", "mongod", "mongos" ], jsDirTestSpec( "sharding" ) )
     addSmoketest( "smokeJsPerf", [ "mongo" ], runShellTest )
     addSmoketest( "smokeQuota", [ "mongo" ], runShellTest )
-    addSmoketest( "smokeTool", [ add_exe( "mongo" ) ], [ jsDirTestSpec( "tool" ) ] )
+    if windows: # this test doesn't work on windows in v1.2.x
+        addSmoketest( "smokeTool", [ add_exe( "mongo" ) ], [] )
+    else:
+        addSmoketest( "smokeTool", [ add_exe( "mongo" ) ], jsDirTestSpec( "tool" ) )
 
 mongodForTests = None
 mongodForTestsPort = "27017"
@@ -1120,7 +1139,7 @@ def startMongodForTests( env, target, source ):
     global mongod
     if mongodForTests:
         return
-    mongodForTestsPort = "40000"
+    mongodForTestsPort = "32000"
     import os
     ensureTestDirs()
     dirName = installDir + "/data/db/sconsTests/"

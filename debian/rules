@@ -48,7 +48,7 @@ clean:
 	dh_testroot
 	rm -f build-stamp configure-stamp
 
-	scons -c
+	rm -rf $(CURDIR)/debian/mongodb
 	rm -f config.log
 	rm -f mongo
 	rm -f mongod
@@ -69,6 +69,10 @@ clean:
 	rm -rf debian/tmp-test
 	rm -f debian/mongodb.upstart
 	dh_clean debian/files
+
+	# FIXME: scons freaks out at the presence of target files
+	# under debian/mongodb.
+	scons -c
 
 install: build
 	dh_testdir
