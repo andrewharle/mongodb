@@ -1,3 +1,13 @@
+mongodb (1:1.2.4-1) unstable; urgency=low
+
+  * [c3803a1] Imported Upstream version 1.2.4
+  * [ab4e0c8] removal of unnecessary files for Debian from upstream
+    source
+  * changelog for upstream at 
+    http://jira.mongodb.org/browse/SERVER/fixforversion/10130
+
+ -- Antonin Kral <A.Kral@sh.cvut.cz>  Wed, 17 Mar 2010 10:18:01 +0100
+
 mongodb (1:1.2.2-4) unstable; urgency=low
 
   * ensure removal of upstart script as upload of repacked source is failing
