@@ -88,10 +88,20 @@ namespace mongo {
             _cur = new InMemory();
         }
         
-        _cur->push_back( pair<BSONObj,DiskLoc>( o.getOwned() , loc ) );
+        BSONObj toadd = o;
+        if ( toadd.isOwned() ){
+            // hack to handle buffer problems
+            if ( toadd.objsize() < 100 )
+                toadd = toadd.copy();
+        }
+        else {
+            toadd = toadd.getOwned();
+        }
+
+        _cur->push_back( pair<BSONObj,DiskLoc>( o , loc ) );
 
         long size = o.objsize();
-        _curSizeSoFar += size + sizeof( DiskLoc );
+        _curSizeSoFar += size + sizeof( DiskLoc ) + sizeof( BSONObj );
         
         if ( _curSizeSoFar > _maxFilesize )
             finishMap();
@@ -204,7 +214,8 @@ namespace mongo {
     
     BSONObjExternalSorter::FileIterator::FileIterator( string file ){
         long length;
-        _buf = (char*)_file.map( file.c_str() , length );
+        _buf = (char*)_file.map( file.c_str() , length , MemoryMappedFile::SEQUENTIAL );
+        massert( "mmap failed" , _buf );
         assert( (unsigned long)length == file_size( file ) );
         _end = _buf + length;
     }
