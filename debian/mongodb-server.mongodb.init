@@ -42,6 +42,8 @@
 #                         objects (e.g. videos)
 #                       * Auto-sharding for cloud-level scalability (Q209)
 #
+#                    This package is build with V8 JavaScript engine.
+#
 #                    High performance, scalability, and reasonable depth of
 #                    functionality are the goals for the project.
 ### END INIT INFO
