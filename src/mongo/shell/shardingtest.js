@@ -60,7 +60,9 @@
  *          Can be used to specify options that are common all config servers.
  *       mongosOptions {Object}: same as the mongos property above.
  *          Can be used to specify options that are common all mongos.
- * 
+ *       enableBalancer {boolean} : if true, enable the balancer
+ *       manualAddShard {boolean}: shards will not be added if true.
+ *
  *       // replica Set only:
  *       rsOptions {Object}: same as the rs property above. Can be used to
  *         specify options that are common all replica members.
@@ -273,7 +275,9 @@ ShardingTest = function( testName , numShards , verboseLevel , numMongos , other
         var rs = this._rs[i].test;
         
         rs.getMaster().getDB( "admin" ).foo.save( { x : 1 } )
-        rs.awaitReplication();
+        if (keyFile) {
+            authutil.asCluster(rs.nodes, keyFile, function() { rs.awaitReplication(); });
+        }
         rs.awaitSecondaryNodes();
         
         var rsConn = new Mongo( rs.getURL() );
@@ -287,7 +291,7 @@ ShardingTest = function( testName , numShards , verboseLevel , numMongos , other
     this._configNames = []
     
     if ( otherParams.sync && ! otherParams.separateConfig && numShards < 3 )
-        throw "if you want sync, you need at least 3 servers";
+        throw Error("if you want sync, you need at least 3 servers");
     
     for ( var i = 0; i < ( otherParams.sync ? 3 : 1 ) ; i++ ) {
         
@@ -335,7 +339,7 @@ ShardingTest = function( testName , numShards , verboseLevel , numMongos , other
 
     if ( numMongos == 0 && !otherParams.noChunkSize ) {
         if ( keyFile ) {
-            throw "Cannot set chunk size without any mongos when using auth";
+            throw Error("Cannot set chunk size without any mongos when using auth");
         } else {
             this._configConnection.getDB( "config" ).settings.insert(
                 { _id : "chunksize" , value : otherParams.chunksize || otherParams.chunkSize || 50 } );
@@ -378,6 +382,27 @@ ShardingTest = function( testName , numShards , verboseLevel , numMongos , other
     var admin = this.admin = this.s.getDB( "admin" );
     this.config = this.s.getDB( "config" );
 
+    // Disable the balancer unless it is explicitly turned on
+    if ( !otherParams.enableBalancer ) {
+        if (keyFile) {
+            authutil.assertAuthenticate(this._mongos, 'admin', {
+                user: '__system',
+                mechanism: 'MONGODB-CR',
+                pwd: cat(keyFile).replace(/[\011-\015\040]/g, '')
+            });
+
+            try {
+                this.stopBalancer();
+            }
+            finally {
+                authutil.logout(this._mongos, 'admin');
+            }
+        }
+        else {
+            this.stopBalancer();
+        }
+    }
+
     if ( ! otherParams.manualAddShard ){
         this._shardNames = []
         var shardNames = this._shardNames
@@ -410,7 +435,7 @@ ShardingTest.prototype.getRSEntry = function( setName ){
     for ( var i=0; i<this._rs.length; i++ )
         if ( this._rs[i].setName == setName )
             return this._rs[i];
-    throw "can't find rs: " + setName;
+    throw Error( "can't find rs: " + setName );
 }
 
 ShardingTest.prototype.getConfigIndex = function( config ){
@@ -434,7 +459,7 @@ ShardingTest.prototype.getServerName = function( dbname ){
     if ( x )
         return x.primary;
     this.config.databases.find().forEach( printjson );
-    throw "couldn't find dbname: " + dbname + " total: " + this.config.databases.count();
+    throw Error( "couldn't find dbname: " + dbname + " total: " + this.config.databases.count() );
 }
 
 
@@ -442,7 +467,7 @@ ShardingTest.prototype.getNonPrimaries = function( dbname ){
     var x = this.config.databases.findOne( { _id : dbname } );
     if ( ! x ){
         this.config.databases.find().forEach( printjson );
-        throw "couldn't find dbname: " + dbname + " total: " + this.config.databases.count();
+        throw Error( "couldn't find dbname: " + dbname + " total: " + this.config.databases.count() );
     }
     
     return this.config.shards.find( { _id : { $ne : x.primary } } ).map( function(z){ return z._id; } )
@@ -475,7 +500,7 @@ ShardingTest.prototype.getServer = function( dbname ){
             return c;
     }
     
-    throw "can't find server for: " + dbname + " name:" + name;
+    throw Error( "can't find server for: " + dbname + " name:" + name );
 
 }
 
@@ -488,7 +513,7 @@ ShardingTest.prototype.normalize = function( x ){
 
 ShardingTest.prototype.getOther = function( one ){
     if ( this._connections.length < 2 )
-        throw "getOther only works with 2 servers";
+        throw Error("getOther only works with 2 servers");
 
     if ( one._mongo )
         one = one._mongo
@@ -502,7 +527,7 @@ ShardingTest.prototype.getOther = function( one ){
 
 ShardingTest.prototype.getAnother = function( one ){
     if(this._connections.length < 2)
-    	throw "getAnother() only works with multiple servers";
+        throw Error("getAnother() only works with multiple servers");
 	
 	if ( one._mongo )
         one = one._mongo
@@ -518,7 +543,7 @@ ShardingTest.prototype.getFirstOther = function( one ){
         if ( this._connections[i] != one )
         return this._connections[i];
     }
-    throw "impossible";
+    throw Error("impossible");
 }
 
 ShardingTest.prototype.stop = function(){
@@ -554,7 +579,7 @@ ShardingTest.prototype.adminCommand = function(cmd){
     if ( res && res.ok == 1 )
         return true;
 
-    throw "command " + tojson( cmd ) + " failed: " + tojson( res );
+    throw Error( "command " + tojson( cmd ) + " failed: " + tojson( res ) );
 }
 
 ShardingTest.prototype._rangeToString = function(r){
@@ -628,6 +653,8 @@ ShardingTest.prototype.printCollectionInfo = function( ns , msg ){
 }
 
 printShardingStatus = function( configDB , verbose ){
+    // configDB is a DB object that contains the sharding metadata of interest.
+    // Defaults to the db named "config" on the current connection.
     if (configDB === undefined)
         configDB = db.getSisterDB('config')
     
@@ -651,6 +678,77 @@ printShardingStatus = function( configDB , verbose ){
         }
     );
 
+    output( "  balancer:" );
+
+    //Is the balancer currently enabled
+    output( "\tCurrently enabled:  " + ( sh.getBalancerState(configDB) ? "yes" : "no" ) );
+
+    //Is the balancer currently active
+    output( "\tCurrently running:  " + ( sh.isBalancerRunning(configDB) ? "yes" : "no" ) );
+
+    //Output details of the current balancer round
+    var balLock = sh.getBalancerLockDetails(configDB)
+    if ( balLock ) {
+        output( "\t\tBalancer lock taken at " + balLock.when + " by " + balLock.who );
+    }
+
+    //Output the balancer window
+    var balSettings = sh.getBalancerWindow(configDB)
+    if ( balSettings ) {
+        output( "\t\tBalancer active window is set between " +
+            balSettings.start + " and " + balSettings.stop + " server local time");
+    }
+
+    //Output the list of active migrations
+    var activeMigrations = sh.getActiveMigrations(configDB)
+    if (activeMigrations.length > 0 ){
+        output("\tCollections with active migrations: ");
+        activeMigrations.forEach( function(migration){
+            output("\t\t"+migration._id+ " started at " + migration.when );
+        });
+    }
+
+    // Actionlog and version checking only works on 2.7 and greater
+    var versionHasActionlog = false;
+    var metaDataVersion = configDB.getCollection("version").findOne().currentVersion
+    if ( metaDataVersion > 5 ) {
+        versionHasActionlog = true;
+    }
+    if ( metaDataVersion == 5 ) {
+        var verArray = db.serverBuildInfo().versionArray
+        if (verArray[0] == 2 && verArray[1] > 6){
+            versionHasActionlog = true;
+        }
+    }
+
+    if ( versionHasActionlog ) {
+        //Review config.actionlog for errors
+        var actionReport = sh.getRecentFailedRounds(configDB);
+        //Always print the number of failed rounds
+        output( "\tFailed balancer rounds in last 5 attempts:  " + actionReport.count )
+
+        //Only print the errors if there are any
+        if ( actionReport.count > 0 ){
+            output( "\tLast reported error:  " + actionReport.lastErr )
+            output( "\tTime of Reported error:  " + actionReport.lastTime )
+        }
+
+        output("\tMigration Results for the last 24 hours: ");
+        var migrations = sh.getRecentMigrations(configDB)
+        if(migrations.length > 0) {
+            migrations.forEach( function(x) {
+                if (x._id === "Success"){
+                    output( "\t\t" + x.count + " : " + x._id)
+                } else {
+                    output( "\t\t" + x.count + " : Failed with error '" +  x._id
+                    + "', from " + x.from + " to " + x.to )
+                }
+            });
+        } else {
+                output( "\t\tNo recent migrations");
+        }
+    }
+
     output( "  databases:" );
     configDB.databases.find().sort( { name : 1 } ).forEach( 
         function(db){
@@ -665,8 +763,13 @@ printShardingStatus = function( configDB , verbose ){
                             output( "\t\t\tshard key: " + tojson(coll.key) );
                             output( "\t\t\tchunks:" );
 
-                            res = configDB.chunks.group( { cond : { ns : coll._id } , key : { shard : 1 },
-                                reduce : function( doc , out ){ out.nChunks++; } , initial : { nChunks : 0 } } );
+                            res = configDB.chunks.aggregate( { $match : { ns : coll._id } } ,
+                                                             { $group : { _id : "$shard" ,
+                                                                          cnt : { $sum : 1 } } } ,
+                                                             { $project : { _id : 0 ,
+                                                                            shard : "$_id" ,
+                                                                            nChunks : "$cnt" } } ,
+                                                             { $sort : { shard : 1 } } ).toArray();
                             var totalChunks = 0;
                             res.forEach( function(z){
                                 totalChunks += z.nChunks;
@@ -845,21 +948,23 @@ ShardingTest.prototype.getShard = function( coll, query, includeEmpty ){
 ShardingTest.prototype.getShards = function( coll, query, includeEmpty ){
     if( ! coll.getDB )
         coll = this.s.getCollection( coll )
-    
-    var explain = coll.find( query ).explain()
+
+    var explain = coll.find( query ).explain("executionStats")
     var shards = []
-        
-    if( explain.shards ){
-        
-        for( var shardName in explain.shards ){           
-            for( var i = 0; i < explain.shards[shardName].length; i++ ){
-                if( includeEmpty || ( explain.shards[shardName][i].n && explain.shards[shardName][i].n > 0 ) )
-                    shards.push( shardName )
+
+    var execStages = explain.executionStats.executionStages;
+    var plannerShards = explain.queryPlanner.winningPlan.shards;
+
+    if( execStages.shards ){
+        for( var i = 0; i < execStages.shards.length; i++ ){
+            var hasResults = execStages.shards[i].executionStages.nReturned &&
+                             execStages.shards[i].executionStages.nReturned > 0;
+            if( includeEmpty || hasResults ){
+                shards.push(plannerShards[i].connectionString);
             }
         }
-        
     }
-    
+
     for( var i = 0; i < shards.length; i++ ){
         for( var j = 0; j < this._connections.length; j++ ){
             if ( connectionURLTheSame(  this._connections[j] , shards[i] ) ){
@@ -868,7 +973,7 @@ ShardingTest.prototype.getShards = function( coll, query, includeEmpty ){
             }
         }
     }
-    
+
     return shards
 }
 
@@ -1009,3 +1114,12 @@ ShardingTest.prototype.restartMongos = function(n) {
     }
 };
 
+/**
+ * Helper method for setting primary shard of a database and making sure that it was successful.
+ * Note: first mongos needs to be up.
+ */
+ShardingTest.prototype.ensurePrimaryShard = function(dbName, shardName) {
+    var db = this.s0.getDB('admin');
+    var res = db.adminCommand({ movePrimary: dbName, to: shardName });
+    assert(res.ok || res.errmsg == "it is already the primary", tojson(res));
+};

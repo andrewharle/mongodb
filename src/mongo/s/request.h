@@ -30,7 +30,10 @@
 
 #pragma once
 
-#include "mongo/pch.h"
+#include "mongo/platform/basic.h"
+
+#include <boost/noncopyable.hpp>
+#include <boost/scoped_ptr.hpp>
 
 #include "mongo/db/dbmessage.h"
 #include "mongo/s/config.h"
@@ -39,63 +42,75 @@
 namespace mongo {
 
 
-    class OpCounters;
-    class ClientInfo;
-
-    class Request : boost::noncopyable {
-    public:
-        Request( Message& m, AbstractMessagingPort* p );
-
-        // ---- message info -----
+class OpCounters;
+class ClientInfo;
+class OperationContext;
 
 
-        const char * getns() const {
-            return _d.getns();
-        }
-        int op() const {
-            return _m.operation();
-        }
-        bool expectResponse() const {
-            return op() == dbQuery || op() == dbGetMore;
-        }
-        bool isCommand() const;
+class Request : boost::noncopyable {
+public:
+    Request(Message& m, AbstractMessagingPort* p);
 
-        MSGID id() const {
-            return _id;
-        }
+    // ---- message info -----
 
-        ClientInfo * getClientInfo() const {
-            return _clientInfo;
-        }
 
-        // ---- low level access ----
+    const char* getns() const {
+        return _d.getns();
+    }
+    const char* getnsIfPresent() const {
+        return _d.messageShouldHaveNs() ? _d.getns() : "";
+    }
+    int op() const {
+        return _m.operation();
+    }
+    bool expectResponse() const {
+        return op() == dbQuery || op() == dbGetMore;
+    }
+    bool isCommand() const;
 
-        void reply( Message & response , const string& fromServer );
+    MSGID id() const {
+        return _id;
+    }
 
-        Message& m() { return _m; }
-        DbMessage& d() { return _d; }
-        AbstractMessagingPort* p() const { return _p; }
+    ClientInfo* getClientInfo() const {
+        return _clientInfo;
+    }
 
-        void process( int attempt = 0 );
+    // ---- low level access ----
 
-        void init();
+    void reply(Message& response, const std::string& fromServer);
 
-        void reset();
+    Message& m() {
+        return _m;
+    }
+    DbMessage& d() {
+        return _d;
+    }
+    AbstractMessagingPort* p() const {
+        return _p;
+    }
 
-    private:
-        Message& _m;
-        DbMessage _d;
-        AbstractMessagingPort* _p;
+    void process(int attempt = 0);
 
-        MSGID _id;
+    void init();
 
-        ClientInfo * _clientInfo;
+    void reset();
 
-        OpCounters* _counter;
+private:
+    Message& _m;
+    DbMessage _d;
+    AbstractMessagingPort* _p;
 
-        bool _didInit;
-    };
+    MSGID _id;
 
+    ClientInfo* _clientInfo;
+
+    OpCounters* _counter;
+
+    boost::scoped_ptr<OperationContext> _txn;
+
+    bool _didInit;
+};
 }
 
 #include "strategy.h"

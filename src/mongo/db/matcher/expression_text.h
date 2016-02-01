@@ -36,26 +36,33 @@
 
 namespace mongo {
 
-    class TextMatchExpression : public LeafMatchExpression {
-    public:
-        TextMatchExpression() : LeafMatchExpression( TEXT ) {}
-        virtual ~TextMatchExpression() {}
+class TextMatchExpression : public LeafMatchExpression {
+public:
+    TextMatchExpression() : LeafMatchExpression(TEXT) {}
+    virtual ~TextMatchExpression() {}
 
-        Status init( const std::string& query, const std::string& language );
+    Status init(const std::string& query, const std::string& language);
 
-        virtual bool matchesSingleElement( const BSONElement& e ) const;
+    virtual bool matchesSingleElement(const BSONElement& e) const;
 
-        virtual void debugString( StringBuilder& debug, int level = 0 ) const;
+    virtual void debugString(StringBuilder& debug, int level = 0) const;
 
-        virtual bool equivalent( const MatchExpression* other ) const;
+    virtual void toBSON(BSONObjBuilder* out) const;
 
-        virtual LeafMatchExpression* shallowClone() const;
+    virtual bool equivalent(const MatchExpression* other) const;
 
-        const string& getQuery() const { return _query; }
-        const string& getLanguage() const { return _language; }
-    private:
-        std::string _query;
-        std::string _language;
-    };
+    virtual LeafMatchExpression* shallowClone() const;
 
-} // namespace mongo
+    const std::string& getQuery() const {
+        return _query;
+    }
+    const std::string& getLanguage() const {
+        return _language;
+    }
+
+private:
+    std::string _query;
+    std::string _language;
+};
+
+}  // namespace mongo

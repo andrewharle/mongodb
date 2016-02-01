@@ -1,3 +1,6 @@
+// SERVER-13922
+if (0) {
+
 // TODO: SERVER-13215 move test back to replSets suite.
 
 /**
@@ -64,13 +67,15 @@
     var size = 500000;
 
     jsTest.log("creating test data " + size + " documents");
+    var bulk = masterDB.jstests_bgsec.initializeUnorderedBulkOp();
     for( i = 0; i < size; ++i ) {
-        masterDB.jstests_bgsec.save( {i:i} );
+        bulk.insert({ i : i });
     }
+    assert.writeOK(bulk.execute());
 
     jsTest.log("Starting background indexing");
     masterDB.jstests_bgsec.ensureIndex( {i:1}, {background:true} );
-    assert.eq(2, masterDB.system.indexes.count( {ns:"bgIndexNoRetrySec.jstests_bgsec"} ) );
+    assert.eq(2, masterDB.jstests_bgsec.getIndexes().length);
 
     // Do one more write, so that later on, the secondary doesn't restart with the index build
     // as the last op in the oplog -- it will redo this op otherwise.
@@ -82,8 +87,7 @@
 
     // Make sure a journal flush for the oplog occurs, by doing a local journaled write to the
     // secondary
-    second.getDB('local').foo.insert({a:1});
-    second.getDB('local').runCommand( { getLastError: 1, j: true } );
+    assert.writeOK(second.getDB('local').foo.insert({ a: 1 }, { writeConcern: { j: true }}));
 
     // restart secondary and reconnect
     jsTest.log("Restarting secondary");
@@ -92,21 +96,22 @@
     // Make sure secondary comes back
     assert.soon( function() { 
         try {
-            secondDB.system.namespaces.count(); // trigger a reconnect if needed
-            return true; 
+            secondDB.isMaster(); // trigger a reconnect if needed
+            return true;
         } catch (e) {
             return false; 
         }
     } , "secondary didn't restart", 60000, 1000);
 
-    assert_trueTimeout( 
-        function() { 
-            return 2 == secondDB.system.indexes.count( {ns:"bgIndexNoRetrySec.jstests_bgsec"} ); 
+    assert_trueTimeout(
+        function() {
+            return 2 == secondDB.jstests_bgsec.getIndexes().length;
         },
         "index created on secondary after restart with --noIndexBuildRetry", 
         30000, 200);
 
-    assert.neq(2, secondDB.system.indexes.count( {ns:"bgIndexNoRetrySec.jstests_bgsec"} ));
+    assert.neq(2, secondDB.jstests_bgsec.getIndexes().length );
     replTest.stopSet();
 }());
 
+}  // if(0)

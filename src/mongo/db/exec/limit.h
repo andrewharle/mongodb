@@ -28,42 +28,57 @@
 
 #pragma once
 
-#include "mongo/db/diskloc.h"
+#include <boost/scoped_ptr.hpp>
+
 #include "mongo/db/jsobj.h"
 #include "mongo/db/exec/plan_stage.h"
+#include "mongo/db/record_id.h"
 
 namespace mongo {
 
-    /**
-     * This stage implements limit functionality.  It only returns 'limit' results before EOF.
-     *
-     * Sort has a baked-in limit, as it can optimize the sort if it has a limit.
-     *
-     * Preconditions: None.
-     */
-    class LimitStage : public PlanStage {
-    public:
-        LimitStage(int limit, WorkingSet* ws, PlanStage* child);
-        virtual ~LimitStage();
+/**
+ * This stage implements limit functionality.  It only returns 'limit' results before EOF.
+ *
+ * Sort has a baked-in limit, as it can optimize the sort if it has a limit.
+ *
+ * Preconditions: None.
+ */
+class LimitStage : public PlanStage {
+public:
+    LimitStage(int limit, WorkingSet* ws, PlanStage* child);
+    virtual ~LimitStage();
 
-        virtual bool isEOF();
-        virtual StageState work(WorkingSetID* out);
+    virtual bool isEOF();
+    virtual StageState work(WorkingSetID* out);
 
-        virtual void prepareToYield();
-        virtual void recoverFromYield();
-        virtual void invalidate(const DiskLoc& dl, InvalidationType type);
+    virtual void saveState();
+    virtual void restoreState(OperationContext* opCtx);
+    virtual void invalidate(OperationContext* txn, const RecordId& dl, InvalidationType type);
 
-        virtual PlanStageStats* getStats();
+    virtual std::vector<PlanStage*> getChildren() const;
 
-    private:
-        WorkingSet* _ws;
-        scoped_ptr<PlanStage> _child;
+    virtual StageType stageType() const {
+        return STAGE_LIMIT;
+    }
 
-        // We only return this many results.
-        int _numToReturn;
+    virtual PlanStageStats* getStats();
 
-        // Stats
-        CommonStats _commonStats;
-    };
+    virtual const CommonStats* getCommonStats();
+
+    virtual const SpecificStats* getSpecificStats();
+
+    static const char* kStageType;
+
+private:
+    WorkingSet* _ws;
+    boost::scoped_ptr<PlanStage> _child;
+
+    // We only return this many results.
+    int _numToReturn;
+
+    // Stats
+    CommonStats _commonStats;
+    LimitStats _specificStats;
+};
 
 }  // namespace mongo

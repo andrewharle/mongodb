@@ -2,37 +2,20 @@
 // Tests that mongodump and mongorestore properly handle access control information when doing
 // single-db dumps and restores
 
-// Runs the tool with the given name against the given mongod.  If shutdownServer is true,
-// first shuts down the mongod and uses the --dbpath option to the tool to operate on the data
-// files directly
-function runTool(toolName, mongod, shutdownServer, options) {
-    if (shutdownServer) {
-        MongoRunner.stopMongod(mongod);
-        var opts = {dbpath: mongod.fullOptions.pathOpts.dbpath};
-        Object.extend(opts, options);
-        assert(!MongoRunner.runMongoTool(toolName, opts));
-        mongod.fullOptions.restart = true;
-        return MongoRunner.runMongod(mongod.fullOptions);
-    } else {
-        var opts = {host: mongod.host};
-        Object.extend(opts, options);
-        assert(!MongoRunner.runMongoTool(toolName, opts));
-        return mongod;
-    }
+// Runs the tool with the given name against the given mongod.
+function runTool(toolName, mongod, options) {
+    var opts = {host: mongod.host};
+    Object.extend(opts, options);
+    MongoRunner.runMongoTool(toolName, opts);
 }
 
-// If shutdownServer is true, will run tools against shut down mongod, operating on the data
-// files directly
-function runTest(shutdownServer) {
+var dumpRestoreAuth3 = function(backup_role, restore_role) {
+
     var mongod = MongoRunner.runMongod();
     var admindb = mongod.getDB("admin");
     var db = mongod.getDB("foo");
-    var shutMessage = "(no shutdown)";
-    if (shutdownServer) {
-        shutMessage = "(shutdown)"
-    }
 
-    jsTestLog("Creating Admin user & initial data "+shutMessage);
+    jsTestLog("Creating Admin user & initial data");
     admindb.createUser({user: 'root', pwd: 'pass', roles: ['root']});
     admindb.createUser({user: 'backup', pwd: 'pass', roles: ['backup']});
     admindb.createUser({user: 'restore', pwd: 'pass', roles: ['restore']});
@@ -65,19 +48,22 @@ function runTest(shutdownServer) {
     assert.eq(1, admindb.system.users.count({user: "backup"}), "Backup user is missing");
     var versionDoc = admindb.system.version.findOne();
 
-    jsTestLog("Dump foo database without dumping user data "+shutMessage);
+    jsTestLog("Dump foo database without dumping user data");
     var dumpDir = MongoRunner.getAndPrepareDumpDirectory("dumprestore_auth3");
-    mongod = runTool("mongodump", mongod, shutdownServer, {out: dumpDir, db: "foo"});
+    runTool("mongodump", mongod, {out: dumpDir, db: "foo"});
     db = mongod.getDB('foo');
 
     db.dropDatabase();
     db.dropAllUsers();
     db.dropAllRoles();
 
-    jsTestLog("Restore foo database from dump that doesn't contain user data "+shutMessage);
-    mongod = runTool("mongorestore", mongod, shutdownServer, {dir: dumpDir + "foo/",
-                                                              db: 'foo',
-                                                              restoreDbUsersAndRoles: ""});
+    jsTestLog("Restore foo database from dump that doesn't contain user data ");
+    // This test depends on W=0 to mask unique index violations.
+    // This should be fixed once we implement TOOLS-341
+    runTool("mongorestore", 
+        mongod, 
+        {dir: dumpDir + "foo/", db: 'foo', restoreDbUsersAndRoles: "", writeConcern: "0"}
+    );
 
     db = mongod.getDB('foo');
 
@@ -96,10 +82,8 @@ function runTest(shutdownServer) {
     assert.eq(userCount, db.getUsers().length, "didn't create user");
     assert.eq(rolesCount, db.getRoles().length, "didn't create role");
 
-    jsTestLog("Dump foo database *with* user data "+shutMessage);
-    mongod = runTool("mongodump", mongod, shutdownServer, {out: dumpDir,
-                                                           db: "foo",
-                                                           dumpDbUsersAndRoles: ""});
+    jsTestLog("Dump foo database *with* user data");
+    runTool("mongodump", mongod, {out: dumpDir, db: "foo", dumpDbUsersAndRoles: ""});
     db = mongod.getDB('foo');
 
     db.dropDatabase();
@@ -110,8 +94,8 @@ function runTest(shutdownServer) {
     assert.eq(0, db.getRoles().length, "didn't drop roles");
     assert.eq(0, db.bar.count(), "didn't drop 'bar' collection");
 
-    jsTestLog("Restore foo database without restoring user data, even though it's in the dump "+shutMessage);
-    mongod = runTool("mongorestore", mongod, shutdownServer, {dir: dumpDir + "foo/", db: 'foo'});
+    jsTestLog("Restore foo database without restoring user data, even though it's in the dump");
+    runTool("mongorestore", mongod, {dir: dumpDir + "foo/", db: 'foo', writeConcern: "0"});
     db = mongod.getDB('foo');
 
     assert.soon(function() { return db.bar.findOne(); }, "no data after restore");
@@ -119,10 +103,11 @@ function runTest(shutdownServer) {
     assert.eq(0, db.getUsers().length, "Restored users even though it shouldn't have");
     assert.eq(0, db.getRoles().length, "Restored roles even though it shouldn't have");
 
-    jsTestLog("Restore foo database *with* user data "+shutMessage);
-    mongod = runTool("mongorestore", mongod, shutdownServer, {dir: dumpDir + "foo/",
-                                                              db: 'foo',
-                                                              restoreDbUsersAndRoles: ""});
+    jsTestLog("Restore foo database *with* user data");
+    runTool("mongorestore", 
+        mongod, 
+        {dir: dumpDir + "foo/", db: 'foo', restoreDbUsersAndRoles: "", writeConcern: "0"}
+    );
     db = mongod.getDB('foo');
     admindb = mongod.getDB('admin');
 
@@ -130,23 +115,24 @@ function runTest(shutdownServer) {
     assert.eq(1, db.bar.findOne().a);
     assert.eq(userCount, db.getUsers().length, "didn't restore users");
     assert.eq(rolesCount, db.getRoles().length, "didn't restore roles");
-    assert.eq(1, admindb.system.users.count({user: "restore", db: "admin"}), "Restore user is missing");
+    assert.eq(1, admindb.system.users.count({user: "restore", db: "admin"}), 
+        "Restore user is missing");
     assert.docEq(versionDoc,
                  db.getSiblingDB('admin').system.version.findOne(),
                  "version doc was changed by restore");
 
-    jsTestLog("Make modifications to user data that should be overridden by the restore "+shutMessage);
+    jsTestLog("Make modifications to user data that should be overridden by the restore");
     db.dropUser('user')
     db.createUser({user: 'user2', pwd: 'password2', roles: jsTest.basicUserRoles});
     db.dropRole('role')
     db.createRole({role: 'role2', roles: [], privileges:[]});
 
-    jsTestLog("Restore foo database (and user data) with --drop so it overrides the changes made "+shutMessage);
+    jsTestLog("Restore foo database (and user data) with --drop so it overrides the changes made");
     // Restore with --drop to override the changes to user data
-    mongod = runTool("mongorestore", mongod, shutdownServer, {dir: dumpDir + "foo/",
-                                                              db: 'foo',
-                                                              drop: "",
-                                                              restoreDbUsersAndRoles: ""});
+    runTool("mongorestore", 
+        mongod,
+        {dir: dumpDir + "foo/", db: 'foo', drop: "", restoreDbUsersAndRoles: "", writeConcern: "0"}
+    );
     db = mongod.getDB('foo');
     admindb = mongod.getDB('admin');
 
@@ -163,12 +149,12 @@ function runTest(shutdownServer) {
                  "version doc was changed by restore");
 
 
-    jsTestLog("Dump just the admin database.  User data should be dumped by default "+shutMessage);
+    jsTestLog("Dump just the admin database.  User data should be dumped by default");
     // Make a user in another database to make sure it is properly captured
     db.getSiblingDB('bar').createUser({user: "user", pwd: 'pwd', roles: []});
     db.getSiblingDB('admin').createUser({user: "user", pwd: 'pwd', roles: []});
     adminUsersCount += 1;
-    mongod = runTool("mongodump", mongod, shutdownServer, {out: dumpDir, db: "admin"});
+    runTool("mongodump", mongod, {out: dumpDir, db: "admin"});
     db = mongod.getDB('foo');
 
     // Change user data a bit.
@@ -176,10 +162,11 @@ function runTest(shutdownServer) {
     db.getSiblingDB('bar').createUser({user: "user2", pwd: 'pwd', roles: []});
     db.getSiblingDB('admin').dropAllUsers();
 
-    jsTestLog("Restore just the admin database. User data should be restored by default "+shutMessage);
-    mongod = runTool("mongorestore", mongod, shutdownServer, {dir: dumpDir + "admin/",
-                                                              db: 'admin',
-                                                              drop: ""});
+    jsTestLog("Restore just the admin database. User data should be restored by default");
+    runTool("mongorestore", 
+        mongod, 
+        {dir: dumpDir + "admin/", db: 'admin', drop: "", writeConcern: "0"}
+    );
     db = mongod.getDB('foo');
     var otherdb = db.getSiblingDB('bar');
     var admindb = db.getSiblingDB('admin');
@@ -192,7 +179,8 @@ function runTest(shutdownServer) {
     assert.eq("role", db.getRole('role').role, "didn't restore role");
     assert.eq(1, otherdb.getUsers().length, "didn't restore users for bar database");
     assert.eq("user", otherdb.getUsers()[0].user, "didn't restore user for bar database");
-    assert.eq(adminUsersCount, admindb.getUsers().length, "didn't restore users for admin database");
+    assert.eq(adminUsersCount, admindb.getUsers().length, 
+        "didn't restore users for admin database");
     assert.eq("user", admindb.getUser("user").user, "didn't restore user for admin database");
     assert.eq(6, admindb.system.users.count(), "has the wrong # of users for the whole server");
     assert.eq(2, admindb.system.roles.count(), "has the wrong # of roles for the whole server");
@@ -200,8 +188,8 @@ function runTest(shutdownServer) {
                  db.getSiblingDB('admin').system.version.findOne(),
                  "version doc was changed by restore");
 
-    jsTestLog("Dump all databases "+shutMessage);
-    mongod = runTool("mongodump", mongod, shutdownServer, {out: dumpDir});
+    jsTestLog("Dump all databases");
+    runTool("mongodump", mongod, {out: dumpDir});
     db = mongod.getDB('foo');
 
     db.dropDatabase();
@@ -212,8 +200,8 @@ function runTest(shutdownServer) {
     assert.eq(0, db.getRoles().length, "didn't drop roles");
     assert.eq(0, db.bar.count(), "didn't drop 'bar' collection");
 
-    jsTestLog("Restore all databases "+shutMessage);
-    mongod = runTool("mongorestore", mongod, shutdownServer, {dir: dumpDir});
+    jsTestLog("Restore all databases");
+    runTool("mongorestore", mongod, {dir: dumpDir, writeConcern: "0"});
     db = mongod.getDB('foo');
 
     assert.soon(function() { return db.bar.findOne(); }, "no data after restore");
@@ -227,5 +215,8 @@ function runTest(shutdownServer) {
     MongoRunner.stopMongod(mongod);
 }
 
-runTest(false);
-runTest(true);
+// Tests that the default auth roles of backup and restore work properly.
+dumpRestoreAuth3("backup", "restore");
+
+// Tests that root has backup and restore privileges too.
+dumpRestoreAuth3("root", "root");

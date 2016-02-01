@@ -16,13 +16,16 @@ env.Library(
         "planner_ixselect.cpp",
         "query_knobs.cpp",
         "query_planner.cpp",
+        "query_planner_common.cpp",
         "query_solution.cpp",
     ],
     LIBDEPS=[
+        "explain_common",
         "index_bounds",
         "lite_parsed_query",
         "$BUILD_DIR/mongo/bson",
         "$BUILD_DIR/mongo/expressions",
+        "$BUILD_DIR/mongo/expressions_text",
         "$BUILD_DIR/mongo/index_names",
         "$BUILD_DIR/mongo/server_parameters",
     ],
@@ -31,20 +34,14 @@ env.Library(
 env.Library(
     target='query',
     source=[
-        "cached_plan_runner.cpp",
-        "eof_runner.cpp",
-        "explain_plan.cpp",
-        "get_runner.cpp",
-        "idhack_runner.cpp",
-        "internal_runner.cpp",
-        "multi_plan_runner.cpp",
-        "new_find.cpp",
+        "explain.cpp",
+        "get_executor.cpp",
+        "find.cpp",
         "plan_executor.cpp",
         "plan_ranker.cpp",
-        "single_solution_runner.cpp",
+        "plan_yield_policy.cpp",
+        "query_yield.cpp",
         "stage_builder.cpp",
-        "subplan_runner.cpp",
-        "type_explain.cpp",
     ],
     LIBDEPS=[
         "query_planner",
@@ -54,9 +51,9 @@ env.Library(
 )
 
 env.CppUnitTest(
-    target="get_runner_test",
+    target="get_executor_test",
     source=[
-        "get_runner_test.cpp"
+        "get_executor_test.cpp"
     ],
     LIBDEPS=[
         "query",
@@ -64,6 +61,7 @@ env.CppUnitTest(
         "$BUILD_DIR/mongo/coreserver",
         "$BUILD_DIR/mongo/coredb",
         "$BUILD_DIR/mongo/mocklib",
+        "$BUILD_DIR/mongo/ntservice_mock",
     ],
     NO_CRUTCH = True,
 )
@@ -71,6 +69,8 @@ env.CppUnitTest(
 env.Library(
     target="index_bounds",
     source=[
+        "expression_index.cpp",
+        "expression_index_knobs.cpp",
         "index_bounds.cpp",
         "index_bounds_builder.cpp",
         "interval.cpp",
@@ -81,6 +81,17 @@ env.Library(
         "$BUILD_DIR/mongo/expressions_geo",
         "$BUILD_DIR/mongo/index_names",
         "$BUILD_DIR/mongo/mongohasher",
+        "$BUILD_DIR/mongo/server_parameters",
+    ],
+)
+
+env.Library(
+    target="explain_common",
+    source=[
+        "explain_common.cpp"
+    ],
+    LIBDEPS=[
+        "$BUILD_DIR/mongo/bson",
     ],
 )
 
@@ -237,6 +248,7 @@ env.CppUnitTest(
         "$BUILD_DIR/mongo/coreserver",
         "$BUILD_DIR/mongo/coredb",
         "$BUILD_DIR/mongo/mocklib",
+        "$BUILD_DIR/mongo/ntservice_mock",
     ],
     NO_CRUTCH = True,
 )

@@ -26,42 +26,47 @@
  *    then also delete it in the license file.
  */
 
-#include "mongo/pch.h"
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kDefault
+
+#include "mongo/platform/basic.h"
 
 #include <boost/thread.hpp>
+#include <iostream>
+#include <signal.h>
 
 #include "mongo/base/initializer.h"
 #include "mongo/client/dbclientinterface.h"
 #include "mongo/db/dbmessage.h"
 #include "mongo/tools/mongobridge_options.h"
+#include "mongo/util/log.h"
 #include "mongo/util/net/listen.h"
 #include "mongo/util/net/message.h"
 #include "mongo/util/stacktrace.h"
+#include "mongo/util/quick_exit.h"
 #include "mongo/util/text.h"
 #include "mongo/util/timer.h"
 
 using namespace mongo;
 using namespace std;
 
-void cleanup( int sig );
+void cleanup(int sig);
 
 class Forwarder {
 public:
-    Forwarder( MessagingPort &mp ) : mp_( mp ) {
-    }
+    Forwarder(MessagingPort& mp) : mp_(mp) {}
 
     void operator()() const {
         DBClientConnection dest;
         string errmsg;
 
         Timer connectTimer;
-        while (!dest.connect(mongoBridgeGlobalParams.destUri, errmsg)) {
+        while (!dest.connect(HostAndPort(mongoBridgeGlobalParams.destUri), errmsg)) {
             // If we can't connect for the configured timeout, give up
             //
             if (connectTimer.seconds() >= mongoBridgeGlobalParams.connectTimeoutSec) {
-                cout << "Unable to establish connection from " << mp_.psock->remoteString() 
-                     << " to " << mongoBridgeGlobalParams.destUri 
-                     << " after " << connectTimer.seconds() << " seconds. Giving up." << endl;
+                cout << "Unable to establish connection from " << mp_.psock->remoteString()
+                     << " to " << mongoBridgeGlobalParams.destUri << " after "
+                     << connectTimer.seconds() << " seconds. Giving up." << endl;
                 mp_.shutdown();
                 return;
             }
@@ -70,77 +75,77 @@ public:
         }
 
         Message m;
-        while( 1 ) {
+        while (1) {
             try {
                 m.reset();
-                if ( !mp_.recv( m ) ) {
+                if (!mp_.recv(m)) {
                     cout << "end connection " << mp_.psock->remoteString() << endl;
                     mp_.shutdown();
                     break;
                 }
                 sleepmillis(mongoBridgeGlobalParams.delay);
 
-                int oldId = m.header()->id;
-                if ( m.operation() == dbQuery || m.operation() == dbMsg || m.operation() == dbGetMore ) {
+                int oldId = m.header().getId();
+                if (m.operation() == dbQuery || m.operation() == dbMsg ||
+                    m.operation() == dbGetMore) {
                     bool exhaust = false;
-                    if ( m.operation() == dbQuery ) {
-                        DbMessage d( m );
-                        QueryMessage q( d );
+                    if (m.operation() == dbQuery) {
+                        DbMessage d(m);
+                        QueryMessage q(d);
                         exhaust = q.queryOptions & QueryOption_Exhaust;
                     }
                     Message response;
-                    dest.port().call( m, response );
+                    dest.port().call(m, response);
 
                     // nothing to reply with?
-                    if ( response.empty() ) cleanup(0);
+                    if (response.empty())
+                        cleanup(0);
 
-                    mp_.reply( m, response, oldId );
-                    while ( exhaust ) {
-                        MsgData *header = response.header();
-                        QueryResult *qr = (QueryResult *) header;
-                        if ( qr->cursorId ) {
+                    mp_.reply(m, response, oldId);
+                    while (exhaust) {
+                        MsgData::View header = response.header();
+                        QueryResult::View qr = header.view2ptr();
+                        if (qr.getCursorId()) {
                             response.reset();
-                            dest.port().recv( response );
-                            mp_.reply( m, response ); // m argument is ignored anyway
-                        }
-                        else {
+                            dest.port().recv(response);
+                            mp_.reply(m, response);  // m argument is ignored anyway
+                        } else {
                             exhaust = false;
                         }
                     }
+                } else {
+                    dest.port().say(m, oldId);
                 }
-                else {
-                    dest.port().say( m, oldId );
-                }
-            }
-            catch ( ... ) {
+            } catch (...) {
                 log() << "caught exception in Forwarder, continuing" << endl;
             }
         }
     }
+
 private:
-    MessagingPort &mp_;
+    MessagingPort& mp_;
 };
 
-set<MessagingPort*>& ports ( *(new std::set<MessagingPort*>()) );
+set<MessagingPort*>& ports(*(new std::set<MessagingPort*>()));
 
 class MyListener : public Listener {
 public:
-    MyListener( int port ) : Listener( "bridge" , "", port ) {}
-    virtual void acceptedMP(MessagingPort *mp) {
-        ports.insert( mp );
-        Forwarder f( *mp );
-        boost::thread t( f );
+    MyListener(int port) : Listener("bridge", "", port) {}
+    virtual void acceptedMP(MessagingPort* mp) {
+        ports.insert(mp);
+        Forwarder f(*mp);
+        boost::thread t(f);
     }
 };
 
-auto_ptr< MyListener > listener;
+auto_ptr<MyListener> listener;
 
 
-void cleanup( int sig ) {
+void cleanup(int sig) {
     ListeningSockets::get()->closeAll();
-    for ( set<MessagingPort*>::iterator i = ports.begin(); i != ports.end(); i++ )
+    for (set<MessagingPort*>::iterator i = ports.begin(); i != ports.end(); i++)
         (*i)->shutdown();
-    ::_exit( 0 );
+    quickExit(0);
 }
 #if !defined(_WIN32)
 void myterminate() {
@@ -149,20 +154,20 @@ void myterminate() {
 }
 
 void setupSignals() {
-    signal( SIGINT , cleanup );
-    signal( SIGTERM , cleanup );
-    signal( SIGPIPE , cleanup );
-    signal( SIGABRT , cleanup );
-    signal( SIGSEGV , cleanup );
-    signal( SIGBUS , cleanup );
-    signal( SIGFPE , cleanup );
-    set_terminate( myterminate );
+    signal(SIGINT, cleanup);
+    signal(SIGTERM, cleanup);
+    signal(SIGPIPE, cleanup);
+    signal(SIGABRT, cleanup);
+    signal(SIGSEGV, cleanup);
+    signal(SIGBUS, cleanup);
+    signal(SIGFPE, cleanup);
+    set_terminate(myterminate);
 }
 #else
 inline void setupSignals() {}
 #endif
 
-int toolMain( int argc, char **argv, char** envp ) {
+int toolMain(int argc, char** argv, char** envp) {
     mongo::runGlobalInitializersOrDie(argc, argv, envp);
 
     static StaticObserver staticObserver;
@@ -185,11 +190,11 @@ int toolMain( int argc, char **argv, char** envp ) {
 int wmain(int argc, wchar_t* argvW[], wchar_t* envpW[]) {
     WindowsCommandLine wcl(argc, argvW, envpW);
     int exitCode = toolMain(argc, wcl.argv(), wcl.envp());
-    ::_exit(exitCode);
+    quickExit(exitCode);
 }
 #else
 int main(int argc, char* argv[], char** envp) {
     int exitCode = toolMain(argc, argv, envp);
-    ::_exit(exitCode);
+    quickExit(exitCode);
 }
 #endif

@@ -17,8 +17,7 @@ var primeSystemReplset = function() {
 
     print("create a TTL collection");
     var testDB = conn.getDB("test");
-    testDB.foo.ensureIndex({x:1}, {expireAfterSeconds : 2});
-    testDB.getLastError();
+    assert.commandWorked(testDB.foo.ensureIndex({ x: 1 }, { expireAfterSeconds: 2 }));
 };
 
 var restartWithConfig = function() {
@@ -30,16 +29,15 @@ var restartWithConfig = function() {
         testDB.foo.insert({x : new Date()});
     }
 
-    print("sleeping 60 seconds");
-    sleep(60000);
+    print("sleeping 65 seconds");
+    sleep(65000);
 
     assert.eq(testDB.foo.count(), n);
 };
 
 var restartWithoutConfig = function() {
     var localDB = conn.getDB("local");
-    localDB.system.replset.remove({});
-    localDB.getLastError();
+    assert.writeOK(localDB.system.replset.remove({}));
 
     stopMongod(runner.port(), 15);
 
@@ -47,7 +45,7 @@ var restartWithoutConfig = function() {
 
     assert.soon(function() {
         return conn.getDB("test").foo.count() < 100;
-    }, "never deleted", 60000);
+    }, "never deleted", 65000);
 
     stopMongod(runner.port(), 15);
 };

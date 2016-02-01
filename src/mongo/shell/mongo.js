@@ -8,17 +8,17 @@ if ( typeof Mongo == "undefined" ){
 }
 
 if ( ! Mongo.prototype ){
-    throw "Mongo.prototype not defined";
+    throw Error("Mongo.prototype not defined");
 }
 
 if ( ! Mongo.prototype.find )
-    Mongo.prototype.find = function( ns , query , fields , limit , skip , batchSize , options ){ throw "find not implemented"; }
+    Mongo.prototype.find = function( ns , query , fields , limit , skip , batchSize , options ){ throw Error("find not implemented"); }
 if ( ! Mongo.prototype.insert )
-    Mongo.prototype.insert = function( ns , obj ){ throw "insert not implemented"; }
+    Mongo.prototype.insert = function( ns , obj ){ throw Error("insert not implemented"); }
 if ( ! Mongo.prototype.remove )
-    Mongo.prototype.remove = function( ns , pattern ){ throw "remove not implemented;" }
+    Mongo.prototype.remove = function( ns , pattern ){ throw Error("remove not implemented"); }
 if ( ! Mongo.prototype.update )
-    Mongo.prototype.update = function( ns , query , obj , upsert ){ throw "update not implemented;" }
+    Mongo.prototype.update = function( ns , query , obj , upsert ){ throw Error("update not implemented"); }
 
 if ( typeof mongoInject == "function" ){
     mongoInject( Mongo.prototype );
@@ -44,7 +44,7 @@ Mongo.prototype.getDB = function( name ){
 Mongo.prototype.getDBs = function(){
     var res = this.getDB( "admin" ).runCommand( { "listDatabases" : 1 } );
     if ( ! res.ok )
-        throw "listDatabases failed:" + tojson( res );
+        throw Error( "listDatabases failed:" + tojson( res ) );
     return res;
 }
 
@@ -52,8 +52,41 @@ Mongo.prototype.adminCommand = function( cmd ){
     return this.getDB( "admin" ).runCommand( cmd );
 }
 
-Mongo.prototype.setLogLevel = function( logLevel ){
-    return this.adminCommand({ setParameter : 1, logLevel : logLevel })
+/**
+ * Returns all log components and current verbosity values
+ */
+Mongo.prototype.getLogComponents = function() {
+    var res = this.adminCommand({ getParameter:1, logComponentVerbosity:1 });
+    if (!res.ok)
+        throw Error( "getLogComponents failed:" + tojson(res));
+    return res.logComponentVerbosity;
+}
+
+/**
+ * Accepts optional second argument "component",
+ * string of form "storage.journaling"
+ */
+Mongo.prototype.setLogLevel = function(logLevel, component) {
+    componentNames = [];
+    if (typeof component === "string") {
+        componentNames = component.split(".");
+    }
+    else if (component !== undefined) {
+        throw Error( "setLogLevel component must be a string:" + tojson(component));
+    }
+    var vDoc = { verbosity: logLevel };
+
+    // nest vDoc
+    for (var key,obj; componentNames.length > 0;) {
+        obj = {};
+        key = componentNames.pop();
+        obj[ key ] = vDoc;
+        vDoc = obj;
+    }
+    var res = this.adminCommand({ setParameter : 1, logComponentVerbosity : vDoc });
+    if (!res.ok)
+        throw Error( "setLogLevel failed:" + tojson(res));
+    return res;
 }
 
 Mongo.prototype.getDBNames = function(){
@@ -67,7 +100,7 @@ Mongo.prototype.getDBNames = function(){
 Mongo.prototype.getCollection = function(ns){
     var idx = ns.indexOf( "." );
     if ( idx < 0 ) 
-        throw "need . in ns";
+        throw Error("need . in ns");
     var db = ns.substring( 0 , idx );
     var c = ns.substring( idx + 1 );
     return this.getDB( db ).getCollection( c );
@@ -81,7 +114,7 @@ Mongo.prototype.tojson = Mongo.prototype.toString;
 /**
  * Sets the read preference.
  *
- * @param mode {string} read prefrence mode to use. Pass null to disable read
+ * @param mode {string} read preference mode to use. Pass null to disable read
  *     preference.
  * @param tagSet {Array.<Object>} optional. The list of tags to use, order matters.
  *     Note that this object only keeps a shallow copy of this array.
@@ -176,6 +209,18 @@ Mongo.prototype.hasWriteCommands = function() {
     }
     
     return this._hasWriteCommands;
+}
+
+Mongo.prototype.hasExplainCommand = function() {
+    if ( !('_hasExplainCommand' in this) ) {
+        var isMaster = this.getDB("admin").runCommand({ isMaster : 1 });
+        this._hasExplainCommand = (isMaster.ok &&
+                                   'minWireVersion' in isMaster &&
+                                   isMaster.minWireVersion <= 3 &&
+                                   3 <= isMaster.maxWireVersion );
+    }
+
+    return this._hasExplainCommand;
 }
 
 /**

@@ -85,9 +85,11 @@ function test(index) {
         assert.eq( numExpected , t.find( q ).itcount() , "itcount : " + tojson( searches[i] ) );
         assert.eq( numExpected , t.find( q ).count() , "count : " + tojson( searches[i] ) );
         if (index == "2d") {
-            var explain = t.find( q ).explain();
+            var explain = t.find( q ).explain("executionStats");
             print( 'explain for ' + tojson( q , '' , true ) + ' = ' + tojson( explain ) );
-            assert.gt( numExpected * 2 , explain.nscanned ,
+            // The index should be at least minimally effective in preventing the full collection
+            // scan.
+            assert.gt( t.find().count(), explain.executionStats.totalKeysExamined ,
                        "nscanned : " + tojson( searches[i] ) )
         }
     }

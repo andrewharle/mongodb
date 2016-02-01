@@ -1,12 +1,13 @@
 
 s = new ShardingTest( "balance_tags1" , 3 , 1 , 1 , { sync:true, chunksize : 1 , nopreallocj : true } )
-s.config.settings.update( { _id: "balancer" }, { $set : { stopped: false, _nosleep: true } } , true );
+s.config.settings.update({ _id: "balancer" }, { $set: { stopped: false }}, true);
 
 db = s.getDB( "test" );
+var bulk = db.foo.initializeUnorderedBulkOp();
 for ( i=0; i<21; i++ ) {
-    db.foo.insert( { _id : i , x : i } );
+    bulk.insert({ _id: i, x: i });
 }
-db.getLastError();
+assert.writeOK(bulk.execute());
 
 s.adminCommand( { enablesharding : "test" } )
 s.adminCommand( { shardcollection : "test.foo" , key : { _id : 1 } } );

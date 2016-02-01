@@ -27,7 +27,7 @@ printjson(prof);
 
 // Since we're doing a collection scan, we should have examined zero
 // index keys and all 5 documents.
-assert.eq(5, prof.nscanned, "wrong nscanned");
+assert.eq(0, prof.nscanned, "wrong nscanned");
 assert.eq(5, prof.nscannedObjects, "wrong nscannedObjects");
 
 // Disable profiling and drop the profiler data.

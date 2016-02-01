@@ -1,6 +1,6 @@
 // tests sharding with replica sets
 
-s = new ShardingTest( "rs1" , 3 /* numShards */, 1 /* verboseLevel */, 2 /* numMongos */, { rs : true , chunksize : 1 } )
+s = new ShardingTest( "rs1" , 3 /* numShards */, 1 /* verboseLevel */, 2 /* numMongos */, { rs : true , chunksize : 1, enableBalancer : true } )
 
 s.adminCommand( { enablesharding : "test" } );
 s.config.settings.update( { _id: "balancer" }, { $set : { _waitForDelete : true } } , true );
@@ -15,12 +15,13 @@ while ( bigString.length < 10000 )
 
 inserted = 0;
 num = 0;
+var bulk = db.foo.initializeUnorderedBulkOp();
 while ( inserted < ( 20 * 1024 * 1024 ) ){
-    db.foo.insert( { _id : num++ , s : bigString , x : Math.random() } );
+    bulk.insert({ _id: num++, s: bigString, x: Math.random() });
     inserted += bigString.length;
 }
+assert.writeOK(bulk.execute());
 
-db.getLastError();
 s.adminCommand( { shardcollection : "test.foo" , key : { _id : 1 } } );
 assert.lt( 20 , s.config.chunks.count()  , "setup2" );
 

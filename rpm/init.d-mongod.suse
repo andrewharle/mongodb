@@ -25,8 +25,8 @@ CONFIGFILE="/etc/mongod.conf"
 OPTIONS=" -f $CONFIGFILE"
 SYSCONFIG="/etc/sysconfig/mongod"
 
-DBPATH=`awk -F= '/^dbpath[[:blank:]]*=[[:blank:]]*/{print $2}' "$CONFIGFILE"`
-PIDFILEPATH=`awk -F= '/^pidfilepath[[:blank:]]*=[[:blank:]]*/{print $2}' "$CONFIGFILE"`
+PIDFILEPATH=`awk -F'[:=]' -v IGNORECASE=1 '/^[[:blank:]]*(processManagement\.)?pidfilepath[[:blank:]]*[:=][[:blank:]]*/{print $2}' "$CONFIGFILE" | tr -d "[:blank:]\"'" | awk -F'#' '{print $1}'`
+
 mongod=${MONGOD-/usr/bin/mongod}
 
 MONGO_USER=mongod
@@ -35,6 +35,8 @@ MONGO_GROUP=mongod
 if [ -f "$SYSCONFIG" ]; then
     . "$SYSCONFIG"
 fi
+
+PIDDIR=`dirname $PIDFILEPATH`
 
 # Handle NUMA access to CPUs (SERVER-3574)
 # This verifies the existence of numactl as well as testing that the command works
@@ -82,8 +84,8 @@ stop()
 }
 
 restart () {
-	stop
-	start
+        stop
+        start
 }
 
 # Send TERM signal to process and wait up to 300 seconds for process to go away.
@@ -110,11 +112,10 @@ mongo_killproc()
   kill -KILL $pid >/dev/null 2>&1
   usleep 100000
 
-  rm -f "${pid_file}"
-
-  checkproc -p "${pid_file}" ${procname}
+  checkproc -p "${pid_file}" ${procname} # returns 0 only if the process exists.
   local RC=$?
-  RC=$((! $RC))
+  [ "$RC" -eq 0 ] || rm -f "${pid_file}" # remove the pidfile only if there is no process.
+  RC=$((! $RC)) # invert return code so we return 0 when process is dead.
   return $RC
 }
 

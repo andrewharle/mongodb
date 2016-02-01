@@ -2,7 +2,7 @@
 
 // simple test to make sure things get balanced 
 
-s = new ShardingTest( "slow_sharding_balance3" , 2 , 3 , 1 , { chunksize : 1 } );
+s = new ShardingTest( "slow_sharding_balance3" , 2 , 3 , 1 , { chunksize : 1, enableBalancer : true } );
 
 s.adminCommand( { enablesharding : "test" } );
 
@@ -16,12 +16,13 @@ while ( bigString.length < 10000 )
 
 inserted = 0;
 num = 0;
+var bulk = db.foo.initializeUnorderedBulkOp();
 while ( inserted < ( 40 * 1024 * 1024 ) ){
-    db.foo.insert( { _id : num++ , s : bigString } );
+    bulk.insert({ _id: num++, s: bigString });
     inserted += bigString.length;
 }
+assert.writeOK(bulk.execute());
 
-db.getLastError();
 s.adminCommand( { shardcollection : "test.foo" , key : { _id : 1 } } );
 assert.lt( 20 , s.config.chunks.count()  , "setup2" );
 
@@ -35,11 +36,9 @@ assert.lt( 10 , diff1() );
 
 // Wait for balancer to kick in.
 var initialDiff = diff1();
-var maxRetries = 3;
-while ( diff1() == initialDiff ){
-    sleep( 5000 );
-    assert.lt( 0, maxRetries--, "Balancer did not kick in.");
-}
+assert.soon(function() {
+                return diff1() != initialDiff;
+            }, "Balancer did not kick in");
 
 print("* A");
 print( "disabling the balancer" );

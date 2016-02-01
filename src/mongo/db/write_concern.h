@@ -29,54 +29,58 @@
 #pragma once
 
 #include "mongo/db/write_concern_options.h"
+#include "mongo/util/net/hostandport.h"
 
 namespace mongo {
 
-    /**
-     * Verifies that a WriteConcern is valid for this particular host.
-     */
-    Status validateWriteConcern( const WriteConcernOptions& writeConcern );
+class OperationContext;
 
-    struct WriteConcernResult {
-        WriteConcernResult() {
-            reset();
-        }
+/**
+ * Verifies that a WriteConcern is valid for this particular host.
+ */
+Status validateWriteConcern(const WriteConcernOptions& writeConcern);
 
-        void reset() {
-            syncMillis = -1;
-            fsyncFiles = -1;
-            wTimedOut = false;
-            wTime = -1;
-            err = "";
-        }
+struct WriteConcernResult {
+    WriteConcernResult() {
+        reset();
+    }
 
-        void appendTo( const WriteConcernOptions& writeConcern, BSONObjBuilder* result ) const;
+    void reset() {
+        syncMillis = -1;
+        fsyncFiles = -1;
+        wTimedOut = false;
+        wTime = -1;
+        err = "";
+    }
 
-        int syncMillis;
-        int fsyncFiles;
+    void appendTo(const WriteConcernOptions& writeConcern, BSONObjBuilder* result) const;
 
-        bool wTimedOut;
-        int wTime;
-        vector<BSONObj> writtenTo;
+    int syncMillis;
+    int fsyncFiles;
 
-        string err; // this is the old err field, should deprecate
-    };
+    bool wTimedOut;
+    int wTime;
+    std::vector<HostAndPort> writtenTo;
 
-    /**
-     * Blocks until the database is sure the specified user write concern has been fulfilled, or
-     * returns an error status if the write concern fails.  Does no validation of the input write
-     * concern, it is an error to pass this function an invalid write concern for the host.
-     *
-     * Takes a user write concern as well as the replication opTime the write concern applies to -
-     * if this opTime.isNull() no replication-related write concern options will be enforced.
-     *
-     * Returns result of the write concern if successful.
-     * Returns NotMaster if the host steps down while waiting for replication
-     * Returns UnknownReplWriteConcern if the wMode specified was not enforceable
-     */
-    Status waitForWriteConcern( const WriteConcernOptions& writeConcern,
-                                const OpTime& replOpTime,
-                                WriteConcernResult* result );
+    std::string err;  // this is the old err field, should deprecate
+};
+
+/**
+ * Blocks until the database is sure the specified user write concern has been fulfilled, or
+ * returns an error status if the write concern fails.  Does no validation of the input write
+ * concern, it is an error to pass this function an invalid write concern for the host.
+ *
+ * Takes a user write concern as well as the replication opTime the write concern applies to -
+ * if this opTime.isNull() no replication-related write concern options will be enforced.
+ *
+ * Returns result of the write concern if successful.
+ * Returns NotMaster if the host steps down while waiting for replication
+ * Returns UnknownReplWriteConcern if the wMode specified was not enforceable
+ */
+Status waitForWriteConcern(OperationContext* txn,
+                           const WriteConcernOptions& writeConcern,
+                           const OpTime& replOpTime,
+                           WriteConcernResult* result);
 
 
-} // namespace mongo
+}  // namespace mongo

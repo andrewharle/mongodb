@@ -25,7 +25,6 @@ function dotest( useIndex ) {
     assert.docEq( { _id : 5, a: 4, x : 4 }, t.findOne() );
 
     op = getLastOp();
-    assert( op.fastmod );
 }
 
 dotest( false );
@@ -43,5 +42,4 @@ assert.writeError(res, "$setOnInsert _id.a/b worked" );
 
 res = t.update( {"_id.a": 4} , { $setOnInsert: { "_id": {a:4, b:1} } } , true );
 assert.writeError(res, "$setOnInsert _id.a/a+b worked" );
-
 db.setProfilingLevel( 0 );

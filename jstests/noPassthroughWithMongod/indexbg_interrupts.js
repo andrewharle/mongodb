@@ -66,20 +66,22 @@ for (var idx = 0; idx < dropAction.length; idx++) {
     // set up collections
     masterDB.dropDatabase();
     jsTest.log("creating test data " + size + " documents");
+    var bulk = masterDB.getCollection(collection).initializeUnorderedBulkOp();
     for(var i = 0; i < size; ++i ) {
-        masterDB.getCollection(collection).save( {i:i} );
+        bulk.insert({ i: i });
     }
+    assert.writeOK(bulk.execute());
 
     jsTest.log("Starting background indexing for test of: " + JSON.stringify(dc));
     masterDB.getCollection(collection).ensureIndex( {i:1}, {background:true} );
-    assert.eq(2, masterDB.system.indexes.count( {ns:dbname + "." + collection} ) );
+    assert.eq(2, masterDB.getCollection(collection).getIndexes().length );
 
     // Wait for the secondary to get the index entry
     assert.soon( function() { 
-        return 2 == secondDB.system.indexes.count( {ns:dbname + "." + collection} ); }, 
-                 "index not created on secondary", 240000 );
+        return 2 == secondDB.getCollection(collection).getIndexes().length;
+    }, "index not created on secondary", 240000 );
 
-    jsTest.log("Index created and system.indexes entry exists on secondary");
+    jsTest.log("Index created and index info exists on secondary");
 
     jsTest.log("running command " + JSON.stringify(dc));
     assert.commandWorked(masterDB.runCommand( dc ));
@@ -90,7 +92,7 @@ for (var idx = 0; idx < dropAction.length; idx++) {
     // we need to assert.soon because the drop only marks the index for removal
     // the removal itself is asynchronous and may take another moment before it happens
     assert.soon( function() {
-        var idx_count = secondDB.system.indexes.count( {ns:dbname + "." + collection} );
+        var idx_count = secondDB.getCollection(collection).getIndexes().length;
         return idx_count == 1 || idx_count == 0;
     }, "secondary did not drop index for " + dc.toString());
 }

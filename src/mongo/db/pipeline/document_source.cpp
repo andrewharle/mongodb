@@ -26,7 +26,7 @@
 *    it in the license file.
 */
 
-#include "mongo/pch.h"
+#include "mongo/platform/basic.h"
 
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/expression_context.h"
@@ -34,39 +34,38 @@
 
 namespace mongo {
 
-    DocumentSource::DocumentSource(const intrusive_ptr<ExpressionContext> &pCtx)
-        : pSource(NULL)
-        , pExpCtx(pCtx)
-    {}
+using boost::intrusive_ptr;
+using std::vector;
 
-    const char *DocumentSource::getSourceName() const {
-        static const char unknown[] = "[UNKNOWN]";
-        return unknown;
-    }
+DocumentSource::DocumentSource(const intrusive_ptr<ExpressionContext>& pCtx)
+    : pSource(NULL), pExpCtx(pCtx) {}
 
-    void DocumentSource::setSource(DocumentSource *pTheSource) {
-        verify(!pSource);
-        pSource = pTheSource;
-    }
+const char* DocumentSource::getSourceName() const {
+    static const char unknown[] = "[UNKNOWN]";
+    return unknown;
+}
 
-    bool DocumentSource::coalesce(
-        const intrusive_ptr<DocumentSource> &pNextSource) {
-        return false;
-    }
+void DocumentSource::setSource(DocumentSource* pTheSource) {
+    verify(!pSource);
+    pSource = pTheSource;
+}
 
-    void DocumentSource::optimize() {
-    }
+bool DocumentSource::coalesce(const intrusive_ptr<DocumentSource>& pNextSource) {
+    return false;
+}
 
-    void DocumentSource::dispose() {
-        if ( pSource ) {
-            pSource->dispose();
-        }
-    }
+void DocumentSource::optimize() {}
 
-    void DocumentSource::serializeToArray(vector<Value>& array, bool explain) const {
-        Value entry = serialize(explain);
-        if (!entry.missing()) {
-            array.push_back(entry);
-        }
+void DocumentSource::dispose() {
+    if (pSource) {
+        pSource->dispose();
     }
+}
+
+void DocumentSource::serializeToArray(vector<Value>& array, bool explain) const {
+    Value entry = serialize(explain);
+    if (!entry.missing()) {
+        array.push_back(entry);
+    }
+}
 }

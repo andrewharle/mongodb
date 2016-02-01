@@ -3,7 +3,7 @@ sh = function() { return "try sh.help();" }
 sh._checkMongos = function() {
     var x = db.runCommand( "ismaster" );
     if ( x.msg != "isdbgrid" )
-        throw "not connected to a mongos"
+        throw Error("not connected to a mongos");
 }
 
 sh._checkFullName = function( fullName ) {
@@ -44,9 +44,13 @@ sh.help = function() {
     print( "\tsh.getBalancerState()                     return true if enabled" );
     print( "\tsh.isBalancerRunning()                    return true if the balancer has work in progress on any mongos" );
 
+    print( "\tsh.disableBalancing(coll)                 disable balancing on one collection" );
+    print( "\tsh.enableBalancing(coll)                  re-enable balancing on one collection" );
+
     print( "\tsh.addShardTag(shard,tag)                 adds the tag to the shard" );
     print( "\tsh.removeShardTag(shard,tag)              removes the tag from the shard" );
     print( "\tsh.addTagRange(fullName,min,max,tag)      tags the specified range of the given collection" );
+    print( "\tsh.removeTagRange(fullName,min,max,tag)   removes the tagged range of the given collection" );
 
     print( "\tsh.status()                               prints a general overview of the cluster" )
 }
@@ -96,15 +100,19 @@ sh.setBalancerState = function( onOrNot ) {
     db.getSisterDB( "config" ).settings.update({ _id: "balancer" }, { $set : { stopped: onOrNot ? false : true } }, true );
 }
 
-sh.getBalancerState = function() {
-    var x = db.getSisterDB( "config" ).settings.findOne({ _id: "balancer" } )
+sh.getBalancerState = function(configDB) {
+    if (configDB === undefined)
+        configDB = db.getSiblingDB('config');
+    var x = configDB.settings.findOne({ _id: "balancer" } )
     if ( x == null )
         return true;
     return ! x.stopped;
 }
 
-sh.isBalancerRunning = function () {
-    var x = db.getSisterDB("config").locks.findOne({ _id: "balancer" });
+sh.isBalancerRunning = function (configDB) {
+    if (configDB === undefined)
+        configDB = db.getSiblingDB('config');
+    var x = configDB.locks.findOne({ _id: "balancer" });
     if (x == null) {
         print("config.locks collection empty or missing. be sure you are connected to a mongos");
         return false;
@@ -112,8 +120,10 @@ sh.isBalancerRunning = function () {
     return x.state > 0;
 }
 
-sh.getBalancerHost = function() {   
-    var x = db.getSisterDB("config").locks.findOne({ _id: "balancer" });
+sh.getBalancerHost = function(configDB) {
+    if (configDB === undefined)
+        configDB = db.getSiblingDB('config');
+    var x = configDB.locks.findOne({ _id: "balancer" });
     if( x == null ){
         print("config.locks collection does not contain balancer lock. be sure you are connected to a mongos");
         return ""
@@ -225,7 +235,7 @@ sh.waitForBalancerOff = function( timeout, interval ){
     }
     catch( e ){
         print( "Balancer still may be active, you must manually verify this is not the case using the config.changelog collection." )
-        throw e
+        throw Error(e);
     }
         
     print( "Waiting again for active hosts after balancer is off..." )
@@ -257,12 +267,18 @@ sh.waitForBalancer = function( onOrNot, timeout, interval ){
 }
 
 sh.disableBalancing = function( coll ){
+    if (coll === undefined) {
+        throw Error("Must specify collection");
+    }
     var dbase = db
     if( coll instanceof DBCollection ) dbase = coll.getDB()
     dbase.getSisterDB( "config" ).collections.update({ _id : coll + "" }, { $set : { "noBalance" : true } })
 }
 
 sh.enableBalancing = function( coll ){
+    if (coll === undefined) {
+        throw Error("Must specify collection");
+    }
     var dbase = db
     if( coll instanceof DBCollection ) dbase = coll.getDB()
     dbase.getSisterDB( "config" ).collections.update({ _id : coll + "" }, { $set : { "noBalance" : false } })
@@ -319,13 +335,13 @@ sh._lastMigration = function( ns ){
 sh._checkLastError = function( mydb ) {
     var err = mydb.getLastError();
     if ( err )
-        throw "error: " + err;
+        throw Error( "error: " + err );
 }
 
 sh.addShardTag = function( shard, tag ) {
     var config = db.getSisterDB( "config" );
     if ( config.shards.findOne( { _id : shard } ) == null ) {
-        throw "can't find a shard with name: " + shard;
+        throw Error( "can't find a shard with name: " + shard );
     }
     config.shards.update( { _id : shard } , { $addToSet : { tags : tag } } );
     sh._checkLastError( config );
@@ -334,7 +350,7 @@ sh.addShardTag = function( shard, tag ) {
 sh.removeShardTag = function( shard, tag ) {
     var config = db.getSisterDB( "config" );
     if ( config.shards.findOne( { _id : shard } ) == null ) {
-        throw "can't find a shard with name: " + shard;
+        throw Error( "can't find a shard with name: " + shard );
     }
     config.shards.update( { _id : shard } , { $pull : { tags : tag } } );
     sh._checkLastError( config );
@@ -351,3 +367,146 @@ sh.addTagRange = function( ns, min, max, tag ) {
             true );
     sh._checkLastError( config );    
 }
+
+sh.removeTagRange = function( ns, min, max, tag ) {
+    var config = db.getSisterDB( "config" );
+    // warn if the namespace does not exist, even dropped
+    if ( config.collections.findOne( { _id : ns } ) == null ) {
+        print( "Warning: can't find the namespace: " + ns + " - collection likely never sharded" );
+    }
+    // warn if the tag being removed is still in use
+    if ( config.shards.findOne( { tags : tag } ) ) {
+        print( "Warning: tag still in use by at least one shard" );
+    }
+    // max and tag criteria not really needed, but including them avoids potentially unexpected
+    // behavior.
+    config.tags.remove( { _id : { ns : ns , min : min } , max : max , tag : tag } );
+    sh._checkLastError( config );
+}
+
+sh.getBalancerLockDetails = function(configDB) {
+    if (configDB === undefined)
+        configDB = db.getSiblingDB('config');
+    var lock = configDB.locks.findOne({ _id : 'balancer' });
+    if (lock == null) {
+        return null;
+    }
+    if (lock.state == 0){
+        return null;
+    }
+    return lock;
+}
+
+sh.getBalancerWindow = function(configDB) {
+    if (configDB === undefined)
+        configDB = db.getSiblingDB('config');
+    var settings = configDB.settings.findOne({ _id : 'balancer' });
+    if ( settings == null ) {
+        return null;
+    }
+    if (settings.hasOwnProperty("activeWindow")){
+        return settings.activeWindow;
+    }
+    return null
+}
+
+sh.getActiveMigrations = function(configDB) {
+    if (configDB === undefined)
+        configDB = db.getSiblingDB('config');
+    var activeLocks = configDB.locks.find( { _id : { $ne : "balancer" }, state: {$eq:2} });
+    var result = []
+    if( activeLocks != null ){
+        activeLocks.forEach( function(lock){
+            result.push({_id:lock._id, when:lock.when});
+        })
+    }
+    return result;
+}
+
+sh.getRecentFailedRounds = function(configDB) {
+    if (configDB === undefined)
+        configDB = db.getSiblingDB('config');
+    var balErrs = configDB.actionlog.find({what:"balancer.round"}).sort({time:-1}).limit(5)
+    var result = { count : 0, lastErr : "", lastTime : " "};
+    if(balErrs != null) {
+        balErrs.forEach( function(r){
+            if(r.details.errorOccured){
+                result.count += 1;
+                result.lastErr = r.details.errmsg;
+                result.lastTime = r.time;
+            }
+        })
+    }
+    return result;
+}
+
+/**
+ * Returns a summary of chunk migrations that was completed either successfully or not
+ * since yesterday. The format is an array of 2 arrays, where the first array contains
+ * the successful cases, and the second array contains the failure cases.
+ */
+sh.getRecentMigrations = function(configDB) {
+    if (configDB === undefined)
+        configDB = db.getSiblingDB('config');
+    var yesterday = new Date( new Date() - 24 * 60 * 60 * 1000 );
+
+    // Successful migrations.
+    var result = configDB.changelog.aggregate([
+        {
+            $match: {
+                time: { $gt: yesterday },
+                what: "moveChunk.from",
+                'details.errmsg': { $exists: false },
+                'details.note': 'success'
+            }
+        },
+        {
+            $group: {
+                _id: {
+                    msg: "$details.errmsg"
+                },
+                count : { $sum: 1 }
+            }
+        },
+        {
+            $project: {
+                _id: { $ifNull: [ "$_id.msg", "Success" ] },
+                count: "$count"
+            }
+        }
+    ]).toArray();
+
+    // Failed migrations.
+    result = result.concat(configDB.changelog.aggregate([
+        {
+            $match: {
+                time: { $gt: yesterday },
+                what : "moveChunk.from",
+                $or: [
+                    { 'details.errmsg': { $exists: true }},
+                    { 'details.note': { $ne: 'success' }}
+                ]
+            }
+        },
+        {
+            $group: {
+                _id: {
+                    msg: "$details.errmsg",
+                    from : "$details.from",
+                    to: "$details.to"
+                },
+                count: { $sum: 1 }
+            }
+        },
+        {
+            $project: {
+                _id: { $ifNull: [ '$_id.msg', 'aborted' ]},
+                from: "$_id.from",
+                to: "$_id.to",
+                count: "$count"
+            }
+        }
+    ]).toArray());
+
+    return result;
+};

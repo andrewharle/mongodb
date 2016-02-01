@@ -11,6 +11,11 @@ b = DBRef(a.getRef(), a.getId());
 printjson(a);
 assert.eq(tojson(a), tojson(b), "dbref");
 
+a = new DBRef("test", "theid", "testdb");
+b = DBRef(a.getRef(), a.getId(), a.getDb());
+printjson(a);
+assert.eq(tojson(a), tojson(b), "dbref");
+
 a = new DBPointer("test", new ObjectId());
 b = DBPointer(a.getCollection(), a.getId());
 printjson(a);
@@ -50,6 +55,43 @@ a = new NumberInt(100);
 b = NumberInt(a.toNumber());
 printjson(a);
 assert.eq(tojson(a), tojson(b), "int");
+
+// ObjectId.fromDate
+
+a = new ObjectId();
+var timestampA = a.getTimestamp();
+var dateA = new Date(timestampA.getTime());
+
+// ObjectId.fromDate - invalid input types
+assert.throws(function() { ObjectId.fromDate(undefined); }, null,
+              "ObjectId.fromDate should error on undefined date" );
+
+assert.throws(function() { ObjectId.fromDate(12345); }, null,
+              "ObjectId.fromDate should error on numerical value" );
+
+assert.throws(function() { ObjectId.fromDate(dateA.toISOString()); }, null,
+              "ObjectId.fromDate should error on string value" );
+
+// SERVER-14623 dates less than or equal to 1978-07-04T21:24:15Z fail
+var checkFromDate = function(millis, expected, comment) {
+    var oid = ObjectId.fromDate(new Date(millis))
+    assert.eq(oid.valueOf(), expected, comment);
+}
+checkFromDate(Math.pow(2,28) * 1000, "100000000000000000000000", "1978-07-04T21:24:16Z");
+checkFromDate((Math.pow(2,28) * 1000) - 1 , "0fffffff0000000000000000", "1978-07-04T21:24:15Z");
+checkFromDate(0, "000000000000000000000000", "start of epoch");
+
+// test date upper limit
+checkFromDate((Math.pow(2,32) * 1000) - 1, "ffffffff0000000000000000", "last valid date");
+assert.throws(function() { ObjectId.fromDate(new Date(Math.pow(2,32) * 1000)); }, null,
+              "ObjectId limited to 4 bytes for seconds" );
+
+// ObjectId.fromDate - Date
+b = ObjectId.fromDate(dateA);
+printjson(a);
+assert.eq(tojson(a.getTimestamp()), tojson(b.getTimestamp()), "ObjectId.fromDate - Date");
+
+
 
 // tojsonObject
 

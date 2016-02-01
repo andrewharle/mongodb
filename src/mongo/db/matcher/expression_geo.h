@@ -31,56 +31,157 @@
 
 #pragma once
 
-#include "mongo/db/geo/geoquery.h"
+#include <boost/shared_ptr.hpp>
+
+#include "mongo/db/geo/geometry_container.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_leaf.h"
 
 namespace mongo {
 
-    class GeoMatchExpression : public LeafMatchExpression {
-    public:
-        GeoMatchExpression() : LeafMatchExpression( GEO ){}
-        virtual ~GeoMatchExpression(){}
+struct PointWithCRS;
+class GeometryContainer;
 
-        Status init( const StringData& path, const GeoQuery& query, const BSONObj& rawObj );
+// This represents either a $within or a $geoIntersects.
+class GeoExpression {
+    MONGO_DISALLOW_COPYING(GeoExpression);
 
-        virtual bool matchesSingleElement( const BSONElement& e ) const;
+public:
+    GeoExpression();
+    GeoExpression(const std::string& f);
 
-        virtual void debugString( StringBuilder& debug, int level = 0 ) const;
+    enum Predicate { WITHIN, INTERSECT, INVALID };
 
-        virtual bool equivalent( const MatchExpression* other ) const;
+    // parseFrom() must be called before getGeometry() to ensure initialization of geoContainer
+    Status parseFrom(const BSONObj& obj);
 
-        virtual LeafMatchExpression* shallowClone() const;
+    std::string getField() const {
+        return field;
+    }
+    Predicate getPred() const {
+        return predicate;
+    }
+    const GeometryContainer& getGeometry() const {
+        return *geoContainer;
+    }
 
-        const GeoQuery& getGeoQuery() const { return _query; }
-        const BSONObj getRawObj() const { return _rawObj; }
+private:
+    // Parse geospatial query
+    // e.g.
+    // { "$intersect" : { "$geometry" : { "type" : "Point", "coordinates": [ 40, 5 ] } } }
+    Status parseQuery(const BSONObj& obj);
 
-    private:
-        BSONObj _rawObj;
-        GeoQuery _query;
-    };
+    // Name of the field in the query.
+    std::string field;
+    boost::scoped_ptr<GeometryContainer> geoContainer;
+    Predicate predicate;
+};
 
-    class GeoNearMatchExpression : public LeafMatchExpression {
-    public:
-        GeoNearMatchExpression() : LeafMatchExpression( GEO_NEAR ){}
-        virtual ~GeoNearMatchExpression(){}
+class GeoMatchExpression : public LeafMatchExpression {
+public:
+    GeoMatchExpression() : LeafMatchExpression(GEO) {}
+    virtual ~GeoMatchExpression() {}
 
-        Status init( const StringData& path, const NearQuery& query, const BSONObj& rawObj );
+    /**
+     * Takes ownership of the passed-in GeoExpression.
+     */
+    Status init(const StringData& path, const GeoExpression* query, const BSONObj& rawObj);
 
-        // This shouldn't be called and as such will crash.  GeoNear always requires an index.
-        virtual bool matchesSingleElement( const BSONElement& e ) const;
+    virtual bool matchesSingleElement(const BSONElement& e) const;
 
-        virtual void debugString( StringBuilder& debug, int level = 0 ) const;
+    virtual void debugString(StringBuilder& debug, int level = 0) const;
 
-        virtual bool equivalent( const MatchExpression* other ) const;
+    virtual void toBSON(BSONObjBuilder* out) const;
 
-        virtual LeafMatchExpression* shallowClone() const;
+    virtual bool equivalent(const MatchExpression* other) const;
 
-        const NearQuery& getData() const { return _query; }
-        const BSONObj getRawObj() const { return _rawObj; }
-    private:
-        NearQuery _query;
-        BSONObj _rawObj;
-    };
+    virtual LeafMatchExpression* shallowClone() const;
+
+    const GeoExpression& getGeoExpression() const {
+        return *_query;
+    }
+    const BSONObj getRawObj() const {
+        return _rawObj;
+    }
+
+private:
+    BSONObj _rawObj;
+    // Share ownership of our query with all of our clones
+    boost::shared_ptr<const GeoExpression> _query;
+};
+
+
+// TODO: Make a struct, turn parse stuff into something like
+// static Status parseNearQuery(const BSONObj& obj, NearQuery** out);
+class GeoNearExpression {
+    MONGO_DISALLOW_COPYING(GeoNearExpression);
+
+public:
+    GeoNearExpression();
+    GeoNearExpression(const std::string& f);
+
+    Status parseFrom(const BSONObj& obj);
+
+    // The name of the field that contains the geometry.
+    std::string field;
+
+    // The starting point of the near search. Use forward declaration of geometries.
+    boost::scoped_ptr<PointWithCRS> centroid;
+
+    // Min and max distance from centroid that we're willing to search.
+    // Distance is in units of the geometry's CRS, except SPHERE and isNearSphere => radians
+    double minDistance;
+    double maxDistance;
+
+    // Is this a $nearSphere query
+    bool isNearSphere;
+    // $nearSphere with a legacy point implies units are radians
+    bool unitsAreRadians;
+    // $near with a non-legacy point implies a wrapping query, otherwise the query doesn't wrap
+    bool isWrappingQuery;
+
+    std::string toString() const {
+        std::stringstream ss;
+        ss << " field=" << field;
+        ss << " maxdist=" << maxDistance;
+        ss << " isNearSphere=" << isNearSphere;
+        return ss.str();
+    }
+
+private:
+    bool parseLegacyQuery(const BSONObj& obj);
+    Status parseNewQuery(const BSONObj& obj);
+};
+
+class GeoNearMatchExpression : public LeafMatchExpression {
+public:
+    GeoNearMatchExpression() : LeafMatchExpression(GEO_NEAR) {}
+    virtual ~GeoNearMatchExpression() {}
+
+    Status init(const StringData& path, const GeoNearExpression* query, const BSONObj& rawObj);
+
+    // This shouldn't be called and as such will crash.  GeoNear always requires an index.
+    virtual bool matchesSingleElement(const BSONElement& e) const;
+
+    virtual void debugString(StringBuilder& debug, int level = 0) const;
+
+    virtual void toBSON(BSONObjBuilder* out) const;
+
+    virtual bool equivalent(const MatchExpression* other) const;
+
+    virtual LeafMatchExpression* shallowClone() const;
+
+    const GeoNearExpression& getData() const {
+        return *_query;
+    }
+    const BSONObj getRawObj() const {
+        return _rawObj;
+    }
+
+private:
+    BSONObj _rawObj;
+    // Share ownership of our query with all of our clones
+    boost::shared_ptr<const GeoNearExpression> _query;
+};
 
 }  // namespace mongo

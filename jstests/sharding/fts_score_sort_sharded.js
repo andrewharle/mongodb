@@ -13,8 +13,8 @@ var cursor;
 // Pre-split collection: shard 0 takes {_id: {$lt: 0}}, shard 1 takes {_id: {$gte: 0}}.
 //
 assert.commandWorked(admin.runCommand({enableSharding: coll.getDB().getName()}));
-assert.commandWorked(admin.runCommand({movePrimary: coll.getDB().getName(),
-                                       to: "shard0000"}));
+admin.runCommand({movePrimary: coll.getDB().getName(),
+                  to: "shard0000"});
 assert.commandWorked(admin.runCommand({shardCollection: coll.getFullName(),
                                        key: {_id: 1}}));
 assert.commandWorked(admin.runCommand({split: coll.getFullName(), middle: {_id: 0}}));
@@ -25,13 +25,11 @@ assert.commandWorked(admin.runCommand({moveChunk: coll.getFullName(),
 //
 // Insert documents into collection and create text index.
 //
-coll.insert({_id: 1, a: "pizza"});
-coll.insert({_id: -1, a: "pizza pizza"});
-coll.insert({_id: 2, a: "pizza pizza pizza"});
-coll.insert({_id: -2, a: "pizza pizza pizza pizza"});
-assert.gleSuccess(coll.getDB());
-coll.ensureIndex({a: "text"});
-assert.gleSuccess(coll.getDB());
+assert.writeOK(coll.insert({ _id: 1, a: "pizza" }));
+assert.writeOK(coll.insert({ _id: -1, a: "pizza pizza" }));
+assert.writeOK(coll.insert({ _id: 2, a: "pizza pizza pizza" }));
+assert.writeOK(coll.insert({ _id: -2, a: "pizza pizza pizza pizza"}));
+assert.commandWorked(coll.ensureIndex({ a: "text" }));
 
 //
 // Execute query with sort on document score, verify results are in correct order.

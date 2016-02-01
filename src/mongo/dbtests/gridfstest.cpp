@@ -26,9 +26,11 @@
  *    then also delete it in the license file.
  */
 
-#include "mongo/pch.h"
+#include "mongo/platform/basic.h"
 
 #include "mongo/client/gridfs.h"
+#include "mongo/db/dbdirectclient.h"
+#include "mongo/db/operation_context_impl.h"
 #include "mongo/dbtests/dbtests.h"
 #include "mongo/util/assert_util.h"
 
@@ -37,30 +39,32 @@ using mongo::GridFS;
 using mongo::MsgAssertionException;
 
 namespace {
-    DBDirectClient _client;
-    
-    class SetChunkSizeTest {
-    public:
-        virtual void run() {
-            GridFS grid( _client, "gridtest" );
-            grid.setChunkSize( 5 );
 
-            ASSERT_EQUALS( 5U, grid.getChunkSize() );
-            ASSERT_THROWS( grid.setChunkSize( 0 ), MsgAssertionException );
-            ASSERT_EQUALS( 5U, grid.getChunkSize() );
-        }
+class SetChunkSizeTest {
+public:
+    virtual void run() {
+        OperationContextImpl txn;
+        DBDirectClient client(&txn);
 
-        virtual ~SetChunkSizeTest() {}
-    };
+        GridFS grid(client, "gridtest");
+        grid.setChunkSize(5);
 
-    class All : public Suite {
-    public:
-        All() : Suite( "gridfs" ) {
-        }
+        ASSERT_EQUALS(5U, grid.getChunkSize());
+        ASSERT_THROWS(grid.setChunkSize(0), MsgAssertionException);
+        ASSERT_EQUALS(5U, grid.getChunkSize());
+    }
 
-        void setupTests() {
-            add< SetChunkSizeTest >();
-        }
-    } myall;
+    virtual ~SetChunkSizeTest() {}
+};
+
+class All : public Suite {
+public:
+    All() : Suite("gridfs") {}
+
+    void setupTests() {
+        add<SetChunkSizeTest>();
+    }
+};
+
+SuiteInstance<All> myall;
 }
-

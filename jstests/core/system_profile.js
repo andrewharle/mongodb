@@ -11,7 +11,7 @@ testDB.system.profile.drop();
 // convertToCapped should succeed.
 assert.commandWorked(testDB.dropDatabase());
 assert.commandWorked(testDB.createCollection("system.profile"));
-assert.eq(undefined, testDB.system.profile.stats().capped);
+assert.eq(false, testDB.system.profile.stats().capped);
 assert.commandWorked(testDB.system.profile.convertToCapped(1024 * 1024));
 assert.eq(true, testDB.system.profile.stats().capped);
 

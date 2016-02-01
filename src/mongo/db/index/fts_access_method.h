@@ -36,20 +36,20 @@
 
 namespace mongo {
 
-    class FTSAccessMethod : public BtreeBasedAccessMethod {
-    public:
-        FTSAccessMethod(IndexCatalogEntry* btreeState );
-        virtual ~FTSAccessMethod() { }
+class FTSAccessMethod : public BtreeBasedAccessMethod {
+public:
+    FTSAccessMethod(IndexCatalogEntry* btreeState, SortedDataInterface* btree);
+    virtual ~FTSAccessMethod() {}
 
-        const fts::FTSSpec& getSpec() const { return _ftsSpec; }
+    const fts::FTSSpec& getSpec() const {
+        return _ftsSpec;
+    }
 
-        virtual shared_ptr<KeyGenerator> getKeyGenerator() const { return _keyGenerator; }
-    private:
-        // Implemented:
-        virtual void getKeys(const BSONObj& obj, BSONObjSet* keys);
+private:
+    // Implemented:
+    virtual void getKeys(const BSONObj& obj, BSONObjSet* keys);
 
-        fts::FTSSpec _ftsSpec;
-        shared_ptr<KeyGenerator> _keyGenerator;
-    };
+    fts::FTSSpec _ftsSpec;
+};
 
-} // namespace mongo
+}  // namespace mongo

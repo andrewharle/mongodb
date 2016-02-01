@@ -33,28 +33,31 @@
 
 namespace mongo {
 
-    TEST( Shard, EqualityRs ) {
-        Shard a( "foo", "bar/a,b" );
-        Shard b( "foo", "bar/a,b" );
-        ASSERT_EQUALS( a, b );
+TEST(Shard, EqualityRs) {
+    Shard a("foo", "bar/a,b", 0, false);
+    Shard b("foo", "bar/a,b", 0, false);
+    ASSERT_EQUALS(a, b);
 
-        b = Shard( "foo", "bar/b,a" );
-        ASSERT_EQUALS( a, b );
-    }
+    b = Shard("foo", "bar/b,a", 0, false);
+    ASSERT_EQUALS(a, b);
+}
 
-    TEST( Shard, EqualitySingle ) {
-        ASSERT_EQUALS( Shard( "foo", "b.foo.com:123"), Shard( "foo", "b.foo.com:123") );
-        ASSERT_NOT_EQUALS( Shard( "foo", "b.foo.com:123"), Shard( "foo", "a.foo.com:123") );
-        ASSERT_NOT_EQUALS( Shard( "foo", "b.foo.com:123"), Shard( "foo", "b.foo.com:124") );
-        ASSERT_NOT_EQUALS( Shard( "foo", "b.foo.com:123"), Shard( "foa", "b.foo.com:123") );
-    }
+TEST(Shard, EqualitySingle) {
+    ASSERT_EQUALS(Shard("foo", "b.foo.com:123", 0, false), Shard("foo", "b.foo.com:123", 0, false));
+    ASSERT_NOT_EQUALS(Shard("foo", "b.foo.com:123", 0, false),
+                      Shard("foo", "a.foo.com:123", 0, false));
+    ASSERT_NOT_EQUALS(Shard("foo", "b.foo.com:123", 0, false),
+                      Shard("foo", "b.foo.com:124", 0, false));
+    ASSERT_NOT_EQUALS(Shard("foo", "b.foo.com:123", 0, false),
+                      Shard("foa", "b.foo.com:123", 0, false));
+}
 
-    TEST( Shard, EqualitySync ) {
-        ConnectionString cs( ConnectionString::SYNC, "a,b,c" );
-        ASSERT( cs.sameLogicalEndpoint( ConnectionString( ConnectionString::SYNC, "a,b,c" ) ) );
-        ASSERT( cs.sameLogicalEndpoint( ConnectionString( ConnectionString::SYNC, "c,b,a" ) ) );
-        ASSERT( cs.sameLogicalEndpoint( ConnectionString( ConnectionString::SYNC, "c,a,b" ) ) );
+TEST(Shard, EqualitySync) {
+    ConnectionString cs(ConnectionString::SYNC, "a,b,c");
+    ASSERT(cs.sameLogicalEndpoint(ConnectionString(ConnectionString::SYNC, "a,b,c")));
+    ASSERT(cs.sameLogicalEndpoint(ConnectionString(ConnectionString::SYNC, "c,b,a")));
+    ASSERT(cs.sameLogicalEndpoint(ConnectionString(ConnectionString::SYNC, "c,a,b")));
 
-        ASSERT( ! cs.sameLogicalEndpoint( ConnectionString( ConnectionString::SYNC, "d,a,b" ) ) );
-    }
+    ASSERT(!cs.sameLogicalEndpoint(ConnectionString(ConnectionString::SYNC, "d,a,b")));
+}
 }

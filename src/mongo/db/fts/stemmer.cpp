@@ -36,37 +36,36 @@
 
 namespace mongo {
 
-    namespace fts {
+namespace fts {
 
-        Stemmer::Stemmer( const FTSLanguage& language ) {
-            _stemmer = NULL;
-            if ( language.str() != "none" )
-                _stemmer = sb_stemmer_new(language.str().c_str(), "UTF_8");
-        }
+using std::string;
 
-        Stemmer::~Stemmer() {
-            if ( _stemmer ) {
-                sb_stemmer_delete(_stemmer);
-                _stemmer = NULL;
-            }
-        }
+Stemmer::Stemmer(const FTSLanguage& language) {
+    _stemmer = NULL;
+    if (language.str() != "none")
+        _stemmer = sb_stemmer_new(language.str().c_str(), "UTF_8");
+}
 
-        string Stemmer::stem( const StringData& word ) const {
-            if ( !_stemmer )
-                return word.toString();
+Stemmer::~Stemmer() {
+    if (_stemmer) {
+        sb_stemmer_delete(_stemmer);
+        _stemmer = NULL;
+    }
+}
 
-            const sb_symbol* sb_sym = sb_stemmer_stem( _stemmer,
-                                                       (const sb_symbol*)word.rawData(),
-                                                       word.size() );
+string Stemmer::stem(const StringData& word) const {
+    if (!_stemmer)
+        return word.toString();
 
-            if ( sb_sym == NULL ) {
-                // out of memory
-                abort();
-            }
+    const sb_symbol* sb_sym =
+        sb_stemmer_stem(_stemmer, (const sb_symbol*)word.rawData(), word.size());
 
-            return string( (const char*)(sb_sym), sb_stemmer_length( _stemmer ) );
-        }
-
+    if (sb_sym == NULL) {
+        // out of memory
+        abort();
     }
 
+    return string((const char*)(sb_sym), sb_stemmer_length(_stemmer));
+}
+}
 }

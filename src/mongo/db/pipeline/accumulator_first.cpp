@@ -26,45 +26,45 @@
  * it in the license file.
  */
 
-#include "mongo/pch.h"
+#include "mongo/platform/basic.h"
 
 #include "mongo/db/pipeline/accumulator.h"
 #include "mongo/db/pipeline/value.h"
 
 namespace mongo {
 
-    void AccumulatorFirst::processInternal(const Value& input, bool merging) {
-        /* only remember the first value seen */
-        if (!_haveFirst) {
-            // can't use pValue.missing() since we want the first value even if missing
-            _haveFirst = true;
-            _first = input;
-            _memUsageBytes = sizeof(*this) + input.getApproximateSize() - sizeof(Value);
-        }
-    }
+using boost::intrusive_ptr;
 
-    Value AccumulatorFirst::getValue(bool toBeMerged) const {
-        return _first;
+void AccumulatorFirst::processInternal(const Value& input, bool merging) {
+    /* only remember the first value seen */
+    if (!_haveFirst) {
+        // can't use pValue.missing() since we want the first value even if missing
+        _haveFirst = true;
+        _first = input;
+        _memUsageBytes = sizeof(*this) + input.getApproximateSize() - sizeof(Value);
     }
+}
 
-    AccumulatorFirst::AccumulatorFirst()
-        : _haveFirst(false)
-    {
-        _memUsageBytes = sizeof(*this);
-    }
+Value AccumulatorFirst::getValue(bool toBeMerged) const {
+    return _first;
+}
 
-    void AccumulatorFirst::reset() {
-        _haveFirst = false;
-        _first = Value();
-        _memUsageBytes = sizeof(*this);
-    }
+AccumulatorFirst::AccumulatorFirst() : _haveFirst(false) {
+    _memUsageBytes = sizeof(*this);
+}
+
+void AccumulatorFirst::reset() {
+    _haveFirst = false;
+    _first = Value();
+    _memUsageBytes = sizeof(*this);
+}
 
 
-    intrusive_ptr<Accumulator> AccumulatorFirst::create() {
-        return new AccumulatorFirst();
-    }
+intrusive_ptr<Accumulator> AccumulatorFirst::create() {
+    return new AccumulatorFirst();
+}
 
-    const char *AccumulatorFirst::getOpName() const {
-        return "$first";
-    }
+const char* AccumulatorFirst::getOpName() const {
+    return "$first";
+}
 }

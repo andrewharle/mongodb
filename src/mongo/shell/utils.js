@@ -145,6 +145,10 @@ jsTestOptions = function(){
         return Object.merge(_jsTestOptions,
                             { setParameters : TestData.setParameters,
                               setParametersMongos : TestData.setParametersMongos,
+                              storageEngine: TestData.storageEngine,
+                              wiredTigerEngineConfigString: TestData.wiredTigerEngineConfigString,
+                              wiredTigerCollectionConfigString: TestData.wiredTigerCollectionConfigString,
+                              wiredTigerIndexConfigString: TestData.wiredTigerIndexConfigString,
                               noJournal : TestData.noJournal,
                               noJournalPrealloc : TestData.noJournalPrealloc,
                               auth : TestData.auth,
@@ -515,7 +519,7 @@ shellHelper = function( command , rest , shouldPrint ){
     var args = rest.trim().replace(/\s*;$/,"").split( "\s+" );
     
     if ( ! shellHelper[command] )
-        throw "no command [" + command + "]";
+        throw Error( "no command [" + command + "]" );
     
     var res = shellHelper[command].apply( null , args );
     if ( shouldPrint ){
@@ -726,7 +730,7 @@ shellHelper.show = function (what) {
         }
     }
 
-    throw "don't know how to show [" + what + "]";
+    throw Error( "don't know how to show [" + what + "]" );
 
 }
 
@@ -886,7 +890,7 @@ _awaitRSHostViaRSMonitor = function(hostAddr, desiredState, rsName, timeout) {
             var stateReached = true;
             for(var prop in desiredState) {
                 if (isObject(desiredState[prop])) {
-                    if (!friendlyEqual(desiredState[prop], node[prop])) {
+                    if (!friendlyEqual(sortDoc(desiredState[prop]), sortDoc(node[prop]))) {
                         stateReached = false;
                         break;
                     }
@@ -908,27 +912,26 @@ _awaitRSHostViaRSMonitor = function(hostAddr, desiredState, rsName, timeout) {
 }
 
 rs.help = function () {
-    print("\trs.status()                     { replSetGetStatus : 1 } checks repl set status");
-    print("\trs.initiate()                   { replSetInitiate : null } initiates set with default settings");
-    print("\trs.initiate(cfg)                { replSetInitiate : cfg } initiates set with configuration cfg");
-    print("\trs.conf()                       get the current configuration object from local.system.replset");
-    print("\trs.reconfig(cfg)                updates the configuration of a running replica set with cfg (disconnects)");
-    print("\trs.add(hostportstr)             add a new member to the set with default attributes (disconnects)");
-    print("\trs.add(membercfgobj)            add a new member to the set with extra attributes (disconnects)");
-    print("\trs.addArb(hostportstr)          add a new member which is arbiterOnly:true (disconnects)");
-    print("\trs.stepDown([secs])             step down as primary (momentarily) (disconnects)");
-    print("\trs.syncFrom(hostportstr)        make a secondary to sync from the given member");
-    print("\trs.freeze(secs)                 make a node ineligible to become primary for the time specified");
-    print("\trs.remove(hostportstr)          remove a host from the replica set (disconnects)");
-    print("\trs.slaveOk()                    shorthand for db.getMongo().setSlaveOk()");
+    print("\trs.status()                                { replSetGetStatus : 1 } checks repl set status");
+    print("\trs.initiate()                              { replSetInitiate : null } initiates set with default settings");
+    print("\trs.initiate(cfg)                           { replSetInitiate : cfg } initiates set with configuration cfg");
+    print("\trs.conf()                                  get the current configuration object from local.system.replset");
+    print("\trs.reconfig(cfg)                           updates the configuration of a running replica set with cfg (disconnects)");
+    print("\trs.add(hostportstr)                        add a new member to the set with default attributes (disconnects)");
+    print("\trs.add(membercfgobj)                       add a new member to the set with extra attributes (disconnects)");
+    print("\trs.addArb(hostportstr)                     add a new member which is arbiterOnly:true (disconnects)");
+    print("\trs.stepDown([stepdownSecs, catchUpSecs])   step down as primary (disconnects)");
+    print("\trs.syncFrom(hostportstr)                   make a secondary sync from the given member");
+    print("\trs.freeze(secs)                            make a node ineligible to become primary for the time specified");
+    print("\trs.remove(hostportstr)                     remove a host from the replica set (disconnects)");
+    print("\trs.slaveOk()                               allow queries on secondary nodes");
     print();
-    print("\trs.printReplicationInfo()       check oplog size and time range");
-    print("\trs.printSlaveReplicationInfo()  check replica set members and replication lag");
-    print("\tdb.isMaster()                   check who is primary");
+    print("\trs.printReplicationInfo()                  check oplog size and time range");
+    print("\trs.printSlaveReplicationInfo()             check replica set members and replication lag");
+    print("\tdb.isMaster()                              check who is primary");
     print();
     print("\treconfiguration helpers disconnect from the database so the shell will display");
     print("\tan error, even if the command succeeds.");
-    print("\tsee also http://<mongod_host>:28017/_replSet for additional diagnostic info");
 }
 rs.slaveOk = function (value) { return db.getMongo().setSlaveOk(value); }
 rs.status = function () { return db._adminCommand("replSetGetStatus"); }
@@ -988,15 +991,32 @@ rs.add = function (hostport, arb) {
         if (arb)
             cfg.arbiterOnly = true;
     }
+    if (cfg._id == null){
+        cfg._id = max+1;
+    }
     c.members.push(cfg);
     return this._runCmd({ replSetReconfig: c });
 }
 rs.syncFrom = function (host) { return db._adminCommand({replSetSyncFrom : host}); };
-rs.stepDown = function (secs) { return db._adminCommand({ replSetStepDown:(secs === undefined) ? 60:secs}); }
+rs.stepDown = function (stepdownSecs, catchUpSecs) {
+    var cmdObj = {replSetStepDown: stepdownSecs === undefined ? 60 : stepdownSecs};
+    if (catchUpSecs !== undefined) {
+        cmdObj['secondaryCatchUpPeriodSecs'] = catchUpSecs;
+    }
+    return db._adminCommand(cmdObj);
+};
 rs.freeze = function (secs) { return db._adminCommand({replSetFreeze:secs}); }
 rs.addArb = function (hn) { return this.add(hn, true); }
-rs.conf = function () { return db.getSisterDB("local").system.replset.findOne(); }
-rs.config = function () { return rs.conf(); }
+
+rs.conf = function () { 
+    var resp = db._adminCommand({replSetGetConfig:1});
+    if (resp.ok && !(resp.errmsg) && resp.config)
+        return resp.config;
+    else if (resp.errmsg && resp.errmsg.startsWith("no such cmd"))
+        return db.getSisterDB("local").system.replset.findOne(); 
+    throw new Error("Could not retrieve replica set config: " + tojson(resp));
+}
+rs.config = rs.conf;
 
 rs.remove = function (hn) {
     var local = db.getSisterDB("local");

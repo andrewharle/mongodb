@@ -1,8 +1,7 @@
-var st = new ShardingTest({ shards: 2 });
+var st = new ShardingTest({ shards: 2, other: { shardOptions: { verbose: 1 }}});
 
 var testDB = st.s.getDB('test');
-testDB.foo.insert({ a: 1 });
-assert.eq(null, testDB.getLastError());
+assert.writeOK(testDB.foo.insert({ a: 1 }));
 
 var res = testDB.adminCommand({ copydb: 1,
                                 fromhost: st.s.host,

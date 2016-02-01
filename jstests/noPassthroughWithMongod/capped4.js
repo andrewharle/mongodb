@@ -22,13 +22,7 @@ assert( !d.hasNext(), "C" );
 assert( t.find().sort( { i : 1 } ).hint( { i : 1 } ).toArray().length > 10, "D" );
 
 assert( t.findOne( { i : i - 1 } ), "E" );
-t.remove( { i : i - 1 } );
-assert( db.getLastError().indexOf( "capped" ) >= 0, "F" );
+var res = assert.writeError(t.remove( { i : i - 1 } ));
+assert( res.getWriteError().errmsg.indexOf( "capped" ) >= 0, "F" );
 
 assert( t.validate().valid, "G" );
-
-/* there is a cursor open here, so this is a convenient place for a quick cursor test. */
-
-db._adminCommand("closeAllDatabases");
-
-assert( db.serverStatus().cursors.totalOpen == 0, "cursors open and shouldn't be");

@@ -28,37 +28,40 @@
 *    then also delete it in the license file.
 */
 
-#include "mongo/pch.h"
+#include "mongo/platform/basic.h"
 
 #include "mongo/s/version_manager.h"
 
 namespace mongo {
 
-    // Global version manager
-    VersionManager versionManager;
+using std::string;
 
-    void VersionManager::resetShardVersionCB( DBClientBase * conn ) {
-        return;
-    }
+// Global version manager
+VersionManager versionManager;
 
-    bool VersionManager::isVersionableCB( DBClientBase* conn ){
-        return false;
-    }
+void VersionManager::resetShardVersionCB(DBClientBase* conn) {
+    return;
+}
 
-    bool VersionManager::initShardVersionCB( DBClientBase * conn_in, BSONObj& result ){
-        return false;
-    }
+bool VersionManager::isVersionableCB(DBClientBase* conn) {
+    return false;
+}
 
-    bool VersionManager::forceRemoteCheckShardVersionCB( const string& ns ){
-        return true;
-    }
+bool VersionManager::forceRemoteCheckShardVersionCB(const string& ns) {
+    return true;
+}
 
-    bool VersionManager::checkShardVersionCB( DBClientBase* conn_in , const string& ns , bool authoritative , int tryNumber ) {
-        return false;
-    }
+bool VersionManager::checkShardVersionCB(DBClientBase* conn_in,
+                                         const string& ns,
+                                         bool authoritative,
+                                         int tryNumber) {
+    return false;
+}
 
-    bool VersionManager::checkShardVersionCB( ShardConnection* conn_in , bool authoritative , int tryNumber ) {
-        return false;
-    }
+bool VersionManager::checkShardVersionCB(ShardConnection* conn_in,
+                                         bool authoritative,
+                                         int tryNumber) {
+    return false;
+}
 
 }  // namespace mongo

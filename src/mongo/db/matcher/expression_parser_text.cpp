@@ -37,46 +37,46 @@
 
 namespace mongo {
 
-    StatusWithMatchExpression expressionParserTextCallbackReal( const BSONObj& queryObj ) {
-        // Validate queryObj, but defer construction of FTSQuery (which requires access to the
-        // target namespace) until stage building time.
+using std::auto_ptr;
+using std::string;
 
-        if ( mongo::String != queryObj["$search"].type() ) {
-            return StatusWithMatchExpression( ErrorCodes::BadValue, "$search needs a String" );
-        }
+StatusWithMatchExpression expressionParserTextCallbackReal(const BSONObj& queryObj) {
+    // Validate queryObj, but defer construction of FTSQuery (which requires access to the
+    // target namespace) until stage building time.
 
-        string language = "";
-        BSONElement languageElt = queryObj["$language"];
-        if ( !languageElt.eoo() ) {
-            if ( mongo::String != languageElt.type() ) {
-                return StatusWithMatchExpression( ErrorCodes::BadValue,
-                                                  "$language needs a String" );
-            }
-            language = languageElt.String();
-            Status status =
-                fts::FTSLanguage::make( language, fts::TEXT_INDEX_VERSION_2 ).getStatus();
-            if ( !status.isOK() ) {
-                return StatusWithMatchExpression( ErrorCodes::BadValue,
-                                                  "$language specifies unsupported language" );
-            }
-        }
-        string query = queryObj["$search"].String();
-
-        if ( queryObj.nFields() != ( languageElt.eoo() ? 1 : 2 ) ) {
-            return StatusWithMatchExpression( ErrorCodes::BadValue, "extra fields in $text" );
-        }
-
-        auto_ptr<TextMatchExpression> e( new TextMatchExpression() );
-        Status s = e->init( query, language );
-        if ( !s.isOK() ) {
-            return StatusWithMatchExpression( s );
-        }
-        return StatusWithMatchExpression( e.release() );
+    if (mongo::String != queryObj["$search"].type()) {
+        return StatusWithMatchExpression(ErrorCodes::BadValue, "$search needs a String");
     }
 
-    MONGO_INITIALIZER( MatchExpressionParserText )( ::mongo::InitializerContext* context ) {
-        expressionParserTextCallback = expressionParserTextCallbackReal;
-        return Status::OK();
+    string language = "";
+    BSONElement languageElt = queryObj["$language"];
+    if (!languageElt.eoo()) {
+        if (mongo::String != languageElt.type()) {
+            return StatusWithMatchExpression(ErrorCodes::BadValue, "$language needs a String");
+        }
+        language = languageElt.String();
+        Status status = fts::FTSLanguage::make(language, fts::TEXT_INDEX_VERSION_2).getStatus();
+        if (!status.isOK()) {
+            return StatusWithMatchExpression(ErrorCodes::BadValue,
+                                             "$language specifies unsupported language");
+        }
+    }
+    string query = queryObj["$search"].String();
+
+    if (queryObj.nFields() != (languageElt.eoo() ? 1 : 2)) {
+        return StatusWithMatchExpression(ErrorCodes::BadValue, "extra fields in $text");
     }
 
+    auto_ptr<TextMatchExpression> e(new TextMatchExpression());
+    Status s = e->init(query, language);
+    if (!s.isOK()) {
+        return StatusWithMatchExpression(s);
+    }
+    return StatusWithMatchExpression(e.release());
+}
+
+MONGO_INITIALIZER(MatchExpressionParserText)(::mongo::InitializerContext* context) {
+    expressionParserTextCallback = expressionParserTextCallbackReal;
+    return Status::OK();
+}
 }
