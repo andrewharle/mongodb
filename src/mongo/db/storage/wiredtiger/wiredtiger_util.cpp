@@ -97,10 +97,9 @@ void WiredTigerUtil::fetchTypeAndSourceURI(OperationContext* opCtx,
     *source = std::string(sourceItem.str, sourceItem.len);
 }
 
-StatusWith<std::string> WiredTigerUtil::getMetadata(OperationContext* opCtx,
-                                                    const StringData& uri) {
+StatusWith<std::string> WiredTigerUtil::getMetadata(OperationContext* opCtx, StringData uri) {
     invariant(opCtx);
-    WiredTigerCursor curwrap("metadata:", WiredTigerSession::kMetadataCursorId, false, opCtx);
+    WiredTigerCursor curwrap("metadata:create", WiredTigerSession::kMetadataTableId, false, opCtx);
     WT_CURSOR* cursor = curwrap.get();
     invariant(cursor);
     std::string strUri = uri.toString();
@@ -122,7 +121,7 @@ StatusWith<std::string> WiredTigerUtil::getMetadata(OperationContext* opCtx,
 }
 
 Status WiredTigerUtil::getApplicationMetadata(OperationContext* opCtx,
-                                              const StringData& uri,
+                                              StringData uri,
                                               BSONObjBuilder* bob) {
     StatusWith<std::string> metadataResult = getMetadata(opCtx, uri);
     if (!metadataResult.isOK()) {
@@ -176,7 +175,7 @@ Status WiredTigerUtil::getApplicationMetadata(OperationContext* opCtx,
 }
 
 StatusWith<BSONObj> WiredTigerUtil::getApplicationMetadata(OperationContext* opCtx,
-                                                           const StringData& uri) {
+                                                           StringData uri) {
     BSONObjBuilder bob;
     Status status = getApplicationMetadata(opCtx, uri, &bob);
     if (!status.isOK()) {
@@ -186,7 +185,7 @@ StatusWith<BSONObj> WiredTigerUtil::getApplicationMetadata(OperationContext* opC
 }
 
 Status WiredTigerUtil::checkApplicationMetadataFormatVersion(OperationContext* opCtx,
-                                                             const StringData& uri,
+                                                             StringData uri,
                                                              int64_t minimumVersion,
                                                              int64_t maximumVersion) {
     StatusWith<std::string> result = getMetadata(opCtx, uri);
@@ -228,6 +227,32 @@ Status WiredTigerUtil::checkApplicationMetadataFormatVersion(OperationContext* o
            << " uri: " << uri << " ok range " << minimumVersion << " -> " << maximumVersion
            << " current: " << version;
 
+    return Status::OK();
+}
+
+// static
+Status WiredTigerUtil::checkTableCreationOptions(const BSONElement& configElem) {
+    invariant(configElem.fieldNameStringData() == "configString");
+
+    if (configElem.type() != String) {
+        return {ErrorCodes::TypeMismatch, "'configString' must be a string."};
+    }
+
+    std::vector<std::string> errors;
+    ErrorAccumulator eventHandler(&errors);
+
+    StringData config = configElem.valueStringData();
+    Status status = wtRCToStatus(
+        wiredtiger_config_validate(nullptr, &eventHandler, "WT_SESSION.create", config.rawData()));
+    if (!status.isOK()) {
+        StringBuilder errorMsg;
+        errorMsg << status.reason();
+        for (std::string error : errors) {
+            errorMsg << ". " << error;
+        }
+        errorMsg << ".";
+        return {status.code(), errorMsg.str()};
+    }
     return Status::OK();
 }
 
@@ -328,37 +353,33 @@ WT_EVENT_HANDLER WiredTigerUtil::defaultEventHandlers() {
     return handlers;
 }
 
+WiredTigerUtil::ErrorAccumulator::ErrorAccumulator(std::vector<std::string>* errors)
+    : WT_EVENT_HANDLER(defaultEventHandlers()),
+      _errors(errors),
+      _defaultErrorHandler(handle_error) {
+    if (errors) {
+        handle_error = onError;
+    }
+}
+
+// static
+int WiredTigerUtil::ErrorAccumulator::onError(WT_EVENT_HANDLER* handler,
+                                              WT_SESSION* session,
+                                              int error,
+                                              const char* message) {
+    try {
+        ErrorAccumulator* self = static_cast<ErrorAccumulator*>(handler);
+        self->_errors->push_back(message);
+        return self->_defaultErrorHandler(handler, session, error, message);
+    } catch (...) {
+        std::terminate();
+    }
+}
+
 int WiredTigerUtil::verifyTable(OperationContext* txn,
                                 const std::string& uri,
                                 std::vector<std::string>* errors) {
-    class MyEventHandlers : public WT_EVENT_HANDLER {
-    public:
-        MyEventHandlers(std::vector<std::string>* errors)
-            : WT_EVENT_HANDLER(defaultEventHandlers()),
-              _errors(errors),
-              _defaultErrorHandler(handle_error) {
-            handle_error = onError;
-        }
-
-    private:
-        static int onError(WT_EVENT_HANDLER* handler,
-                           WT_SESSION* session,
-                           int error,
-                           const char* message) {
-            try {
-                MyEventHandlers* self = static_cast<MyEventHandlers*>(handler);
-                self->_errors->push_back(message);
-                return self->_defaultErrorHandler(handler, session, error, message);
-            } catch (...) {
-                std::terminate();
-            }
-        }
-
-        typedef int (*ErrorHandler)(WT_EVENT_HANDLER*, WT_SESSION*, int, const char*);
-
-        std::vector<std::string>* const _errors;
-        const ErrorHandler _defaultErrorHandler;
-    } eventHandler(errors);
+    ErrorAccumulator eventHandler(errors);
 
     // Try to close as much as possible to avoid EBUSY errors.
     WiredTigerRecoveryUnit::get(txn)->getSession(txn)->closeAllCursors();
@@ -368,7 +389,7 @@ int WiredTigerUtil::verifyTable(OperationContext* txn,
     // Open a new session with custom error handlers.
     WT_CONNECTION* conn = WiredTigerRecoveryUnit::get(txn)->getSessionCache()->conn();
     WT_SESSION* session;
-    invariantWTOK(conn->open_session(conn, errors ? &eventHandler : NULL, NULL, &session));
+    invariantWTOK(conn->open_session(conn, &eventHandler, NULL, &session));
     ON_BLOCK_EXIT(session->close, session, "");
 
     // Do the verify. Weird parens prevent treating "verify" as a macro.

@@ -41,12 +41,15 @@
 
 namespace mongo {
 
-Matcher::Matcher(const BSONObj& pattern, const MatchExpressionParser::WhereCallback& whereCallback)
+Matcher::Matcher(const BSONObj& pattern, const ExtensionsCallback& extensionsCallback)
     : _pattern(pattern) {
-    StatusWithMatchExpression result = MatchExpressionParser::parse(pattern, whereCallback);
-    uassert(16810, mongoutils::str::stream() << "bad query: " << result.toString(), result.isOK());
+    StatusWithMatchExpression statusWithMatcher =
+        MatchExpressionParser::parse(pattern, extensionsCallback);
+    uassert(16810,
+            mongoutils::str::stream() << "bad query: " << statusWithMatcher.getStatus().toString(),
+            statusWithMatcher.isOK());
 
-    _expression.reset(result.getValue());
+    _expression = std::move(statusWithMatcher.getValue());
 }
 
 bool Matcher::matches(const BSONObj& doc, MatchDetails* details) const {

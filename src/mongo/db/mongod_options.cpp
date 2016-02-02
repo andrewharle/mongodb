@@ -37,17 +37,17 @@
 
 #include "mongo/base/status.h"
 #include "mongo/bson/util/builder.h"
-#include "mongo/db/auth/authorization_manager.h"
-#include "mongo/db/auth/authorization_manager_global.h"
+#include "mongo/config.h"
 #include "mongo/db/db.h"
 #include "mongo/db/instance.h"
 #include "mongo/db/repl/repl_settings.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/server_options_helpers.h"
 #include "mongo/db/storage/mmap_v1/mmap_v1_options.h"
-#include "mongo/util/log.h"
+#include "mongo/s/catalog/catalog_manager.h"
 #include "mongo/logger/console_appender.h"
 #include "mongo/logger/message_event_utf8_encoder.h"
+#include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
 #include "mongo/util/net/ssl_options.h"
 #include "mongo/util/options_parser/startup_options.h"
@@ -80,7 +80,7 @@ Status addMongodOptions(moe::OptionSection* options) {
     }
 #endif
 
-#ifdef MONGO_SSL
+#ifdef MONGO_CONFIG_SSL
     moe::OptionSection ssl_options("SSL options");
 
     ret = addSSLServerOptions(&ssl_options);
@@ -173,11 +173,11 @@ Status addMongodOptions(moe::OptionSection* options) {
 
     // Storage Options
 
-    storage_options.addOptionChaining("storage.engine",
-                                      "storageEngine",
-                                      moe::String,
-                                      "what storage engine to use")
-        .setDefault(moe::Value(std::string("mmapv1")));
+    storage_options.addOptionChaining(
+        "storage.engine",
+        "storageEngine",
+        moe::String,
+        "what storage engine to use - defaults to wiredTiger if no data files present");
 
 
 #ifdef _WIN32
@@ -329,11 +329,11 @@ Status addMongodOptions(moe::OptionSection* options) {
         .setSources(moe::SourceAllLegacy)
         .incompatibleWith("storage.mmapv1.journal.debugFlags");
 
-    storage_options.addOptionChaining("storage.mmapv1.journal.commitIntervalMs",
+    storage_options.addOptionChaining("storage.journal.commitIntervalMs",
                                       "journalCommitInterval",
-                                      moe::Unsigned,
+                                      moe::Int,
                                       "how often to group/batch commit (ms)",
-                                      "storage.journal.commitIntervalMs");
+                                      "storage.mmapv1.journal.commitIntervalMs");
 
     // Deprecated option that we don't want people to use for performance reasons
     storage_options.addOptionChaining("nopreallocj",
@@ -418,6 +418,11 @@ Status addMongodOptions(moe::OptionSection* options) {
                    "specify index prefetching behavior (if secondary) [none|_id_only|all]")
         .format("(:?none)|(:?_id_only)|(:?all)", "(none/_id_only/all)");
 
+    rs_options.addOptionChaining("replication.enableMajorityReadConcern",
+                                 "enableMajorityReadConcern",
+                                 moe::Switch,
+                                 "enables majority readConcern");
+
     // Sharding Options
 
     sharding_options.addOptionChaining(
@@ -427,7 +432,16 @@ Status addMongodOptions(moe::OptionSection* options) {
                          "declare this is a config db of a cluster; default port 27019; "
                          "default dir /data/configdb")
         .setSources(moe::SourceAllLegacy)
-        .incompatibleWith("shardsvr");
+        .incompatibleWith("shardsvr")
+        .incompatibleWith("nojournal");
+
+    sharding_options.addOptionChaining("sharding.configsvrMode",
+                                       "configsvrMode",
+                                       moe::String,
+                                       "Controls what config server protocol is in use. When set to"
+                                       " \"sccc\" keeps server in legacy SyncClusterConnection mode"
+                                       " even when the service is running as a replSet")
+        .setSources(moe::SourceAll);
 
     sharding_options.addOptionChaining(
                          "shardsvr",
@@ -487,7 +501,7 @@ Status addMongodOptions(moe::OptionSection* options) {
     options->addSection(ms_options);
     options->addSection(rs_options);
     options->addSection(sharding_options);
-#ifdef MONGO_SSL
+#ifdef MONGO_CONFIG_SSL
     options->addSection(ssl_options);
 #endif
     options->addSection(storage_options);
@@ -545,7 +559,6 @@ void printMongodHelp(const moe::OptionSection& options) {
 
 namespace {
 void sysRuntimeInfo() {
-    log() << "sysinfo:" << endl;
 #if defined(_SC_PAGE_SIZE)
     log() << "  page size: " << (int)sysconf(_SC_PAGE_SIZE) << endl;
 #endif
@@ -575,8 +588,7 @@ bool handlePreValidationMongodOptions(const moe::Environment& params,
     if (params.count("version") && params["version"].as<bool>() == true) {
         setPlainConsoleLogger();
         log() << mongodVersion() << endl;
-        printGitVersion();
-        printOpenSSLVersion();
+        printBuildInfo();
         return false;
     }
     if (params.count("sysinfo") && params["sysinfo"].as<bool>() == true) {
@@ -689,7 +701,7 @@ Status canonicalizeMongodOptions(moe::Environment* params) {
         return ret;
     }
 
-#ifdef MONGO_SSL
+#ifdef MONGO_CONFIG_SSL
     ret = canonicalizeSSLServerOptions(params);
     if (!ret.isOK()) {
         return ret;
@@ -953,7 +965,10 @@ Status storeMongodOptions(const moe::Environment& params, const std::vector<std:
                       "files");
     }
 
-    storageGlobalParams.engine = params["storage.engine"].as<string>();
+    if (params.count("storage.engine")) {
+        storageGlobalParams.engine = params["storage.engine"].as<string>();
+        storageGlobalParams.engineSetByUser = true;
+    }
 
     if (params.count("storage.dbPath")) {
         storageGlobalParams.dbpath = params["storage.dbPath"].as<string>();
@@ -1006,11 +1021,11 @@ Status storeMongodOptions(const moe::Environment& params, const std::vector<std:
     }
     if (params.count("security.authorization") &&
         params["security.authorization"].as<std::string>() == "disabled") {
-        getGlobalAuthorizationManager()->setAuthEnabled(false);
+        serverGlobalParams.isAuthEnabled = false;
     }
     if (params.count("security.authorization") &&
         params["security.authorization"].as<std::string>() == "enabled") {
-        getGlobalAuthorizationManager()->setAuthEnabled(true);
+        serverGlobalParams.isAuthEnabled = true;
     }
     if (params.count("storage.mmapv1.quota.enforced")) {
         mmapv1GlobalOptions.quota = params["storage.mmapv1.quota.enforced"].as<bool>();
@@ -1024,16 +1039,19 @@ Status storeMongodOptions(const moe::Environment& params, const std::vector<std:
         storageGlobalParams.dur = params["storage.journal.enabled"].as<bool>();
     }
 
-    if (params.count("storage.mmapv1.journal.commitIntervalMs")) {
+    if (params.count("storage.journal.commitIntervalMs")) {
         // don't check if dur is false here as many will just use the default, and will default
         // to off on win32.  ie no point making life a little more complex by giving an error on
         // a dev environment.
-        mmapv1GlobalOptions.journalCommitInterval =
-            params["storage.mmapv1.journal.commitIntervalMs"].as<unsigned>();
-        if (mmapv1GlobalOptions.journalCommitInterval <= 1 ||
-            mmapv1GlobalOptions.journalCommitInterval > 300) {
+        storageGlobalParams.journalCommitIntervalMs =
+            params["storage.journal.commitIntervalMs"].as<int>();
+        if (storageGlobalParams.journalCommitIntervalMs < 1 ||
+            storageGlobalParams.journalCommitIntervalMs >
+                StorageGlobalParams::kMaxJournalCommitIntervalMs) {
             return Status(ErrorCodes::BadValue,
-                          "--journalCommitInterval out of allowed range (0-300ms)");
+                          str::stream() << "--journalCommitInterval out of allowed range (1-"
+                                        << StorageGlobalParams::kMaxJournalCommitIntervalMs
+                                        << "ms)");
         }
     }
     if (params.count("storage.mmapv1.journal.debugFlags")) {
@@ -1099,6 +1117,10 @@ Status storeMongodOptions(const moe::Environment& params, const std::vector<std:
         replSettings.slavedelay = params["slavedelay"].as<int>();
     }
     if (params.count("fastsync")) {
+        if (replSettings.slave != repl::SimpleSlave) {
+            return Status(ErrorCodes::BadValue,
+                          str::stream() << "--fastsync must only be used with --slave");
+        }
         replSettings.fastsync = params["fastsync"].as<bool>();
     }
     if (params.count("autoresync")) {
@@ -1121,6 +1143,10 @@ Status storeMongodOptions(const moe::Environment& params, const std::vector<std:
     if (params.count("replication.secondaryIndexPrefetch")) {
         replSettings.rsIndexPrefetch =
             params["replication.secondaryIndexPrefetch"].as<std::string>();
+    }
+
+    if (params.count("replication.enableMajorityReadConcern")) {
+        replSettings.majorityReadConcernEnabled = true;
     }
 
     if (params.count("storage.indexBuildRetry")) {
@@ -1184,11 +1210,10 @@ Status storeMongodOptions(const moe::Environment& params, const std::vector<std:
     if (params.count("sharding.clusterRole") &&
         params["sharding.clusterRole"].as<std::string>() == "configsvr") {
         serverGlobalParams.configsvr = true;
+        serverGlobalParams.configsvrMode = replSettings.replSet.empty()
+            ? CatalogManager::ConfigServerMode::SCCC
+            : CatalogManager::ConfigServerMode::CSRS;
         mmapv1GlobalOptions.smallfiles = true;  // config server implies small files
-        if (replSettings.usingReplSets() || replSettings.master || replSettings.slave) {
-            return Status(ErrorCodes::BadValue,
-                          "replication should not be enabled on a config server");
-        }
 
         // If we haven't explicitly specified a journal option, default journaling to true for
         // the config server role
@@ -1199,9 +1224,29 @@ Status storeMongodOptions(const moe::Environment& params, const std::vector<std:
         if (!params.count("storage.dbPath")) {
             storageGlobalParams.dbpath = storageGlobalParams.kDefaultConfigDbPath;
         }
-        replSettings.master = true;
-        if (!params.count("replication.oplogSizeMB"))
-            replSettings.oplogSize = 5 * 1024 * 1024;
+        if (serverGlobalParams.configsvrMode == CatalogManager::ConfigServerMode::SCCC) {
+            replSettings.master = true;  // To force SCCC config servers to have an oplog for backup
+            if (!params.count("replication.oplogSizeMB"))
+                replSettings.oplogSize = 5 * 1024 * 1024;
+        }
+    }
+
+    if (params.count("sharding.configsvrMode")) {
+        if (!serverGlobalParams.configsvr) {
+            return Status(ErrorCodes::BadValue,
+                          "Cannot set \"sharding.configsvrMode\" without "
+                          "setting \"sharding.clusterRole\" to \"configsvr\"");
+        }
+        if (params["sharding.configsvrMode"].as<std::string>() != "sccc") {
+            return Status(ErrorCodes::BadValue,
+                          "Bad value for sharding.configsvrMode.  "
+                          " Only supported value is \"sccc\"");
+        }
+        serverGlobalParams.configsvrMode = CatalogManager::ConfigServerMode::SCCC;
+    }
+
+    if (serverGlobalParams.configsvrMode == CatalogManager::ConfigServerMode::CSRS) {
+        replSettings.majorityReadConcernEnabled = true;
     }
 
     if (params.count("sharding.archiveMovedChunks")) {

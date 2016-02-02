@@ -2,14 +2,15 @@
  * Tests the setShardVersion logic on the this shard side, specifically when comparing
  * against a major version of zero or incompatible epochs.
  */
+(function() {
+'use strict';
 
 var st = new ShardingTest({ shards: 2, mongos: 4 });
-st.stopBalancer();
 
 var testDB_s0 = st.s.getDB('test');
-testDB_s0.adminCommand({ enableSharding: 'test' });
-testDB_s0.adminCommand({ movePrimary: 'test', to: 'shard0001' });
-testDB_s0.adminCommand({ shardCollection: 'test.user', key: { x: 1 }});
+assert.commandWorked(testDB_s0.adminCommand({ enableSharding: 'test' }));
+st.ensurePrimaryShard('test', 'shard0001');
+assert.commandWorked(testDB_s0.adminCommand({ shardCollection: 'test.user', key: { x: 1 }}));
 
 var checkShardMajorVersion = function(conn, expectedVersion) {
     var shardVersionInfo = conn.adminCommand({ getShardVersion: 'test.user' });
@@ -18,7 +19,6 @@ var checkShardMajorVersion = function(conn, expectedVersion) {
 
 ///////////////////////////////////////////////////////
 // Test shard with empty chunk
-// mongos versions: s0: 1|0|a
 
 // shard0: 0|0|a
 // shard1: 1|0|a, [-inf, inf)
@@ -37,7 +37,6 @@ assert.commandWorked(testDB_s1.adminCommand({ moveChunk: 'test.user',
 // Shard metadata:
 // shard0: 0|0|a
 // shard1: 0|0|a
-//
 // mongos0: 1|0|a
 
 checkShardMajorVersion(st.d0, 0);
@@ -112,7 +111,7 @@ checkShardMajorVersion(st.d1, 2);
 // refresh it's metadata correctly.
 assert.neq(null, testDB_s2.user.findOne({ x: 1 }));
 
-checkShardMajorVersion(st.d0, 0);
+checkShardMajorVersion(st.d0, 2);
 checkShardMajorVersion(st.d1, 2);
 
 // Set shard metadata to 2|0|b
@@ -178,3 +177,4 @@ checkShardMajorVersion(st.d1, 0);
 
 st.stop();
 
+})();

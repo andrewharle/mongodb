@@ -31,15 +31,18 @@
 
 #include "mongo/bson/bsonelement.h"
 
+#include <cmath>
 #include <boost/functional/hash.hpp>
 
 #include "mongo/base/compare_numbers.h"
 #include "mongo/base/data_cursor.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/platform/strnlen.h"
 #include "mongo/util/base64.h"
 #include "mongo/util/hex.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
+#include "mongo/util/string_map.h"
 
 namespace mongo {
 namespace str = mongoutils::str;
@@ -49,8 +52,6 @@ using std::hex;
 using std::string;
 
 string BSONElement::jsonString(JsonStringFormat format, bool includeFieldNames, int pretty) const {
-    int sign;
-
     std::stringstream s;
     if (includeFieldNames)
         s << '"' << escape(fieldName()) << "\" : ";
@@ -80,16 +81,35 @@ string BSONElement::jsonString(JsonStringFormat format, bool includeFieldNames, 
             // This is not valid JSON, but according to RFC-4627, "Numeric values that cannot be
             // represented as sequences of digits (such as Infinity and NaN) are not permitted." so
             // we are accepting the fact that if we have such values we cannot output valid JSON.
-            else if (mongo::isNaN(number())) {
+            else if (std::isnan(number())) {
                 s << "NaN";
-            } else if (mongo::isInf(number(), &sign)) {
-                s << (sign == 1 ? "Infinity" : "-Infinity");
+            } else if (std::isinf(number())) {
+                s << (number() > 0 ? "Infinity" : "-Infinity");
             } else {
                 StringBuilder ss;
                 ss << "Number " << number() << " cannot be represented in JSON";
                 string message = ss.str();
                 massert(10311, message.c_str(), false);
             }
+            break;
+        case NumberDecimal:
+            if (format == TenGen)
+                s << "NumberDecimal(\"";
+            else
+                s << "{ \"$numberDecimal\" : \"";
+            // Recognize again that this is not valid JSON according to RFC-4627.
+            // Also, treat -NaN and +NaN as the same thing for MongoDB.
+            if (numberDecimal().isNaN()) {
+                s << "NaN";
+            } else if (numberDecimal().isInfinite()) {
+                s << (numberDecimal().isNegative() ? "-Infinity" : "Infinity");
+            } else {
+                s << numberDecimal().toString();
+            }
+            if (format == TenGen)
+                s << "\")";
+            else
+                s << "\" }";
             break;
         case mongo::Bool:
             s << (boolean() ? "true" : "false");
@@ -169,8 +189,8 @@ string BSONElement::jsonString(JsonStringFormat format, bool includeFieldNames, 
             break;
         case BinData: {
             ConstDataCursor reader(value());
-            const int len = reader.readLEAndAdvance<int>();
-            BinDataType type = static_cast<BinDataType>(reader.readLEAndAdvance<uint8_t>());
+            const int len = reader.readAndAdvance<LittleEndian<int>>();
+            BinDataType type = static_cast<BinDataType>(reader.readAndAdvance<uint8_t>());
 
             s << "{ \"$binary\" : \"";
             base64::encode(s, reader.view(), len);
@@ -191,10 +211,10 @@ string BSONElement::jsonString(JsonStringFormat format, bool includeFieldNames, 
                 // long long, despite the fact that it is logically signed (SERVER-8573), this check
                 // handles both the case where Date_t::millis is too large, and the case where
                 // Date_t::millis is negative (before the epoch).
-                if (d.isFormatable()) {
+                if (d.isFormattable()) {
                     s << "\"" << dateToISOStringLocal(date()) << "\"";
                 } else {
-                    s << "{ \"$numberLong\" : \"" << static_cast<long long>(d.millis) << "\" }";
+                    s << "{ \"$numberLong\" : \"" << d.toMillisSinceEpoch() << "\" }";
                 }
                 s << " }";
             } else {
@@ -207,12 +227,12 @@ string BSONElement::jsonString(JsonStringFormat format, bool includeFieldNames, 
                     // unsigned long long, despite the fact that it is logically signed
                     // (SERVER-8573), this check handles both the case where Date_t::millis is too
                     // large, and the case where Date_t::millis is negative (before the epoch).
-                    if (d.isFormatable()) {
+                    if (d.isFormattable()) {
                         s << "\"" << dateToISOStringLocal(date()) << "\"";
                     } else {
                         // FIXME: This is not parseable by the shell, since it may not fit in a
                         // float
-                        s << d.millis;
+                        s << d.toMillisSinceEpoch();
                     }
                 } else {
                     s << date().asInt64();
@@ -253,11 +273,13 @@ string BSONElement::jsonString(JsonStringFormat format, bool includeFieldNames, 
             s << "\"" << escape(_asCode()) << "\"";
             break;
 
-        case Timestamp:
+        case bsonTimestamp:
             if (format == TenGen) {
-                s << "Timestamp( " << (timestampTime() / 1000) << ", " << timestampInc() << " )";
+                s << "Timestamp( " << durationCount<Seconds>(timestampTime().toDurationSinceEpoch())
+                  << ", " << timestampInc() << " )";
             } else {
-                s << "{ \"$timestamp\" : { \"t\" : " << (timestampTime() / 1000)
+                s << "{ \"$timestamp\" : { \"t\" : "
+                  << durationCount<Seconds>(timestampTime().toDurationSinceEpoch())
                   << ", \"i\" : " << timestampInc() << " } }";
             }
             break;
@@ -280,65 +302,50 @@ string BSONElement::jsonString(JsonStringFormat format, bool includeFieldNames, 
     return s.str();
 }
 
+namespace {
+
+// Map from query operator string name to operator MatchType. Used in BSONElement::getGtLtOp().
+const StringMap<BSONObj::MatchType> queryOperatorMap{
+    // TODO: SERVER-19565 Add $eq after auditing callers.
+    {"lt", BSONObj::LT},
+    {"lte", BSONObj::LTE},
+    {"gte", BSONObj::GTE},
+    {"gt", BSONObj::GT},
+    {"in", BSONObj::opIN},
+    {"ne", BSONObj::NE},
+    {"size", BSONObj::opSIZE},
+    {"all", BSONObj::opALL},
+    {"nin", BSONObj::NIN},
+    {"exists", BSONObj::opEXISTS},
+    {"mod", BSONObj::opMOD},
+    {"type", BSONObj::opTYPE},
+    {"regex", BSONObj::opREGEX},
+    {"options", BSONObj::opOPTIONS},
+    {"elemMatch", BSONObj::opELEM_MATCH},
+    {"near", BSONObj::opNEAR},
+    {"nearSphere", BSONObj::opNEAR},
+    {"geoNear", BSONObj::opNEAR},
+    {"within", BSONObj::opWITHIN},
+    {"geoWithin", BSONObj::opWITHIN},
+    {"geoIntersects", BSONObj::opGEO_INTERSECTS},
+    {"bitsAllSet", BSONObj::opBITS_ALL_SET},
+    {"bitsAllClear", BSONObj::opBITS_ALL_CLEAR},
+    {"bitsAnySet", BSONObj::opBITS_ANY_SET},
+    {"bitsAnyClear", BSONObj::opBITS_ANY_CLEAR},
+};
+
+}  // namespace
+
 int BSONElement::getGtLtOp(int def) const {
     const char* fn = fieldName();
     if (fn[0] == '$' && fn[1]) {
-        if (fn[2] == 't') {
-            if (fn[1] == 'g') {
-                if (fn[3] == 0)
-                    return BSONObj::GT;
-                else if (fn[3] == 'e' && fn[4] == 0)
-                    return BSONObj::GTE;
-            } else if (fn[1] == 'l') {
-                if (fn[3] == 0)
-                    return BSONObj::LT;
-                else if (fn[3] == 'e' && fn[4] == 0)
-                    return BSONObj::LTE;
-            }
-        } else if (fn[1] == 'n' && fn[2] == 'e') {
-            if (fn[3] == 0)
-                return BSONObj::NE;
-            if (fn[3] == 'a' && fn[4] == 'r')  // matches anything with $near prefix
-                return BSONObj::opNEAR;
-        } else if (fn[1] == 'm') {
-            if (fn[2] == 'o' && fn[3] == 'd' && fn[4] == 0)
-                return BSONObj::opMOD;
-            if (fn[2] == 'a' && fn[3] == 'x' && fn[4] == 'D' && fn[5] == 'i' && fn[6] == 's' &&
-                fn[7] == 't' && fn[8] == 'a' && fn[9] == 'n' && fn[10] == 'c' && fn[11] == 'e' &&
-                fn[12] == 0)
-                return BSONObj::opMAX_DISTANCE;
-        } else if (fn[1] == 't' && fn[2] == 'y' && fn[3] == 'p' && fn[4] == 'e' && fn[5] == 0)
-            return BSONObj::opTYPE;
-        else if (fn[1] == 'i' && fn[2] == 'n' && fn[3] == 0) {
-            return BSONObj::opIN;
-        } else if (fn[1] == 'n' && fn[2] == 'i' && fn[3] == 'n' && fn[4] == 0)
-            return BSONObj::NIN;
-        else if (fn[1] == 'a' && fn[2] == 'l' && fn[3] == 'l' && fn[4] == 0)
-            return BSONObj::opALL;
-        else if (fn[1] == 's' && fn[2] == 'i' && fn[3] == 'z' && fn[4] == 'e' && fn[5] == 0)
-            return BSONObj::opSIZE;
-        else if (fn[1] == 'e') {
-            if (fn[2] == 'x' && fn[3] == 'i' && fn[4] == 's' && fn[5] == 't' && fn[6] == 's' &&
-                fn[7] == 0)
-                return BSONObj::opEXISTS;
-            if (fn[2] == 'l' && fn[3] == 'e' && fn[4] == 'm' && fn[5] == 'M' && fn[6] == 'a' &&
-                fn[7] == 't' && fn[8] == 'c' && fn[9] == 'h' && fn[10] == 0)
-                return BSONObj::opELEM_MATCH;
-        } else if (fn[1] == 'r' && fn[2] == 'e' && fn[3] == 'g' && fn[4] == 'e' && fn[5] == 'x' &&
-                   fn[6] == 0)
-            return BSONObj::opREGEX;
-        else if (fn[1] == 'o' && fn[2] == 'p' && fn[3] == 't' && fn[4] == 'i' && fn[5] == 'o' &&
-                 fn[6] == 'n' && fn[7] == 's' && fn[8] == 0)
-            return BSONObj::opOPTIONS;
-        else if (fn[1] == 'w' && fn[2] == 'i' && fn[3] == 't' && fn[4] == 'h' && fn[5] == 'i' &&
-                 fn[6] == 'n' && fn[7] == 0)
-            return BSONObj::opWITHIN;
-        else if (str::equals(fn + 1, "geoIntersects"))
-            return BSONObj::opGEO_INTERSECTS;
-        else if (str::equals(fn + 1, "geoNear"))
-            return BSONObj::opNEAR;
-        else if (str::equals(fn + 1, "geoWithin"))
-            return BSONObj::opWITHIN;
+        StringData opName = fieldNameStringData().substr(1);
+
+        StringMap<BSONObj::MatchType>::const_iterator queryOp = queryOperatorMap.find(opName);
+        if (queryOp == queryOperatorMap.end()) {
+            return def;
+        }
+        return queryOp->second;
     }
     return def;
 }
@@ -387,7 +394,6 @@ int BSONElement::woCompare(const BSONElement& e, bool considerFieldName) const {
     return x;
 }
 
-
 BSONObj BSONElement::embeddedObjectUserCheck() const {
     if (MONGO_likely(isABSONObj()))
         return BSONObj(value());
@@ -404,7 +410,7 @@ BSONObj BSONElement::embeddedObject() const {
 
 BSONObj BSONElement::codeWScopeObject() const {
     verify(type() == CodeWScope);
-    int strSizeWNull = ConstDataView(value() + 4).readLE<int>();
+    int strSizeWNull = ConstDataView(value() + 4).read<LittleEndian<int>>();
     return BSONObj(value() + 4 + 4 + strSizeWNull);
 }
 
@@ -415,7 +421,7 @@ BSONObj BSONElement::wrap() const {
     return b.obj();
 }
 
-BSONObj BSONElement::wrap(const StringData& newName) const {
+BSONObj BSONElement::wrap(StringData newName) const {
     BSONObjBuilder b(size() + 6 + newName.size());
     b.appendAs(*this, newName);
     return b.obj();
@@ -454,11 +460,14 @@ int BSONElement::size(int maxLen) const {
         case NumberInt:
             x = 4;
             break;
-        case Timestamp:
+        case bsonTimestamp:
         case mongo::Date:
         case NumberDouble:
         case NumberLong:
             x = 8;
+            break;
+        case NumberDecimal:
+            x = 16;
             break;
         case jstOID:
             x = OID::kOIDSize;
@@ -538,11 +547,14 @@ int BSONElement::size() const {
         case NumberInt:
             x = 4;
             break;
-        case Timestamp:
+        case bsonTimestamp:
         case mongo::Date:
         case NumberDouble:
         case NumberLong:
             x = 8;
+            break;
+        case NumberDecimal:
+            x = 16;
             break;
         case jstOID:
             x = OID::kOIDSize;
@@ -609,7 +621,7 @@ void BSONElement::toString(StringBuilder& s, bool includeFieldName, bool full, i
             s << "EOO";
             break;
         case mongo::Date:
-            s << "new Date(" << (long long)date() << ')';
+            s << "new Date(" << date().toMillisSinceEpoch() << ')';
             break;
         case RegEx: {
             s << "/" << regex() << '/';
@@ -625,6 +637,9 @@ void BSONElement::toString(StringBuilder& s, bool includeFieldName, bool full, i
             break;
         case NumberInt:
             s << _numberInt();
+            break;
+        case NumberDecimal:
+            s << _numberDecimal().toString();
             break;
         case mongo::Bool:
             s << (boolean() ? "true" : "false");
@@ -690,8 +705,8 @@ void BSONElement::toString(StringBuilder& s, bool includeFieldName, bool full, i
                 }
             }
             break;
-        case Timestamp:
-            s << "Timestamp " << timestampTime() << "|" << timestampInc();
+        case bsonTimestamp:
+            s << "Timestamp " << timestampTime().toMillisSinceEpoch() << "|" << timestampInc();
             break;
         default:
             s << "?type=" << type();
@@ -705,7 +720,8 @@ std::string BSONElement::_asCode() const {
         case Code:
             return std::string(valuestr(), valuestrsize() - 1);
         case CodeWScope:
-            return std::string(codeWScopeCode(), ConstDataView(valuestr()).readLE<int>() - 1);
+            return std::string(codeWScopeCode(),
+                               ConstDataView(valuestr()).read<LittleEndian<int>>() - 1);
         default:
             log() << "can't convert type: " << (int)(type()) << " to code" << std::endl;
     }
@@ -751,6 +767,14 @@ bool BSONElement::coerce<double>(double* out) const {
     if (!isNumber())
         return false;
     *out = numberDouble();
+    return true;
+}
+
+template <>
+bool BSONElement::coerce<Decimal128>(Decimal128* out) const {
+    if (!isNumber())
+        return false;
+    *out = numberDecimal();
     return true;
 }
 
@@ -840,17 +864,17 @@ int compareElementValues(const BSONElement& l, const BSONElement& r) {
             return f == 0 ? 0 : 1;
         case Bool:
             return *l.value() - *r.value();
-        case Timestamp:
-            // unsigned compare for timestamps - note they are not really dates
-            // but (ordinal + time_t)
-            if (l.date() < r.date())
+        case bsonTimestamp:
+            // unsigned compare for timestamps - note they are not really dates but (ordinal +
+            // time_t)
+            if (l.timestamp() < r.timestamp())
                 return -1;
-            return l.date() == r.date() ? 0 : 1;
+            return l.timestamp() == r.timestamp() ? 0 : 1;
         case Date:
             // Signed comparisons for Dates.
             {
-                long long a = (long long)l.Date().millis;
-                long long b = (long long)r.Date().millis;
+                const Date_t a = l.Date();
+                const Date_t b = r.Date();
                 if (a < b)
                     return -1;
                 return a == b ? 0 : 1;
@@ -866,6 +890,8 @@ int compareElementValues(const BSONElement& l, const BSONElement& r) {
                     return compareLongs(l._numberInt(), r._numberLong());
                 case NumberDouble:
                     return compareDoubles(l._numberInt(), r._numberDouble());
+                case NumberDecimal:
+                    return compareIntToDecimal(l._numberInt(), r._numberDecimal());
                 default:
                     invariant(false);
             }
@@ -879,6 +905,8 @@ int compareElementValues(const BSONElement& l, const BSONElement& r) {
                     return compareLongs(l._numberLong(), r._numberInt());
                 case NumberDouble:
                     return compareLongToDouble(l._numberLong(), r._numberDouble());
+                case NumberDecimal:
+                    return compareLongToDecimal(l._numberLong(), r._numberDecimal());
                 default:
                     invariant(false);
             }
@@ -892,6 +920,23 @@ int compareElementValues(const BSONElement& l, const BSONElement& r) {
                     return compareDoubles(l._numberDouble(), r._numberInt());
                 case NumberLong:
                     return compareDoubleToLong(l._numberDouble(), r._numberLong());
+                case NumberDecimal:
+                    return compareDoubleToDecimal(l._numberDouble(), r._numberDecimal());
+                default:
+                    invariant(false);
+            }
+        }
+
+        case NumberDecimal: {
+            switch (r.type()) {
+                case NumberDecimal:
+                    return compareDecimals(l._numberDecimal(), r._numberDecimal());
+                case NumberInt:
+                    return compareDecimalToInt(l._numberDecimal(), r._numberInt());
+                case NumberLong:
+                    return compareDecimalToLong(l._numberDecimal(), r._numberLong());
+                case NumberDouble:
+                    return compareDecimalToDouble(l._numberDecimal(), r._numberDouble());
                 default:
                     invariant(false);
             }
@@ -976,23 +1021,41 @@ size_t BSONElement::Hasher::operator()(const BSONElement& elem) const {
             boost::hash_combine(hash, elem.boolean());
             break;
 
-        case mongo::Timestamp:
-            boost::hash_combine(hash, elem._opTime().asDate());
+        case mongo::bsonTimestamp:
+            boost::hash_combine(hash, elem.timestamp().asULL());
             break;
 
         case mongo::Date:
             boost::hash_combine(hash, elem.date().asInt64());
             break;
 
+        case mongo::NumberDecimal: {
+            const Decimal128 dcml = elem.numberDecimal();
+            if (dcml.toAbs().isGreater(Decimal128(std::numeric_limits<double>::max())) &&
+                !dcml.isInfinite() && !dcml.isNaN()) {
+                // Normalize our decimal to force equivalent decimals
+                // in the same cohort to hash to the same value
+                Decimal128 dcmlNorm(dcml.normalize());
+                boost::hash_combine(hash, dcmlNorm.getValue().low64);
+                boost::hash_combine(hash, dcmlNorm.getValue().high64);
+                break;
+            }
+            // Else, fall through and convert the decimal to a double and hash.
+            // At this point the decimal fits into the range of doubles, is infinity, or is NaN,
+            // which doubles have a cheaper representation for.
+        }
         case mongo::NumberDouble:
         case mongo::NumberLong:
         case mongo::NumberInt: {
             // This converts all numbers to doubles, which ignores the low-order bits of
-            // NumberLongs > 2**53, but that is ok since the hash will still be the same for
-            // equal numbers and is still likely to be different for different numbers.
+            // NumberLongs > 2**53 and precise decimal numbers without double representations,
+            // but that is ok since the hash will still be the same for equal numbers and is
+            // still likely to be different for different numbers. (Note: this issue only
+            // applies for decimals when they are outside of the valid double range. See
+            // the above case.)
             // SERVER-16851
             const double dbl = elem.numberDouble();
-            if (isNaN(dbl)) {
+            if (std::isnan(dbl)) {
                 boost::hash_combine(hash, std::numeric_limits<double>::quiet_NaN());
             } else {
                 boost::hash_combine(hash, dbl);

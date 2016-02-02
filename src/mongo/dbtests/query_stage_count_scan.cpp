@@ -26,19 +26,19 @@
  *    then also delete it in the license file.
  */
 
-#include <boost/shared_ptr.hpp>
 
 #include "mongo/client/dbclientcursor.h"
+#include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/database.h"
+#include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/exec/collection_scan.h"
-#include "mongo/db/exec/keep_mutations.h"
 #include "mongo/db/exec/count_scan.h"
+#include "mongo/db/exec/keep_mutations.h"
 #include "mongo/db/exec/working_set.h"
 #include "mongo/db/json.h"
 #include "mongo/db/matcher/expression_parser.h"
 #include "mongo/db/operation_context_impl.h"
-#include "mongo/db/catalog/collection.h"
 #include "mongo/dbtests/dbtests.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/fail_point_registry.h"
@@ -46,14 +46,14 @@
 
 namespace QueryStageCountScan {
 
-using boost::shared_ptr;
+using std::shared_ptr;
 
 class CountBase {
 public:
     CountBase() : _client(&_txn) {}
 
     virtual ~CountBase() {
-        Client::WriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_txn, ns());
         _client.dropCollection(ns());
     }
 
@@ -111,7 +111,7 @@ private:
 class QueryStageCountScanDups : public CountBase {
 public:
     void run() {
-        Client::WriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_txn, ns());
 
         // Insert some docs
         insert(BSON("a" << BSON_ARRAY(5 << 7)));
@@ -143,7 +143,7 @@ public:
 class QueryStageCountScanInclusiveBounds : public CountBase {
 public:
     void run() {
-        Client::WriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_txn, ns());
 
         // Insert some docs
         for (int i = 0; i < 10; ++i) {
@@ -175,7 +175,7 @@ public:
 class QueryStageCountScanExclusiveBounds : public CountBase {
 public:
     void run() {
-        Client::WriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_txn, ns());
 
         // Insert some docs
         for (int i = 0; i < 10; ++i) {
@@ -207,7 +207,7 @@ public:
 class QueryStageCountScanLowerBound : public CountBase {
 public:
     void run() {
-        Client::WriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_txn, ns());
 
         // Insert doc, add index
         insert(BSON("a" << 2));
@@ -235,7 +235,7 @@ public:
 class QueryStageCountScanNothingInInterval : public CountBase {
 public:
     void run() {
-        Client::WriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_txn, ns());
 
         // Insert documents, add index
         insert(BSON("a" << 2));
@@ -265,7 +265,7 @@ public:
 class QueryStageCountScanNothingInIntervalFirstMatchTooHigh : public CountBase {
 public:
     void run() {
-        Client::WriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_txn, ns());
 
         // Insert some documents, add index
         insert(BSON("a" << 2));
@@ -295,7 +295,7 @@ public:
 class QueryStageCountScanNoChangeDuringYield : public CountBase {
 public:
     void run() {
-        Client::WriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_txn, ns());
 
         // Insert documents, add index
         for (int i = 0; i < 10; ++i) {
@@ -305,7 +305,7 @@ public:
 
         // Set up count stage
         CountScanParams params;
-        params.descriptor = getIndex(ctx.ctx().db(), BSON("a" << 1));
+        params.descriptor = getIndex(ctx.db(), BSON("a" << 1));
         params.startKey = BSON("" << 2);
         params.startKeyInclusive = false;
         params.endKey = BSON("" << 6);
@@ -329,7 +329,7 @@ public:
         count.saveState();
 
         // Recover from yield
-        count.restoreState(&_txn);
+        count.restoreState();
 
         // finish counting
         while (PlanStage::IS_EOF != countState) {
@@ -348,7 +348,7 @@ public:
 class QueryStageCountScanDeleteDuringYield : public CountBase {
 public:
     void run() {
-        Client::WriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_txn, ns());
 
         // Insert documents, add index
         for (int i = 0; i < 10; ++i) {
@@ -358,7 +358,7 @@ public:
 
         // Set up count stage
         CountScanParams params;
-        params.descriptor = getIndex(ctx.ctx().db(), BSON("a" << 1));
+        params.descriptor = getIndex(ctx.db(), BSON("a" << 1));
         params.startKey = BSON("" << 2);
         params.startKeyInclusive = false;
         params.endKey = BSON("" << 6);
@@ -385,7 +385,7 @@ public:
         remove(BSON("a" << GTE << 5));
 
         // Recover from yield
-        count.restoreState(&_txn);
+        count.restoreState();
 
         // finish counting
         while (PlanStage::IS_EOF != countState) {
@@ -404,7 +404,7 @@ public:
 class QueryStageCountScanInsertNewDocsDuringYield : public CountBase {
 public:
     void run() {
-        Client::WriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_txn, ns());
 
         // Insert documents, add index
         for (int i = 0; i < 10; ++i) {
@@ -414,7 +414,7 @@ public:
 
         // Set up count stage
         CountScanParams params;
-        params.descriptor = getIndex(ctx.ctx().db(), BSON("a" << 1));
+        params.descriptor = getIndex(ctx.db(), BSON("a" << 1));
         params.startKey = BSON("" << 2);
         params.startKeyInclusive = false;
         params.endKey = BSON("" << 6);
@@ -444,7 +444,7 @@ public:
         insert(BSON("a" << 6.5));
 
         // Recover from yield
-        count.restoreState(&_txn);
+        count.restoreState();
 
         // finish counting
         while (PlanStage::IS_EOF != countState) {
@@ -463,7 +463,7 @@ public:
 class QueryStageCountScanBecomesMultiKeyDuringYield : public CountBase {
 public:
     void run() {
-        Client::WriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_txn, ns());
 
         // Insert documents, add index
         for (int i = 0; i < 10; ++i) {
@@ -473,7 +473,7 @@ public:
 
         // Set up count stage
         CountScanParams params;
-        params.descriptor = getIndex(ctx.ctx().db(), BSON("a" << 1));
+        params.descriptor = getIndex(ctx.db(), BSON("a" << 1));
         params.startKey = BSON("" << 2);
         params.startKeyInclusive = false;
         params.endKey = BSON("" << 50);
@@ -500,7 +500,7 @@ public:
         insert(BSON("a" << BSON_ARRAY(10 << 11)));
 
         // Recover from yield
-        count.restoreState(&_txn);
+        count.restoreState();
 
         // finish counting
         while (PlanStage::IS_EOF != countState) {
@@ -518,7 +518,7 @@ public:
 class QueryStageCountScanUnusedKeys : public CountBase {
 public:
     void run() {
-        Client::WriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_txn, ns());
 
         // Insert docs, add index
         for (int i = 0; i < 10; ++i) {
@@ -533,7 +533,7 @@ public:
 
         // Ensure that count does not include unused keys
         CountScanParams params;
-        params.descriptor = getIndex(ctx.ctx().db(), BSON("a" << 1));
+        params.descriptor = getIndex(ctx.db(), BSON("a" << 1));
         params.startKey = BSON("" << 1);
         params.startKeyInclusive = true;
         params.endKey = BSON("" << 1);
@@ -553,7 +553,7 @@ public:
 class QueryStageCountScanUnusedEndKey : public CountBase {
 public:
     void run() {
-        Client::WriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_txn, ns());
 
         // Insert docs, add index
         for (int i = 0; i < 10; ++i) {
@@ -566,7 +566,7 @@ public:
 
         // Run count and check
         CountScanParams params;
-        params.descriptor = getIndex(ctx.ctx().db(), BSON("a" << 1));
+        params.descriptor = getIndex(ctx.db(), BSON("a" << 1));
         params.startKey = BSON("" << 0);
         params.startKeyInclusive = true;
         params.endKey = BSON("" << 2);
@@ -586,7 +586,7 @@ public:
 class QueryStageCountScanKeyBecomesUnusedDuringYield : public CountBase {
 public:
     void run() {
-        Client::WriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_txn, ns());
 
         // Insert documents, add index
         for (int i = 0; i < 10; ++i) {
@@ -623,7 +623,7 @@ public:
         remove(BSON("a" << 1 << "b" << 5));
 
         // Recover from yield
-        count.restoreState(&_txn);
+        count.restoreState();
 
         // finish counting
         while (PlanStage::IS_EOF != countState) {

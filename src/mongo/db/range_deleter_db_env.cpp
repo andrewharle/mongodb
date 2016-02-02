@@ -37,21 +37,17 @@
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/client.h"
 #include "mongo/db/clientcursor.h"
+#include "mongo/db/db_raii.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/repl/replication_coordinator_global.h"
+#include "mongo/db/s/operation_shard_version.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/s/d_state.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
 
-using std::endl;
 using std::string;
-
-void RangeDeleterDBEnv::initThread() {
-    if (currentClient.get() == NULL)
-        Client::initThread("RangeDeleter");
-}
 
 /**
  * Outline of the delete process:
@@ -75,78 +71,60 @@ bool RangeDeleterDBEnv::deleteRange(OperationContext* txn,
     const bool fromMigrate = taskDetails.options.fromMigrate;
     const bool onlyRemoveOrphans = taskDetails.options.onlyRemoveOrphanedDocs;
 
-    const bool initiallyHaveClient = haveClient();
-
-    if (!initiallyHaveClient) {
-        Client::initThread("RangeDeleter");
-    }
+    Client::initThreadIfNotAlready("RangeDeleter");
 
     *deletedDocs = 0;
-    ShardForceVersionOkModeBlock forceVersion;
-    {
-        Helpers::RemoveSaver removeSaver("moveChunk", ns, taskDetails.options.removeSaverReason);
-        Helpers::RemoveSaver* removeSaverPtr = NULL;
-        if (serverGlobalParams.moveParanoia && !taskDetails.options.removeSaverReason.empty()) {
-            removeSaverPtr = &removeSaver;
-        }
+    OperationShardVersion::IgnoreVersioningBlock forceVersion(txn, NamespaceString(ns));
 
-        // log the opId so the user can use it to cancel the delete using killOp.
-        unsigned int opId = txn->getCurOp()->opNum();
-        log() << "Deleter starting delete for: " << ns << " from " << inclusiveLower << " -> "
-              << exclusiveUpper << ", with opId: " << opId << endl;
+    Helpers::RemoveSaver removeSaver("moveChunk", ns, taskDetails.options.removeSaverReason);
+    Helpers::RemoveSaver* removeSaverPtr = NULL;
+    if (serverGlobalParams.moveParanoia && !taskDetails.options.removeSaverReason.empty()) {
+        removeSaverPtr = &removeSaver;
+    }
 
-        try {
-            *deletedDocs =
-                Helpers::removeRange(txn,
-                                     KeyRange(ns, inclusiveLower, exclusiveUpper, keyPattern),
-                                     false, /*maxInclusive*/
-                                     writeConcern,
-                                     removeSaverPtr,
-                                     fromMigrate,
-                                     onlyRemoveOrphans);
+    // log the opId so the user can use it to cancel the delete using killOp.
+    unsigned int opId = txn->getOpID();
+    log() << "Deleter starting delete for: " << ns << " from " << inclusiveLower << " -> "
+          << exclusiveUpper << ", with opId: " << opId;
 
-            if (*deletedDocs < 0) {
-                *errMsg = "collection or index dropped before data could be cleaned";
-                warning() << *errMsg << endl;
+    try {
+        *deletedDocs =
+            Helpers::removeRange(txn,
+                                 KeyRange(ns, inclusiveLower, exclusiveUpper, keyPattern),
+                                 false, /*maxInclusive*/
+                                 writeConcern,
+                                 removeSaverPtr,
+                                 fromMigrate,
+                                 onlyRemoveOrphans);
 
-                if (!initiallyHaveClient) {
-                    txn->getClient()->shutdown();
-                }
-
-                return false;
-            }
-
-            log() << "rangeDeleter deleted " << *deletedDocs << " documents for " << ns << " from "
-                  << inclusiveLower << " -> " << exclusiveUpper << endl;
-        } catch (const DBException& ex) {
-            *errMsg = str::stream() << "Error encountered while deleting range: "
-                                    << "ns" << ns << " from " << inclusiveLower << " -> "
-                                    << exclusiveUpper << ", cause by:" << causedBy(ex);
-
-            if (!initiallyHaveClient) {
-                txn->getClient()->shutdown();
-            }
+        if (*deletedDocs < 0) {
+            *errMsg = "collection or index dropped before data could be cleaned";
+            warning() << *errMsg;
 
             return false;
         }
-    }
 
-    if (!initiallyHaveClient) {
-        txn->getClient()->shutdown();
+        log() << "rangeDeleter deleted " << *deletedDocs << " documents for " << ns << " from "
+              << inclusiveLower << " -> " << exclusiveUpper;
+    } catch (const DBException& ex) {
+        *errMsg = str::stream() << "Error encountered while deleting range: "
+                                << "ns" << ns << " from " << inclusiveLower << " -> "
+                                << exclusiveUpper << ", cause by:" << causedBy(ex);
+
+        return false;
     }
 
     return true;
 }
 
 void RangeDeleterDBEnv::getCursorIds(OperationContext* txn,
-                                     const StringData& ns,
+                                     StringData ns,
                                      std::set<CursorId>* openCursors) {
-    AutoGetCollectionForRead ctx(txn, ns.toString());
-    Collection* collection = ctx.getCollection();
-    if (!collection) {
+    AutoGetCollection autoColl(txn, NamespaceString(ns), MODE_IS);
+    if (!autoColl.getCollection())
         return;
-    }
 
-    collection->getCursorManager()->getCursorIds(openCursors);
+    autoColl.getCollection()->getCursorManager()->getCursorIds(openCursors);
 }
-}
+
+}  // namespace mongo

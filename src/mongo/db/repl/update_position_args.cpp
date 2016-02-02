@@ -91,8 +91,19 @@ Status UpdatePositionArgs::initialize(const BSONObj& argsObj) {
         if (!status.isOK())
             return status;
 
-        OpTime ts;
-        status = bsonExtractOpTimeField(entry, kOpTimeFieldName, &ts);
+        OpTime opTime;
+        if (entry[kOpTimeFieldName].isABSONObj()) {
+            // In protocol version 1, { ts: <timestamp>, t: term }
+            Status status = bsonExtractOpTimeField(entry, kOpTimeFieldName, &opTime);
+            if (!status.isOK())
+                return status;
+        } else {
+            Timestamp ts;
+            status = bsonExtractTimestampField(entry, kOpTimeFieldName, &ts);
+            if (!status.isOK())
+                return status;
+            opTime = OpTime(ts, OpTime::kUninitializedTerm);
+        }
         if (!status.isOK())
             return status;
 
@@ -113,7 +124,7 @@ Status UpdatePositionArgs::initialize(const BSONObj& argsObj) {
         if (!status.isOK())
             return status;
 
-        _updates.push_back(UpdateInfo(rid, ts, cfgver, memberID));
+        _updates.push_back(UpdateInfo(rid, opTime, cfgver, memberID));
     }
 
     return Status::OK();
@@ -130,9 +141,9 @@ BSONObj UpdatePositionArgs::toBSON() const {
         for (UpdatePositionArgs::UpdateIterator update = updatesBegin(); update != updatesEnd();
              ++update) {
             updateArray.append(BSON(kMemberRIDFieldName << update->rid << kOpTimeFieldName
-                                                        << update->ts << kConfigVersionFieldName
-                                                        << update->cfgver << kMemberIdFieldName
-                                                        << update->memberId));
+                                                        << update->ts.getTimestamp()
+                                                        << kConfigVersionFieldName << update->cfgver
+                                                        << kMemberIdFieldName << update->memberId));
         }
         updateArray.doneFast();
     }

@@ -74,7 +74,7 @@ function runTest(conn) {
              var passed = true;
              try {
                  var res = db.currentOp();
-                 passed = !res.err && !res['$err'];
+                 passed = res.ok && !res.hasOwnProperty("errmsg");
              } catch (e) {
                  passed = false;
              }
@@ -119,58 +119,15 @@ function runTest(conn) {
                  }
                  var res = db.killOp(opid);
                  printjson(res);
-                 passed = !res.err && !res['$err'];
+                 passed = res.ok && !res.errmsg && !res.err && !res['$err'];
              } catch (e) {
                  passed = false;
              }
-
              assert.eq(shouldPass, passed);
          }
 
          testProperAuthorization(testFunc, roles, privilege);
     })();
-
-    (function testKillop() {
-         jsTestLog("Testing killOp");
-
-         var roles = {read: false,
-                      readAnyDatabase: false,
-                      readWrite: false,
-                      readWriteAnyDatabase: false,
-                      dbAdmin: false,
-                      dbAdminAnyDatabase: false,
-                      dbOwner: false,
-                      clusterMonitor: false,
-                      clusterManager: false,
-                      hostManager: true,
-                      clusterAdmin: true,
-                      root: true,
-                      __system: true
-                     };
-
-         var privilege = { resource: {cluster: true}, actions: ['killop'] };
-
-         var testFunc = function(shouldPass) {
-             var passed = true;
-             try {
-                 var opid;
-                 if (isMongos(db)) { // opid format different between mongos and mongod
-                     opid = "shard0000:1234";
-                 } else {
-                     opid = 1234;
-                 }
-                 var res = db.killOp(opid);
-                 printjson(res);
-                 passed = !res.err && !res['$err'];
-             } catch (e) {
-                 passed = false;
-             }
-
-             assert.eq(shouldPass, passed);
-         }
-
-         testProperAuthorization(testFunc, roles, privilege);
-     })();
 
     (function testUnlock() {
          if (isMongos(db)) {
@@ -199,7 +156,13 @@ function runTest(conn) {
          var testFunc = function(shouldPass) {
              var passed = true;
              try {
-                 admin.fsyncLock(); // must be locked first
+                 var ret = admin.fsyncLock(); // must be locked first
+                 // If the storage engine doesnt support fsync lock, we can't proceed
+                 if (!ret.ok) {
+                    assert.commandFailedWithCode(ret, ErrorCodes.CommandNotSupported);
+                    assert(shouldPass); // If we get to the storage engine, we better be authorized.
+                    return;
+                 }
                  var res = db.fsyncUnlock();
                  printjson(res);
                  passed = res.ok && !res.errmsg && !res.err && !res['$err'];

@@ -59,13 +59,13 @@ inline ElementType findElement(ElementType first, Predicate predicate) {
 /** A predicate for findElement that matches on the field name of Elements. */
 struct FieldNameEquals {
     // The lifetime of this object must be a subset of the lifetime of 'fieldName'.
-    explicit FieldNameEquals(const StringData& fieldName) : fieldName(fieldName) {}
+    explicit FieldNameEquals(StringData fieldName) : fieldName(fieldName) {}
 
     bool operator()(const ConstElement& element) const {
         return (fieldName == element.getFieldName());
     }
 
-    const StringData& fieldName;
+    StringData fieldName;
 };
 
 /** An overload of findElement that delegates to the special implementation
@@ -78,7 +78,7 @@ inline ElementType findElement(ElementType first, FieldNameEquals predicate) {
 
 /** A convenience wrapper around findElement<ElementType, FieldNameEquals>. */
 template <typename ElementType>
-inline ElementType findElementNamed(ElementType first, const StringData& fieldName) {
+inline ElementType findElementNamed(ElementType first, StringData fieldName) {
     return findElement(first, FieldNameEquals(fieldName));
 }
 
@@ -102,7 +102,7 @@ inline ElementType findFirstChild(ElementType parent, FieldNameEquals predicate)
  *  Element is found, the returned Element's 'ok' method will return false.
  */
 template <typename ElementType>
-inline ElementType findFirstChildNamed(ElementType parent, const StringData& fieldName) {
+inline ElementType findFirstChildNamed(ElementType parent, StringData fieldName) {
     return findFirstChild(parent, FieldNameEquals(fieldName));
 }
 

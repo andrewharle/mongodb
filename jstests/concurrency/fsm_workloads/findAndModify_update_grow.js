@@ -12,6 +12,10 @@ load('jstests/concurrency/fsm_workload_helpers/server_types.js'); // for isMongo
 
 var $config = (function() {
 
+    var data = {
+        shardKey: { tid: 1 },
+    };
+
     var states = (function() {
 
         // Use the workload name as the field name (since it is assumed
@@ -94,7 +98,7 @@ var $config = (function() {
                 // Since the document has at least doubled in size, and the default
                 // allocation strategy of mmapv1 is to use power of two sizes, the
                 // document will have always moved
-                assertWhenOwnColl.neq(before.$diskLoc, after.$diskLoc,
+                assertWhenOwnColl.neq(before.$recordId, after.$recordId,
                                       'document should have moved');
             }
         }
@@ -114,6 +118,7 @@ var $config = (function() {
     return {
         threadCount: 20,
         iterations: 20,
+        data: data,
         states: states,
         startState: 'insert',
         transitions: transitions

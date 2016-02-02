@@ -27,6 +27,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <iosfwd>
 #include <string>
 
@@ -34,7 +35,6 @@
 #include <unistd.h>
 #endif
 
-#include "mongo/platform/cstdint.h"
 #include "mongo/platform/hash_namespace.h"
 
 namespace mongo {
@@ -137,7 +137,7 @@ MONGO_HASH_NAMESPACE_START
 template <>
 struct hash<::mongo::ProcessId> {
     size_t operator()(const ::mongo::ProcessId pid) const {
-        return hash<::mongo::uint32_t>()(pid.asUInt32());
+        return hash<::std::uint32_t>()(pid.asUInt32());
     }
 };
 MONGO_HASH_NAMESPACE_END

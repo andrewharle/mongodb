@@ -25,9 +25,7 @@
  *    then also delete it in the license file.
  */
 
-#include <boost/scoped_ptr.hpp>
 
-#include "mongo/client/export_macros.h"
 #include "mongo/client/sasl_client_session.h"
 
 namespace mongo {
@@ -38,7 +36,7 @@ class SaslClientConversation;
  * Implementation of the client side of a SASL authentication conversation using the
  * native SASL implementation.
  */
-class MONGO_CLIENT_API NativeSaslClientSession : public SaslClientSession {
+class NativeSaslClientSession : public SaslClientSession {
     MONGO_DISALLOW_COPYING(NativeSaslClientSession);
 
 public:
@@ -47,7 +45,7 @@ public:
 
     virtual Status initialize();
 
-    virtual Status step(const StringData& inputData, std::string* outputData);
+    virtual Status step(StringData inputData, std::string* outputData);
 
     virtual bool isDone() const {
         return _done;
@@ -61,7 +59,7 @@ private:
     bool _done;
 
     /// The client side of a SASL authentication conversation.
-    boost::scoped_ptr<SaslClientConversation> _saslConversation;
+    std::unique_ptr<SaslClientConversation> _saslConversation;
 };
 
 }  // namespace mongo

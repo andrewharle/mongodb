@@ -31,18 +31,18 @@
 
 #include "mongo/util/debugger.h"
 
-#include <iostream>
+#include <cstdlib>
 
-#include "mongo/db/server_options.h"
-#include "mongo/util/debug_util.h"
+#if defined(USE_GDBSERVER)
+#include <unistd.h>
+#include <cstdio>
+#endif
 
 #ifndef _WIN32
 #include <signal.h>
 #endif
 
-#if defined(USE_GDBSERVER)
-#include "mongo/db/jsobj.h"
-#endif  // defined(USE_GDBSERVER)
+#include "mongo/util/debug_util.h"
 
 namespace mongo {
 void breakpoint() {
@@ -55,7 +55,9 @@ void breakpoint() {
         // prevent SIGTRAP from crashing the program if default action is specified and we are not
         // in gdb
         struct sigaction current;
-        sigaction(SIGTRAP, NULL, &current);
+        if (sigaction(SIGTRAP, nullptr, &current) != 0) {
+            std::abort();
+        }
         if (current.sa_handler == SIG_DFL) {
             signal(SIGTRAP, SIG_IGN);
         }
@@ -78,16 +80,25 @@ void launchGDB(int) {
     // Don't come back here
     signal(SIGTRAP, SIG_IGN);
 
-    int newPort = serverGlobalParams.port + 2000;
-    string newPortStr = "localhost:" + BSONObjBuilder::numStr(newPort);
-    string pidToDebug = BSONObjBuilder::numStr(getpid());
+    char pidToDebug[16];
+    int pidRet = snprintf(pidToDebug, sizeof(pidToDebug), "%d", getpid());
+    if (!(pidRet >= 0 && size_t(pidRet) < sizeof(pidToDebug)))
+        std::abort();
 
-    cout << "\n\n\t**** Launching gdbserver on " << newPortStr << " ****" << endl
-         << endl;
+    char msg[128];
+    int msgRet = snprintf(
+        msg, sizeof(msg), "\n\n\t**** Launching gdbserver (use lsof to find port) ****\n\n");
+    if (!(msgRet >= 0 && size_t(msgRet) < sizeof(msg)))
+        std::abort();
+
+    if (!(write(STDERR_FILENO, msg, msgRet) == msgRet))
+        std::abort();
+
     if (fork() == 0) {
         // child
-        execlp("gdbserver", "gdbserver", "--attach", newPortStr.c_str(), pidToDebug.c_str(), NULL);
-        perror(NULL);
+        execlp("gdbserver", "gdbserver", "--attach", ":0", pidToDebug, nullptr);
+        perror(nullptr);
+        _exit(1);
     } else {
         // parent
         raise(SIGSTOP);  // pause all threads until gdb connects and continues
@@ -96,7 +107,8 @@ void launchGDB(int) {
 }
 
 void setupSIGTRAPforGDB() {
-    verify(signal(SIGTRAP, launchGDB) != SIG_ERR);
+    if (!(signal(SIGTRAP, launchGDB) != SIG_ERR))
+        std::abort();
 }
 #else
 void setupSIGTRAPforGDB() {}

@@ -30,10 +30,12 @@
 
 #ifdef _WIN32
 
-#include <ostream>
-
 #include "mongo/platform/basic.h"
+
+#include <ostream>
 #include <DbgHelp.h>
+
+#include "mongo/config.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/exit_code.h"
 #include "mongo/util/log.h"
@@ -91,7 +93,7 @@ void doMinidumpWithException(struct _EXCEPTION_POINTERS* exceptionInfo) {
     aMiniDumpInfo.ClientPointers = FALSE;
 
     MINIDUMP_TYPE miniDumpType =
-#ifdef _DEBUG
+#ifdef MONGO_CONFIG_DEBUG_BUILD
         MiniDumpWithFullMemory;
 #else
         static_cast<MINIDUMP_TYPE>(MiniDumpNormal | MiniDumpWithIndirectlyReferencedMemory |

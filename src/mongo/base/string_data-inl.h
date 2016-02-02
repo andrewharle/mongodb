@@ -33,18 +33,27 @@
 
 namespace mongo {
 
-inline int StringData::compare(const StringData& other) const {
-    int res = memcmp(_data, other._data, std::min(_size, other._size));
-    if (res != 0) {
+inline int StringData::compare(StringData other) const {
+    // It is illegal to pass nullptr to memcmp. It is an invariant of
+    // StringData that if _data is nullptr, _size is zero. If asked to
+    // compare zero bytes, memcmp returns zero (how could they
+    // differ?). So, if either StringData object has a nullptr _data
+    // object, then memcmp would return zero. Achieve this by assuming
+    // zero, and only calling memcmp if both pointers are valid.
+    int res = 0;
+    if (_data && other._data)
+        res = memcmp(_data, other._data, std::min(_size, other._size));
+
+    if (res != 0)
         return res > 0 ? 1 : -1;
-    } else if (_size == other._size) {
+
+    if (_size == other._size)
         return 0;
-    } else {
-        return _size > other._size ? 1 : -1;
-    }
+
+    return _size > other._size ? 1 : -1;
 }
 
-inline bool StringData::equalCaseInsensitive(const StringData& other) const {
+inline bool StringData::equalCaseInsensitive(StringData other) const {
     if (other.size() != size())
         return false;
 
@@ -77,7 +86,7 @@ inline size_t StringData::find(char c, size_t fromPos) const {
     return static_cast<size_t>(static_cast<const char*>(x) - _data);
 }
 
-inline size_t StringData::find(const StringData& needle) const {
+inline size_t StringData::find(StringData needle) const {
     size_t mx = size();
     size_t needleSize = needle.size();
 
@@ -118,12 +127,12 @@ inline StringData StringData::substr(size_t pos, size_t n) const {
     return StringData(_data + pos, n);
 }
 
-inline bool StringData::startsWith(const StringData& prefix) const {
+inline bool StringData::startsWith(StringData prefix) const {
     // TODO: Investigate an optimized implementation.
     return substr(0, prefix.size()) == prefix;
 }
 
-inline bool StringData::endsWith(const StringData& suffix) const {
+inline bool StringData::endsWith(StringData suffix) const {
     // TODO: Investigate an optimized implementation.
     const size_t thisSize = size();
     const size_t suffixSize = suffix.size();

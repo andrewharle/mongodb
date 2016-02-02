@@ -38,7 +38,7 @@ using std::string;
 
 UpdateIndexData::UpdateIndexData() : _allPathsIndexed(false) {}
 
-void UpdateIndexData::addPath(const StringData& path) {
+void UpdateIndexData::addPath(StringData path) {
     string s;
     if (getCanonicalIndexField(path, &s)) {
         _canonicalPaths.insert(s);
@@ -47,7 +47,7 @@ void UpdateIndexData::addPath(const StringData& path) {
     }
 }
 
-void UpdateIndexData::addPathComponent(const StringData& pathComponent) {
+void UpdateIndexData::addPathComponent(StringData pathComponent) {
     _pathComponents.insert(pathComponent.toString());
 }
 
@@ -61,7 +61,7 @@ void UpdateIndexData::clear() {
     _allPathsIndexed = false;
 }
 
-bool UpdateIndexData::mightBeIndexed(const StringData& path) const {
+bool UpdateIndexData::mightBeIndexed(StringData path) const {
     if (_allPathsIndexed) {
         return true;
     }
@@ -96,7 +96,7 @@ bool UpdateIndexData::mightBeIndexed(const StringData& path) const {
     return false;
 }
 
-bool UpdateIndexData::_startsWith(const StringData& a, const StringData& b) const {
+bool UpdateIndexData::_startsWith(StringData a, StringData b) const {
     if (!a.startsWith(b))
         return false;
 
@@ -108,7 +108,7 @@ bool UpdateIndexData::_startsWith(const StringData& a, const StringData& b) cons
     return a[b.size()] == '.';
 }
 
-bool getCanonicalIndexField(const StringData& fullName, string* out) {
+bool getCanonicalIndexField(StringData fullName, string* out) {
     // check if fieldName contains ".$" or ".###" substrings (#=digit) and skip them
     // however do not skip the first field even if it meets these criteria
 

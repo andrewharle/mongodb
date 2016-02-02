@@ -28,9 +28,8 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
-#include <unordered_set>
 #include <vector>
+#include <unordered_set>
 
 #include "mongo/base/disallow_copying.h"
 #include "mongo/db/jsobj.h"
@@ -40,8 +39,8 @@
 
 namespace mongo {
 
+class IndexAccessMethod;
 class RecordFetcher;
-
 class WorkingSetMember;
 
 typedef size_t WorkingSetID;
@@ -75,23 +74,23 @@ public:
      * Do not delete the returned pointer as the WorkingSet retains ownership. Call free() to
      * release it.
      */
-    WorkingSetMember* get(const WorkingSetID& i) const {
+    WorkingSetMember* get(WorkingSetID i) const {
         dassert(i < _data.size());              // ID has been allocated.
         dassert(_data[i].nextFreeOrSelf == i);  // ID currently in use.
         return _data[i].member;
     }
 
     /**
-     * Returns true iff WorkingSetMember with id 'i' is free.
+     * Returns true if WorkingSetMember with id 'i' is free.
      */
-    bool isFree(const WorkingSetID& i) const {
+    bool isFree(WorkingSetID i) const {
         return _data[i].nextFreeOrSelf != i;
     }
 
     /**
      * Deallocate the i-th query result and release its resources.
      */
-    void free(const WorkingSetID& i);
+    void free(WorkingSetID i);
 
     /**
      * The RecordId in WSM 'i' was invalidated while being processed.  Any predicates over the
@@ -101,7 +100,7 @@ public:
      *
      * The WSM must be in the state OWNED_OBJ.
      */
-    void flagForReview(const WorkingSetID& i);
+    void flagForReview(WorkingSetID i);
 
     /**
      * Return true if the provided ID is flagged.
@@ -119,31 +118,26 @@ public:
     void clear();
 
     //
-    // Used with the WT storage engine to prepare the working set for snapshot changes.
+    // WorkingSetMember state transitions
     //
 
-    /**
-     * Adds 'id' to the set of ids returned by getIdxIds().
-     *
-     * Whenever a stage transitions a working set member into the LOC_AND_IDX state, it is
-     * responsible for flagging it as such by calling this method.
-     */
-    void flagNewIdxId(const WorkingSetID& id);
+    void transitionToLocAndIdx(WorkingSetID id);
+    void transitionToLocAndObj(WorkingSetID id);
+    void transitionToOwnedObj(WorkingSetID id);
 
     /**
-     * Returns the list of working set ids that have transitioned into the LOC_AND_IDX state
-     * since the last yield. The members corresponding to these ids may have since transitioned
-     * out of the LOC_AND_IDX state or been freed, so these cases must be handled by the
-     * caller.
+     * Returns the list of working set ids that have transitioned into the LOC_AND_IDX or
+     * LOC_AND_OBJ state since the last yield. The members corresponding to these ids may have since
+     * transitioned to a different state or been freed, so these cases must be handled by the
+     * caller. The list may also contain duplicates.
      *
-     * Execution stages are responsible for adding to this list via the flagNewIdxId() method
-     * when they put a member into the LOC_AND_IDX state. Stages are not responsible for
-     * clearing working set ids from this list when the member transitions out of LOC_AND_IDX.
+     * Execution stages are *not* responsible for managing this list, as working set ids are added
+     * to the set automatically by WorkingSet::transitionToLocAndIdx() and
+     * WorkingSet::transitionToLocAndObj().
      *
-     * As a side effect, calling this method clears the list of flagged ids kept by the working
-     * set.
+     * As a side effect, calling this method clears the list of flagged ids kept by the working set.
      */
-    std::vector<WorkingSetID> getAndClearIdxIds();
+    std::vector<WorkingSetID> getAndClearYieldSensitiveIds();
 
 private:
     struct MemberHolder {
@@ -169,9 +163,8 @@ private:
     // An insert-only set of WorkingSetIDs that have been flagged for review.
     std::unordered_set<WorkingSetID> _flagged;
 
-    // Contains all working set members that have transitioned into the LOC_AND_IDX state since
-    // the last snapshot change.
-    std::vector<WorkingSetID> _idxIds;
+    // Contains ids of WSMs that may need to be adjusted when we next yield.
+    std::vector<WorkingSetID> _yieldSensitiveIds;
 };
 
 /**
@@ -180,14 +173,16 @@ private:
  * the key.
  */
 struct IndexKeyDatum {
-    IndexKeyDatum(const BSONObj& keyPattern, const BSONObj& key)
-        : indexKeyPattern(keyPattern), keyData(key) {}
+    IndexKeyDatum(const BSONObj& keyPattern, const BSONObj& key, const IndexAccessMethod* index)
+        : indexKeyPattern(keyPattern), keyData(key), index(index) {}
 
     // This is not owned and points into the IndexDescriptor's data.
     BSONObj indexKeyPattern;
 
     // This is the BSONObj for the key that we put into the index.  Owned by us.
     BSONObj keyData;
+
+    const IndexAccessMethod* index;
 };
 
 /**
@@ -200,12 +195,15 @@ enum WorkingSetComputedDataType {
     // What's the distance from a geoNear query point to the document?
     WSM_COMPUTED_GEO_DISTANCE = 1,
 
-    // The index key used to retrieve the document, for $returnKey query option.
+    // The index key used to retrieve the document, for returnKey query option.
     WSM_INDEX_KEY = 2,
 
     // What point (of several possible points) was used to compute the distance to the document
     // via geoNear?
     WSM_GEO_NEAR_POINT = 3,
+
+    // Comparison key for sorting.
+    WSM_SORT_KEY = 4,
 
     // Must be last.
     WSM_COMPUTED_NUM_TYPES,
@@ -264,9 +262,17 @@ public:
         LOC_AND_OBJ,
 
         // RecordId has been invalidated, or the obj doesn't correspond to an on-disk document
-        // anymore (e.g. is a computed expression). The BSONObj must be owned.
+        // anymore (e.g. is a computed expression).
         OWNED_OBJ,
     };
+
+    //
+    // Member state and state transitions
+    //
+
+    MemberState getState() const;
+
+    void transitionToOwnedObj();
 
     //
     // Core attributes
@@ -275,11 +281,22 @@ public:
     RecordId loc;
     Snapshotted<BSONObj> obj;
     std::vector<IndexKeyDatum> keyData;
-    MemberState state;
+
+    // True if this WSM has survived a yield in LOC_AND_IDX state.
+    // TODO consider replacing by tracking SnapshotIds for IndexKeyDatums.
+    bool isSuspicious = false;
 
     bool hasLoc() const;
     bool hasObj() const;
     bool hasOwnedObj() const;
+
+    /**
+     * Ensures that 'obj' of a WSM in the LOC_AND_OBJ state is owned BSON. It is a no-op if the WSM
+     * is in a different state or if 'obj' is already owned.
+     *
+     * It is also a no-op if the active storage engine doesn't support document-level concurrency.
+     */
+    void makeObjOwnedIfNeeded();
 
     //
     // Computed data
@@ -315,9 +332,13 @@ public:
     size_t getMemUsage() const;
 
 private:
-    boost::scoped_ptr<WorkingSetComputedData> _computed[WSM_COMPUTED_NUM_TYPES];
+    friend class WorkingSet;
 
-    std::auto_ptr<RecordFetcher> _fetcher;
+    MemberState _state = WorkingSetMember::INVALID;
+
+    std::unique_ptr<WorkingSetComputedData> _computed[WSM_COMPUTED_NUM_TYPES];
+
+    std::unique_ptr<RecordFetcher> _fetcher;
 };
 
 }  // namespace mongo

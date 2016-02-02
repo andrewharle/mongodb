@@ -1,7 +1,7 @@
 // Change a write concern mode from 2 to 3 servers
 
 var host = getHostName();
-var replTest = new ReplSetTest( {name: "rstag", nodes: 4, startPort: 31000} );
+var replTest = new ReplSetTest({ name: "rstag", nodes: 4 });
 var nodes = replTest.startSet();
 var ports = replTest.ports;
 var conf = {_id : "rstag", version: 1, members : [
@@ -24,7 +24,7 @@ replTest.initiate( conf );
 
 replTest.awaitReplication();
 
-master = replTest.getMaster();
+master = replTest.getPrimary();
 var db = master.getDB("test");
 assert.writeOK(db.foo.insert({ x: 1 }, { writeConcern: { w: 'backedUp', wtimeout: 20000 }}));
 
@@ -33,7 +33,7 @@ conf.settings.getLastErrorModes.backedUp.backup = 3;
 master.getDB("admin").runCommand( {replSetReconfig: conf} );
 replTest.awaitReplication();
 
-master = replTest.getMaster();
+master = replTest.getPrimary();
 var db = master.getDB("test");
 assert.writeOK(db.foo.insert({ x: 2 }, { writeConcern: { w: 'backedUp', wtimeout: 20000 }}));
 
@@ -42,7 +42,7 @@ conf.members[0].priorty = 3;
 conf.members[2].priorty = 0;
 master.getDB("admin").runCommand( {replSetReconfig: conf} );
 
-master = replTest.getMaster();
+master = replTest.getPrimary();
 var db = master.getDB("test");
 assert.writeOK(db.foo.insert({ x: 3 }, { writeConcern: { w: 'backedUp', wtimeout: 20000 }}));
 

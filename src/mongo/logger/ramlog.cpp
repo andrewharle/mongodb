@@ -44,7 +44,7 @@ using std::string;
 
 namespace {
 typedef std::map<string, RamLog*> RM;
-mongo::mutex* _namedLock = NULL;
+stdx::mutex* _namedLock = NULL;
 RM* _named = NULL;
 
 }  // namespace
@@ -59,7 +59,7 @@ RamLog::RamLog(const std::string& name) : _name(name), _totalLinesWritten(0), _l
 RamLog::~RamLog() {}
 
 void RamLog::write(const std::string& str) {
-    boost::lock_guard<boost::mutex> lk(_mutex);
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
     _lastWrite = time(0);
     _totalLinesWritten++;
 
@@ -73,7 +73,7 @@ void RamLog::write(const std::string& str) {
             memcpy(p, str.c_str(), sz - 1);
             p[sz - 1] = 0;
         } else
-            strcpy(p, str.c_str());
+            memcpy(p, str.c_str(), sz);
     } else {
         memcpy(p, str.c_str(), C - 1);
     }
@@ -212,10 +212,10 @@ Status RamLogAppender::append(const logger::MessageEventEphemeral& event) {
 RamLog* RamLog::get(const std::string& name) {
     if (!_namedLock) {
         // Guaranteed to happen before multi-threaded operation.
-        _namedLock = new mongo::mutex("RamLog::_namedLock");
+        _namedLock = new stdx::mutex();
     }
 
-    scoped_lock lk(*_namedLock);
+    stdx::lock_guard<stdx::mutex> lk(*_namedLock);
     if (!_named) {
         // Guaranteed to happen before multi-threaded operation.
         _named = new RM();
@@ -232,7 +232,7 @@ RamLog* RamLog::get(const std::string& name) {
 RamLog* RamLog::getIfExists(const std::string& name) {
     if (!_named)
         return NULL;
-    scoped_lock lk(*_namedLock);
+    stdx::lock_guard<stdx::mutex> lk(*_namedLock);
     return mapFindWithDefault(*_named, name, static_cast<RamLog*>(NULL));
 }
 
@@ -240,7 +240,7 @@ void RamLog::getNames(std::vector<string>& names) {
     if (!_named)
         return;
 
-    scoped_lock lk(*_namedLock);
+    stdx::lock_guard<stdx::mutex> lk(*_namedLock);
     for (RM::iterator i = _named->begin(); i != _named->end(); ++i) {
         if (i->second->n)
             names.push_back(i->first);
@@ -257,7 +257,7 @@ MONGO_INITIALIZER(RamLogCatalog)(InitializerContext*) {
             return Status(ErrorCodes::InternalError,
                           "Inconsistent intiailization of RamLogCatalog.");
         }
-        _namedLock = new mongo::mutex("RamLog::_namedLock");
+        _namedLock = new stdx::mutex();
         _named = new RM();
     }
 

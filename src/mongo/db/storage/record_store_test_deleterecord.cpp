@@ -30,7 +30,6 @@
 
 #include "mongo/db/storage/record_store_test_harness.h"
 
-#include <boost/scoped_ptr.hpp>
 
 #include "mongo/db/record_id.h"
 #include "mongo/db/storage/record_data.h"
@@ -42,22 +41,22 @@ using std::stringstream;
 
 namespace mongo {
 
-using boost::scoped_ptr;
+using std::unique_ptr;
 
 // Insert a record and try to delete it.
 TEST(RecordStoreTestHarness, DeleteRecord) {
-    scoped_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
-    scoped_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
+    unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    unique_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(0, rs->numRecords(opCtx.get()));
     }
 
     string data = "my record";
     RecordId loc;
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             StatusWith<RecordId> res =
@@ -69,12 +68,12 @@ TEST(RecordStoreTestHarness, DeleteRecord) {
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(1, rs->numRecords(opCtx.get()));
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             rs->deleteRecord(opCtx.get(), loc);
@@ -83,25 +82,25 @@ TEST(RecordStoreTestHarness, DeleteRecord) {
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(0, rs->numRecords(opCtx.get()));
     }
 }
 
 // Insert multiple records and try to delete them.
 TEST(RecordStoreTestHarness, DeleteMultipleRecords) {
-    scoped_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
-    scoped_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
+    unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    unique_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(0, rs->numRecords(opCtx.get()));
     }
 
     const int nToInsert = 10;
     RecordId locs[nToInsert];
     for (int i = 0; i < nToInsert; i++) {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             stringstream ss;
             ss << "record " << i;
@@ -117,12 +116,12 @@ TEST(RecordStoreTestHarness, DeleteMultipleRecords) {
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(nToInsert, rs->numRecords(opCtx.get()));
     }
 
     for (int i = 0; i < nToInsert; i++) {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             rs->deleteRecord(opCtx.get(), locs[i]);
@@ -131,7 +130,7 @@ TEST(RecordStoreTestHarness, DeleteMultipleRecords) {
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(0, rs->numRecords(opCtx.get()));
     }
 }

@@ -32,10 +32,11 @@
 
 #include "mongo/platform/basic.h"
 
-#include "mongo/db/commands.h"
-#include "mongo/db/query/internal_plans.h"
-#include "mongo/db/operation_context_impl.h"
 #include "mongo/db/catalog/collection.h"
+#include "mongo/db/commands.h"
+#include "mongo/db/db_raii.h"
+#include "mongo/db/operation_context_impl.h"
+#include "mongo/db/query/internal_plans.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
@@ -75,8 +76,7 @@ public:
              BSONObj& cmdObj,
              int,
              string& errmsg,
-             BSONObjBuilder& result,
-             bool fromRepl) {
+             BSONObjBuilder& result) {
         string ns = dbname + "." + cmdObj.firstElement().valuestrsafe();
 
         NamespaceString ns_string(ns);

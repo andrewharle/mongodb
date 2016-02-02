@@ -27,22 +27,28 @@
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kDefault
 
-#include "mongo/base/init.h"
+#include "mongo/platform/basic.h"
+
+#include <vector>
+#include <string>
+
 #include "mongo/client/connpool.h"
-#include "mongo/platform/cstdint.h"
+#include "mongo/client/global_conn_pool.h"
+#include "mongo/db/wire_version.h"
+#include "mongo/rpc/factory.h"
+#include "mongo/rpc/reply_builder_interface.h"
+#include "mongo/rpc/request_interface.h"
+#include "mongo/stdx/mutex.h"
+#include "mongo/stdx/thread.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/fail_point_service.h"
+#include "mongo/util/log.h"
 #include "mongo/util/net/listen.h"
 #include "mongo/util/net/message_port.h"
 #include "mongo/util/net/message_server.h"
-#include "mongo/util/fail_point_service.h"
-#include "mongo/util/log.h"
 #include "mongo/util/quick_exit.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/timer.h"
-#include "mongo/unittest/unittest.h"
-
-#include <vector>
-#include <boost/scoped_ptr.hpp>
-#include <boost/thread/thread.hpp>
 
 /**
  * Tests for ScopedDbConnection, particularly in connection pool management.
@@ -51,29 +57,25 @@
  * connection).
  */
 
-using boost::scoped_ptr;
-using mongo::DBClientBase;
-using mongo::FailPoint;
-using mongo::ScopedDbConnection;
+namespace mongo {
+
+using std::unique_ptr;
 using std::string;
 using std::vector;
 
-namespace {
-const string TARGET_HOST = "localhost:27017";
-const int TARGET_PORT = 27017;
-
-mongo::mutex shutDownMutex("shutDownMutex");
-bool shuttingDown = false;
-}
-
-namespace mongo {
-
+class Client;
 class OperationContext;
 
-// Symbols defined to build the binary correctly.
+namespace {
 
+stdx::mutex shutDownMutex;
+bool shuttingDown = false;
+
+}  // namespace
+
+// Symbols defined to build the binary correctly.
 bool inShutdown() {
-    scoped_lock sl(shutDownMutex);
+    stdx::lock_guard<stdx::mutex> sl(shutDownMutex);
     return shuttingDown;
 }
 
@@ -85,7 +87,7 @@ DBClientBase* createDirectClient(OperationContext* txn) {
 
 void dbexit(ExitCode rc, const char* why) {
     {
-        scoped_lock sl(shutDownMutex);
+        stdx::lock_guard<stdx::mutex> sl(shutDownMutex);
         shuttingDown = true;
     }
 
@@ -96,24 +98,37 @@ void exitCleanly(ExitCode rc) {
     dbexit(rc, "");
 }
 
-bool haveLocalShardingInfo(const string& ns) {
-    return false;
-}
+namespace {
 
-class DummyMessageHandler : public MessageHandler {
+const string TARGET_HOST = "localhost:27017";
+const int TARGET_PORT = 27017;
+
+class DummyMessageHandler final : public MessageHandler {
 public:
     virtual void connected(AbstractMessagingPort* p) {}
 
-    virtual void process(Message& m, AbstractMessagingPort* port, LastError* le) {
-        boost::this_thread::interruption_point();
+    virtual void process(Message& m, AbstractMessagingPort* port) {
+        auto request = rpc::makeRequest(&m);
+        auto reply = rpc::makeReplyBuilder(request->getProtocol());
+
+        BSONObjBuilder commandResponse;
+
+        // We need to handle the isMaster received during connection.
+        if (request->getCommandName() == "isMaster") {
+            commandResponse.append("maxWireVersion", WireVersion::FIND_COMMAND);
+            commandResponse.append("minWireVersion", WireVersion::RELEASE_2_4_AND_BEFORE);
+        }
+
+        auto response = reply->setCommandReply(commandResponse.done())
+                            .setMetadata(rpc::makeEmptyMetadata())
+                            .done();
+
+        port->reply(m, response);
     }
 
-    virtual void disconnected(AbstractMessagingPort* p) {}
-};
-}
+    virtual void close() {}
 
-namespace mongo_test {
-mongo::DummyMessageHandler dummyHandler;
+} dummyHandler;
 
 // TODO: Take this out and make it as a reusable class in a header file. The only
 // thing that is preventing this from happening is the dependency on the inShutdown
@@ -135,7 +150,7 @@ public:
      *
      * @param port the port number to listen to.
      */
-    DummyServer(int port) : _port(port), _server(NULL) {}
+    DummyServer(int port) : _port(port) {}
 
     ~DummyServer() {
         stop();
@@ -147,91 +162,91 @@ public:
      * @param messageHandler the message handler to use for this server. Ownership
      *     of this object is passed to this server.
      */
-    void run(mongo::MessageHandler* messsageHandler) {
+    void run(MessageHandler* messsageHandler) {
         if (_server != NULL) {
             return;
         }
 
-        mongo::MessageServer::Options options;
+        MessageServer::Options options;
         options.port = _port;
 
         {
-            mongo::mutex::scoped_lock sl(shutDownMutex);
+            stdx::lock_guard<stdx::mutex> sl(shutDownMutex);
             shuttingDown = false;
         }
 
-        _server = mongo::createServer(options, messsageHandler);
-        _serverThread = boost::thread(runServer, _server);
+        _server.reset(createServer(options, messsageHandler));
+        _serverThread = stdx::thread(runServer, _server.get());
     }
 
     /**
      * Stops the server if it is running.
      */
     void stop() {
-        if (_server == NULL) {
+        if (!_server) {
             return;
         }
 
         {
-            mongo::mutex::scoped_lock sl(shutDownMutex);
+            stdx::lock_guard<stdx::mutex> sl(shutDownMutex);
             shuttingDown = true;
         }
 
-        mongo::ListeningSockets::get()->closeAll();
+        ListeningSockets::get()->closeAll();
         _serverThread.join();
 
-        int connCount = mongo::Listener::globalTicketHolder.used();
+        int connCount = Listener::globalTicketHolder.used();
         size_t iterCount = 0;
         while (connCount > 0) {
             if ((++iterCount % 20) == 0) {
-                mongo::log() << "DummyServer: Waiting for " << connCount << " connections to close."
-                             << std::endl;
+                log() << "DummyServer: Waiting for " << connCount << " connections to close."
+                      << std::endl;
             }
 
-            mongo::sleepmillis(500);
-            connCount = mongo::Listener::globalTicketHolder.used();
+            sleepmillis(500);
+            connCount = Listener::globalTicketHolder.used();
         }
 
-        delete _server;
-        _server = NULL;
+        _server.reset();
     }
 
     /**
      * Helper method for running the server on a separate thread.
      */
-    static void runServer(mongo::MessageServer* server) {
+    static void runServer(MessageServer* server) {
         server->setupSockets();
         server->run();
     }
 
 private:
     const int _port;
-    boost::thread _serverThread;
-    mongo::MessageServer* _server;
+
+    stdx::thread _serverThread;
+    unique_ptr<MessageServer> _server;
 };
 
 /**
  * Warning: cannot run in parallel
  */
-class DummyServerFixture : public mongo::unittest::Test {
+class DummyServerFixture : public unittest::Test {
 public:
     void setUp() {
-        _maxPoolSizePerHost = mongo::pool.getMaxPoolSize();
+        _maxPoolSizePerHost = globalConnPool.getMaxPoolSize();
         _dummyServer = new DummyServer(TARGET_PORT);
 
         _dummyServer->run(&dummyHandler);
-        mongo::DBClientConnection conn;
-        mongo::Timer timer;
+        DBClientConnection conn;
+        Timer timer;
 
         // Make sure the dummy server is up and running before proceeding
         while (true) {
-            try {
-                conn.connect(TARGET_HOST);
+            auto connectStatus = conn.connect(HostAndPort{TARGET_HOST});
+            if (connectStatus.isOK()) {
                 break;
-            } catch (const mongo::ConnectException&) {
-                if (timer.seconds() > 20) {
-                    FAIL("Timed out connecting to dummy server");
-                }
+            }
+            if (timer.seconds() > 20) {
+                FAIL(str::stream()
+                     << "Timed out connecting to dummy server: " << connectStatus.toString());
             }
         }
     }
@@ -240,7 +255,7 @@ public:
         ScopedDbConnection::clearPool();
         delete _dummyServer;
 
-        mongo::pool.setMaxPoolSize(_maxPoolSizePerHost);
+        globalConnPool.setMaxPoolSize(_maxPoolSizePerHost);
     }
 
 protected:
@@ -254,7 +269,7 @@ protected:
 
     /**
      * Tries to grab a series of connections from the pool, perform checks on
-     * them, then put them back into the pool. After that, it checks these
+     * them, then put them back into the globalConnPool. After that, it checks these
      * connections can be retrieved again from the pool.
      *
      * @param checkFunc method for comparing new connections and arg2.
@@ -271,7 +286,7 @@ protected:
             newConnList.push_back(newConn);
         }
 
-        const uint64_t oldCreationTime = mongo::curTimeMicros64();
+        const uint64_t oldCreationTime = curTimeMicros64();
 
         for (vector<ScopedDbConnection*>::iterator iter = newConnList.begin();
              iter != newConnList.end();
@@ -298,7 +313,7 @@ protected:
     }
 
 private:
-    static void runServer(mongo::MessageServer* server) {
+    static void runServer(MessageServer* server) {
         server->setupSockets();
         server->run();
     }
@@ -329,18 +344,16 @@ TEST_F(DummyServerFixture, InvalidateBadConnInPool) {
     conn1.done();
     conn3.done();
 
-    const uint64_t badCreationTime = mongo::curTimeMicros64();
+    const uint64_t badCreationTime = curTimeMicros64();
 
-    mongo::getGlobalFailPointRegistry()
-        ->getFailPoint("throwSockExcep")
-        ->setMode(FailPoint::alwaysOn);
+    getGlobalFailPointRegistry()->getFailPoint("throwSockExcep")->setMode(FailPoint::alwaysOn);
 
     try {
-        conn2->query("test.user", mongo::Query());
-    } catch (const mongo::SocketException&) {
+        conn2->query("test.user", Query());
+    } catch (const SocketException&) {
     }
 
-    mongo::getGlobalFailPointRegistry()->getFailPoint("throwSockExcep")->setMode(FailPoint::off);
+    getGlobalFailPointRegistry()->getFailPoint("throwSockExcep")->setMode(FailPoint::off);
     conn2.done();
 
     checkNewConns(assertGreaterThan, badCreationTime, 10);
@@ -353,16 +366,14 @@ TEST_F(DummyServerFixture, DontReturnKnownBadConnToPool) {
 
     conn1.done();
 
-    mongo::getGlobalFailPointRegistry()
-        ->getFailPoint("throwSockExcep")
-        ->setMode(FailPoint::alwaysOn);
+    getGlobalFailPointRegistry()->getFailPoint("throwSockExcep")->setMode(FailPoint::alwaysOn);
 
     try {
-        conn3->query("test.user", mongo::Query());
-    } catch (const mongo::SocketException&) {
+        conn3->query("test.user", Query());
+    } catch (const SocketException&) {
     }
 
-    mongo::getGlobalFailPointRegistry()->getFailPoint("throwSockExcep")->setMode(FailPoint::off);
+    getGlobalFailPointRegistry()->getFailPoint("throwSockExcep")->setMode(FailPoint::off);
 
     const uint64_t badCreationTime = conn3->getSockCreationMicroSec();
     conn3.done();
@@ -373,7 +384,7 @@ TEST_F(DummyServerFixture, DontReturnKnownBadConnToPool) {
 }
 
 TEST_F(DummyServerFixture, InvalidateBadConnEvenWhenPoolIsFull) {
-    mongo::pool.setMaxPoolSize(2);
+    globalConnPool.setMaxPoolSize(2);
 
     ScopedDbConnection conn1(TARGET_HOST);
     ScopedDbConnection conn2(TARGET_HOST);
@@ -382,18 +393,16 @@ TEST_F(DummyServerFixture, InvalidateBadConnEvenWhenPoolIsFull) {
     conn1.done();
     conn3.done();
 
-    const uint64_t badCreationTime = mongo::curTimeMicros64();
+    const uint64_t badCreationTime = curTimeMicros64();
 
-    mongo::getGlobalFailPointRegistry()
-        ->getFailPoint("throwSockExcep")
-        ->setMode(FailPoint::alwaysOn);
+    getGlobalFailPointRegistry()->getFailPoint("throwSockExcep")->setMode(FailPoint::alwaysOn);
 
     try {
-        conn2->query("test.user", mongo::Query());
-    } catch (const mongo::SocketException&) {
+        conn2->query("test.user", Query());
+    } catch (const SocketException&) {
     }
 
-    mongo::getGlobalFailPointRegistry()->getFailPoint("throwSockExcep")->setMode(FailPoint::off);
+    getGlobalFailPointRegistry()->getFailPoint("throwSockExcep")->setMode(FailPoint::off);
     conn2.done();
 
     checkNewConns(assertGreaterThan, badCreationTime, 2);
@@ -425,4 +434,6 @@ TEST_F(DummyServerFixture, DontReturnConnGoneBadToPool) {
 
     conn1Again.done();
 }
-}
+
+}  // namespace
+}  // namespace mongo

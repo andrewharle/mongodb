@@ -60,7 +60,7 @@ struct ModifierEntry {
     string name;
     ModifierType type;
 
-    ModifierEntry(const StringData& name, ModifierType type) : name(name.toString()), type(type) {}
+    ModifierEntry(StringData name, ModifierType type) : name(name.toString()), type(type) {}
 };
 
 typedef unordered_map<StringData, ModifierEntry*, StringData::Hasher> NameMap;
@@ -126,7 +126,7 @@ MONGO_INITIALIZER(ModifierTable)(InitializerContext* context) {
     return Status::OK();
 }
 
-ModifierType getType(const StringData& typeStr) {
+ModifierType getType(StringData typeStr) {
     NameMap::const_iterator it = MODIFIER_NAME_MAP->find(typeStr);
     if (it == MODIFIER_NAME_MAP->end()) {
         return MOD_UNKNOWN;

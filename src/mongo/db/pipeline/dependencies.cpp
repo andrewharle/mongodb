@@ -138,7 +138,7 @@ Value arrayHelper(const BSONObj& bson, const Document& neededFields) {
         }
     }
 
-    return Value::consume(values);
+    return Value(std::move(values));
 }
 
 // Handles object-typed values including the top-level for ParsedDeps::extractFields

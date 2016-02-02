@@ -31,36 +31,32 @@
 #include "mongo/db/storage/devnull/devnull_kv_engine.h"
 
 #include "mongo/base/disallow_copying.h"
-#include "mongo/db/storage/in_memory/in_memory_record_store.h"
+#include "mongo/db/storage/ephemeral_for_test/ephemeral_for_test_record_store.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/sorted_data_interface.h"
+#include "mongo/stdx/memory.h"
 
 namespace mongo {
 
-class EmptyRecordIterator : public RecordIterator {
+class EmptyRecordCursor final : public SeekableRecordCursor {
 public:
-    virtual bool isEOF() {
+    boost::optional<Record> next() final {
+        return {};
+    }
+    boost::optional<Record> seekExact(const RecordId& id) final {
+        return {};
+    }
+    void save() final {}
+    bool restore() final {
         return true;
     }
-    virtual RecordId curr() {
-        return RecordId();
-    }
-    virtual RecordId getNext() {
-        return RecordId();
-    }
-    virtual void invalidate(const RecordId& dl) {}
-    virtual void saveState() {}
-    virtual bool restoreState(OperationContext* txn) {
-        return false;
-    }
-    virtual RecordData dataFor(const RecordId& loc) const {
-        invariant(false);
-    }
+    void detachFromOperationContext() final {}
+    void reattachToOperationContext(OperationContext* txn) final {}
 };
 
 class DevNullRecordStore : public RecordStore {
 public:
-    DevNullRecordStore(const StringData& ns, const CollectionOptions& options)
+    DevNullRecordStore(StringData ns, const CollectionOptions& options)
         : RecordStore(ns), _options(options) {
         _numInserts = 0;
         _dummy = BSON("_id" << 1);
@@ -70,7 +66,7 @@ public:
         return "devnull";
     }
 
-    virtual void setCappedDeleteCallback(CappedDocumentDeleteCallback*) {}
+    virtual void setCappedCallback(CappedCallback*) {}
 
     virtual long long dataSize(OperationContext* txn) const {
         return 0;
@@ -128,28 +124,18 @@ public:
         return false;
     }
 
-    virtual Status updateWithDamages(OperationContext* txn,
-                                     const RecordId& loc,
-                                     const RecordData& oldRec,
-                                     const char* damageSource,
-                                     const mutablebson::DamageVector& damages) {
+    virtual StatusWith<RecordData> updateWithDamages(OperationContext* txn,
+                                                     const RecordId& loc,
+                                                     const RecordData& oldRec,
+                                                     const char* damageSource,
+                                                     const mutablebson::DamageVector& damages) {
         invariant(false);
     }
 
-    virtual RecordIterator* getIterator(OperationContext* txn,
-                                        const RecordId& start,
-                                        const CollectionScanParams::Direction& dir) const {
-        return new EmptyRecordIterator();
-    }
 
-    virtual RecordIterator* getIteratorForRepair(OperationContext* txn) const {
-        return new EmptyRecordIterator();
-    }
-
-    virtual std::vector<RecordIterator*> getManyIterators(OperationContext* txn) const {
-        std::vector<RecordIterator*> v;
-        v.push_back(new EmptyRecordIterator());
-        return v;
+    std::unique_ptr<SeekableRecordCursor> getCursor(OperationContext* txn,
+                                                    bool forward) const final {
+        return stdx::make_unique<EmptyRecordCursor>();
     }
 
     virtual Status truncate(OperationContext* txn) {
@@ -241,8 +227,9 @@ public:
         return true;
     }
 
-    virtual SortedDataInterface::Cursor* newCursor(OperationContext* txn, int direction) const {
-        return NULL;
+    virtual std::unique_ptr<SortedDataInterface::Cursor> newCursor(OperationContext* txn,
+                                                                   bool isForward) const {
+        return {};
     }
 
     virtual Status initAsEmpty(OperationContext* txn) {
@@ -252,17 +239,17 @@ public:
 
 
 RecordStore* DevNullKVEngine::getRecordStore(OperationContext* opCtx,
-                                             const StringData& ns,
-                                             const StringData& ident,
+                                             StringData ns,
+                                             StringData ident,
                                              const CollectionOptions& options) {
     if (ident == "_mdb_catalog") {
-        return new InMemoryRecordStore(ns, &_catalogInfo);
+        return new EphemeralForTestRecordStore(ns, &_catalogInfo);
     }
     return new DevNullRecordStore(ns, options);
 }
 
 SortedDataInterface* DevNullKVEngine::getSortedDataInterface(OperationContext* opCtx,
-                                                             const StringData& ident,
+                                                             StringData ident,
                                                              const IndexDescriptor* desc) {
     return new DevNullSortedDataInterface();
 }

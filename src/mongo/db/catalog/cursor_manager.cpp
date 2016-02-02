@@ -39,7 +39,8 @@
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/client.h"
-#include "mongo/db/global_environment_experiment.h"
+#include "mongo/db/db_raii.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/platform/random.h"
@@ -120,13 +121,13 @@ private:
     Map _idToNS;
     unsigned _nextId;
 
-    boost::scoped_ptr<SecureRandom> _secureRandom;
+    std::unique_ptr<SecureRandom> _secureRandom;
 };
 
 // Note that "globalCursorIdCache" must be declared before "globalCursorManager", as the latter
 // calls into the former during destruction.
-boost::scoped_ptr<GlobalCursorIdCache> globalCursorIdCache;
-boost::scoped_ptr<CursorManager> globalCursorManager;
+std::unique_ptr<GlobalCursorIdCache> globalCursorIdCache;
+std::unique_ptr<CursorManager> globalCursorManager;
 
 MONGO_INITIALIZER(GlobalCursorIdCache)(InitializerContext* context) {
     globalCursorIdCache.reset(new GlobalCursorIdCache());
@@ -139,13 +140,12 @@ MONGO_INITIALIZER_WITH_PREREQUISITES(GlobalCursorManager, ("GlobalCursorIdCache"
     return Status::OK();
 }
 
-GlobalCursorIdCache::GlobalCursorIdCache()
-    : _mutex("GlobalCursorIdCache"), _nextId(0), _secureRandom() {}
+GlobalCursorIdCache::GlobalCursorIdCache() : _nextId(0), _secureRandom() {}
 
 GlobalCursorIdCache::~GlobalCursorIdCache() {}
 
 int64_t GlobalCursorIdCache::nextSeed() {
-    SimpleMutex::scoped_lock lk(_mutex);
+    stdx::lock_guard<SimpleMutex> lk(_mutex);
     if (!_secureRandom)
         _secureRandom.reset(SecureRandom::create());
     return _secureRandom->nextInt64();
@@ -154,7 +154,7 @@ int64_t GlobalCursorIdCache::nextSeed() {
 unsigned GlobalCursorIdCache::created(const std::string& ns) {
     static const unsigned MAX_IDS = 1000 * 1000 * 1000;
 
-    SimpleMutex::scoped_lock lk(_mutex);
+    stdx::lock_guard<SimpleMutex> lk(_mutex);
 
     fassert(17359, _idToNS.size() < MAX_IDS);
 
@@ -172,7 +172,7 @@ unsigned GlobalCursorIdCache::created(const std::string& ns) {
 }
 
 void GlobalCursorIdCache::destroyed(unsigned id, const std::string& ns) {
-    SimpleMutex::scoped_lock lk(_mutex);
+    stdx::lock_guard<SimpleMutex> lk(_mutex);
     invariant(ns == _idToNS[id]);
     _idToNS.erase(id);
 }
@@ -189,7 +189,7 @@ bool GlobalCursorIdCache::eraseCursor(OperationContext* txn, CursorId id, bool c
         }
         ns = pin.c()->ns();
     } else {
-        SimpleMutex::scoped_lock lk(_mutex);
+        stdx::lock_guard<SimpleMutex> lk(_mutex);
         unsigned nsid = idFromCursorId(id);
         Map::const_iterator it = _idToNS.find(nsid);
         if (it == _idToNS.end()) {
@@ -204,7 +204,7 @@ bool GlobalCursorIdCache::eraseCursor(OperationContext* txn, CursorId id, bool c
 
     // Check if we are authorized to erase this cursor.
     if (checkAuth) {
-        AuthorizationSession* as = txn->getClient()->getAuthorizationSession();
+        AuthorizationSession* as = AuthorizationSession::get(txn->getClient());
         Status authorizationStatus = as->checkAuthForKillCursors(nss, id);
         if (!authorizationStatus.isOK()) {
             audit::logKillCursorsAuthzCheck(txn->getClient(), nss, id, ErrorCodes::Unauthorized);
@@ -214,7 +214,12 @@ bool GlobalCursorIdCache::eraseCursor(OperationContext* txn, CursorId id, bool c
 
     // If this cursor is owned by the global cursor manager, ask it to erase the cursor for us.
     if (globalCursorManager->ownsCursorId(id)) {
-        return globalCursorManager->eraseCursor(txn, id, checkAuth);
+        Status eraseStatus = globalCursorManager->eraseCursor(txn, id, checkAuth);
+        massert(28697,
+                eraseStatus.reason(),
+                eraseStatus.code() == ErrorCodes::OK ||
+                    eraseStatus.code() == ErrorCodes::CursorNotFound);
+        return eraseStatus.isOK();
     }
 
     // If not, then the cursor must be owned by a collection.  Erase the cursor under the
@@ -226,7 +231,13 @@ bool GlobalCursorIdCache::eraseCursor(OperationContext* txn, CursorId id, bool c
             audit::logKillCursorsAuthzCheck(txn->getClient(), nss, id, ErrorCodes::CursorNotFound);
         return false;
     }
-    return collection->getCursorManager()->eraseCursor(txn, id, checkAuth);
+
+    Status eraseStatus = collection->getCursorManager()->eraseCursor(txn, id, checkAuth);
+    massert(16089,
+            eraseStatus.reason(),
+            eraseStatus.code() == ErrorCodes::OK ||
+                eraseStatus.code() == ErrorCodes::CursorNotFound);
+    return eraseStatus.isOK();
 }
 
 std::size_t GlobalCursorIdCache::timeoutCursors(OperationContext* txn, int millisSinceLastCall) {
@@ -238,7 +249,7 @@ std::size_t GlobalCursorIdCache::timeoutCursors(OperationContext* txn, int milli
     // Compute the set of collection names that we have to time out cursors for.
     vector<string> todo;
     {
-        SimpleMutex::scoped_lock lk(_mutex);
+        stdx::lock_guard<SimpleMutex> lk(_mutex);
         for (Map::const_iterator i = _idToNS.begin(); i != _idToNS.end(); ++i) {
             if (globalCursorManager->ownsCursorId(cursorIdFromParts(i->first, 0))) {
                 // Skip the global cursor manager, since we handle it above (and it's not
@@ -284,7 +295,7 @@ int CursorManager::eraseCursorGlobalIfAuthorized(OperationContext* txn, int n, c
     ConstDataCursor ids(_ids);
     int numDeleted = 0;
     for (int i = 0; i < n; i++) {
-        if (eraseCursorGlobalIfAuthorized(txn, ids.readLEAndAdvance<int64_t>()))
+        if (eraseCursorGlobalIfAuthorized(txn, ids.readAndAdvance<LittleEndian<int64_t>>()))
             numDeleted++;
         if (inShutdown())
             break;
@@ -302,25 +313,25 @@ bool CursorManager::eraseCursorGlobal(OperationContext* txn, CursorId id) {
 // --------------------------
 
 
-CursorManager::CursorManager(const StringData& ns) : _nss(ns), _mutex("CursorManager") {
+CursorManager::CursorManager(StringData ns) : _nss(ns) {
     _collectionCacheRuntimeId = globalCursorIdCache->created(_nss.ns());
     _random.reset(new PseudoRandom(globalCursorIdCache->nextSeed()));
 }
 
 CursorManager::~CursorManager() {
-    invalidateAll(true);
+    invalidateAll(true, "collection going away");
     globalCursorIdCache->destroyed(_collectionCacheRuntimeId, _nss.ns());
 }
 
-void CursorManager::invalidateAll(bool collectionGoingAway) {
-    SimpleMutex::scoped_lock lk(_mutex);
+void CursorManager::invalidateAll(bool collectionGoingAway, const std::string& reason) {
+    stdx::lock_guard<SimpleMutex> lk(_mutex);
     fassert(28819, !BackgroundOperation::inProgForNs(_nss));
 
     for (ExecSet::iterator it = _nonCachedExecutors.begin(); it != _nonCachedExecutors.end();
          ++it) {
         // we kill the executor, but it deletes itself
         PlanExecutor* exec = *it;
-        exec->kill();
+        exec->kill(reason);
         invariant(exec->collection() == NULL);
     }
     _nonCachedExecutors.clear();
@@ -365,7 +376,7 @@ void CursorManager::invalidateAll(bool collectionGoingAway) {
                 // the underlying collection).  However, if they have an associated executor, we
                 // need to kill it, because it's now invalid.
                 if (cc->getExecutor())
-                    cc->getExecutor()->kill();
+                    cc->getExecutor()->kill(reason);
                 newMap.insert(*i);
             } else {
                 cc->kill();
@@ -386,7 +397,7 @@ void CursorManager::invalidateDocument(OperationContext* txn,
         return;
     }
 
-    SimpleMutex::scoped_lock lk(_mutex);
+    stdx::lock_guard<SimpleMutex> lk(_mutex);
 
     for (ExecSet::iterator it = _nonCachedExecutors.begin(); it != _nonCachedExecutors.end();
          ++it) {
@@ -403,7 +414,7 @@ void CursorManager::invalidateDocument(OperationContext* txn,
 }
 
 std::size_t CursorManager::timeoutCursors(int millisSinceLastCall) {
-    SimpleMutex::scoped_lock lk(_mutex);
+    stdx::lock_guard<SimpleMutex> lk(_mutex);
 
     vector<ClientCursor*> toDelete;
 
@@ -424,18 +435,18 @@ std::size_t CursorManager::timeoutCursors(int millisSinceLastCall) {
 }
 
 void CursorManager::registerExecutor(PlanExecutor* exec) {
-    SimpleMutex::scoped_lock lk(_mutex);
+    stdx::lock_guard<SimpleMutex> lk(_mutex);
     const std::pair<ExecSet::iterator, bool> result = _nonCachedExecutors.insert(exec);
     invariant(result.second);  // make sure this was inserted
 }
 
 void CursorManager::deregisterExecutor(PlanExecutor* exec) {
-    SimpleMutex::scoped_lock lk(_mutex);
+    stdx::lock_guard<SimpleMutex> lk(_mutex);
     _nonCachedExecutors.erase(exec);
 }
 
 ClientCursor* CursorManager::find(CursorId id, bool pin) {
-    SimpleMutex::scoped_lock lk(_mutex);
+    stdx::lock_guard<SimpleMutex> lk(_mutex);
     CursorMap::const_iterator it = _cursors.find(id);
     if (it == _cursors.end())
         return NULL;
@@ -450,7 +461,7 @@ ClientCursor* CursorManager::find(CursorId id, bool pin) {
 }
 
 void CursorManager::unpin(ClientCursor* cursor) {
-    SimpleMutex::scoped_lock lk(_mutex);
+    stdx::lock_guard<SimpleMutex> lk(_mutex);
 
     invariant(cursor->isPinned());
     cursor->unsetPinned();
@@ -461,7 +472,7 @@ bool CursorManager::ownsCursorId(CursorId cursorId) const {
 }
 
 void CursorManager::getCursorIds(std::set<CursorId>* openCursors) const {
-    SimpleMutex::scoped_lock lk(_mutex);
+    stdx::lock_guard<SimpleMutex> lk(_mutex);
 
     for (CursorMap::const_iterator i = _cursors.begin(); i != _cursors.end(); ++i) {
         ClientCursor* cc = i->second;
@@ -470,7 +481,7 @@ void CursorManager::getCursorIds(std::set<CursorId>* openCursors) const {
 }
 
 size_t CursorManager::numCursors() const {
-    SimpleMutex::scoped_lock lk(_mutex);
+    stdx::lock_guard<SimpleMutex> lk(_mutex);
     return _cursors.size();
 }
 
@@ -486,38 +497,46 @@ CursorId CursorManager::_allocateCursorId_inlock() {
 
 CursorId CursorManager::registerCursor(ClientCursor* cc) {
     invariant(cc);
-    SimpleMutex::scoped_lock lk(_mutex);
+    stdx::lock_guard<SimpleMutex> lk(_mutex);
     CursorId id = _allocateCursorId_inlock();
     _cursors[id] = cc;
     return id;
 }
 
 void CursorManager::deregisterCursor(ClientCursor* cc) {
-    SimpleMutex::scoped_lock lk(_mutex);
+    stdx::lock_guard<SimpleMutex> lk(_mutex);
     _deregisterCursor_inlock(cc);
 }
 
-bool CursorManager::eraseCursor(OperationContext* txn, CursorId id, bool checkAuth) {
-    SimpleMutex::scoped_lock lk(_mutex);
+Status CursorManager::eraseCursor(OperationContext* txn, CursorId id, bool shouldAudit) {
+    stdx::lock_guard<SimpleMutex> lk(_mutex);
 
     CursorMap::iterator it = _cursors.find(id);
     if (it == _cursors.end()) {
-        if (checkAuth)
+        if (shouldAudit) {
             audit::logKillCursorsAuthzCheck(txn->getClient(), _nss, id, ErrorCodes::CursorNotFound);
-        return false;
+        }
+        return {ErrorCodes::CursorNotFound, str::stream() << "Cursor id not found: " << id};
     }
 
     ClientCursor* cursor = it->second;
 
-    if (checkAuth)
-        audit::logKillCursorsAuthzCheck(txn->getClient(), _nss, id, ErrorCodes::OK);
+    if (cursor->isPinned()) {
+        if (shouldAudit) {
+            audit::logKillCursorsAuthzCheck(
+                txn->getClient(), _nss, id, ErrorCodes::OperationFailed);
+        }
+        return {ErrorCodes::OperationFailed, str::stream() << "Cannot kill pinned cursor: " << id};
+    }
 
-    massert(16089, str::stream() << "Cannot kill active cursor " << id, !cursor->isPinned());
+    if (shouldAudit) {
+        audit::logKillCursorsAuthzCheck(txn->getClient(), _nss, id, ErrorCodes::OK);
+    }
 
     cursor->kill();
     _deregisterCursor_inlock(cursor);
     delete cursor;
-    return true;
+    return Status::OK();
 }
 
 void CursorManager::_deregisterCursor_inlock(ClientCursor* cc) {

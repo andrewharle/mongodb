@@ -32,10 +32,7 @@
 
 #pragma once
 
-#include <cstring>
-
 namespace mongo {
-class OperationContext;
 
 enum ExitCode {
     EXIT_CLEAN = 0,
@@ -74,4 +71,5 @@ void exitCleanly(ExitCode code);
  * proper NT Service shutdown.
  */
 void signalShutdown();
+
 }  // namespace mongo

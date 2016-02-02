@@ -37,10 +37,11 @@
 #include "mongo/db/exec/collection_scan_common.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/storage/record_data.h"
+#include "mongo/db/storage/record_fetcher.h"
 
 namespace mongo {
 
-class CappedDocumentDeleteCallback;
+class CappedCallback;
 class Collection;
 struct CompactOptions;
 struct CompactStats;
@@ -48,7 +49,6 @@ class DocWriter;
 class MAdvise;
 class NamespaceDetails;
 class OperationContext;
-class Record;
 class RecordFetcher;
 
 class RecordStoreCompactAdaptor;
@@ -84,46 +84,201 @@ public:
 };
 
 /**
- * A RecordIterator provides an interface for walking over a RecordStore.
- * The details of navigating the collection's structure are below this interface.
+ * The data items stored in a RecordStore.
  */
-class RecordIterator {
-public:
-    virtual ~RecordIterator() {}
-
-    // True if getNext will produce no more data, false otherwise.
-    virtual bool isEOF() = 0;
-
-    // Return the RecordId that the iterator points at.  Returns RecordId() if isEOF.
-    virtual RecordId curr() = 0;
-
-    // Return the RecordId that the iterator points at and move the iterator to the next item
-    // from the collection.  Returns RecordId() if isEOF.
-    virtual RecordId getNext() = 0;
-
-    // Can only be called after saveState and before restoreState.
-    virtual void invalidate(const RecordId& dl) = 0;
-
-    // Save any state required to resume operation (without crashing) after RecordId deletion or
-    // a collection drop.
-    virtual void saveState() = 0;
-
-    // Returns true if collection still exists, false otherwise.
-    // The state of the iterator may be restored into a different context
-    // than the one it was created in.
-    virtual bool restoreState(OperationContext* txn) = 0;
-
-    // normally this will just go back to the RecordStore and convert
-    // but this gives the iterator an oppurtnity to optimize
-    virtual RecordData dataFor(const RecordId& loc) const = 0;
+struct Record {
+    RecordId id;
+    RecordData data;
 };
 
+struct BsonRecord {
+    RecordId id;
+    const BSONObj* docPtr;
+};
 
+/**
+ * Retrieves Records from a RecordStore.
+ *
+ * A cursor is constructed with a direction flag with the following effects:
+ *      - The direction that next() moves.
+ *      - If a restore cannot return to the saved position, cursors will be positioned on the
+ *        closest position *after* the query in the direction of the scan.
+ *
+ * A cursor is tied to a transaction, such as the OperationContext or a WriteUnitOfWork
+ * inside that context. Any cursor acquired inside a transaction is invalid outside
+ * of that transaction, instead use the save and restore methods to reestablish the cursor.
+ *
+ * Any method other than invalidate and the save methods may throw WriteConflictException. If
+ * that happens, the cursor may not be used again until it has been saved and successfully
+ * restored. If next() or restore() throw a WCE the cursor's position will be the same as before
+ * the call (strong exception guarantee). All other methods leave the cursor in a valid state
+ * but with an unspecified position (basic exception guarantee). If any exception other than
+ * WCE is thrown, the cursor must be destroyed, which is guaranteed not to leak any resources.
+ *
+ * Any returned unowned BSON is only valid until the next call to any method on this
+ * interface.
+ *
+ * Implementations may override any default implementation if they can provide a more
+ * efficient implementation.
+ *
+ * Storage engines only need to implement the derived SeekableRecordCursor, but may choose
+ * to implement this simpler interface for cursors used for repair or random traversal.
+ *
+ * IMPORTANT NOTE FOR DOCUMENT-LOCKING ENGINES: If you implement capped collections with a
+ * "visibility" system such that documents that exist in your snapshot but were inserted after
+ * the last uncommitted document are hidden, you must follow the following rules:
+ *   - next() must never return invisible documents.
+ *   - If next() on a forward cursor hits an invisible document, it should behave as if it hit
+ *     the end of the collection.
+ *   - When next() on a reverse cursor seeks to the end of the collection it must return the
+ *     newest visible document. This should only return boost::none if there are no visible
+ *     documents in the collection.
+ *   - SeekableRecordCursor::seekExact() must ignore the visibility filter and return the requested
+ *     document even if it is supposed to be invisible.
+ * TODO SERVER-18934 Handle this above the storage engine layer so storage engines don't have to
+ * deal with capped visibility.
+ */
+class RecordCursor {
+public:
+    virtual ~RecordCursor() = default;
+
+    /**
+     * Moves forward and returns the new data or boost::none if there is no more data.
+     * Continues returning boost::none once it reaches EOF.
+     */
+    virtual boost::optional<Record> next() = 0;
+
+    //
+    // Saving and restoring state
+    //
+
+    /**
+     * Prepares for state changes in underlying data in a way that allows the cursor's
+     * current position to be restored.
+     *
+     * It is safe to call save multiple times in a row.
+     * No other method (excluding destructor) may be called until successfully restored.
+     */
+    virtual void save() = 0;
+
+    /**
+     * Recovers from potential state changes in underlying data.
+     *
+     * Returns false if it is invalid to continue using this iterator. This usually means that
+     * capped deletes have caught up to the position of this iterator and continuing could
+     * result in missed data.
+     *
+     * If the former position no longer exists, but it is safe to continue iterating, the
+     * following call to next() will return the next closest position in the direction of the
+     * scan, if any.
+     *
+     * This handles restoring after either save() or SeekableRecordCursor::saveUnpositioned().
+     */
+    virtual bool restore() = 0;
+
+    /**
+     * Detaches from the OperationContext and releases any storage-engine state.
+     *
+     * It is only legal to call this when in a "saved" state. While in the "detached" state, it is
+     * only legal to call reattachToOperationContext or the destructor. It is not legal to call
+     * detachFromOperationContext() while already in the detached state.
+     */
+    virtual void detachFromOperationContext() = 0;
+
+    /**
+     * Reattaches to the OperationContext and reacquires any storage-engine state.
+     *
+     * It is only legal to call this in the "detached" state. On return, the cursor is left in a
+     * "saved" state, so callers must still call restoreState to use this object.
+     */
+    virtual void reattachToOperationContext(OperationContext* opCtx) = 0;
+
+    /**
+     * Inform the cursor that this id is being invalidated. Must be called between save and restore.
+     * The txn is that of the operation causing the invalidation, not the txn using the cursor.
+     *
+     * WARNING: Storage engines other than MMAPv1 should use the default implementation,
+     *          and not depend on this being called.
+     */
+    virtual void invalidate(OperationContext* txn, const RecordId& id) {}
+
+    //
+    // RecordFetchers
+    //
+    // Storage engines which do not support document-level locking hold locks at collection or
+    // database granularity. As an optimization, these locks can be yielded when a record needs
+    // to be fetched from secondary storage. If this method returns non-NULL, then it indicates
+    // that the query system layer should yield its locks, following the protocol defined by the
+    // RecordFetcher class, so that a potential page fault is triggered out of the lock.
+    //
+    // Storage engines which support document-level locking need not implement this.
+    //
+    // TODO see if these can be replaced by WriteConflictException.
+    //
+
+    /**
+     * Returns a RecordFetcher if needed for a call to next() or none if unneeded.
+     */
+    virtual std::unique_ptr<RecordFetcher> fetcherForNext() const {
+        return {};
+    }
+};
+
+/**
+ * Adds explicit seeking of records. This functionality is separated out from RecordCursor,
+ * because some cursors, such as repair cursors, are not required to support seeking.
+ *
+ * Warning: MMAPv1 cannot detect if RecordIds are valid. Therefore callers should only pass
+ * potentially deleted RecordIds to seek methods if they know that MMAPv1 is not the current
+ * storage engine. All new storage engines must support detecting the existence of Records.
+ *
+ */
+class SeekableRecordCursor : public RecordCursor {
+public:
+    /**
+     * Seeks to a Record with the provided id.
+     *
+     * If an exact match can't be found, boost::none will be returned and the resulting position
+     * of the cursor is unspecified.
+     */
+    virtual boost::optional<Record> seekExact(const RecordId& id) = 0;
+
+    /**
+     * Prepares for state changes in underlying data without necessarily saving the current
+     * state.
+     *
+     * The cursor's position when restored is unspecified. Caller is expected to seek rather
+     * than call next() following the restore.
+     *
+     * It is safe to call saveUnpositioned multiple times in a row.
+     * No other method (excluding destructor) may be called until successfully restored.
+     */
+    virtual void saveUnpositioned() {
+        save();
+    }
+
+    /**
+     * Returns a RecordFetcher if needed to fetch the provided Record or none if unneeded.
+     */
+    virtual std::unique_ptr<RecordFetcher> fetcherForId(const RecordId& id) const {
+        return {};
+    }
+};
+
+/**
+ * A RecordStore provides an abstraction used for storing documents in a collection,
+ * or entries in an index. In storage engines implementing the KVEngine, record stores
+ * are also used for implementing catalogs.
+ *
+ * Many methods take an OperationContext parameter. This contains the RecoveryUnit, with
+ * all RecordStore specific transaction information, as well as the LockState. Methods that take
+ * an OperationContext may throw a WriteConflictException.
+ */
 class RecordStore {
     MONGO_DISALLOW_COPYING(RecordStore);
 
 public:
-    RecordStore(const StringData& ns) : _ns(ns.toString()) {}
+    RecordStore(StringData ns) : _ns(ns.toString()) {}
 
     virtual ~RecordStore() {}
 
@@ -136,19 +291,28 @@ public:
         return _ns;
     }
 
+    /**
+     * The dataSize is an approximation of the sum of the sizes (in bytes) of the
+     * documents or entries in the recordStore.
+     */
     virtual long long dataSize(OperationContext* txn) const = 0;
 
+    /**
+     * Total number of record in the RecordStore. You may need to cache it, so this call
+     * takes constant time, as it is called often.
+     */
     virtual long long numRecords(OperationContext* txn) const = 0;
 
     virtual bool isCapped() const = 0;
 
-    virtual void setCappedDeleteCallback(CappedDocumentDeleteCallback*) {
+    virtual void setCappedCallback(CappedCallback*) {
         invariant(false);
     }
 
     /**
      * @param extraInfo - optional more debug info
      * @param level - optional, level of debug info to put in (higher is more)
+     * @return total estimate size (in bytes) on stable storage
      */
     virtual int64_t storageSize(OperationContext* txn,
                                 BSONObjBuilder* extraInfo = NULL,
@@ -156,13 +320,45 @@ public:
 
     // CRUD related
 
-    virtual RecordData dataFor(OperationContext* txn, const RecordId& loc) const = 0;
+    /**
+     * Get the RecordData at loc, which must exist.
+     *
+     * If unowned data is returned, it is valid until the next modification of this Record or
+     * the lock on this collection is released.
+     *
+     * In general, prefer findRecord or RecordCursor::seekExact since they can tell you if a
+     * record has been removed.
+     */
+    virtual RecordData dataFor(OperationContext* txn, const RecordId& loc) const {
+        RecordData data;
+        invariant(findRecord(txn, loc, &data));
+        return data;
+    }
 
     /**
      * @param out - If the record exists, the contents of this are set.
      * @return true iff there is a Record for loc
+     *
+     * If unowned data is returned, it is valid until the next modification of this Record or
+     * the lock on this collection is released.
+     *
+     * In general prefer RecordCursor::seekExact since it can avoid copying data in more
+     * storageEngines.
+     *
+     * Warning: MMAPv1 cannot detect if RecordIds are valid. Therefore callers should only pass
+     * potentially deleted RecordIds to seek methods if they know that MMAPv1 is not the current
+     * storage engine. All new storage engines must support detecting the existence of Records.
      */
-    virtual bool findRecord(OperationContext* txn, const RecordId& loc, RecordData* out) const = 0;
+    virtual bool findRecord(OperationContext* txn, const RecordId& loc, RecordData* out) const {
+        auto cursor = getCursor(txn);
+        auto record = cursor->seekExact(loc);
+        if (!record)
+            return false;
+
+        record->data.makeOwned();  // Unowned data expires when cursor goes out of scope.
+        *out = std::move(record->data);
+        return true;
+    }
 
     virtual void deleteRecord(OperationContext* txn, const RecordId& dl) = 0;
 
@@ -175,6 +371,20 @@ public:
                                               const DocWriter* doc,
                                               bool enforceQuota) = 0;
 
+    virtual Status insertRecords(OperationContext* txn,
+                                 std::vector<Record>* records,
+                                 bool enforceQuota) {
+        for (auto& record : *records) {
+            StatusWith<RecordId> res =
+                insertRecord(txn, record.data.data(), record.data.size(), enforceQuota);
+            if (!res.isOK())
+                return res.getStatus();
+
+            record.id = res.getValue();
+        }
+        return Status::OK();
+    }
+
     /**
      * @param notifier - Only used by record stores which do not support doc-locking.
      *                   In the case of a document move, this is called after the document
@@ -183,6 +393,8 @@ public:
      *                   In the case of an in-place update, this is called just before the
      *                   in-place write occurs.
      * @return Status or RecordId, RecordId might be different
+     *
+     * For capped record stores, the record size will never change.
      */
     virtual StatusWith<RecordId> updateRecord(OperationContext* txn,
                                               const RecordId& oldLocation,
@@ -200,54 +412,64 @@ public:
      */
     virtual bool updateWithDamagesSupported() const = 0;
 
-    virtual Status updateWithDamages(OperationContext* txn,
-                                     const RecordId& loc,
-                                     const RecordData& oldRec,
-                                     const char* damageSource,
-                                     const mutablebson::DamageVector& damages) = 0;
-
     /**
-     * Storage engines which do not support document-level locking hold locks at
-     * collection or database granularity. As an optimization, these locks can be yielded
-     * when a record needs to be fetched from secondary storage. If this method returns
-     * non-NULL, then it indicates that the query system layer should yield and reacquire its
-     * locks.
+     * Updates the record positioned at 'loc' in-place using the deltas described by 'damages'. The
+     * 'damages' vector describes contiguous ranges of 'damageSource' from which to copy and apply
+     * byte-level changes to the data.
      *
-     * The return value is a functor that should be invoked when the locks are yielded;
-     * it should access the record at 'loc' so that a potential page fault is triggered
-     * out of the lock.
-     *
-     * The caller is responsible for deleting the return value.
-     *
-     * Storage engines which support document-level locking need not implement this.
+     * @return the updated version of the record. If unowned data is returned, then it is valid
+     * until the next modification of this Record or the lock on the collection has been released.
      */
-    virtual RecordFetcher* recordNeedsFetch(OperationContext* txn, const RecordId& loc) const {
-        return NULL;
-    }
+    virtual StatusWith<RecordData> updateWithDamages(OperationContext* txn,
+                                                     const RecordId& loc,
+                                                     const RecordData& oldRec,
+                                                     const char* damageSource,
+                                                     const mutablebson::DamageVector& damages) = 0;
 
     /**
-     * returned iterator owned by caller
-     * Default arguments return all items in record store.
+     * Returns a new cursor over this record store.
+     *
+     * The cursor is logically positioned before the first (or last if !forward) Record in the
+     * collection so that Record will be returned on the first call to next(). Implementations
+     * are allowed to lazily seek to the first Record when next() is called rather than doing
+     * it on construction.
      */
-    virtual RecordIterator* getIterator(
-        OperationContext* txn,
-        const RecordId& start = RecordId(),
-        const CollectionScanParams::Direction& dir = CollectionScanParams::FORWARD) const = 0;
+    virtual std::unique_ptr<SeekableRecordCursor> getCursor(OperationContext* txn,
+                                                            bool forward = true) const = 0;
 
     /**
-     * Constructs an iterator over a potentially corrupted store, which can be used to salvage
+     * Constructs a cursor over a potentially corrupted store, which can be used to salvage
      * damaged records. The iterator might return every record in the store if all of them
      * are reachable and not corrupted.  Returns NULL if not supported.
      */
-    virtual RecordIterator* getIteratorForRepair(OperationContext* txn) const {
-        return NULL;
+    virtual std::unique_ptr<RecordCursor> getCursorForRepair(OperationContext* txn) const {
+        return {};
     }
 
     /**
-     * Returns many iterators that partition the RecordStore into many disjoint sets. Iterating
-     * all returned iterators is equivalent to Iterating the full store.
+     * Constructs a cursor over a record store that returns documents in a randomized order, and
+     * allows storage engines to provide a more efficient way of random sampling of a record store
+     * than MongoDB's default sampling methods, which is used when this method returns {}.
+     *
+     * This method may be implemented using a pseudo-random walk over B-trees or a similar approach.
+     * Different cursors should return documents in a different order. Random cursors may return
+     * the same document more than once and, as a result, may return more documents than exist in
+     * the record store. Implementations should avoid obvious biases toward older, newer, larger
+     * smaller or other specific classes of documents.
      */
-    virtual std::vector<RecordIterator*> getManyIterators(OperationContext* txn) const = 0;
+    virtual std::unique_ptr<RecordCursor> getRandomCursor(OperationContext* txn) const {
+        return {};
+    }
+
+    /**
+     * Returns many RecordCursors that partition the RecordStore into many disjoint sets.
+     * Iterating all returned RecordCursors is equivalent to iterating the full store.
+     */
+    virtual std::vector<std::unique_ptr<RecordCursor>> getManyCursors(OperationContext* txn) const {
+        std::vector<std::unique_ptr<RecordCursor>> out(1);
+        out[0] = getCursor(txn);
+        return out;
+    }
 
     // higher level
 
@@ -349,8 +571,11 @@ public:
      * When we write to an oplog, we call this so that if the storage engine
      * supports doc locking, it can manage the visibility of oplog entries to ensure
      * they are ordered.
+     *
+     * Since this is called inside of a WriteUnitOfWork while holding a std::mutex, it is
+     * illegal to acquire any LockManager locks inside of this function.
      */
-    virtual Status oplogDiskLocRegister(OperationContext* txn, const OpTime& opTime) {
+    virtual Status oplogDiskLocRegister(OperationContext* txn, const Timestamp& opTime) {
         return Status::OK();
     }
 

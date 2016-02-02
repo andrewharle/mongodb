@@ -12,12 +12,12 @@
     assert.commandWorked(db.createCollection(collName));
 
     // Get the original collection options for the collection.
-    var originalResult = db[collName].exists();
+    var originalResult = db.getCollectionInfos({name: collName});
 
     // Issue an invalid command.
-    assert.commandFailed(coll.runCommand("collMod", {usePowerOf2Sizes: true, unknownField: "x"}));
+    assert.commandFailed(coll.runCommand("collMod", {validationLevel: "off", unknownField: "x"}));
 
     // Make sure the options are unchanged.
-    var newResult = db[collName].exists();
+    var newResult = db.getCollectionInfos({name: collName});
     assert.eq(originalResult, newResult);
 })();

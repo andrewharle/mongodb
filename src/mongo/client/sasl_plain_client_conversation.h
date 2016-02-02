@@ -51,7 +51,7 @@ public:
 
     virtual ~SaslPLAINClientConversation();
 
-    virtual StatusWith<bool> step(const StringData& inputData, std::string* outputData);
+    virtual StatusWith<bool> step(StringData inputData, std::string* outputData);
 };
 
 }  // namespace mongo

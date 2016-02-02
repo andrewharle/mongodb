@@ -34,6 +34,7 @@
 
 #include "mongo/db/ops/update_result.h"
 
+#include "mongo/db/lasterror.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
@@ -42,13 +43,11 @@ UpdateResult::UpdateResult(bool existing_,
                            bool modifiers_,
                            unsigned long long numDocsModified_,
                            unsigned long long numMatched_,
-                           const BSONObj& upsertedObject_,
-                           const BSONObj& newObj_)
+                           const BSONObj& upsertedObject_)
     : existing(existing_),
       modifiers(modifiers_),
       numDocsModified(numDocsModified_),
-      numMatched(numMatched_),
-      newObj(newObj_) {
+      numMatched(numMatched_) {
     BSONElement id = upsertedObject_["_id"];
     if (!existing && numMatched == 1 && !id.eoo()) {
         upserted = id.wrap(kUpsertedFieldName);

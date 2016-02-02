@@ -40,8 +40,9 @@
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/curop.h"
 #include "mongo/db/concurrency/d_concurrency.h"
+#include "mongo/db/curop.h"
+#include "mongo/db/db_raii.h"
 #include "mongo/db/index_builder.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/operation_context_impl.h"
@@ -91,8 +92,7 @@ public:
                      BSONObj& cmdObj,
                      int,
                      string& errmsg,
-                     BSONObjBuilder& result,
-                     bool fromRepl) {
+                     BSONObjBuilder& result) {
         const std::string nsToCompact = parseNsCollectionRequired(db, cmdObj);
 
         repl::ReplicationCoordinator* replCoord = repl::getGlobalReplicationCoordinator();
@@ -103,13 +103,13 @@ public:
             return false;
         }
 
-        NamespaceString ns(nsToCompact);
-        if (!ns.isNormal()) {
+        NamespaceString nss(nsToCompact);
+        if (!nss.isNormal()) {
             errmsg = "bad namespace name";
             return false;
         }
 
-        if (ns.isSystem()) {
+        if (nss.isSystem()) {
             // items in system.* cannot be moved as there might be pointers to them
             // i.e. system.indexes entries are pointed to from NamespaceDetails
             errmsg = "can't compact a system namespace";
@@ -150,7 +150,7 @@ public:
         ScopedTransaction transaction(txn, MODE_IX);
         AutoGetDb autoDb(txn, db, MODE_X);
         Database* const collDB = autoDb.getDb();
-        Collection* collection = collDB ? collDB->getCollection(ns) : NULL;
+        Collection* collection = collDB ? collDB->getCollection(nss) : NULL;
 
         // If db/collection does not exist, short circuit and return.
         if (!collDB || !collection) {
@@ -158,15 +158,10 @@ public:
             return false;
         }
 
-        Client::Context ctx(txn, ns);
-        BackgroundOperation::assertNoBgOpInProgForNs(ns.ns());
+        OldClientContext ctx(txn, nss.ns());
+        BackgroundOperation::assertNoBgOpInProgForNs(nss.ns());
 
-        if (collection->isCapped()) {
-            errmsg = "cannot compact a capped collection";
-            return false;
-        }
-
-        log() << "compact " << ns << " begin, options: " << compactOptions.toString();
+        log() << "compact " << nss.ns() << " begin, options: " << compactOptions.toString();
 
         StatusWith<CompactStats> status = collection->compact(txn, &compactOptions);
         if (!status.isOK())
@@ -175,7 +170,7 @@ public:
         if (status.getValue().corruptDocuments > 0)
             result.append("invalidObjects", status.getValue().corruptDocuments);
 
-        log() << "compact " << ns << " end";
+        log() << "compact " << nss.ns() << " end";
 
         return true;
     }

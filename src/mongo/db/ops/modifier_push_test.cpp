@@ -29,6 +29,7 @@
 #include "mongo/db/ops/modifier_push.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <iostream>
 #include <vector>
 
@@ -41,7 +42,6 @@
 #include "mongo/db/jsobj.h"
 #include "mongo/db/json.h"
 #include "mongo/db/ops/log_builder.h"
-#include "mongo/platform/cstdint.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/mongoutils/str.h"
 
@@ -486,14 +486,12 @@ public:
                    ? ModifierPush::PUSH_ALL
                    : ModifierPush::PUSH_NORMAL) {
         _modObj = modObj;
-        const StringData& modName = modObj.firstElement().fieldName();
+        StringData modName = modObj.firstElement().fieldName();
         ASSERT_OK(_mod.init(_modObj[modName].embeddedObject().firstElement(),
                             ModifierInterface::Options::normal()));
     }
 
-    Status prepare(Element root,
-                   const StringData& matchedField,
-                   ModifierInterface::ExecInfo* execInfo) {
+    Status prepare(Element root, StringData matchedField, ModifierInterface::ExecInfo* execInfo) {
         return _mod.prepare(root, matchedField, execInfo);
     }
 

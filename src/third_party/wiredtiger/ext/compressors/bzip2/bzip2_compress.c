@@ -232,7 +232,7 @@ bzip2_compress_raw(WT_COMPRESSOR *compressor, WT_SESSION *session,
 	 * it's a small number of slots, we're not going to take them because
 	 * they aren't worth compressing.  In all likelihood, that's going to
 	 * be because the btree is wrapping up a page, but that's OK, that is
-	 * going to happen a lot.   In addition, add a 2% chance of not taking
+	 * going to happen a lot. In addition, add a 2% chance of not taking
 	 * anything at all just because we don't want to take it.  Otherwise,
 	 * select between 80 and 100% of the slots and compress them, stepping
 	 * down by 5 slots at a time until something works.
@@ -314,8 +314,15 @@ bzip2_decompress(WT_COMPRESSOR *compressor, WT_SESSION *session,
 	if ((ret = BZ2_bzDecompress(&bz)) == BZ_STREAM_END) {
 		*result_lenp = dst_len - bz.avail_out;
 		ret = 0;
-	} else
+	} else {
+		/*
+		 * If BZ2_bzDecompress returns 0, it expects there to be more
+		 * data available.  There isn't, so treat this as an error.
+		 */
+		if (ret == 0)
+			ret = BZ_DATA_ERROR;
 		(void)bzip2_error(compressor, session, "BZ2_bzDecompress", ret);
+	}
 
 	if ((tret = BZ2_bzDecompressEnd(&bz)) != BZ_OK)
 		return (bzip2_error(

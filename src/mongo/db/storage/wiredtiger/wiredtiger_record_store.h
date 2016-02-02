@@ -31,16 +31,16 @@
 
 #pragma once
 
+#include <boost/thread/mutex.hpp>
 #include <set>
 #include <string>
 
-#include <boost/scoped_ptr.hpp>
-#include <boost/thread/mutex.hpp>
-
 #include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/capped_callback.h"
+#include "mongo/db/storage/record_store.h"
 #include "mongo/platform/atomic_word.h"
+#include "mongo/stdx/mutex.h"
+#include "mongo/util/concurrency/synchronization.h"
 #include "mongo/util/fail_point_service.h"
 
 /**
@@ -57,6 +57,7 @@ class WiredTigerRecoveryUnit;
 class WiredTigerSizeStorer;
 
 extern const std::string kWiredTigerEngineName;
+typedef std::list<RecordId> SortedRecordIds;
 
 class WiredTigerRecordStore : public RecordStore {
 public:
@@ -78,18 +79,21 @@ public:
      * Note that even if this function returns an OK status, WT_SESSION:create() may still
      * fail with the constructed configuration string.
      */
-    static StatusWith<std::string> generateCreateString(const StringData& ns,
+    static StatusWith<std::string> generateCreateString(const std::string& engineName,
+                                                        StringData ns,
                                                         const CollectionOptions& options,
-                                                        const StringData& extraStrings);
+                                                        StringData extraStrings);
 
     WiredTigerRecordStore(OperationContext* txn,
-                          const StringData& ns,
-                          const StringData& uri,
-                          bool isCapped = false,
+                          StringData ns,
+                          StringData uri,
+                          std::string engineName,
+                          bool isCapped,
+                          bool isEphemeral,
                           int64_t cappedMaxSize = -1,
                           int64_t cappedMaxDocs = -1,
-                          CappedDocumentDeleteCallback* cappedDeleteCallback = NULL,
-                          WiredTigerSizeStorer* sizeStorer = NULL);
+                          CappedCallback* cappedCallback = nullptr,
+                          WiredTigerSizeStorer* sizeStorer = nullptr);
 
     virtual ~WiredTigerRecordStore();
 
@@ -108,11 +112,15 @@ public:
 
     // CRUD related
 
-    virtual RecordData dataFor(OperationContext* txn, const RecordId& loc) const;
+    virtual RecordData dataFor(OperationContext* txn, const RecordId& id) const;
 
-    virtual bool findRecord(OperationContext* txn, const RecordId& loc, RecordData* out) const;
+    virtual bool findRecord(OperationContext* txn, const RecordId& id, RecordData* out) const;
 
-    virtual void deleteRecord(OperationContext* txn, const RecordId& dl);
+    virtual void deleteRecord(OperationContext* txn, const RecordId& id);
+
+    virtual Status insertRecords(OperationContext* txn,
+                                 std::vector<Record>* records,
+                                 bool enforceQuota);
 
     virtual StatusWith<RecordId> insertRecord(OperationContext* txn,
                                               const char* data,
@@ -132,23 +140,25 @@ public:
 
     virtual bool updateWithDamagesSupported() const;
 
-    virtual Status updateWithDamages(OperationContext* txn,
-                                     const RecordId& loc,
-                                     const RecordData& oldRec,
-                                     const char* damageSource,
-                                     const mutablebson::DamageVector& damages);
+    virtual StatusWith<RecordData> updateWithDamages(OperationContext* txn,
+                                                     const RecordId& id,
+                                                     const RecordData& oldRec,
+                                                     const char* damageSource,
+                                                     const mutablebson::DamageVector& damages);
 
-    virtual RecordIterator* getIterator(
-        OperationContext* txn,
-        const RecordId& start = RecordId(),
-        const CollectionScanParams::Direction& dir = CollectionScanParams::FORWARD) const;
+    std::unique_ptr<SeekableRecordCursor> getCursor(OperationContext* txn,
+                                                    bool forward) const final;
+    std::unique_ptr<RecordCursor> getRandomCursor(OperationContext* txn) const final;
 
-    virtual std::vector<RecordIterator*> getManyIterators(OperationContext* txn) const;
+    std::unique_ptr<RecordCursor> getRandomCursorWithOptions(OperationContext* txn,
+                                                             StringData extraConfig) const;
+
+    std::vector<std::unique_ptr<RecordCursor>> getManyCursors(OperationContext* txn) const final;
 
     virtual Status truncate(OperationContext* txn);
 
     virtual bool compactSupported() const {
-        return true;
+        return !_isEphemeral;
     }
     virtual bool compactsInPlace() const {
         return true;
@@ -170,12 +180,14 @@ public:
                                    BSONObjBuilder* result,
                                    double scale) const;
 
+    virtual Status touch(OperationContext* txn, BSONObjBuilder* output) const;
+
     virtual void temp_cappedTruncateAfter(OperationContext* txn, RecordId end, bool inclusive);
 
     virtual boost::optional<RecordId> oplogStartHack(OperationContext* txn,
                                                      const RecordId& startingPosition) const;
 
-    virtual Status oplogDiskLocRegister(OperationContext* txn, const OpTime& opTime);
+    virtual Status oplogDiskLocRegister(OperationContext* txn, const Timestamp& opTime);
 
     virtual void updateStatsAfterRepair(OperationContext* txn,
                                         long long numRecords,
@@ -188,8 +200,8 @@ public:
         return _useOplogHack;
     }
 
-    void setCappedDeleteCallback(CappedDocumentDeleteCallback* cb) {
-        _cappedDeleteCallback = cb;
+    void setCappedCallback(CappedCallback* cb) {
+        _cappedCallback = cb;
     }
     int64_t cappedMaxDocs() const;
     int64_t cappedMaxSize() const;
@@ -197,62 +209,42 @@ public:
     const std::string& getURI() const {
         return _uri;
     }
-    uint64_t instanceId() const {
-        return _instanceId;
+    uint64_t tableId() const {
+        return _tableId;
     }
 
     void setSizeStorer(WiredTigerSizeStorer* ss) {
         _sizeStorer = ss;
     }
 
-    void dealtWithCappedLoc(const RecordId& loc);
-    bool isCappedHidden(const RecordId& loc) const;
+    bool isCappedHidden(const RecordId& id) const;
+    RecordId lowestCappedHiddenRecord() const;
 
     bool inShutdown() const;
+
+    void reclaimOplog(OperationContext* txn);
+
     int64_t cappedDeleteAsNeeded(OperationContext* txn, const RecordId& justInserted);
 
     int64_t cappedDeleteAsNeeded_inlock(OperationContext* txn, const RecordId& justInserted);
 
-    boost::timed_mutex& cappedDeleterMutex() {
+    boost::timed_mutex& cappedDeleterMutex() {  // NOLINT
         return _cappedDeleterMutex;
     }
 
-private:
-    class Iterator : public RecordIterator {
-    public:
-        Iterator(const WiredTigerRecordStore& rs,
-                 OperationContext* txn,
-                 const RecordId& start,
-                 const CollectionScanParams::Direction& dir,
-                 bool forParallelCollectionScan);
+    // Returns false if the oplog was dropped while waiting for a deletion request.
+    bool yieldAndAwaitOplogDeletionRequest(OperationContext* txn);
 
-        virtual ~Iterator();
+    class OplogStones;
 
-        virtual bool isEOF();
-        virtual RecordId curr();
-        virtual RecordId getNext();
-        virtual void invalidate(const RecordId& dl);
-        virtual void saveState();
-        virtual bool restoreState(OperationContext* txn);
-        virtual RecordData dataFor(const RecordId& loc) const;
-
-    private:
-        void _getNext();
-        void _locate(const RecordId& loc, bool exact);
-        RecordId _curr() const;  // const version of public curr method
-
-        const WiredTigerRecordStore& _rs;
-        OperationContext* _txn;
-        RecoveryUnit* _savedRecoveryUnit;  // only used to sanity check between save/restore
-        const bool _forward;
-        bool _forParallelCollectionScan;
-        boost::scoped_ptr<WiredTigerCursor> _cursor;
-        bool _eof;
-        const RecordId _readUntilForOplog;
-
-        RecordId _loc;      // Cached key of _cursor. Update any time _cursor is moved.
-        RecordId _lastLoc;  // the last thing returned from getNext()
+    // Exposed only for testing.
+    OplogStones* oplogStones() {
+        return _oplogStones.get();
     };
+
+private:
+    class Cursor;
+    class RandomCursor;
 
     class CappedInsertChange;
     class NumRecordsChange;
@@ -260,41 +252,49 @@ private:
 
     static WiredTigerRecoveryUnit* _getRecoveryUnit(OperationContext* txn);
 
-    static int64_t _makeKey(const RecordId& loc);
+    static int64_t _makeKey(const RecordId& id);
     static RecordId _fromKey(int64_t k);
 
-    void _addUncommitedDiskLoc_inlock(OperationContext* txn, const RecordId& loc);
+    void _dealtWithCappedId(SortedRecordIds::iterator it);
+    void _addUncommitedRecordId_inlock(OperationContext* txn, const RecordId& id);
 
     RecordId _nextId();
-    void _setId(RecordId loc);
+    void _setId(RecordId id);
     bool cappedAndNeedDelete() const;
     void _changeNumRecords(OperationContext* txn, int64_t diff);
-    void _increaseDataSize(OperationContext* txn, int amount);
+    void _increaseDataSize(OperationContext* txn, int64_t amount);
     RecordData _getData(const WiredTigerCursor& cursor) const;
-    StatusWith<RecordId> extractAndCheckLocForOplog(const char* data, int len);
     void _oplogSetStartHack(WiredTigerRecoveryUnit* wru) const;
 
     const std::string _uri;
-    const uint64_t _instanceId;  // not persisted
+    const uint64_t _tableId;  // not persisted
 
+    // Canonical engine name to use for retrieving options
+    const std::string _engineName;
     // The capped settings should not be updated once operations have started
     const bool _isCapped;
+    // True if the storage engine is an in-memory storage engine
+    const bool _isEphemeral;
+    // True if the namespace of this record store starts with "local.oplog.", and false otherwise.
     const bool _isOplog;
     const int64_t _cappedMaxSize;
     const int64_t _cappedMaxSizeSlack;  // when to start applying backpressure
     const int64_t _cappedMaxDocs;
     RecordId _cappedFirstRecord;
-    CappedDocumentDeleteCallback* _cappedDeleteCallback;
-    int _cappedDeleteCheckCount;                     // see comment in ::cappedDeleteAsNeeded
-    mutable boost::timed_mutex _cappedDeleterMutex;  // see comment in ::cappedDeleteAsNeeded
+    AtomicInt64 _cappedSleep;
+    AtomicInt64 _cappedSleepMS;
+    CappedCallback* _cappedCallback;
+
+    // See comment in ::cappedDeleteAsNeeded
+    int _cappedDeleteCheckCount;
+    mutable boost::timed_mutex _cappedDeleterMutex;  // NOLINT
 
     const bool _useOplogHack;
 
-    typedef std::vector<RecordId> SortedDiskLocs;
-    SortedDiskLocs _uncommittedDiskLocs;
+    SortedRecordIds _uncommittedRecordIds;
     RecordId _oplog_visibleTo;
     RecordId _oplog_highestSeen;
-    mutable boost::mutex _uncommittedDiskLocsMutex;
+    mutable stdx::mutex _uncommittedRecordIdsMutex;
 
     AtomicInt64 _nextIdNum;
     AtomicInt64 _dataSize;
@@ -304,7 +304,9 @@ private:
     int _sizeStorerCounter;
 
     bool _shuttingDown;
-    bool _hasBackgroundThread;
+
+    // Non-null if this record store is underlying the active oplog.
+    std::shared_ptr<OplogStones> _oplogStones;
 };
 
 // WT failpoint to throw write conflict exceptions randomly

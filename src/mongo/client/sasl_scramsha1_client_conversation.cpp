@@ -31,7 +31,6 @@
 #include "mongo/client/sasl_scramsha1_client_conversation.h"
 
 #include <boost/algorithm/string/replace.hpp>
-#include <boost/scoped_ptr.hpp>
 
 #include "mongo/base/parse_number.h"
 #include "mongo/client/sasl_client_session.h"
@@ -43,7 +42,7 @@
 
 namespace mongo {
 
-using boost::scoped_ptr;
+using std::unique_ptr;
 using std::string;
 
 SaslSCRAMSHA1ClientConversation::SaslSCRAMSHA1ClientConversation(
@@ -55,7 +54,7 @@ SaslSCRAMSHA1ClientConversation::~SaslSCRAMSHA1ClientConversation() {
     memset(_saltedPassword, 0, scram::hashSize);
 }
 
-StatusWith<bool> SaslSCRAMSHA1ClientConversation::step(const StringData& inputData,
+StatusWith<bool> SaslSCRAMSHA1ClientConversation::step(StringData inputData,
                                                        std::string* outputData) {
     std::vector<std::string> input = StringSplitter::split(inputData.toString(), ",");
     _step++;
@@ -99,7 +98,7 @@ StatusWith<bool> SaslSCRAMSHA1ClientConversation::_firstStep(std::string* output
     const int nonceLenQWords = 3;
     uint64_t binaryNonce[nonceLenQWords];
 
-    scoped_ptr<SecureRandom> sr(SecureRandom::create());
+    unique_ptr<SecureRandom> sr(SecureRandom::create());
 
     binaryNonce[0] = sr->nextInt64();
     binaryNonce[1] = sr->nextInt64();

@@ -33,10 +33,10 @@
 
 namespace mongo {
 
-/* The idea here is to let all initialization of global variables (classes inheriting from
- * StartupTest)
-   complete before we run the tests -- otherwise order of initilization being arbitrary may mess
-   us up.  The app's main() function should call runTests().
+/*
+   The idea here is to let all initialization of global variables (classes inheriting from
+   StartupTest) complete before we run the tests -- otherwise order of initilization being arbitrary
+   may mess us up. The app's main() function should call runTests().
 
    To define a unit test, inherit from this and implement run. instantiate one object for the new
    class as a global.

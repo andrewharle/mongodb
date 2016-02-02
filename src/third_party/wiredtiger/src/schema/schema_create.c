@@ -9,6 +9,22 @@
 #include "wt_internal.h"
 
 /*
+ * __wt_schema_create_strip --
+ *	Discard any configuration information from a schema entry that is not
+ * applicable to an session.create call, here for the wt dump command utility,
+ * which only wants to dump the schema information needed for load.
+ */
+int
+__wt_schema_create_strip(WT_SESSION_IMPL *session,
+    const char *v1, const char *v2, char **value_ret)
+{
+	const char *cfg[] =
+	    { WT_CONFIG_BASE(session, WT_SESSION_create), v1, v2, NULL };
+
+	return (__wt_config_collapse(session, cfg, value_ret));
+}
+
+/*
  * __wt_direct_io_size_check --
  *	Return a size from the configuration, complaining if it's insufficient
  * for direct I/O.
@@ -108,8 +124,8 @@ __create_file(WT_SESSION_IMPL *session,
 	}
 
 	/*
-	 * Open the file to check that it was setup correctly.   We don't need
-	 * to pass the configuration, we just wrote the collapsed configuration
+	 * Open the file to check that it was setup correctly. We don't need to
+	 * pass the configuration, we just wrote the collapsed configuration
 	 * into the metadata file, and it's going to be read/used by underlying
 	 * functions.
 	 *
@@ -180,10 +196,11 @@ __create_colgroup(WT_SESSION_IMPL *session,
 	const char **cfgp, *cfg[4] =
 	    { WT_CONFIG_BASE(session, colgroup_meta), config, NULL, NULL };
 	const char *sourcecfg[] = { config, NULL, NULL };
-	const char *cgname, *source, *tablename;
-	char *cgconf, *sourceconf, *oldconf;
+	const char *cgname, *source, *sourceconf, *tablename;
+	char *cgconf, *oldconf;
 
-	cgconf = sourceconf = oldconf = NULL;
+	sourceconf = NULL;
+	cgconf = oldconf = NULL;
 	WT_CLEAR(fmt);
 	WT_CLEAR(confbuf);
 	WT_CLEAR(namebuf);
@@ -244,7 +261,7 @@ __create_colgroup(WT_SESSION_IMPL *session,
 		    table, cval.str, cval.len, NULL, true, &fmt));
 	}
 	sourcecfg[1] = fmt.data;
-	WT_ERR(__wt_config_concat(session, sourcecfg, &sourceconf));
+	WT_ERR(__wt_config_merge(session, sourcecfg, NULL, &sourceconf));
 
 	WT_ERR(__wt_schema_create(session, source, sourceconf));
 
@@ -305,6 +322,47 @@ __wt_schema_index_source(WT_SESSION_IMPL *session,
 }
 
 /*
+ * __fill_index --
+ *	Fill the index from the current contents of the table.
+ */
+static int
+__fill_index(WT_SESSION_IMPL *session, WT_TABLE *table, WT_INDEX *idx)
+{
+	WT_DECL_RET;
+	WT_CURSOR *tcur, *icur;
+	WT_SESSION *wt_session;
+
+	wt_session = &session->iface;
+	tcur = NULL;
+	icur = NULL;
+	WT_RET(__wt_schema_open_colgroups(session, table));
+
+	/*
+	 * If the column groups have not been completely created,
+	 * there cannot be data inserted yet, and we're done.
+	 */
+	if (!table->cg_complete)
+		return (0);
+
+	WT_ERR(wt_session->open_cursor(wt_session,
+	    idx->source, NULL, "bulk=unordered", &icur));
+	WT_ERR(wt_session->open_cursor(wt_session,
+	    table->name, NULL, "readonly", &tcur));
+
+	while ((ret = tcur->next(tcur)) == 0)
+		WT_ERR(__wt_apply_single_idx(session, idx,
+		    icur, (WT_CURSOR_TABLE *)tcur, icur->insert));
+
+	WT_ERR_NOTFOUND_OK(ret);
+err:
+	if (icur)
+		WT_TRET(icur->close(icur));
+	if (tcur)
+		WT_TRET(tcur->close(tcur));
+	return (ret);
+}
+
+/*
  * __create_index --
  *	Create an index.
  */
@@ -316,19 +374,21 @@ __create_index(WT_SESSION_IMPL *session,
 	WT_CONFIG_ITEM ckey, cval, icols, kval;
 	WT_DECL_PACK_VALUE(pv);
 	WT_DECL_RET;
+	WT_INDEX *idx;
 	WT_ITEM confbuf, extra_cols, fmt, namebuf;
 	WT_PACK pack;
 	WT_TABLE *table;
 	const char *cfg[4] =
 	    { WT_CONFIG_BASE(session, index_meta), NULL, NULL, NULL };
 	const char *sourcecfg[] = { config, NULL, NULL };
-	const char *source, *idxname, *tablename;
-	char *sourceconf, *idxconf;
+	const char *source, *sourceconf, *idxname, *tablename;
+	char *idxconf;
 	size_t tlen;
 	bool have_extractor;
 	u_int i, npublic_cols;
 
-	idxconf = sourceconf = NULL;
+	sourceconf = NULL;
+	idxconf = NULL;
 	WT_CLEAR(confbuf);
 	WT_CLEAR(fmt);
 	WT_CLEAR(extra_cols);
@@ -458,7 +518,7 @@ __create_index(WT_SESSION_IMPL *session,
 	    session, &fmt, ",index_key_columns=%u", npublic_cols));
 
 	sourcecfg[1] = fmt.data;
-	WT_ERR(__wt_config_concat(session, sourcecfg, &sourceconf));
+	WT_ERR(__wt_config_merge(session, sourcecfg, NULL, &sourceconf));
 
 	WT_ERR(__wt_schema_create(session, source, sourceconf));
 
@@ -474,6 +534,12 @@ __create_index(WT_SESSION_IMPL *session,
 			ret = exclusive ? EEXIST : 0;
 		goto err;
 	}
+
+	/* Make sure that the configuration is valid. */
+	WT_ERR(__wt_schema_open_index(
+	    session, table, idxname, strlen(idxname), &idx));
+
+	WT_ERR(__fill_index(session, table, idx));
 
 err:	__wt_free(session, idxconf);
 	__wt_free(session, sourceconf);
@@ -573,7 +639,7 @@ __create_data_source(WT_SESSION_IMPL *session,
 {
 	WT_CONFIG_ITEM cval;
 	const char *cfg[] = {
-	    WT_CONFIG_BASE(session, session_create), config, NULL };
+	    WT_CONFIG_BASE(session, WT_SESSION_create), config, NULL };
 
 	/*
 	 * Check to be sure the key/value formats are legal: the underlying

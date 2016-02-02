@@ -26,12 +26,16 @@
  *    it in the license file.
  */
 
+#include "mongo/platform/basic.h"
+
 #include "mongo/db/ops/delete.h"
 
+#include "mongo/db/catalog/database.h"
 #include "mongo/db/exec/delete.h"
 #include "mongo/db/ops/delete_request.h"
 #include "mongo/db/ops/parsed_delete.h"
 #include "mongo/db/query/get_executor.h"
+#include "mongo/db/repl/repl_client_info.h"
 
 namespace mongo {
 
@@ -41,37 +45,38 @@ namespace mongo {
    god:     allow access to system namespaces, and don't yield
 */
 long long deleteObjects(OperationContext* txn,
-                        Database* db,
-                        const StringData& ns,
+                        Collection* collection,
+                        StringData ns,
                         BSONObj pattern,
                         PlanExecutor::YieldPolicy policy,
                         bool justOne,
-                        bool logop,
                         bool god,
                         bool fromMigrate) {
     NamespaceString nsString(ns);
     DeleteRequest request(nsString);
     request.setQuery(pattern);
     request.setMulti(!justOne);
-    request.setUpdateOpLog(logop);
     request.setGod(god);
     request.setFromMigrate(fromMigrate);
     request.setYieldPolicy(policy);
 
-    Collection* collection = NULL;
-    if (db) {
-        collection = db->getCollection(nsString.ns());
-    }
-
     ParsedDelete parsedDelete(txn, &request);
     uassertStatusOK(parsedDelete.parseRequest());
 
-    PlanExecutor* rawExec;
-    uassertStatusOK(getExecutorDelete(txn, collection, &parsedDelete, &rawExec));
-    boost::scoped_ptr<PlanExecutor> exec(rawExec);
+    auto client = txn->getClient();
+    auto lastOpAtOperationStart = repl::ReplClientInfo::forClient(client).getLastOp();
+
+    std::unique_ptr<PlanExecutor> exec =
+        uassertStatusOK(getExecutorDelete(txn, collection, &parsedDelete));
 
     uassertStatusOK(exec->executePlan());
-    return DeleteStage::getNumDeleted(exec.get());
+
+    // No-ops need to reset lastOp in the client, for write concern.
+    if (repl::ReplClientInfo::forClient(client).getLastOp() == lastOpAtOperationStart) {
+        repl::ReplClientInfo::forClient(client).setLastOpToSystemLastOpTime(txn);
+    }
+
+    return DeleteStage::getNumDeleted(*exec);
 }
 
 }  // namespace mongo

@@ -62,8 +62,7 @@ public:
              BSONObj& cmdObj,
              int options,
              std::string& errmsg,
-             BSONObjBuilder& result,
-             bool fromRepl);
+             BSONObjBuilder& result);
 
     virtual bool isWriteCommandForConfigServer() const;
 
@@ -95,10 +94,9 @@ public:
     /**
      * Validatess query shape from command object and returns canonical query.
      */
-    static Status canonicalize(OperationContext* txn,
-                               const std::string& ns,
-                               const BSONObj& cmdObj,
-                               CanonicalQuery** canonicalQueryOut);
+    static StatusWith<std::unique_ptr<CanonicalQuery>> canonicalize(OperationContext* txn,
+                                                                    const std::string& ns,
+                                                                    const BSONObj& cmdObj);
 
 private:
     std::string helpText;

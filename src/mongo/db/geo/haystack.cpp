@@ -26,20 +26,24 @@
  *    it in the license file.
  */
 
+#include "mongo/platform/basic.h"
+
 #include <vector>
 
 #include "mongo/db/auth/action_set.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/privilege.h"
-#include "mongo/db/curop.h"
+#include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/database.h"
+#include "mongo/db/commands.h"
+#include "mongo/db/curop.h"
+#include "mongo/db/db_raii.h"
 #include "mongo/db/index/haystack_access_method.h"
-#include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index/index_access_method.h"
+#include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index_names.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/commands.h"
+#include "mongo/db/query/find_common.h"
 
 /**
  * Examines all documents in a given radius of a given point.
@@ -67,6 +71,13 @@ public:
     bool slaveOverrideOk() const {
         return true;
     }
+    bool supportsReadConcern() const final {
+        return true;
+    }
+
+    std::size_t reserveBytesForReply() const override {
+        return FindCommon::kInitReplyBufferSize;
+    }
 
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
@@ -81,8 +92,7 @@ public:
              BSONObj& cmdObj,
              int,
              string& errmsg,
-             BSONObjBuilder& result,
-             bool fromRepl) {
+             BSONObjBuilder& result) {
         const std::string ns = parseNsCollectionRequired(dbname, cmdObj);
 
         AutoGetCollectionForRead ctx(txn, ns);

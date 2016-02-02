@@ -52,7 +52,8 @@
 namespace mongo {
 
 NamespaceDetails::NamespaceDetails(const DiskLoc& loc, bool capped) {
-    BOOST_STATIC_ASSERT(sizeof(NamespaceDetails::Extra) <= sizeof(NamespaceDetails));
+    static_assert(sizeof(NamespaceDetails::Extra) <= sizeof(NamespaceDetails),
+                  "sizeof(NamespaceDetails::Extra) <= sizeof(NamespaceDetails)");
 
     /* be sure to initialize new fields here -- doesn't default to zeroes the way we use it */
     firstExtent = lastExtent = capExtent = loc;
@@ -83,7 +84,7 @@ NamespaceDetails::NamespaceDetails(const DiskLoc& loc, bool capped) {
 }
 
 NamespaceDetails::Extra* NamespaceDetails::allocExtra(OperationContext* txn,
-                                                      const StringData& ns,
+                                                      StringData ns,
                                                       NamespaceIndex& ni,
                                                       int nindexessofar) {
     // Namespace details must always be changed under an exclusive DB lock
@@ -178,7 +179,7 @@ NamespaceDetails::IndexIterator::IndexIterator(const NamespaceDetails* _d,
 
 // must be called when renaming a NS to fix up extra
 void NamespaceDetails::copyingFrom(OperationContext* txn,
-                                   const StringData& thisns,
+                                   StringData thisns,
                                    NamespaceIndex& ni,
                                    NamespaceDetails* src) {
     _extraOffset = 0;  // we are a copy -- the old value is wrong.  fixing it up below.
@@ -225,7 +226,7 @@ void NamespaceDetails::setMaxCappedDocs(OperationContext* txn, long long max) {
 
 int NamespaceDetails::_catalogFindIndexByName(OperationContext* txn,
                                               const Collection* coll,
-                                              const StringData& name,
+                                              StringData name,
                                               bool includeBackgroundInProgress) const {
     IndexIterator i = ii(includeBackgroundInProgress);
     while (i.more()) {

@@ -27,9 +27,14 @@
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kDefault
 
+#ifdef _WIN32
+#define NVALGRIND
+#endif
+
 #include "mongo/platform/basic.h"
 
-#include "gperftools/malloc_extension.h"
+#include <gperftools/malloc_extension.h>
+#include <valgrind/valgrind.h>
 
 #include "mongo/base/init.h"
 #include "mongo/db/commands/server_status.h"
@@ -46,16 +51,15 @@ namespace {
 // a long time.
 const int kManyClients = 40;
 
-boost::mutex tcmallocCleanupLock;
+stdx::mutex tcmallocCleanupLock;
 
 /**
  *  Callback to allow TCMalloc to release freed memory to the central list at
  *  favorable times. Ideally would do some milder cleanup or scavenge...
  */
 void threadStateChange() {
-    if (Listener::globalTicketHolder.used() <= kManyClients) {
+    if (Listener::globalTicketHolder.used() <= kManyClients)
         return;
-    }
 
 #if MONGO_HAVE_GPERFTOOLS_GET_THREAD_CACHE_SIZE
     size_t threadCacheSizeBytes = MallocExtension::instance()->GetThreadCacheSize();
@@ -70,18 +74,19 @@ void threadStateChange() {
 
     LOG(1) << "thread over memory limit, cleaning up, current: " << (threadCacheSizeBytes / 1024)
            << "k";
-#endif
 
     // We synchronize as the tcmalloc central list uses a spinlock, and we can cause a really
     // terrible runaway if we're not careful.
-    boost::mutex::scoped_lock lk(tcmallocCleanupLock);
+    stdx::lock_guard<stdx::mutex> lk(tcmallocCleanupLock);
+#endif
     MallocExtension::instance()->MarkThreadIdle();
     MallocExtension::instance()->MarkThreadBusy();
 }
 
 // Register threadStateChange callback
 MONGO_INITIALIZER(TCMallocThreadIdleListener)(InitializerContext*) {
-    registerThreadIdleCallback(&threadStateChange);
+    if (!RUNNING_ON_VALGRIND)
+        registerThreadIdleCallback(&threadStateChange);
     return Status::OK();
 }
 
@@ -89,7 +94,7 @@ class TCMallocServerStatusSection : public ServerStatusSection {
 public:
     TCMallocServerStatusSection() : ServerStatusSection("tcmalloc") {}
     virtual bool includeByDefault() const {
-        return false;
+        return true;
     }
 
     virtual BSONObj generateSection(OperationContext* txn, const BSONElement& configElement) const {

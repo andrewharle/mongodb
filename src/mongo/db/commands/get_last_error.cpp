@@ -32,11 +32,13 @@
 
 #include "mongo/platform/basic.h"
 
+#include "mongo/bson/util/bson_extract.h"
 #include "mongo/db/client.h"
-#include "mongo/db/curop.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/curop.h"
 #include "mongo/db/field_parser.h"
 #include "mongo/db/lasterror.h"
+#include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/replication_coordinator_global.h"
 #include "mongo/db/write_concern.h"
 #include "mongo/util/log.h"
@@ -72,11 +74,8 @@ public:
              BSONObj& cmdObj,
              int,
              string& errmsg,
-             BSONObjBuilder& result,
-             bool fromRepl) {
-        LastError* le = lastError.get();
-        verify(le);
-        le->reset();
+             BSONObjBuilder& result) {
+        LastError::get(txn->getClient()).reset();
         return true;
     }
 } cmdResetError;
@@ -94,7 +93,7 @@ public:
                                        const BSONObj& cmdObj,
                                        std::vector<Privilege>* out) {}  // No auth required
     virtual void help(stringstream& help) const {
-        lastError.disableForCommand();  // SERVER-11492
+        LastError::get(cc()).disable();  // SERVER-11492
         help << "return error status of the last operation on this connection\n"
              << "options:\n"
              << "  { fsync:true } - fsync before returning, or wait for journal commit if running "
@@ -110,8 +109,7 @@ public:
              BSONObj& cmdObj,
              int,
              string& errmsg,
-             BSONObjBuilder& result,
-             bool fromRepl) {
+             BSONObjBuilder& result) {
         //
         // Correct behavior here is very finicky.
         //
@@ -136,33 +134,57 @@ public:
         // err is null.
         //
 
-        LastError* le = lastError.disableForCommand();
+        LastError* le = &LastError::get(txn->getClient());
+        le->disable();
 
         // Always append lastOp and connectionId
         Client& c = *txn->getClient();
-        c.appendLastOp(result);
+        auto replCoord = repl::getGlobalReplicationCoordinator();
+        if (replCoord->getReplicationMode() == repl::ReplicationCoordinator::modeReplSet) {
+            const repl::OpTime lastOp = repl::ReplClientInfo::forClient(c).getLastOp();
+            if (!lastOp.isNull()) {
+                if (replCoord->isV1ElectionProtocol()) {
+                    lastOp.append(&result, "lastOp");
+                } else {
+                    result.append("lastOp", lastOp.getTimestamp());
+                }
+            }
+        }
 
         // for sharding; also useful in general for debugging
         result.appendNumber("connectionId", c.getConnectionId());
 
-        OpTime lastOpTime;
-        BSONField<OpTime> wOpTimeField("wOpTime");
-        FieldParser::FieldState extracted =
-            FieldParser::extract(cmdObj, wOpTimeField, &lastOpTime, &errmsg);
-        if (!extracted) {
-            result.append("badGLE", cmdObj);
-            appendCommandStatus(result, false, errmsg);
-            return false;
+        repl::OpTime lastOpTime;
+        bool lastOpTimePresent = true;
+        const BSONElement opTimeElement = cmdObj["wOpTime"];
+        if (opTimeElement.eoo()) {
+            lastOpTimePresent = false;
+            lastOpTime = repl::ReplClientInfo::forClient(c).getLastOp();
+        } else if (opTimeElement.type() == bsonTimestamp) {
+            lastOpTime = repl::OpTime(opTimeElement.timestamp(), repl::OpTime::kUninitializedTerm);
+        } else if (opTimeElement.type() == Date) {
+            lastOpTime =
+                repl::OpTime(Timestamp(opTimeElement.date()), repl::OpTime::kUninitializedTerm);
+        } else if (opTimeElement.type() == Object) {
+            Status status = bsonExtractOpTimeField(cmdObj, "wOpTime", &lastOpTime);
+            if (!status.isOK()) {
+                result.append("badGLE", cmdObj);
+                return appendCommandStatus(result, status);
+            }
+        } else {
+            return appendCommandStatus(
+                result,
+                Status(ErrorCodes::TypeMismatch,
+                       str::stream() << "Expected \"wOpTime\" field in getLastError to "
+                                        "have type Date, Timestamp, or OpTime but found type "
+                                     << typeName(opTimeElement.type())));
         }
-        bool lastOpTimePresent = extracted != FieldParser::FIELD_NONE;
-        if (!lastOpTimePresent) {
-            // Use the client opTime if no wOpTime is specified
-            lastOpTime = c.getLastOp();
-        }
+
 
         OID electionId;
         BSONField<OID> wElectionIdField("wElectionId");
-        extracted = FieldParser::extract(cmdObj, wElectionIdField, &electionId, &errmsg);
+        FieldParser::FieldState extracted =
+            FieldParser::extract(cmdObj, wElectionIdField, &electionId, &errmsg);
         if (!extracted) {
             result.append("badGLE", cmdObj);
             appendCommandStatus(result, false, errmsg);
@@ -174,9 +196,8 @@ public:
 
         // Errors aren't reported when wOpTime is used
         if (!lastOpTimePresent) {
-            if (le->nPrev != 1) {
+            if (le->getNPrev() != 1) {
                 errorOccurred = LastError::noError.appendSelf(result, false);
-                le->appendSelfStatus(result);
             } else {
                 errorOccurred = le->appendSelf(result, false);
             }
@@ -203,7 +224,7 @@ public:
 
         if (status.isOK()) {
             // Ensure options are valid for this host
-            status = validateWriteConcern(writeConcern);
+            status = validateWriteConcern(txn, writeConcern, dbname);
         }
 
         if (!status.isOK()) {
@@ -242,10 +263,15 @@ public:
             }
         }
 
-        txn->setMessage("waiting for write concern");
+        txn->setWriteConcern(writeConcern);
+        setupSynchronousCommit(txn);
+        {
+            stdx::lock_guard<Client> lk(*txn->getClient());
+            txn->setMessage_inlock("waiting for write concern");
+        }
 
         WriteConcernResult wcResult;
-        status = waitForWriteConcern(txn, writeConcern, lastOpTime, &wcResult);
+        status = waitForWriteConcern(txn, lastOpTime, txn->getWriteConcern(), &wcResult);
         wcResult.appendTo(writeConcern, &result);
 
         // For backward compatibility with 2.4, wtimeout returns ok : 1.0
@@ -282,12 +308,12 @@ public:
              BSONObj& cmdObj,
              int,
              string& errmsg,
-             BSONObjBuilder& result,
-             bool fromRepl) {
-        LastError* le = lastError.disableForCommand();
-        le->appendSelf(result);
-        if (le->valid)
-            result.append("nPrev", le->nPrev);
+             BSONObjBuilder& result) {
+        LastError* le = &LastError::get(txn->getClient());
+        le->disable();
+        le->appendSelf(result, true);
+        if (le->isValid())
+            result.append("nPrev", le->getNPrev());
         else
             result.append("nPrev", -1);
         return true;

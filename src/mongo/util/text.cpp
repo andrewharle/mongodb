@@ -30,7 +30,6 @@
 #include "mongo/util/text.h"
 
 #include <boost/integer_traits.hpp>
-#include <boost/smart_ptr/scoped_array.hpp>
 #include <errno.h>
 #include <iostream>
 #include <sstream>
@@ -156,7 +155,7 @@ long long parseLL(const char* n) {
     errno = 0;
     ret = strtoll(n, &endPtr, 10);
     uassert(13305, "could not convert string to long long", *endPtr == 0 && errno == 0);
-#elif _MSC_VER >= 1600  // 1600 is VS2k10 1500 is VS2k8
+#else
     size_t endLen = 0;
     try {
         ret = stoll(n, &endLen, 10);
@@ -164,13 +163,7 @@ long long parseLL(const char* n) {
         endLen = 0;
     }
     uassert(13306, "could not convert string to long long", endLen != 0 && n[endLen] == 0);
-#else                   // stoll() wasn't introduced until VS 2010.
-    char* endPtr = 0;
-    ret = _strtoi64(n, &endPtr, 10);
-    uassert(13310,
-            "could not convert string to long long",
-            (*endPtr == 0) && (ret != _I64_MAX) && (ret != _I64_MIN));
-#endif                  // !defined(_WIN32)
+#endif  // !defined(_WIN32)
     return ret;
 }
 
@@ -219,7 +212,7 @@ std::wstring toWideString(const char* utf8String) {
     if (bufferSize == 0) {
         return std::wstring();
     }
-    boost::scoped_array<wchar_t> tempBuffer(new wchar_t[bufferSize]);
+    std::unique_ptr<wchar_t[]> tempBuffer(new wchar_t[bufferSize]);
     tempBuffer[0] = 0;
     MultiByteToWideChar(CP_UTF8,           // Code page
                         0,                 // Flags
@@ -249,7 +242,7 @@ bool writeUtf8ToWindowsConsole(const char* utf8String, unsigned int utf8StringSi
     if (bufferSize == 0) {
         return true;
     }
-    boost::scoped_array<wchar_t> utf16String(new wchar_t[bufferSize]);
+    std::unique_ptr<wchar_t[]> utf16String(new wchar_t[bufferSize]);
     MultiByteToWideChar(CP_UTF8,            // Code page
                         0,                  // Flags
                         utf8String,         // Input string

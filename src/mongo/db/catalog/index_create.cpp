@@ -34,29 +34,28 @@
 
 #include "mongo/db/catalog/index_create.h"
 
-#include <boost/make_shared.hpp>
-#include <boost/scoped_ptr.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/client/dbclientinterface.h"
 #include "mongo/db/audit.h"
 #include "mongo/db/background.h"
 #include "mongo/db/catalog/collection.h"
+#include "mongo/db/client.h"
 #include "mongo/db/clientcursor.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/exec/working_set_common.h"
 #include "mongo/db/query/internal_plans.h"
-#include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/replication_coordinator_global.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/stdx/mutex.h"
 #include "mongo/util/log.h"
 #include "mongo/util/processinfo.h"
 #include "mongo/util/progress_meter.h"
 
 namespace mongo {
 
-using boost::scoped_ptr;
+using std::unique_ptr;
 using std::string;
 using std::endl;
 
@@ -176,7 +175,7 @@ Status MultiIndexBlock::init(const std::vector<BSONObj>& indexSpecs) {
         info = statusWithInfo.getValue();
 
         IndexToBuild index;
-        index.block = boost::make_shared<IndexCatalog::IndexBuildBlock>(_txn, _collection, info);
+        index.block.reset(new IndexCatalog::IndexBuildBlock(_txn, _collection, info));
         status = index.block->init();
         if (!status.isOK())
             return status;
@@ -189,7 +188,7 @@ Status MultiIndexBlock::init(const std::vector<BSONObj>& indexSpecs) {
         if (!_buildInBackground) {
             // Bulk build process requires foreground building as it assumes nothing is changing
             // under it.
-            index.bulk.reset(index.real->initiateBulk(_txn));
+            index.bulk = index.real->initiateBulk();
         }
 
         const IndexDescriptor* descriptor = index.block->getEntry()->descriptor();
@@ -202,15 +201,13 @@ Status MultiIndexBlock::init(const std::vector<BSONObj>& indexSpecs) {
         if (index.bulk)
             log() << "\t building index using bulk method";
 
+        index.filterExpression = index.block->getEntry()->getFilterExpression();
+
         // TODO SERVER-14888 Suppress this in cases we don't want to audit.
         audit::logCreateIndex(_txn->getClient(), &info, descriptor->indexName(), ns);
 
-        _indexes.push_back(index);
+        _indexes.push_back(std::move(index));
     }
-
-    // this is so that operations examining the list of indexes know there are more keys to look
-    // at when doing things like in place updates, etc...
-    _collection->infoCache()->addedIndex(_txn);
 
     if (_buildInBackground)
         _backgroundOperation.reset(new BackgroundOperation(ns));
@@ -221,18 +218,22 @@ Status MultiIndexBlock::init(const std::vector<BSONObj>& indexSpecs) {
 
 Status MultiIndexBlock::insertAllDocumentsInCollection(std::set<RecordId>* dupsOut) {
     const char* curopMessage = _buildInBackground ? "Index Build (background)" : "Index Build";
-    ProgressMeterHolder progress(
-        *_txn->setMessage(curopMessage, curopMessage, _collection->numRecords(_txn)));
+    const auto numRecords = _collection->numRecords(_txn);
+    stdx::unique_lock<Client> lk(*_txn->getClient());
+    ProgressMeterHolder progress(*_txn->setMessage_inlock(curopMessage, curopMessage, numRecords));
+    lk.unlock();
 
     Timer t;
 
     unsigned long long n = 0;
 
-    scoped_ptr<PlanExecutor> exec(
-        InternalPlanner::collectionScan(_txn, _collection->ns().ns(), _collection));
+    unique_ptr<PlanExecutor> exec(InternalPlanner::collectionScan(
+        _txn, _collection->ns().ns(), _collection, PlanExecutor::YIELD_MANUAL));
     if (_buildInBackground) {
         invariant(_allowInterruption);
         exec->setYieldPolicy(PlanExecutor::YIELD_AUTO);
+    } else {
+        exec->setYieldPolicy(PlanExecutor::WRITE_CONFLICT_RETRY_ONLY);
     }
 
     Snapshotted<BSONObj> objToIndex;
@@ -274,15 +275,15 @@ Status MultiIndexBlock::insertAllDocumentsInCollection(std::set<RecordId>* dupsO
             n++;
             retries = 0;
         } catch (const WriteConflictException& wce) {
-            _txn->getCurOp()->debug().writeConflicts++;
+            CurOp::get(_txn)->debug().writeConflicts++;
             retries++;  // logAndBackoff expects this to be 1 on first call.
             wce.logAndBackoff(retries, "index creation", _collection->ns().ns());
 
             // Can't use WRITE_CONFLICT_RETRY_LOOP macros since we need to save/restore exec
-            // around call to commitAndRestart.
+            // around call to abandonSnapshot.
             exec->saveState();
-            _txn->recoveryUnit()->commitAndRestart();
-            exec->restoreState(_txn);  // Handles any WCEs internally.
+            _txn->recoveryUnit()->abandonSnapshot();
+            exec->restoreState();  // Handles any WCEs internally.
         }
     }
 
@@ -305,9 +306,18 @@ Status MultiIndexBlock::insertAllDocumentsInCollection(std::set<RecordId>* dupsO
 
 Status MultiIndexBlock::insert(const BSONObj& doc, const RecordId& loc) {
     for (size_t i = 0; i < _indexes.size(); i++) {
+        if (_indexes[i].filterExpression && !_indexes[i].filterExpression->matchesBSON(doc)) {
+            continue;
+        }
+
         int64_t unused;
-        Status idxStatus =
-            _indexes[i].forInsert()->insert(_txn, doc, loc, _indexes[i].options, &unused);
+        Status idxStatus(ErrorCodes::InternalError, "");
+        if (_indexes[i].bulk) {
+            idxStatus = _indexes[i].bulk->insert(_txn, doc, loc, _indexes[i].options, &unused);
+        } else {
+            idxStatus = _indexes[i].real->insert(_txn, doc, loc, _indexes[i].options, &unused);
+        }
+
         if (!idxStatus.isOK())
             return idxStatus;
     }
@@ -320,8 +330,11 @@ Status MultiIndexBlock::doneInserting(std::set<RecordId>* dupsOut) {
             continue;
         LOG(1) << "\t bulk commit starting for index: "
                << _indexes[i].block->getEntry()->descriptor()->indexName();
-        Status status = _indexes[i].real->commitBulk(
-            _indexes[i].bulk.get(), _allowInterruption, _indexes[i].options.dupsAllowed, dupsOut);
+        Status status = _indexes[i].real->commitBulk(_txn,
+                                                     std::move(_indexes[i].bulk),
+                                                     _allowInterruption,
+                                                     _indexes[i].options.dupsAllowed,
+                                                     dupsOut);
         if (!status.isOK()) {
             return status;
         }
@@ -339,9 +352,6 @@ void MultiIndexBlock::commit() {
     for (size_t i = 0; i < _indexes.size(); i++) {
         _indexes[i].block->success();
     }
-
-    // this one is so operations examining the list of indexes know that the index is finished
-    _collection->infoCache()->addedIndex(_txn);
 
     _txn->recoveryUnit()->registerChange(new SetNeedToCleanupOnRollback(this));
     _needToCleanup = false;

@@ -32,7 +32,6 @@
 
 #include "mongo/util/signal_handlers.h"
 
-#include <boost/thread.hpp>
 #include <signal.h>
 
 #if !defined(_WIN32)
@@ -43,6 +42,7 @@
 #include "mongo/db/log_process_details.h"
 #include "mongo/db/server_options.h"
 #include "mongo/platform/process_id.h"
+#include "mongo/stdx/thread.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/exit_code.h"
 #include "mongo/util/log.h"
@@ -187,22 +187,18 @@ void signalProcessingThread() {
 #endif
 }  // namespace
 
-void setupSignalHandlers(bool handleControlC) {
+void setupSignalHandlers() {
     setupSynchronousSignalHandlers();
 #ifdef _WIN32
-    if (!handleControlC) {
-        massert(10297,
-                "Couldn't register Windows Ctrl-C handler",
-                SetConsoleCtrlHandler(static_cast<PHANDLER_ROUTINE>(CtrlHandler), TRUE));
-    }
+    massert(10297,
+            "Couldn't register Windows Ctrl-C handler",
+            SetConsoleCtrlHandler(static_cast<PHANDLER_ROUTINE>(CtrlHandler), TRUE));
 #else
     // asyncSignals is a global variable listing the signals that should be handled by the
     // interrupt thread, once it is started via startSignalProcessingThread().
     sigemptyset(&asyncSignals);
     sigaddset(&asyncSignals, SIGHUP);
-    if (!handleControlC) {
-        sigaddset(&asyncSignals, SIGINT);
-    }
+    sigaddset(&asyncSignals, SIGINT);
     sigaddset(&asyncSignals, SIGTERM);
     sigaddset(&asyncSignals, SIGUSR1);
     sigaddset(&asyncSignals, SIGXCPU);
@@ -211,12 +207,12 @@ void setupSignalHandlers(bool handleControlC) {
 
 void startSignalProcessingThread() {
 #ifdef _WIN32
-    boost::thread(eventProcessingThread).detach();
+    stdx::thread(eventProcessingThread).detach();
 #else
     // Mask signals in the current (only) thread. All new threads will inherit this mask.
     invariant(pthread_sigmask(SIG_SETMASK, &asyncSignals, 0) == 0);
     // Spawn a thread to capture the signals we just masked off.
-    boost::thread(signalProcessingThread).detach();
+    stdx::thread(signalProcessingThread).detach();
 #endif
 }
 

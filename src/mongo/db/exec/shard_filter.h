@@ -28,15 +28,11 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
-
 #include "mongo/db/exec/plan_stage.h"
-#include "mongo/db/jsobj.h"
-#include "mongo/db/record_id.h"
-#include "mongo/s/chunk_version.h"
-#include "mongo/s/d_state.h"
 
 namespace mongo {
+
+class CollectionMetadata;
 
 /**
  * This stage drops documents that didn't belong to the shard we're executing on at the time of
@@ -73,43 +69,36 @@ namespace mongo {
  * Preconditions: Child must be fetched.  TODO: when covering analysis is in just build doc
  * and check that against shard key.  See SERVER-5022.
  */
-class ShardFilterStage : public PlanStage {
+class ShardFilterStage final : public PlanStage {
 public:
-    ShardFilterStage(const CollectionMetadataPtr& metadata, WorkingSet* ws, PlanStage* child);
-    virtual ~ShardFilterStage();
+    ShardFilterStage(OperationContext* opCtx,
+                     const std::shared_ptr<CollectionMetadata>& metadata,
+                     WorkingSet* ws,
+                     PlanStage* child);
+    ~ShardFilterStage();
 
-    virtual bool isEOF();
-    virtual StageState work(WorkingSetID* out);
+    bool isEOF() final;
+    StageState work(WorkingSetID* out) final;
 
-    virtual void saveState();
-    virtual void restoreState(OperationContext* opCtx);
-    virtual void invalidate(OperationContext* txn, const RecordId& dl, InvalidationType type);
-
-    virtual std::vector<PlanStage*> getChildren() const;
-
-    virtual StageType stageType() const {
+    StageType stageType() const final {
         return STAGE_SHARDING_FILTER;
     }
 
-    virtual PlanStageStats* getStats();
+    std::unique_ptr<PlanStageStats> getStats() final;
 
-    virtual const CommonStats* getCommonStats();
-
-    virtual const SpecificStats* getSpecificStats();
+    const SpecificStats* getSpecificStats() const final;
 
     static const char* kStageType;
 
 private:
     WorkingSet* _ws;
-    boost::scoped_ptr<PlanStage> _child;
 
     // Stats
-    CommonStats _commonStats;
     ShardingFilterStats _specificStats;
 
     // Note: it is important that this is the metadata from the time this stage is constructed.
     // See class comment for details.
-    const CollectionMetadataPtr _metadata;
+    const std::shared_ptr<CollectionMetadata> _metadata;
 };
 
 }  // namespace mongo

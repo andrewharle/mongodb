@@ -28,38 +28,25 @@
 
 #pragma once
 
-#include <boost/noncopyable.hpp>
-#include <boost/scoped_ptr.hpp>
-#include <boost/thread/recursive_mutex.hpp>
-
+#include "mongo/db/cursor_id.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/db/keypattern.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/record_id.h"
-#include "mongo/s/collection_metadata.h"
-#include "mongo/util/background.h"
 #include "mongo/util/net/message.h"
 
 namespace mongo {
 
-typedef boost::recursive_mutex::scoped_lock recursive_scoped_lock;
-class ClientCursor;
 class Collection;
-class CurOp;
 class CursorManager;
-class Database;
-class NamespaceDetails;
-class ParsedQuery;
 class RecoveryUnit;
-
-typedef long long CursorId; /* passed to the client so it can send back on getMore */
-static const CursorId INVALID_CURSOR_ID = -1;  // But see SERVER-5726.
 
 /**
  * ClientCursor is a wrapper that represents a cursorid from our database application's
  * perspective.
  */
-class ClientCursor : private boost::noncopyable {
+class ClientCursor {
+    MONGO_DISALLOW_COPYING(ClientCursor);
+
 public:
     /**
      * This ClientCursor constructor creates a cursorid that can be used with getMore and
@@ -70,12 +57,15 @@ public:
     ClientCursor(CursorManager* cursorManager,
                  PlanExecutor* exec,
                  const std::string& ns,
+                 bool isReadCommitted,
                  int qopts = 0,
                  const BSONObj query = BSONObj(),
                  bool isAggCursor = false);
 
     /**
      * This ClientCursor is used to track sharding state for the given collection.
+     *
+     * Do not use outside of RangePreserver!
      */
     explicit ClientCursor(const Collection* collection);
 
@@ -91,6 +81,9 @@ public:
     }
     CursorManager* cursorManager() const {
         return _cursorManager;
+    }
+    bool isReadCommitted() const {
+        return _isReadCommitted;
     }
     bool isAggCursor() const {
         return _isAggCursor;
@@ -150,26 +143,17 @@ public:
     }
 
     //
-    // Sharding-specific data.  TODO: Document.
-    //
-
-    void setCollMetadata(CollectionMetadataPtr metadata) {
-        _collMetadata = metadata;
-    }
-    CollectionMetadataPtr getCollMetadata() {
-        return _collMetadata;
-    }
-
-    //
     // Replication-related stuff.  TODO: Document and clean.
     //
 
-    void updateSlaveLocation(OperationContext* txn, CurOp& curop);
-    void slaveReadTill(const OpTime& t) {
+    // Used to report replication position only in master-slave,
+    // so we keep them as TimeStamp rather than OpTime.
+    void updateSlaveLocation(OperationContext* txn);
+    void slaveReadTill(const Timestamp& t) {
         _slaveReadTill = t;
     }
     /** Just for testing. */
-    OpTime getSlaveReadTill() const {
+    Timestamp getSlaveReadTill() const {
         return _slaveReadTill;
     }
 
@@ -188,60 +172,17 @@ public:
     }
 
     // Used by ops/query.cpp to stash how many results have been returned by a query.
-    int pos() const {
+    long long pos() const {
         return _pos;
     }
-    void incPos(int n) {
+    void incPos(long long n) {
         _pos += n;
     }
-    void setPos(int n) {
+    void setPos(long long n) {
         _pos = n;
     }
 
     static long long totalOpen();
-
-    //
-    // Storage engine state for getMore.
-    //
-
-    bool hasRecoveryUnit() const {
-        return _ownedRU.get() || _unownedRU;
-    }
-
-    /**
-     *
-     * If a ClientCursor is created via DBDirectClient, it uses the same storage engine
-     * context as the DBDirectClient caller.  We store this context in _unownedRU.  We use
-     * this to verify that all further callers use the same RecoveryUnit.
-     *
-     * Once a ClientCursor has an unowned RecoveryUnit, it will always have one.
-     *
-     * Sets the unowned RecoveryUnit to 'ru'.  Does NOT take ownership of the pointer.
-     */
-    void setUnownedRecoveryUnit(RecoveryUnit* ru);
-
-    /**
-     * Return the unowned RecoveryUnit.  'this' does not own pointer and therefore cannot
-     * transfer ownership.
-     */
-    RecoveryUnit* getUnownedRecoveryUnit() const;
-
-    /**
-     * If a ClientCursor is created via a client request, we bind its lifetime to the
-     * ClientCursor's by storing it un _ownedRU.  In order to execute the query over repeated
-     * network requests, we have to keep the execution state around.
-     */
-
-    /**
-     * Set the owned recovery unit to 'ru'.  Takes ownership of it.  If there is a previous
-     * owned recovery unit, it is deleted.
-     */
-    void setOwnedRecoveryUnit(RecoveryUnit* ru);
-
-    /**
-     * Returns the owned recovery unit.  Ownership is transferred to the caller.
-     */
-    RecoveryUnit* releaseOwnedRecoveryUnit();
 
 private:
     friend class CursorManager;
@@ -268,13 +209,15 @@ private:
     // The namespace we're operating on.
     std::string _ns;
 
+    const bool _isReadCommitted;
+
     CursorManager* _cursorManager;
 
     // if we've added it to the total open counter yet
     bool _countedYet;
 
     // How many objects have been returned by the find() so far?
-    int _pos;
+    long long _pos;
 
     // If this cursor was created by a find operation, '_query' holds the query predicate for
     // the find. If this cursor was created by a command (e.g. the aggregate command), then
@@ -290,7 +233,7 @@ private:
     // should not be killed or destroyed when the underlying collection is deleted.
     //
     // Note: This should *not* be set for the internal cursor used as input to an aggregation.
-    bool _isAggCursor;
+    const bool _isAggCursor;
 
     // Is this cursor in use?  Defaults to false.
     bool _isPinned;
@@ -299,8 +242,8 @@ private:
     // deletion after an interval of inactivity.  Defaults to false.
     bool _isNoTimeout;
 
-    // TODO: document better.
-    OpTime _slaveReadTill;
+    // The replication position only used in master-slave.
+    Timestamp _slaveReadTill;
 
     // How long has the cursor been idle?
     int _idleAgeMillis;
@@ -308,24 +251,10 @@ private:
     // TODO: Document.
     uint64_t _leftoverMaxTimeMicros;
 
-    // For chunks that are being migrated, there is a period of time when that chunks data is in
-    // two shards, the donor and the receiver one. That data is picked up by a cursor on the
-    // receiver side, even before the migration was decided.  The CollectionMetadata allow one
-    // to inquiry if any given document of the collection belongs indeed to this shard or if it
-    // is coming from (or a vestige of) an ongoing migration.
-    CollectionMetadataPtr _collMetadata;
-
-    // Only one of these is not-NULL.
-    RecoveryUnit* _unownedRU;
-    std::auto_ptr<RecoveryUnit> _ownedRU;
-    // NOTE: _ownedRU must come before _exec, because _ownedRU must outlive _exec.
-    // The storage engine can have resources in the PlanExecutor that rely on
-    // the RecoveryUnit being alive.
-
     //
     // The underlying execution machinery.
     //
-    boost::scoped_ptr<PlanExecutor> _exec;
+    std::unique_ptr<PlanExecutor> _exec;
 };
 
 /**

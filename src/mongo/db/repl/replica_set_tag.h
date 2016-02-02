@@ -28,6 +28,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <iosfwd>
 #include <string>
 #include <utility>
@@ -35,7 +36,6 @@
 
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
-#include "mongo/platform/cstdint.h"
 
 namespace mongo {
 class BSONObjBuilder;
@@ -229,13 +229,13 @@ public:
     /**
      * Finds or allocates a tag with the given "key" and "value" strings.
      */
-    ReplicaSetTag makeTag(const StringData& key, const StringData& value);
+    ReplicaSetTag makeTag(StringData key, StringData value);
 
     /**
      * Finds a tag with the given key and value strings, or returns a tag whose isValid() method
      * returns false if the configuration has never allocated such a tag via makeTag().
      */
-    ReplicaSetTag findTag(const StringData& key, const StringData& value) const;
+    ReplicaSetTag findTag(StringData key, StringData value) const;
 
     /**
      * Makes a new, empty pattern object.
@@ -249,7 +249,7 @@ public:
      * means that we must see at least "minCount" tags with the specified "tagKey".
      */
     Status addTagCountConstraintToPattern(ReplicaSetTagPattern* pattern,
-                                          const StringData& tagKey,
+                                          StringData tagKey,
                                           int32_t minCount) const;
 
     /**
@@ -291,7 +291,7 @@ private:
      * Returns the index corresponding to "key", or _tagData.size() if there is no
      * such index.
      */
-    int32_t _findKeyIndex(const StringData& key) const;
+    int32_t _findKeyIndex(StringData key) const;
 
     /**
      * Helper that writes a "tagKey" field for the given "keyIndex" to "builder".

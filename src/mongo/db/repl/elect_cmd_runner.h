@@ -28,7 +28,6 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
 #include <vector>
 
 #include "mongo/base/disallow_copying.h"
@@ -58,8 +57,8 @@ public:
                   OID round);
 
         virtual ~Algorithm();
-        virtual std::vector<ReplicationExecutor::RemoteCommandRequest> getRequests() const;
-        virtual void processResponse(const ReplicationExecutor::RemoteCommandRequest& request,
+        virtual std::vector<executor::RemoteCommandRequest> getRequests() const;
+        virtual void processResponse(const executor::RemoteCommandRequest& request,
                                      const ResponseStatus& response);
         virtual bool hasReceivedSufficientResponses() const;
 
@@ -121,8 +120,8 @@ public:
     }
 
 private:
-    boost::scoped_ptr<Algorithm> _algorithm;
-    boost::scoped_ptr<ScatterGatherRunner> _runner;
+    std::unique_ptr<Algorithm> _algorithm;
+    std::unique_ptr<ScatterGatherRunner> _runner;
     bool _isCanceled;
 };
 }

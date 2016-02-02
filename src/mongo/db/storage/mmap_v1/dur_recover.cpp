@@ -40,6 +40,7 @@
 #include <sys/stat.h>
 
 #include "mongo/db/operation_context_impl.h"
+#include "mongo/db/storage/mmap_v1/compress.h"
 #include "mongo/db/storage/mmap_v1/dur_commitjob.h"
 #include "mongo/db/storage/mmap_v1/dur_journal.h"
 #include "mongo/db/storage/mmap_v1/dur_journalformat.h"
@@ -47,9 +48,9 @@
 #include "mongo/db/storage/mmap_v1/durop.h"
 #include "mongo/db/storage/mmap_v1/durable_mapped_file.h"
 #include "mongo/db/storage/mmap_v1/mmap_v1_options.h"
+#include "mongo/platform/strnlen.h"
 #include "mongo/util/bufreader.h"
 #include "mongo/util/checksum.h"
-#include "mongo/util/compress.h"
 #include "mongo/util/exit.h"
 #include "mongo/util/hex.h"
 #include "mongo/util/log.h"
@@ -58,8 +59,8 @@
 
 namespace mongo {
 
-using boost::shared_ptr;
-using std::auto_ptr;
+using std::shared_ptr;
+using std::unique_ptr;
 using std::endl;
 using std::hex;
 using std::map;
@@ -99,7 +100,7 @@ struct ParsedJournalEntry {/*copyable*/
     const JEntry* e;  // local db sentinel is already parsed out here into dbName
 
     // if not one of the two simple JEntry's above, this is the operation:
-    boost::shared_ptr<DurOp> op;
+    std::shared_ptr<DurOp> op;
 };
 
 
@@ -157,7 +158,7 @@ public:
         const char* p = _uncompressed.c_str();
         verify(compressedLen == _h.sectionLen() - sizeof(JSectFooter) - sizeof(JSectHeader));
 
-        _entries = auto_ptr<BufReader>(new BufReader(p, _uncompressed.size()));
+        _entries = unique_ptr<BufReader>(new BufReader(p, _uncompressed.size()));
     }
 
     // We work with the uncompressed buffer when doing a WRITETODATAFILES (for speed)
@@ -188,7 +189,7 @@ public:
                 case JEntry::OpCode_FileCreated:
                 case JEntry::OpCode_DropDb: {
                     e.dbName = 0;
-                    boost::shared_ptr<DurOp> op = DurOp::read(lenOrOpCode, *_entries);
+                    std::shared_ptr<DurOp> op = DurOp::read(lenOrOpCode, *_entries);
                     if (_doDurOps) {
                         e.op = op;
                     }
@@ -227,7 +228,7 @@ public:
 
 
 private:
-    auto_ptr<BufReader> _entries;
+    unique_ptr<BufReader> _entries;
     const JSectHeader _h;
     const char* _lastDbName;  // pointer into mmaped journal file
     const bool _doDurOps;
@@ -252,17 +253,14 @@ static string fileName(const char* dbName, int fileNo) {
 
 
 RecoveryJob::RecoveryJob()
-    : _mx("recovery"),
-      _recovering(false),
-      _lastDataSyncedFromLastRun(0),
-      _lastSeqMentionedInConsoleLog(1) {}
+    : _recovering(false), _lastDataSyncedFromLastRun(0), _lastSeqMentionedInConsoleLog(1) {}
 
 RecoveryJob::~RecoveryJob() {
     DESTRUCTOR_GUARD(if (!_mmfs.empty()) {} close();)
 }
 
 void RecoveryJob::close() {
-    scoped_lock lk(_mx);
+    stdx::lock_guard<stdx::mutex> lk(_mx);
     _close();
 }
 
@@ -297,7 +295,7 @@ DurableMappedFile* RecoveryJob::Last::newEntry(const dur::ParsedJournalEntry& en
             log() << "journal error applying writes, file " << fn << " is not open" << endl;
             verify(false);
         }
-        boost::shared_ptr<DurableMappedFile> sp(new DurableMappedFile);
+        std::shared_ptr<DurableMappedFile> sp(new DurableMappedFile);
         verify(sp->open(fn, false));
         rj._mmfs.push_back(sp);
         mmf = sp.get();
@@ -382,7 +380,7 @@ void RecoveryJob::processSection(const JSectHeader* h,
                                  unsigned len,
                                  const JSectFooter* f) {
     LockMongoFilesShared lkFiles;  // for RecoveryJob::Last
-    scoped_lock lk(_mx);
+    stdx::lock_guard<stdx::mutex> lk(_mx);
 
     // Check the footer checksum before doing anything else.
     if (_recovering) {
@@ -407,11 +405,11 @@ void RecoveryJob::processSection(const JSectHeader* h,
         return;
     }
 
-    auto_ptr<JournalSectionIterator> i;
+    unique_ptr<JournalSectionIterator> i;
     if (_recovering) {
-        i = auto_ptr<JournalSectionIterator>(new JournalSectionIterator(*h, p, len, _recovering));
+        i = unique_ptr<JournalSectionIterator>(new JournalSectionIterator(*h, p, len, _recovering));
     } else {
-        i = auto_ptr<JournalSectionIterator>(
+        i = unique_ptr<JournalSectionIterator>(
             new JournalSectionIterator(*h, /*after header*/ p, /*w/out header*/ len));
     }
 
@@ -480,7 +478,7 @@ bool RecoveryJob::processFileBuffer(const void* p, unsigned len) {
             JSectHeader h;
             br.peek(h);
             if (h.fileId != fileId) {
-                if (debug ||
+                if (kDebugBuild ||
                     (mmapv1GlobalOptions.journalOptions & MMAPV1Options::JournalDumpJournal)) {
                     log() << "Ending processFileBuffer at differing fileId want:" << fileId
                           << " got:" << h.fileId << endl;

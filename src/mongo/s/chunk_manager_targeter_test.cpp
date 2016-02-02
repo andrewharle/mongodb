@@ -28,10 +28,13 @@
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kSharding
 
+#include "mongo/platform/basic.h"
+
 #include "mongo/db/json.h"
+#include "mongo/db/matcher/extensions_callback_noop.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/query/interval.h"
-#include "mongo/s/chunk.h"
+#include "mongo/db/query/canonical_query.h"
+#include "mongo/s/chunk_manager.h"
 #include "mongo/s/shard_key_pattern.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/log.h"
@@ -40,8 +43,9 @@ namespace {
 
 using namespace mongo;
 
-using std::auto_ptr;
+using std::unique_ptr;
 using std::make_pair;
+
 /**
  * ChunkManager targeting test
  *
@@ -50,23 +54,23 @@ using std::make_pair;
  */
 
 // Utility function to create a CanonicalQuery
-CanonicalQuery* canonicalize(const char* queryStr) {
+unique_ptr<CanonicalQuery> canonicalize(const char* queryStr) {
     BSONObj queryObj = fromjson(queryStr);
-    CanonicalQuery* cq;
-    Status result = CanonicalQuery::canonicalize("test.foo", queryObj, &cq, WhereCallbackNoop());
-    ASSERT_OK(result);
-    return cq;
+    const NamespaceString nss("test.foo");
+    auto statusWithCQ = CanonicalQuery::canonicalize(nss, queryObj, ExtensionsCallbackNoop());
+    ASSERT_OK(statusWithCQ.getStatus());
+    return std::move(statusWithCQ.getValue());
 }
 
 void checkIndexBoundsWithKey(const char* keyStr,
                              const char* queryStr,
                              const IndexBounds& expectedBounds) {
-    auto_ptr<CanonicalQuery> query(canonicalize(queryStr));
+    unique_ptr<CanonicalQuery> query(canonicalize(queryStr));
     ASSERT(query.get() != NULL);
 
     BSONObj key = fromjson(keyStr);
 
-    IndexBounds indexBounds = ChunkManager::getIndexBoundsForQuery(key, query.get());
+    IndexBounds indexBounds = ChunkManager::getIndexBoundsForQuery(key, *query.get());
     ASSERT_EQUALS(indexBounds.size(), expectedBounds.size());
     for (size_t i = 0; i < indexBounds.size(); i++) {
         const OrderedIntervalList& oil = indexBounds.fields[i];
@@ -84,12 +88,12 @@ void checkIndexBoundsWithKey(const char* keyStr,
 
 // Assume shard key is { a: 1 }
 void checkIndexBounds(const char* queryStr, const OrderedIntervalList& expectedOil) {
-    auto_ptr<CanonicalQuery> query(canonicalize(queryStr));
+    unique_ptr<CanonicalQuery> query(canonicalize(queryStr));
     ASSERT(query.get() != NULL);
 
     BSONObj key = fromjson("{a: 1}");
 
-    IndexBounds indexBounds = ChunkManager::getIndexBoundsForQuery(key, query.get());
+    IndexBounds indexBounds = ChunkManager::getIndexBoundsForQuery(key, *query.get());
     ASSERT_EQUALS(indexBounds.size(), 1U);
     const OrderedIntervalList& oil = indexBounds.fields.front();
 
@@ -271,12 +275,12 @@ TEST(CMCollapseTreeTest, BasicAllElemMatch) {
     Interval expectedInterval(BSON("" << 1 << "" << 1), true, true);
 
     const char* queryStr = "{foo: {$all: [ {$elemMatch: {a:1, b:1}} ]}}";
-    auto_ptr<CanonicalQuery> query(canonicalize(queryStr));
+    unique_ptr<CanonicalQuery> query(canonicalize(queryStr));
     ASSERT(query.get() != NULL);
 
     BSONObj key = fromjson("{'foo.a': 1}");
 
-    IndexBounds indexBounds = ChunkManager::getIndexBoundsForQuery(key, query.get());
+    IndexBounds indexBounds = ChunkManager::getIndexBoundsForQuery(key, *query.get());
     ASSERT_EQUALS(indexBounds.size(), 1U);
     const OrderedIntervalList& oil = indexBounds.fields.front();
     ASSERT_EQUALS(oil.intervals.size(), 1U);
@@ -351,12 +355,12 @@ TEST(CMCollapseTreeTest, TextWithQuery) {
 //  { a: 0 } -> hashed a: [hash(0), hash(0)]
 TEST(CMCollapseTreeTest, HashedSinglePoint) {
     const char* queryStr = "{ a: 0 }";
-    auto_ptr<CanonicalQuery> query(canonicalize(queryStr));
+    unique_ptr<CanonicalQuery> query(canonicalize(queryStr));
     ASSERT(query.get() != NULL);
 
     BSONObj key = fromjson("{a: 'hashed'}");
 
-    IndexBounds indexBounds = ChunkManager::getIndexBoundsForQuery(key, query.get());
+    IndexBounds indexBounds = ChunkManager::getIndexBoundsForQuery(key, *query.get());
     ASSERT_EQUALS(indexBounds.size(), 1U);
     const OrderedIntervalList& oil = indexBounds.fields.front();
     ASSERT_EQUALS(oil.intervals.size(), 1U);
@@ -508,4 +512,4 @@ TEST(CMKeyBoundsTest, NonPointIntervalExpasion) {
     CheckBoundList(list, expectedList);
 }
 
-}  // end namespace
+}  // namespace

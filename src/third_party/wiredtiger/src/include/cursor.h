@@ -104,6 +104,14 @@ struct __wt_cursor_btree {
 	uint64_t recno;			/* Record number */
 
 	/*
+	 * Next-random cursors can optionally be configured to step through a
+	 * percentage of the total leaf pages to their next value. Note the
+	 * configured value and the calculated number of leaf pages to skip.
+	 */
+	uint64_t next_random_leaf_skip;
+	u_int	 next_random_sample_size;
+
+	/*
 	 * The search function sets compare to:
 	 *	< 1 if the found key is less than the specified key
 	 *	  0 if the found key matches the specified key
@@ -112,12 +120,16 @@ struct __wt_cursor_btree {
 	int	compare;
 
 	/*
-	 * The key value from a binary search of a row-store files; we keep a
-	 * copy of the last key we retrieved in the search, it avoids having
-	 * doing the additional work of getting the key again for return to
-	 * the application.
+	 * A key returned from a binary search or cursor movement on a row-store
+	 * page; if we find an exact match on a row-store leaf page in a search
+	 * operation, keep a copy of key we built during the search to avoid
+	 * doing the additional work of getting the key again for return to the
+	 * application. Note, this only applies to exact matches when searching
+	 * disk-image structures, so it's not, for example, a key from an insert
+	 * list. Additionally, this structure is used to build keys when moving
+	 * a cursor through a row-store leaf page.
 	 */
-	WT_ITEM search_key;
+	WT_ITEM *row_key, _row_key;
 
 	/*
 	 * It's relatively expensive to calculate the last record on a variable-
@@ -140,7 +152,7 @@ struct __wt_cursor_btree {
 
 	/*
 	 * Variable-length column-store values are run-length encoded and may
-	 * be overflow values or Huffman encoded.   To avoid repeatedly reading
+	 * be overflow values or Huffman encoded. To avoid repeatedly reading
 	 * overflow values or decompressing encoded values, process it once and
 	 * store the result in a temporary buffer.  The cip_saved field is used
 	 * to determine if we've switched columns since our last cursor call.
@@ -163,9 +175,15 @@ struct __wt_cursor_btree {
 	WT_ROW *rip_saved;		/* Last-returned key reference */
 
 	/*
-	 * A temporary buffer for caching RLE values for column-store files.
+	 * A temporary buffer for caching RLE values for column-store files (if
+	 * RLE is non-zero, then we don't unpack the value every time we move
+	 * to the next cursor position, we re-use the unpacked value we stored
+	 * here the first time we hit the value).
+	 *
+	 * A temporary buffer for building on-page keys when searching row-store
+	 * files.
 	 */
-	WT_ITEM tmp;
+	WT_ITEM *tmp, _tmp;
 
 	/*
 	 * The update structure allocated by the row- and column-store modify
@@ -187,7 +205,14 @@ struct __wt_cursor_btree {
 #define	WT_CBT_ITERATE_NEXT	0x04	/* Next iteration configuration */
 #define	WT_CBT_ITERATE_PREV	0x08	/* Prev iteration configuration */
 #define	WT_CBT_MAX_RECORD	0x10	/* Col-store: past end-of-table */
-#define	WT_CBT_SEARCH_SMALLEST	0x20	/* Row-store: small-key insert list */
+#define	WT_CBT_NO_TXN   	0x20	/* Non-transactional cursor
+					   (e.g. on a checkpoint) */
+#define	WT_CBT_SEARCH_SMALLEST	0x40	/* Row-store: small-key insert list */
+
+#define	WT_CBT_POSITION_MASK		/* Flags associated with position */ \
+	(WT_CBT_ITERATE_APPEND | WT_CBT_ITERATE_NEXT | WT_CBT_ITERATE_PREV | \
+	WT_CBT_MAX_RECORD | WT_CBT_SEARCH_SMALLEST)
+
 	uint8_t flags;
 };
 
@@ -251,6 +276,67 @@ struct __wt_cursor_index {
 
 	WT_CURSOR *child;
 	WT_CURSOR **cg_cursors;
+	uint8_t	*cg_needvalue;
+};
+
+struct __wt_cursor_join_iter {
+	WT_SESSION_IMPL		*session;
+	WT_CURSOR_JOIN		*cjoin;
+	WT_CURSOR_JOIN_ENTRY	*entry;
+	WT_CURSOR		*cursor;
+	WT_ITEM			*curkey;
+	bool			 advance;
+};
+
+struct __wt_cursor_join_endpoint {
+	WT_ITEM			 key;
+	uint8_t			 recno_buf[10];	/* holds packed recno */
+	WT_CURSOR		*cursor;
+
+#define	WT_CURJOIN_END_LT	0x01		/* include values <  cursor */
+#define	WT_CURJOIN_END_EQ	0x02		/* include values == cursor */
+#define	WT_CURJOIN_END_GT	0x04		/* include values >  cursor */
+#define	WT_CURJOIN_END_GE	(WT_CURJOIN_END_GT | WT_CURJOIN_END_EQ)
+#define	WT_CURJOIN_END_LE	(WT_CURJOIN_END_LT | WT_CURJOIN_END_EQ)
+#define	WT_CURJOIN_END_OWN_KEY	0x08		/* must free key's data */
+	uint8_t			 flags;		/* range for this endpoint */
+};
+
+struct __wt_cursor_join_entry {
+	WT_INDEX		*index;
+	WT_CURSOR		*main;		/* raw main table cursor */
+	WT_BLOOM		*bloom;		/* Bloom filter handle */
+	uint32_t		 bloom_bit_count; /* bits per item in bloom */
+	uint32_t		 bloom_hash_count; /* hash functions in bloom */
+	uint64_t		 count;		/* approx number of matches */
+
+#define	WT_CURJOIN_ENTRY_BLOOM		0x01	/* use a bloom filter */
+#define	WT_CURJOIN_ENTRY_DISJUNCTION	0x02	/* endpoints are or-ed */
+#define	WT_CURJOIN_ENTRY_OWN_BLOOM	0x04	/* this entry owns the bloom */
+	uint8_t			 flags;
+
+	WT_CURSOR_JOIN_ENDPOINT	*ends;		/* reference endpoints */
+	size_t			 ends_allocated;
+	u_int			 ends_next;
+
+	WT_JOIN_STATS		 stats;		/* Join statistics */
+};
+
+struct __wt_cursor_join {
+	WT_CURSOR iface;
+
+	WT_TABLE		*table;
+	const char		*projection;
+	WT_CURSOR_JOIN_ITER	*iter;
+	WT_CURSOR_JOIN_ENTRY	*entries;
+	size_t			 entries_allocated;
+	u_int			 entries_next;
+	uint8_t			 recno_buf[10];	/* holds packed recno */
+
+#define	WT_CURJOIN_ERROR		0x01	/* Error in initialization */
+#define	WT_CURJOIN_INITIALIZED		0x02	/* Successful initialization */
+#define	WT_CURJOIN_SKIP_FIRST_LEFT	0x04	/* First check not needed */
+	uint8_t			 flags;
 };
 
 struct __wt_cursor_json {
@@ -281,9 +367,17 @@ struct __wt_cursor_metadata {
 
 	WT_CURSOR *file_cursor;		/* Queries of regular metadata */
 
-#define	WT_MDC_POSITIONED	0x01
+#define	WT_MDC_CREATEONLY	0x01
 #define	WT_MDC_ONMETADATA	0x02
+#define	WT_MDC_POSITIONED	0x04
 	uint32_t flags;
+};
+
+struct __wt_join_stats_group {
+	const char *desc_prefix;	/* Prefix appears before description */
+	WT_CURSOR_JOIN *join_cursor;
+	ssize_t join_cursor_entry;	/* Position in entries */
+	WT_JOIN_STATS join_stats;
 };
 
 struct __wt_cursor_stat {
@@ -292,17 +386,22 @@ struct __wt_cursor_stat {
 	bool	notinitialized;		/* Cursor not initialized */
 	bool	notpositioned;		/* Cursor not positioned */
 
-	WT_STATS *stats;		/* Stats owned by the cursor */
-	WT_STATS *stats_first;		/* First stats reference */
-	int	  stats_base;		/* Base statistics value */
-	int	  stats_count;		/* Count of stats elements */
+	int64_t	     *stats;		/* Statistics */
+	int	      stats_base;	/* Base statistics value */
+	int	      stats_count;	/* Count of statistics values */
+	int	     (*stats_desc)(WT_CURSOR_STAT *, int, const char **);
+					/* Statistics descriptions */
+	int	     (*next_set)(WT_SESSION_IMPL *, WT_CURSOR_STAT *, bool,
+			 bool);		/* Advance to next set */
 
 	union {				/* Copies of the statistics */
 		WT_DSRC_STATS dsrc_stats;
 		WT_CONNECTION_STATS conn_stats;
+		WT_JOIN_STATS_GROUP join_stats_group;
 	} u;
 
 	const char **cfg;		/* Original cursor configuration */
+	char	*desc_buf;		/* Saved description string */
 
 	int	 key;			/* Current stats key */
 	uint64_t v;			/* Current stats value */
@@ -314,12 +413,10 @@ struct __wt_cursor_stat {
 
 /*
  * WT_CURSOR_STATS --
- *	Return a reference to a statistic cursor's stats structures; use the
- * WT_CURSOR.stats_first field instead of WT_CURSOR.stats because the latter
- * is NULL when non-cursor memory is used to hold the statistics.
+ *	Return a reference to a statistic cursor's stats structures.
  */
 #define	WT_CURSOR_STATS(cursor)						\
-	(((WT_CURSOR_STAT *)cursor)->stats_first)
+	(((WT_CURSOR_STAT *)cursor)->stats)
 
 struct __wt_cursor_table {
 	WT_CURSOR iface;

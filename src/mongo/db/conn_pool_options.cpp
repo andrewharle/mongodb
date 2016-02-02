@@ -26,12 +26,15 @@
  *    it in the license file.
  */
 
+#include "mongo/platform/basic.h"
+
 #include "mongo/db/conn_pool_options.h"
 
 #include "mongo/base/init.h"
-#include "mongo/db/server_parameters.h"
 #include "mongo/client/connpool.h"
-#include "mongo/s/shard.h"
+#include "mongo/client/global_conn_pool.h"
+#include "mongo/db/server_parameters.h"
+#include "mongo/s/client/shard_connection.h"
 
 namespace mongo {
 
@@ -40,19 +43,15 @@ int ConnPoolOptions::maxShardedConnsPerHost(200);
 
 namespace {
 
-ExportedServerParameter<int>  //
+ExportedServerParameter<int, ServerParameterType::kStartupOnly>  //
     maxConnsPerHostParameter(ServerParameterSet::getGlobal(),
                              "connPoolMaxConnsPerHost",
-                             &ConnPoolOptions::maxConnsPerHost,
-                             true,
-                             false /* can't change at runtime */);
+                             &ConnPoolOptions::maxConnsPerHost);
 
-ExportedServerParameter<int>  //
+ExportedServerParameter<int, ServerParameterType::kStartupOnly>  //
     maxShardedConnsPerHostParameter(ServerParameterSet::getGlobal(),
                                     "connPoolMaxShardedConnsPerHost",
-                                    &ConnPoolOptions::maxShardedConnsPerHost,
-                                    true,
-                                    false /* can't change at runtime */);
+                                    &ConnPoolOptions::maxShardedConnsPerHost);
 
 MONGO_INITIALIZER(InitializeConnectionPools)(InitializerContext* context) {
     // Initialize the sharded and unsharded outgoing connection pools
@@ -61,8 +60,8 @@ MONGO_INITIALIZER(InitializeConnectionPools)(InitializerContext* context) {
     // - The connection hooks for sharding are added on startup (mongos) or on first sharded
     //   operation (mongod)
 
-    pool.setName("connection pool");
-    pool.setMaxPoolSize(ConnPoolOptions::maxConnsPerHost);
+    globalConnPool.setName("connection pool");
+    globalConnPool.setMaxPoolSize(ConnPoolOptions::maxConnsPerHost);
 
     shardConnectionPool.setName("sharded connection pool");
     shardConnectionPool.setMaxPoolSize(ConnPoolOptions::maxShardedConnsPerHost);

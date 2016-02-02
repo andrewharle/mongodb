@@ -46,7 +46,7 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/repl/bgsync.h"
 #include "mongo/db/repl/minvalid.h"
-#include "mongo/db/repl/oplog.h"
+#include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/repl_settings.h"
 #include "mongo/db/repl/replication_coordinator_global.h"
 #include "mongo/db/repl/rs_initialsync.h"
@@ -54,7 +54,7 @@
 #include "mongo/db/server_parameters.h"
 #include "mongo/db/stats/timer_stats.h"
 #include "mongo/db/operation_context_impl.h"
-#include "mongo/db/storage_options.h"
+#include "mongo/db/storage/storage_options.h"
 #include "mongo/util/exit.h"
 #include "mongo/util/fail_point_service.h"
 #include "mongo/util/log.h"
@@ -64,7 +64,7 @@ namespace repl {
 
 void runSyncThread() {
     Client::initThread("rsSync");
-    cc().getAuthorizationSession()->grantInternalAuthorization();
+    AuthorizationSession::get(cc())->grantInternalAuthorization();
     ReplicationCoordinator* replCoord = getGlobalReplicationCoordinator();
 
     // Set initial indexPrefetch setting
@@ -90,8 +90,8 @@ void runSyncThread() {
         // trying to sync with other replicas.
         // TODO(spencer): Use a condition variable to await loading a config
         if (replCoord->getMemberState().startup()) {
-            log() << "replSet warning did not receive a valid config yet, sleeping 5 seconds ";
-            sleepsecs(5);
+            warning() << "did not receive a valid config yet";
+            sleepsecs(1);
             continue;
         }
 
@@ -131,15 +131,10 @@ void runSyncThread() {
             /* we have some data.  continue tailing. */
             SyncTail tail(BackgroundSync::get(), multiSyncApply);
             tail.oplogApplication();
-        } catch (const DBException& e) {
-            log() << "Received exception while syncing: " << e.toString();
-            sleepsecs(10);
-        } catch (const std::exception& e) {
-            log() << "Received exception while syncing: " << e.what();
-            sleepsecs(10);
+        } catch (...) {
+            std::terminate();
         }
     }
-    cc().shutdown();
 }
 
 }  // namespace repl

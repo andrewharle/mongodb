@@ -37,11 +37,10 @@
 #include <cmath>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
-#include <boost/noncopyable.hpp>
-#include <boost/scoped_ptr.hpp>
-#include <boost/shared_ptr.hpp>
+#include <boost/config.hpp>
 
 #include "mongo/base/status_with.h"
 #include "mongo/logger/logstream_builder.h"
@@ -127,13 +126,21 @@
  * Behaves like ASSERT_THROWS, above, but also fails if calling what() on the thrown exception
  * does not return a string equal to EXPECTED_WHAT.
  */
-#define ASSERT_THROWS_WHAT(STATEMENT, EXCEPTION_TYPE, EXPECTED_WHAT)                  \
-    ASSERT_THROWS_PRED(STATEMENT,                                                     \
-                       EXCEPTION_TYPE,                                                \
-                       ::mongo::stdx::bind(std::equal_to<std::string>(),              \
-                                           (EXPECTED_WHAT),                           \
-                                           ::mongo::stdx::bind(&EXCEPTION_TYPE::what, \
-                                                               ::mongo::stdx::placeholders::_1)))
+#define ASSERT_THROWS_WHAT(STATEMENT, EXCEPTION_TYPE, EXPECTED_WHAT)                 \
+    ASSERT_THROWS_PRED(STATEMENT,                                                    \
+                       EXCEPTION_TYPE,                                               \
+                       ([&](const EXCEPTION_TYPE& ex) {                              \
+        return ::mongo::StringData(ex.what()) == ::mongo::StringData(EXPECTED_WHAT); \
+                       }))
+
+/**
+ * Behaves like ASSERT_THROWS, above, but also fails if calling getCode() on the thrown exception
+ * does not return an error code equal to EXPECTED_CODE.
+ */
+#define ASSERT_THROWS_CODE(STATEMENT, EXCEPTION_TYPE, EXPECTED_CODE) \
+    ASSERT_THROWS_PRED(STATEMENT,                                    \
+                       EXCEPTION_TYPE,                               \
+                       ([](const EXCEPTION_TYPE& ex) { return (EXPECTED_CODE) == ex.getCode(); }))
 
 /**
  * Behaves like ASSERT_THROWS, above, but also fails if PREDICATE(ex) for the throw exception, ex,
@@ -153,15 +160,16 @@
         }                                                                                     \
     } while (false)
 
-#define ASSERT_STRING_CONTAINS(BIG_STRING, CONTAINS)                                   \
-    do {                                                                               \
-        std::string myString(BIG_STRING);                                              \
-        if (myString.find(CONTAINS) == std::string::npos) {                            \
-            std::string err("Expected " #BIG_STRING " (");                             \
-            err += myString;                                                           \
-            err += std::string(") to contain " #CONTAINS);                             \
-            ::mongo::unittest::TestAssertionFailure(__FILE__, __LINE__, err).stream(); \
-        }                                                                              \
+#define ASSERT_STRING_CONTAINS(BIG_STRING, CONTAINS)                                            \
+    do {                                                                                        \
+        std::string myString(BIG_STRING);                                                       \
+        std::string myContains(CONTAINS);                                                       \
+        if (myString.find(myContains) == std::string::npos) {                                   \
+            str::stream err;                                                                    \
+            err << "Expected to find " #CONTAINS " (" << myContains << ") in " #BIG_STRING " (" \
+                << myString << ")";                                                             \
+            ::mongo::unittest::TestAssertionFailure(__FILE__, __LINE__, err).stream();          \
+        }                                                                                       \
     } while (false)
 
 /**
@@ -238,7 +246,9 @@ typedef stdx::function<void(void)> TestFunction;
  * Container holding a test function and its name.  Suites
  * contain lists of these.
  */
-class TestHolder : private boost::noncopyable {
+class TestHolder {
+    MONGO_DISALLOW_COPYING(TestHolder);
+
 public:
     TestHolder(const std::string& name, const TestFunction& fn) : _name(name), _fn(fn) {}
 
@@ -259,7 +269,9 @@ private:
  * Base type for unit test fixtures.  Also, the default fixture type used
  * by the TEST() macro.
  */
-class Test : private boost::noncopyable {
+class Test {
+    MONGO_DISALLOW_COPYING(Test);
+
 public:
     Test();
     virtual ~Test();
@@ -271,7 +283,9 @@ protected:
      * Registration agent for adding tests to suites, used by TEST macro.
      */
     template <typename T>
-    class RegistrationAgent : private boost::noncopyable {
+    class RegistrationAgent {
+        MONGO_DISALLOW_COPYING(RegistrationAgent);
+
     public:
         RegistrationAgent(const std::string& suiteName, const std::string& testName);
     };
@@ -305,6 +319,11 @@ protected:
         return _capturedLogMessages;
     }
 
+    /**
+     * Returns the number of collected log lines containing "needle".
+     */
+    int64_t countLogLinesContaining(const std::string& needle);
+
 private:
     /**
      * Called on the test object before running the test.
@@ -324,6 +343,7 @@ private:
     bool _isCapturingLogMessages;
     std::vector<std::string> _capturedLogMessages;
     logger::MessageLogDomain::AppenderHandle _captureAppenderHandle;
+    logger::MessageLogDomain::AppenderAutoPtr _captureAppender;
 };
 
 /**
@@ -334,7 +354,9 @@ private:
  * by the programmer by overriding setupTests() in a subclass of Suite.  This
  * approach is deprecated.
  */
-class Suite : private boost::noncopyable {
+class Suite {
+    MONGO_DISALLOW_COPYING(Suite);
+
 public:
     Suite(const std::string& name);
     virtual ~Suite();
@@ -375,7 +397,7 @@ protected:
 
 private:
     // TODO(C++11): Make this hold unique_ptrs.
-    typedef std::vector<boost::shared_ptr<TestHolder>> TestHolderList;
+    typedef std::vector<std::shared_ptr<TestHolder>> TestHolderList;
 
     template <typename T>
     static void runTestObject() {
@@ -450,11 +472,7 @@ class TestAssertionFailure {
 public:
     TestAssertionFailure(const std::string& file, unsigned line, const std::string& message);
     TestAssertionFailure(const TestAssertionFailure& other);
-#if __cplusplus < 201103
-    ~TestAssertionFailure();
-#else
-    ~TestAssertionFailure() noexcept(false);
-#endif
+    ~TestAssertionFailure() BOOST_NOEXCEPT_IF(false);
 
     TestAssertionFailure& operator=(const TestAssertionFailure& other);
 
@@ -474,8 +492,8 @@ private:
         template <typename A, typename B>                                                     \
         ComparisonAssertion_##NAME(const std::string& theFile,                                \
                                    unsigned theLine,                                          \
-                                   const StringData& aExpression,                             \
-                                   const StringData& bExpression,                             \
+                                   StringData aExpression,                                    \
+                                   StringData bExpression,                                    \
                                    const A& a,                                                \
                                    const B& b) {                                              \
             if (a OPERATOR b) {                                                               \
@@ -495,7 +513,7 @@ private:
                                                                                               \
     private:                                                                                  \
         void comparison_failed() const {}                                                     \
-        boost::shared_ptr<TestAssertionFailure> _assertion;                                   \
+        std::shared_ptr<TestAssertionFailure> _assertion;                                     \
     }
 
 DECLARE_COMPARISON_ASSERTION(EQ, == );
@@ -515,11 +533,11 @@ const T& assertGet(const StatusWith<T>& swt) {
     return swt.getValue();
 }
 
-/**
- * Hack to support the runaway test observer in dbtests.  This is a hook that
- * unit test running harnesses (unittest_main and dbtests) must implement.
- */
-void onCurrentTestNameChange(const std::string& testName);
+template <typename T>
+T assertGet(StatusWith<T>&& swt) {
+    ASSERT_OK(swt.getStatus());
+    return std::move(swt.getValue());
+}
 
 /**
  * Return a list of suite names.

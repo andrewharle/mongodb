@@ -43,8 +43,8 @@
 #include "mongo/db/repl/replication_coordinator_global.h"
 #include "mongo/db/server_parameters.h"
 #include "mongo/db/stats/timer_stats.h"
+#include "mongo/db/storage/mmap_v1/mmap.h"
 #include "mongo/util/log.h"
-#include "mongo/util/mmap.h"
 
 namespace mongo {
 
@@ -71,8 +71,7 @@ void prefetchIndexPages(OperationContext* txn,
                         const BSONObj& obj) {
     // do we want prefetchConfig to be (1) as-is, (2) for update ops only, or (3) configured per op
     // type? One might want PREFETCH_NONE for updates, but it's more rare that it is a bad idea for
-    // inserts.
-    // #3 (per op), a big issue would be "too many knobs".
+    // inserts. #3 (per op), a big issue would be "too many knobs".
     switch (prefetchConfig) {
         case BackgroundSync::PREFETCH_NONE:
             return;

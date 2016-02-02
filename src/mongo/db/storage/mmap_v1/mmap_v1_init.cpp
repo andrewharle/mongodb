@@ -31,10 +31,10 @@
 
 #include "mongo/base/init.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/global_environment_experiment.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/storage/mmap_v1/mmap_v1_engine.h"
 #include "mongo/db/storage/storage_engine_metadata.h"
-#include "mongo/db/storage_options.h"
+#include "mongo/db/storage/storage_options.h"
 
 namespace mongo {
 
@@ -74,7 +74,7 @@ public:
 
 MONGO_INITIALIZER_WITH_PREREQUISITES(MMAPV1EngineInit, ("SetGlobalEnvironment"))
 (InitializerContext* context) {
-    getGlobalEnvironment()->registerStorageEngine("mmapv1", new MMAPV1Factory());
+    getGlobalServiceContext()->registerStorageEngine("mmapv1", new MMAPV1Factory());
     return Status::OK();
 }
 

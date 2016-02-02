@@ -36,6 +36,7 @@
 #include "mongo/db/jsobj.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id.h"
+#include "mongo/db/storage/record_store.h"
 #include "mongo/platform/unordered_map.h"
 
 namespace mongo {
@@ -87,7 +88,7 @@ public:
      * @return null if cannot find
      */
     IndexDescriptor* findIndexByName(OperationContext* txn,
-                                     const StringData& name,
+                                     StringData name,
                                      bool includeUnfinishedIndexes = false) const;
 
     /**
@@ -97,13 +98,21 @@ public:
                                            const BSONObj& key,
                                            bool includeUnfinishedIndexes = false) const;
 
-    /* Returns the index entry for the first index whose prefix contains
-     * 'keyPattern'. If 'requireSingleKey' is true, skip indices that contain
-     * array attributes. Otherwise, returns NULL.
+    /**
+     * Returns an index suitable for shard key range scans.
+     *
+     * This index:
+     * - must be prefixed by 'shardKey', and
+     * - must not be a partial index.
+     *
+     * If the parameter 'requireSingleKey' is true, then this index additionally must not be
+     * multi-key.
+     *
+     * If no such index exists, returns NULL.
      */
-    IndexDescriptor* findIndexByPrefix(OperationContext* txn,
-                                       const BSONObj& keyPattern,
-                                       bool requireSingleKey) const;
+    IndexDescriptor* findShardKeyPrefixedIndex(OperationContext* txn,
+                                               const BSONObj& shardKey,
+                                               bool requireSingleKey) const;
 
     void findIndexByType(OperationContext* txn,
                          const std::string& type,
@@ -142,7 +151,10 @@ public:
         IndexDescriptor* next();
 
         // returns the access method for the last return IndexDescriptor
-        IndexAccessMethod* accessMethod(IndexDescriptor* desc);
+        IndexAccessMethod* accessMethod(const IndexDescriptor* desc);
+
+        // returns the IndexCatalogEntry for the last return IndexDescriptor
+        IndexCatalogEntry* catalogEntry(const IndexDescriptor* desc);
 
     private:
         IndexIterator(OperationContext* txn,
@@ -195,32 +207,6 @@ public:
         std::string name;
         BSONObj key;
     };
-
-    /**
-     * Registers an index build in an internal tracking map, for use with
-     * killMatchingIndexBuilds().  The opNum and descriptor provided must remain active
-     * for as long as the entry exists in the map.  The opNum provided must correspond to
-     * an operation building only one index, in the background.
-     * This function is intended for replication to use for tracking and managing background
-     * index builds.  It is expected that the caller has already taken steps to serialize
-     * calls to this function.
-     */
-    void registerIndexBuild(IndexDescriptor* descriptor, unsigned int opNum);
-
-    /**
-     * Removes an index build from the map, upon completion or termination of the index build.
-     * This function is intended for replication to use for tracking and managing background
-     * index builds.  It is expected that the caller has already taken steps to serialize
-     * calls to this function.
-     */
-    void unregisterIndexBuild(IndexDescriptor* descriptor);
-
-    /**
-     * Given some criteria, searches through all in-progress index builds
-     * and kills ones that match. (namespace, index name, and/or index key spec)
-     * Returns the list of index specs that were killed, for use in restarting them later.
-     */
-    std::vector<BSONObj> killMatchingIndexBuilds(const IndexKillCriteria& criteria);
 
     // ---- modify single index
 
@@ -278,7 +264,7 @@ public:
     // ----- data modifiers ------
 
     // this throws for now
-    Status indexRecord(OperationContext* txn, const BSONObj& obj, const RecordId& loc);
+    Status indexRecords(OperationContext* txn, const std::vector<BsonRecord>& bsonRecords);
 
     void unindexRecord(OperationContext* txn, const BSONObj& obj, const RecordId& loc, bool noWarn);
 
@@ -296,8 +282,6 @@ public:
     static BSONObj fixIndexKey(const BSONObj& key);
 
 private:
-    typedef unordered_map<IndexDescriptor*, unsigned int> InProgressIndexesMap;
-
     static const BSONObj _idObj;  // { _id : 1 }
 
     bool _shouldOverridePlugin(OperationContext* txn, const BSONObj& keyPattern) const;
@@ -311,10 +295,13 @@ private:
 
     void _checkMagic() const;
 
-    Status _indexRecord(OperationContext* txn,
-                        IndexCatalogEntry* index,
-                        const BSONObj& obj,
-                        const RecordId& loc);
+    Status _indexFilteredRecords(OperationContext* txn,
+                                 IndexCatalogEntry* index,
+                                 const std::vector<BsonRecord>& bsonRecords);
+
+    Status _indexRecords(OperationContext* txn,
+                         IndexCatalogEntry* index,
+                         const std::vector<BsonRecord>& bsonRecords);
 
     Status _unindexRecord(OperationContext* txn,
                           IndexCatalogEntry* index,
@@ -352,6 +339,7 @@ private:
 
     int _magic;
     Collection* const _collection;
+    const int _maxNumIndexesAllowed;
 
     IndexCatalogEntryContainer _entries;
 
@@ -360,8 +348,5 @@ private:
     // Certain operations are prohibited until someone fixes.
     // Retrieve by calling getAndClearUnfinishedIndexes().
     std::vector<BSONObj> _unfinishedIndexes;
-
-    // Track in-progress index builds, in order to find and stop them when necessary.
-    InProgressIndexesMap _inProgressIndexes;
 };
 }

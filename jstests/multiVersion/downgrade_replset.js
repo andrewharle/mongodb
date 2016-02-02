@@ -1,20 +1,22 @@
 // Test the downgrade of a replica set from latest version
-// to version 2.6 succeeds, while reads and writes continue.
+// to last-stable version succeeds, while reads and writes continue.
 
 load('./jstests/multiVersion/libs/multi_rs.js')
 load('./jstests/libs/test_background_ops.js')
 
 var newVersion = "latest";
-var oldVersion = "2.6";
+var oldVersion = "last-stable";
 
 var name = "replsetdowngrade";
 var nodes = {n1: {binVersion: newVersion},
              n2: {binVersion: newVersion},
              n3: {binVersion: newVersion}};
 
-var rst = new ReplSetTest({name: name, nodes: 3});
+var rst = new ReplSetTest({name: name, nodes: nodes, nodeOptions: {storageEngine: 'mmapv1'}});
 rst.startSet();
-rst.initiate();
+var replSetConfig = rst.getReplSetConfig();
+replSetConfig.protocolVersion = 0;
+rst.initiate(replSetConfig);
 
 var primary = rst.getPrimary();
 var coll = "test.foo";
@@ -37,7 +39,7 @@ jsTest.log("Starting parallel operations during downgrade..");
 var joinFindInsert = startParallelOps(primary, insertDocuments, [rst.getURL(), coll]);
 
 jsTest.log("Downgrading replica set..");
-rst.upgradeSet(oldVersion);
+rst.upgradeSet({ binVersion: oldVersion });
 jsTest.log("Downgrade complete.");
 
 primary = rst.getPrimary();

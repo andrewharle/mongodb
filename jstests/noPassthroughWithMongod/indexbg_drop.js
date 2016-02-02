@@ -10,9 +10,6 @@
 
 // Index drop race
 
-// SERVER-13922 background indices are foregrounded with yielding gone
-if (0) {
-
 var dbname = 'dropbgindex';
 var collection = 'jstests_feh';
 var size = 500000;
@@ -30,7 +27,7 @@ replTest.initiate({"_id" : "bgIndex",
                     {"_id" : 1, "host" : nodes[1]},
                     {"_id" : 2, "host" : nodes[2], "arbiterOnly" : true}]});
 
-var master = replTest.getMaster();
+var master = replTest.getPrimary();
 var second = replTest.getSecondary();
 
 var masterId = replTest.getNodeId(master);
@@ -105,4 +102,3 @@ assert.soon( function() {
 );
 
 replTest.stopSet();
-}  // if (0)

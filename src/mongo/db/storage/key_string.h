@@ -28,12 +28,13 @@
  *    it in the license file.
  */
 
+#pragma once
+
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsonmisc.h"
-#include "mongo/bson/optime.h"
+#include "mongo/bson/timestamp.h"
 #include "mongo/bson/ordering.h"
-#include "mongo/bson/bson_db.h"
 #include "mongo/db/record_id.h"
 
 namespace mongo {
@@ -204,14 +205,20 @@ public:
         uint8_t _buf[1 /*size*/ + kMaxBytesNeeded];
     };
 
+    enum Discriminator {
+        kInclusive,  // Anything to be stored in an index must use this.
+        kExclusiveBefore,
+        kExclusiveAfter,
+    };
+
     KeyString() {}
 
     KeyString(const BSONObj& obj, Ordering ord, RecordId recordId) {
         resetToKey(obj, ord, recordId);
     }
 
-    KeyString(const BSONObj& obj, Ordering ord) {
-        resetToKey(obj, ord);
+    KeyString(const BSONObj& obj, Ordering ord, Discriminator discriminator = kInclusive) {
+        resetToKey(obj, ord, discriminator);
     }
 
     explicit KeyString(RecordId rid) {
@@ -244,7 +251,7 @@ public:
     }
 
     void resetToKey(const BSONObj& obj, Ordering ord, RecordId recordId);
-    void resetToKey(const BSONObj& obj, Ordering ord);
+    void resetToKey(const BSONObj& obj, Ordering ord, Discriminator discriminator = kInclusive);
     void resetFromBuffer(const void* buffer, size_t size) {
         _buffer.reset();
         memcpy(_buffer.skip(size), buffer, size);
@@ -272,11 +279,13 @@ public:
     std::string toString() const;
 
 private:
-    void _appendAllElementsForIndexing(const BSONObj& obj, Ordering ord);
+    void _appendAllElementsForIndexing(const BSONObj& obj,
+                                       Ordering ord,
+                                       Discriminator discriminator);
 
     void _appendBool(bool val, bool invert);
     void _appendDate(Date_t val, bool invert);
-    void _appendTimestamp(OpTime val, bool invert);
+    void _appendTimestamp(Timestamp val, bool invert);
     void _appendOID(OID val, bool invert);
     void _appendString(StringData val, bool invert);
     void _appendSymbol(StringData val, bool invert);

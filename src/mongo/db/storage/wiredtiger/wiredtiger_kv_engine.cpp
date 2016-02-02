@@ -31,13 +31,23 @@
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kStorage
 
+#ifdef _WIN32
+#define NVALGRIND
+#endif
+
 #include "mongo/db/storage/wiredtiger/wiredtiger_kv_engine.h"
 
 #include <boost/filesystem.hpp>
 #include <boost/filesystem/operations.hpp>
+#include <valgrind/valgrind.h>
 
+#include "mongo/base/error_codes.h"
+#include "mongo/db/catalog/collection_catalog_entry.h"
+#include "mongo/db/client.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/index/index_descriptor.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/storage/wiredtiger/wiredtiger_customization_hooks.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_global_options.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_index.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_record_store.h"
@@ -45,7 +55,10 @@
 #include "mongo/db/storage/wiredtiger/wiredtiger_session_cache.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_size_storer.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_util.h"
+#include "mongo/db/storage/storage_options.h"
 #include "mongo/util/log.h"
+#include "mongo/util/background.h"
+#include "mongo/util/exit.h"
 #include "mongo/util/processinfo.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/time_support.h"
@@ -59,28 +72,60 @@ namespace mongo {
 using std::set;
 using std::string;
 
+class WiredTigerKVEngine::WiredTigerJournalFlusher : public BackgroundJob {
+public:
+    explicit WiredTigerJournalFlusher(WiredTigerSessionCache* sessionCache)
+        : BackgroundJob(false /* deleteSelf */), _sessionCache(sessionCache) {}
 
-WiredTigerKVEngine::WiredTigerKVEngine(const std::string& path,
-                                       const std::string& extraOpenOptions,
-                                       bool durable,
-                                       bool repair)
-    : _eventHandler(WiredTigerUtil::defaultEventHandlers()),
-      _path(path),
-      _durable(durable),
-      _sizeStorerSyncTracker(100000, 60 * 1000) {
-    size_t cacheSizeGB = wiredTigerGlobalOptions.cacheSizeGB;
-    if (cacheSizeGB == 0) {
-        // Since the user didn't provide a cache size, choose a reasonable default value.
-        ProcessInfo pi;
-        unsigned long long memSizeMB = pi.getMemSizeMB();
-        if (memSizeMB > 0) {
-            double cacheMB = memSizeMB / 2;
-            cacheSizeGB = static_cast<size_t>(cacheMB / 1024);
-            if (cacheSizeGB < 1)
-                cacheSizeGB = 1;
-        }
+    virtual string name() const {
+        return "WTJournalFlusher";
     }
 
+    virtual void run() {
+        Client::initThread(name().c_str());
+
+        LOG(1) << "starting " << name() << " thread";
+
+        while (!_shuttingDown.load()) {
+            try {
+                _sessionCache->waitUntilDurable(false);
+            } catch (const UserException& e) {
+                invariant(e.getCode() == ErrorCodes::ShutdownInProgress);
+            }
+
+            int ms = storageGlobalParams.journalCommitIntervalMs;
+            if (!ms) {
+                ms = 100;
+            }
+
+            sleepmillis(ms);
+        }
+        LOG(1) << "stopping " << name() << " thread";
+    }
+
+    void shutdown() {
+        _shuttingDown.store(true);
+        wait();
+    }
+
+private:
+    WiredTigerSessionCache* _sessionCache;
+    std::atomic<bool> _shuttingDown{false};  // NOLINT
+};
+
+WiredTigerKVEngine::WiredTigerKVEngine(const std::string& canonicalName,
+                                       const std::string& path,
+                                       const std::string& extraOpenOptions,
+                                       size_t cacheSizeGB,
+                                       bool durable,
+                                       bool ephemeral,
+                                       bool repair)
+    : _eventHandler(WiredTigerUtil::defaultEventHandlers()),
+      _canonicalName(canonicalName),
+      _path(path),
+      _durable(durable),
+      _ephemeral(ephemeral),
+      _sizeStorerSyncTracker(100000, 60 * 1000) {
     boost::filesystem::path journalPath = path;
     journalPath /= "journal";
     if (_durable) {
@@ -94,13 +139,14 @@ WiredTigerKVEngine::WiredTigerKVEngine(const std::string& path,
         }
     }
 
-    _previousCheckedDropsQueued = curTimeMillis64();
+    _previousCheckedDropsQueued = Date_t::now();
 
     std::stringstream ss;
     ss << "create,";
     ss << "cache_size=" << cacheSizeGB << "G,";
     ss << "session_max=20000,";
     ss << "eviction=(threads_max=4),";
+    ss << "config_base=false,";
     ss << "statistics=(fast),";
     // The setting may have a later setting override it if not using the journal.  We make it
     // unconditional here because even nojournal may need this setting if it is a transition
@@ -111,6 +157,7 @@ WiredTigerKVEngine::WiredTigerKVEngine(const std::string& path,
     ss << "checkpoint=(wait=" << wiredTigerGlobalOptions.checkpointDelaySecs;
     ss << ",log_size=2GB),";
     ss << "statistics_log=(wait=" << wiredTigerGlobalOptions.statisticsLogDelaySecs << "),";
+    ss << WiredTigerCustomizationHooks::get(getGlobalServiceContext())->getOpenConfig("system");
     ss << extraOpenOptions;
     if (!_durable) {
         // If we started without the journal, but previously used the journal then open with the
@@ -146,6 +193,11 @@ WiredTigerKVEngine::WiredTigerKVEngine(const std::string& path,
 
     _sessionCache.reset(new WiredTigerSessionCache(this));
 
+    if (_durable) {
+        _journalFlusher = stdx::make_unique<WiredTigerJournalFlusher>(_sessionCache.get());
+        _journalFlusher->go();
+    }
+
     _sizeStorerUri = "table:sizeStorer";
     {
         WiredTigerSession session(_conn);
@@ -173,22 +225,36 @@ void WiredTigerKVEngine::cleanShutdown() {
     if (_conn) {
         // these must be the last things we do before _conn->close();
         _sizeStorer.reset(NULL);
+        if (_journalFlusher)
+            _journalFlusher->shutdown();
         _sessionCache->shuttingDown();
 
+// We want WiredTiger to leak memory for faster shutdown except when we are running tools to
+// look for memory leaks.
 #if !__has_feature(address_sanitizer)
-        const char* config = "leak_memory=true";
+        bool leak_memory = true;
 #else
-        const char* config = NULL;
+        bool leak_memory = false;
 #endif
+        const char* config = nullptr;
+
+        if (RUNNING_ON_VALGRIND) {
+            leak_memory = false;
+        }
+
+        if (leak_memory) {
+            config = "leak_memory=true";
+        }
+
         invariantWTOK(_conn->close(_conn, config));
         _conn = NULL;
     }
 }
 
 Status WiredTigerKVEngine::okToRename(OperationContext* opCtx,
-                                      const StringData& fromNS,
-                                      const StringData& toNS,
-                                      const StringData& ident,
+                                      StringData fromNS,
+                                      StringData toNS,
+                                      StringData ident,
                                       const RecordStore* originalRecordStore) const {
     _sizeStorer->storeToCache(
         _uri(ident), originalRecordStore->numRecords(opCtx), originalRecordStore->dataSize(opCtx));
@@ -196,14 +262,17 @@ Status WiredTigerKVEngine::okToRename(OperationContext* opCtx,
     return Status::OK();
 }
 
-int64_t WiredTigerKVEngine::getIdentSize(OperationContext* opCtx, const StringData& ident) {
+int64_t WiredTigerKVEngine::getIdentSize(OperationContext* opCtx, StringData ident) {
     WiredTigerSession* session = WiredTigerRecoveryUnit::get(opCtx)->getSession(opCtx);
     return WiredTigerUtil::getIdentSize(session->getSession(), _uri(ident));
 }
 
-Status WiredTigerKVEngine::repairIdent(OperationContext* opCtx, const StringData& ident) {
+Status WiredTigerKVEngine::repairIdent(OperationContext* opCtx, StringData ident) {
     WiredTigerSession* session = WiredTigerRecoveryUnit::get(opCtx)->getSession(opCtx);
     session->closeAllCursors();
+    if (isEphemeral()) {
+        return Status::OK();
+    }
     string uri = _uri(ident);
     return _salvageIfNeeded(uri.c_str());
 }
@@ -235,12 +304,28 @@ Status WiredTigerKVEngine::_salvageIfNeeded(const char* uri) {
 int WiredTigerKVEngine::flushAllFiles(bool sync) {
     LOG(1) << "WiredTigerKVEngine::flushAllFiles";
     syncSizeInfo(true);
-
-    WiredTigerSession session(_conn);
-    WT_SESSION* s = session.getSession();
-    invariantWTOK(s->checkpoint(s, NULL));
+    _sessionCache->waitUntilDurable(true);
 
     return 1;
+}
+
+Status WiredTigerKVEngine::beginBackup(OperationContext* txn) {
+    invariant(!_backupSession);
+
+    // This cursor will be freed by the backupSession being closed as the session is uncached
+    auto session = stdx::make_unique<WiredTigerSession>(_conn);
+    WT_CURSOR* c = NULL;
+    WT_SESSION* s = session->getSession();
+    int ret = WT_OP_CHECK(s->open_cursor(s, "backup:", NULL, NULL, &c));
+    if (ret != 0) {
+        return wtRCToStatus(ret);
+    }
+    _backupSession = std::move(session);
+    return Status::OK();
+}
+
+void WiredTigerKVEngine::endBackup(OperationContext* txn) {
+    _backupSession.reset();
 }
 
 void WiredTigerKVEngine::syncSizeInfo(bool sync) const {
@@ -267,14 +352,14 @@ void WiredTigerKVEngine::setSortedDataInterfaceExtraOptions(const std::string& o
 }
 
 Status WiredTigerKVEngine::createRecordStore(OperationContext* opCtx,
-                                             const StringData& ns,
-                                             const StringData& ident,
+                                             StringData ns,
+                                             StringData ident,
                                              const CollectionOptions& options) {
     _checkIdentPath(ident);
     WiredTigerSession session(_conn);
 
     StatusWith<std::string> result =
-        WiredTigerRecordStore::generateCreateString(ns, options, _rsOptions);
+        WiredTigerRecordStore::generateCreateString(_canonicalName, ns, options, _rsOptions);
     if (!result.isOK()) {
         return result.getStatus();
     }
@@ -287,33 +372,61 @@ Status WiredTigerKVEngine::createRecordStore(OperationContext* opCtx,
 }
 
 RecordStore* WiredTigerKVEngine::getRecordStore(OperationContext* opCtx,
-                                                const StringData& ns,
-                                                const StringData& ident,
+                                                StringData ns,
+                                                StringData ident,
                                                 const CollectionOptions& options) {
     if (options.capped) {
         return new WiredTigerRecordStore(opCtx,
                                          ns,
                                          _uri(ident),
+                                         _canonicalName,
                                          options.capped,
+                                         _ephemeral,
                                          options.cappedSize ? options.cappedSize : 4096,
                                          options.cappedMaxDocs ? options.cappedMaxDocs : -1,
                                          NULL,
                                          _sizeStorer.get());
     } else {
-        return new WiredTigerRecordStore(
-            opCtx, ns, _uri(ident), false, -1, -1, NULL, _sizeStorer.get());
+        return new WiredTigerRecordStore(opCtx,
+                                         ns,
+                                         _uri(ident),
+                                         _canonicalName,
+                                         false,
+                                         _ephemeral,
+                                         -1,
+                                         -1,
+                                         NULL,
+                                         _sizeStorer.get());
     }
 }
 
-string WiredTigerKVEngine::_uri(const StringData& ident) const {
+string WiredTigerKVEngine::_uri(StringData ident) const {
     return string("table:") + ident.toString();
 }
 
 Status WiredTigerKVEngine::createSortedDataInterface(OperationContext* opCtx,
-                                                     const StringData& ident,
+                                                     StringData ident,
                                                      const IndexDescriptor* desc) {
     _checkIdentPath(ident);
-    StatusWith<std::string> result = WiredTigerIndex::generateCreateString(_indexOptions, *desc);
+
+    std::string collIndexOptions;
+    const Collection* collection = desc->getCollection();
+
+    // Treat 'collIndexOptions' as an empty string when the collection member of 'desc' is NULL in
+    // order to allow for unit testing WiredTigerKVEngine::createSortedDataInterface().
+    if (collection) {
+        const CollectionCatalogEntry* cce = collection->getCatalogEntry();
+        const CollectionOptions collOptions = cce->getCollectionOptions(opCtx);
+
+        if (!collOptions.indexOptionDefaults["storageEngine"].eoo()) {
+            BSONObj storageEngineOptions = collOptions.indexOptionDefaults["storageEngine"].Obj();
+            collIndexOptions = storageEngineOptions.getFieldDotted(_canonicalName + ".configString")
+                                   .valuestrsafe();
+        }
+    }
+
+    StatusWith<std::string> result = WiredTigerIndex::generateCreateString(
+        _canonicalName, _indexOptions, collIndexOptions, *desc);
     if (!result.isOK()) {
         return result.getStatus();
     }
@@ -326,19 +439,19 @@ Status WiredTigerKVEngine::createSortedDataInterface(OperationContext* opCtx,
 }
 
 SortedDataInterface* WiredTigerKVEngine::getSortedDataInterface(OperationContext* opCtx,
-                                                                const StringData& ident,
+                                                                StringData ident,
                                                                 const IndexDescriptor* desc) {
     if (desc->unique())
         return new WiredTigerIndexUnique(opCtx, _uri(ident), desc);
     return new WiredTigerIndexStandard(opCtx, _uri(ident), desc);
 }
 
-Status WiredTigerKVEngine::dropIdent(OperationContext* opCtx, const StringData& ident) {
+Status WiredTigerKVEngine::dropIdent(OperationContext* opCtx, StringData ident) {
     _drop(ident);
     return Status::OK();
 }
 
-bool WiredTigerKVEngine::_drop(const StringData& ident) {
+bool WiredTigerKVEngine::_drop(StringData ident) {
     string uri = _uri(ident);
 
     WiredTigerSession session(_conn);
@@ -354,7 +467,7 @@ bool WiredTigerKVEngine::_drop(const StringData& ident) {
     if (ret == EBUSY) {
         // this is expected, queue it up
         {
-            boost::mutex::scoped_lock lk(_identToDropMutex);
+            stdx::lock_guard<stdx::mutex> lk(_identToDropMutex);
             _identToDrop.insert(uri);
         }
         _sessionCache->closeAll();
@@ -366,8 +479,8 @@ bool WiredTigerKVEngine::_drop(const StringData& ident) {
 }
 
 bool WiredTigerKVEngine::haveDropsQueued() const {
-    int64_t now = curTimeMillis64();
-    int64_t delta = now - _previousCheckedDropsQueued;
+    Date_t now = Date_t::now();
+    Milliseconds delta = now - _previousCheckedDropsQueued;
 
     if (_sizeStorerSyncTracker.intervalHasElapsed()) {
         _sizeStorerSyncTracker.resetLastTime();
@@ -376,18 +489,18 @@ bool WiredTigerKVEngine::haveDropsQueued() const {
 
     // We only want to check the queue max once per second or we'll thrash
     // This is done in haveDropsQueued, not dropAllQueued so we skip the mutex
-    if (delta < 1000)
+    if (delta < Milliseconds(1000))
         return false;
 
     _previousCheckedDropsQueued = now;
-    boost::mutex::scoped_lock lk(_identToDropMutex);
+    stdx::lock_guard<stdx::mutex> lk(_identToDropMutex);
     return !_identToDrop.empty();
 }
 
 void WiredTigerKVEngine::dropAllQueued() {
     set<string> mine;
     {
-        boost::mutex::scoped_lock lk(_identToDropMutex);
+        stdx::lock_guard<stdx::mutex> lk(_identToDropMutex);
         mine = _identToDrop;
     }
 
@@ -415,7 +528,7 @@ void WiredTigerKVEngine::dropAllQueued() {
     }
 
     {
-        boost::mutex::scoped_lock lk(_identToDropMutex);
+        stdx::lock_guard<stdx::mutex> lk(_identToDropMutex);
         for (set<string>::const_iterator it = deleted.begin(); it != deleted.end(); ++it) {
             _identToDrop.erase(*it);
         }
@@ -430,7 +543,7 @@ bool WiredTigerKVEngine::supportsDirectoryPerDB() const {
     return true;
 }
 
-bool WiredTigerKVEngine::hasIdent(OperationContext* opCtx, const StringData& ident) const {
+bool WiredTigerKVEngine::hasIdent(OperationContext* opCtx, StringData ident) const {
     return _hasUri(WiredTigerRecoveryUnit::get(opCtx)->getSession(opCtx)->getSession(),
                    _uri(ident));
 }
@@ -450,7 +563,7 @@ bool WiredTigerKVEngine::_hasUri(WT_SESSION* session, const std::string& uri) co
 
 std::vector<std::string> WiredTigerKVEngine::getAllIdents(OperationContext* opCtx) const {
     std::vector<std::string> all;
-    WiredTigerCursor cursor("metadata:", WiredTigerSession::kMetadataCursorId, false, opCtx);
+    WiredTigerCursor cursor("metadata:", WiredTigerSession::kMetadataTableId, false, opCtx);
     WT_CURSOR* c = cursor.get();
     if (!c)
         return all;
@@ -480,7 +593,7 @@ int WiredTigerKVEngine::reconfigure(const char* str) {
     return _conn->reconfigure(_conn, str);
 }
 
-void WiredTigerKVEngine::_checkIdentPath(const StringData& ident) {
+void WiredTigerKVEngine::_checkIdentPath(StringData ident) {
     size_t start = 0;
     size_t idx;
     while ((idx = ident.find('/', start)) != string::npos) {

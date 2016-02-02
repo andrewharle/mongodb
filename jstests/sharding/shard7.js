@@ -1,13 +1,14 @@
 // Check that shard selection does not assert for certain unsatisfiable queries.
 // SERVER-4554, SERVER-4914
 
-s = new ShardingTest( 'shard7', 2, 0, 1 );
+s = new ShardingTest({name: 'shard7', shards: 2});
 
 db = s.admin._mongo.getDB( 'test' );
 c = db[ 'foo' ];
 c.drop();
 
 s.adminCommand( { enablesharding: '' + db } );
+s.ensurePrimaryShard(db.getName(), 'shard0001');
 s.adminCommand( { shardcollection: '' + c, key: { a:1,b:1 } } );
 
 // Check query operation with some satisfiable and unsatisfiable queries.

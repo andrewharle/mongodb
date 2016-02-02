@@ -9,13 +9,12 @@ Random.setRandomSeed();
 
 t = new ParallelTester();
 
-// v8 uses about 30M (res) per thread, so can't do many more on an 8GB system
 // Reducing the number of threads to 100 because of WT-1989
 numThreads = 100;
-buildInfo = db.adminCommand( "buildInfo" )
+buildInfo = db.adminCommand( "buildInfo" ).buildEnvironment
 
 if ( buildInfo.bits < 64 ||
-     buildInfo.sysInfo.indexOf( "Linux" ) < 0 ||
+     buildInfo.target_os != "linux" ||
      buildInfo.debug ) {
     numThreads = 50;
 }

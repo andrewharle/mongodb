@@ -40,19 +40,18 @@ var checkMigrate = function(){ print( "Result of migrate : " ); printjson( this 
 
 // Creates a number of migrations of random chunks to diff shard servers
 var ops = []
-for(var i = 0; i < st._shardServers.length; i++) {
+for(var i = 0; i < st._connections.length; i++) {
     ops.push({
         op: "command",
         ns: "admin",
         command: {
             moveChunk: "" + coll,
             find: { _id: { "#RAND_INT" : [ 0, numDocs ] }},
-            to: st._shardServers[i].shardName,
+            to: st._connections[i].shardName,
             _waitForDelete: true
         },
         showResult: true
     });
-    // TODO:  Deadlock due to global V8Lock between scopes if we stop with a js check
 }
 
 // TODO: Also migrate output collection
@@ -93,8 +92,7 @@ for( var t = 0; t < numTests; t++ ){
     
     coll.getMongo().getDB("admin").runCommand({ setParameter : 1, traceExceptions : true })
     
-    // TODO:  If we pass in a weird value here, we can crash v8 obj parsing
-    printjson( coll.mapReduce( map, reduce, { out : { replace : outputColl.getName(), db : outputColl.getDB() + "" } }) )
+    printjson( coll.mapReduce( map, reduce, { out : { replace : outputColl.getName(), db : outputColl.getDB() + "" } }) );
     
     jsTest.log( "MapReduce run #" + t + " finished." )
     

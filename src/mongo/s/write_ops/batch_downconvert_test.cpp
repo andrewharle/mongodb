@@ -26,14 +26,14 @@
  *    it in the license file.
  */
 
-#include "mongo/s/write_ops/batch_downconvert.h"
+#include "mongo/platform/basic.h"
 
 #include <deque>
 #include <vector>
 
 #include "mongo/db/jsobj.h"
 #include "mongo/db/json.h"
-#include "mongo/s/multi_command_dispatch.h"
+#include "mongo/s/write_ops/batch_downconvert.h"
 #include "mongo/unittest/unittest.h"
 
 namespace {
@@ -129,31 +129,6 @@ TEST(GLEParsing, NotMasterGLEFail) {
     GLEErrors errors;
     ASSERT_OK(extractGLEErrors(gleResponse, &errors));
     ASSERT(!errors.writeError.get());
-    ASSERT(errors.wcError.get());
-    ASSERT_EQUALS(errors.wcError->getErrMessage(), "message");
-    ASSERT_EQUALS(errors.wcError->getErrCode(), 10990);
-}
-
-TEST(GLEParsing, OldStaleWrite) {
-    const BSONObj gleResponse =
-        fromjson("{ok: 1.0, err: null, writeback: 'abcde', writebackSince: 1}");
-
-    GLEErrors errors;
-    ASSERT_OK(extractGLEErrors(gleResponse, &errors));
-    ASSERT(!errors.writeError.get());
-    ASSERT(!errors.wcError.get());
-}
-
-TEST(GLEParsing, StaleWriteErrAndNotMasterGLEFail) {
-    // Not master code in response
-    const BSONObj gleResponse = fromjson(
-        "{ok: 0.0, err: null, errmsg: 'message', code: 10990,"
-        " writeback: 'abcde', writebackSince: 0}");
-
-    GLEErrors errors;
-    ASSERT_OK(extractGLEErrors(gleResponse, &errors));
-    ASSERT(errors.writeError.get());
-    ASSERT_EQUALS(errors.writeError->getErrCode(), ErrorCodes::StaleShardVersion);
     ASSERT(errors.wcError.get());
     ASSERT_EQUALS(errors.wcError->getErrMessage(), "message");
     ASSERT_EQUALS(errors.wcError->getErrCode(), 10990);

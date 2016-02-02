@@ -44,6 +44,10 @@ class OperationContext;
  * via the parseRequest() method. A ParsedDelete can then be used to retrieve a PlanExecutor
  * capable of executing the delete.
  *
+ * It is invalid to request that the DeleteStage return the deleted document during a
+ * multi-remove. It is also invalid to request that a ProjectionStage be applied to the
+ * DeleteStage if the DeleteStage would not return the deleted document.
+ *
  * A delete request is parsed to a CanonicalQuery, so this class is a thin, delete-specific
  * wrapper around canonicalization.
  *
@@ -98,7 +102,7 @@ public:
     /**
      * Releases ownership of the canonical query to the caller.
      */
-    CanonicalQuery* releaseParsedQuery();
+    std::unique_ptr<CanonicalQuery> releaseParsedQuery();
 
 private:
     // Transactional context.  Not owned by us.
@@ -108,7 +112,7 @@ private:
     const DeleteRequest* const _request;
 
     // Parsed query object, or NULL if the query proves to be an id hack query.
-    std::auto_ptr<CanonicalQuery> _canonicalQuery;
+    std::unique_ptr<CanonicalQuery> _canonicalQuery;
 };
 
 }  // namespace mongo

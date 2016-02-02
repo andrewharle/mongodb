@@ -44,6 +44,7 @@ class OperationContext;
 class RecordStore;
 class RecoveryUnit;
 class SortedDataInterface;
+class SnapshotManager;
 
 class KVEngine {
 public:
@@ -57,12 +58,12 @@ public:
      * Calling on a non-created ident is invalid and may crash.
      */
     virtual RecordStore* getRecordStore(OperationContext* opCtx,
-                                        const StringData& ns,
-                                        const StringData& ident,
+                                        StringData ns,
+                                        StringData ident,
                                         const CollectionOptions& options) = 0;
 
     virtual SortedDataInterface* getSortedDataInterface(OperationContext* opCtx,
-                                                        const StringData& ident,
+                                                        StringData ident,
                                                         const IndexDescriptor* desc) = 0;
 
     //
@@ -74,26 +75,48 @@ public:
     //
 
     virtual Status createRecordStore(OperationContext* opCtx,
-                                     const StringData& ns,
-                                     const StringData& ident,
+                                     StringData ns,
+                                     StringData ident,
                                      const CollectionOptions& options) = 0;
 
     virtual Status createSortedDataInterface(OperationContext* opCtx,
-                                             const StringData& ident,
+                                             StringData ident,
                                              const IndexDescriptor* desc) = 0;
 
-    virtual int64_t getIdentSize(OperationContext* opCtx, const StringData& ident) = 0;
+    virtual int64_t getIdentSize(OperationContext* opCtx, StringData ident) = 0;
 
-    virtual Status repairIdent(OperationContext* opCtx, const StringData& ident) = 0;
+    virtual Status repairIdent(OperationContext* opCtx, StringData ident) = 0;
 
-    virtual Status dropIdent(OperationContext* opCtx, const StringData& ident) = 0;
+    virtual Status dropIdent(OperationContext* opCtx, StringData ident) = 0;
 
     // optional
     virtual int flushAllFiles(bool sync) {
         return 0;
     }
 
+    /**
+     * See StorageEngine::beginBackup for details
+     */
+    virtual Status beginBackup(OperationContext* txn) {
+        return Status(ErrorCodes::CommandNotSupported,
+                      "The current storage engine doesn't support backup mode");
+    }
+
+    /**
+     * See StorageEngine::endBackup for details
+     */
+    virtual void endBackup(OperationContext* txn) {
+        MONGO_UNREACHABLE;
+    }
+
     virtual bool isDurable() const = 0;
+
+    /**
+     * See StorageEngine::isEphemeral for details
+     */
+    virtual bool isEphemeral() {
+        return false;
+    }
 
     /**
      * This must not change over the lifetime of the engine.
@@ -108,14 +131,14 @@ public:
     virtual bool supportsDirectoryPerDB() const = 0;
 
     virtual Status okToRename(OperationContext* opCtx,
-                              const StringData& fromNS,
-                              const StringData& toNS,
-                              const StringData& ident,
+                              StringData fromNS,
+                              StringData toNS,
+                              StringData ident,
                               const RecordStore* originalRecordStore) const {
         return Status::OK();
     }
 
-    virtual bool hasIdent(OperationContext* opCtx, const StringData& ident) const = 0;
+    virtual bool hasIdent(OperationContext* opCtx, StringData ident) const = 0;
 
     virtual std::vector<std::string> getAllIdents(OperationContext* opCtx) const = 0;
 
@@ -127,6 +150,15 @@ public:
      * There is intentionally no uncleanShutdown().
      */
     virtual void cleanShutdown() = 0;
+
+    /**
+     * Return the SnapshotManager for this KVEngine or NULL if not supported.
+     *
+     * Pointer remains owned by the StorageEngine, not the caller.
+     */
+    virtual SnapshotManager* getSnapshotManager() const {
+        return nullptr;
+    }
 
     /**
      * The destructor will never be called from mongod, but may be called from tests.

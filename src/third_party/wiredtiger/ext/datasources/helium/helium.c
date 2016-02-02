@@ -1153,7 +1153,7 @@ skip_deleted:
 	 * are making two calls and returning the best choice.  As each call
 	 * overwrites both key and value, we have to have a copy of the key
 	 * for the second call plus the returned key and value from the first
-	 * call.   That's why each cursor has 3 temporary buffers.
+	 * call. That's why each cursor has 3 temporary buffers.
 	 *
 	 * First, copy the key.
 	 */
@@ -1190,7 +1190,7 @@ skip_deleted:
 			cache_rm = 1;
 
 		/*
-		 * Copy the cache key.   If the cache's entry wasn't a delete,
+		 * Copy the cache key. If the cache's entry wasn't a delete,
 		 * copy the value as well, we may return the cache entry.
 		 */
 		if (cursor->t2.mem_len < r->key_len) {
@@ -1575,7 +1575,7 @@ update(WT_CURSOR *wtcursor, int remove_op)
 
 		/*
 		 * If overwrite is false, no entry (or a removed entry), is an
-		 * error.   We're done checking if there is a visible entry in
+		 * error. We're done checking if there is a visible entry in
 		 * the cache, otherwise repeat the check on the primary store.
 		 */
 		if (cache_value_visible(wtcursor, &cp)) {
@@ -3073,8 +3073,8 @@ helium_source_open_txn(DATA_SOURCE *ds)
 
 	/*
 	 * If we didn't find a transaction store, open a transaction store in
-	 * the first Helium source we loaded.   (It could just as easily be
-	 * the last one we loaded, we're just picking one, but picking the first
+	 * the first Helium source we loaded. (It could just as easily be the
+	 * last one we loaded, we're just picking one, but picking the first
 	 * seems slightly less likely to make people wonder.)
 	 */
 	if ((hs = hs_txn) == NULL) {
@@ -3427,7 +3427,7 @@ wiredtiger_extension_init(WT_CONNECTION *connection, WT_CONFIG_ARG *config)
 	/* Add Helium-specific WT_SESSION.create configuration options.  */
 	for (p = session_create_opts; *p != NULL; ++p)
 		if ((ret = connection->configure_method(connection,
-		    "session.create", "helium:", *p, "boolean", NULL)) != 0)
+		    "WT_SESSION.create", "helium:", *p, "boolean", NULL)) != 0)
 			EMSG_ERR(wtext, NULL, ret,
 			    "WT_CONNECTION.configure_method: session.create: "
 			    "%s: %s",

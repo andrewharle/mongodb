@@ -39,9 +39,10 @@
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index/index_descriptor.h"
-#include "mongo/db/global_environment_experiment.h"
+#include "mongo/db/matcher/expression.h"
+#include "mongo/db/matcher/expression_parser.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/util/file_allocator.h"
+#include "mongo/db/service_context.h"
 #include "mongo/util/log.h"
 #include "mongo/util/scopeguard.h"
 
@@ -67,7 +68,7 @@ private:
     IndexCatalogEntry* _catalogEntry;
 };
 
-IndexCatalogEntry::IndexCatalogEntry(const StringData& ns,
+IndexCatalogEntry::IndexCatalogEntry(StringData ns,
                                      CollectionCatalogEntry* collection,
                                      IndexDescriptor* descriptor,
                                      CollectionInfoCache* infoCache)
@@ -97,6 +98,18 @@ void IndexCatalogEntry::init(OperationContext* txn, IndexAccessMethod* accessMet
     _isReady = _catalogIsReady(txn);
     _head = _catalogHead(txn);
     _isMultikey = _catalogIsMultikey(txn);
+
+    BSONElement filterElement = _descriptor->getInfoElement("partialFilterExpression");
+    if (filterElement.type()) {
+        invariant(filterElement.isABSONObj());
+        BSONObj filter = filterElement.Obj();
+        StatusWithMatchExpression statusWithMatcher = MatchExpressionParser::parse(filter);
+        // this should be checked in create, so can blow up here
+        invariantOK(statusWithMatcher.getStatus());
+        _filterExpression = std::move(statusWithMatcher.getValue());
+        LOG(2) << "have filter expression for " << _ns << " " << _descriptor->indexName() << " "
+               << filter;
+    }
 }
 
 const RecordId& IndexCatalogEntry::head(OperationContext* txn) const {
@@ -150,13 +163,13 @@ public:
     RecoveryUnitSwap(OperationContext* txn, RecoveryUnit* newRecoveryUnit)
         : _txn(txn),
           _oldRecoveryUnit(_txn->releaseRecoveryUnit()),
-          _newRecoveryUnit(newRecoveryUnit) {
-        _txn->setRecoveryUnit(_newRecoveryUnit.get());
-    }
+          _oldRecoveryUnitState(
+              _txn->setRecoveryUnit(newRecoveryUnit, OperationContext::kNotInUnitOfWork)),
+          _newRecoveryUnit(newRecoveryUnit) {}
 
     ~RecoveryUnitSwap() {
         _txn->releaseRecoveryUnit();
-        _txn->setRecoveryUnit(_oldRecoveryUnit);
+        _txn->setRecoveryUnit(_oldRecoveryUnit, _oldRecoveryUnitState);
     }
 
 private:
@@ -165,9 +178,10 @@ private:
 
     // Owned, but life-time is not controlled
     RecoveryUnit* const _oldRecoveryUnit;
+    OperationContext::RecoveryUnitState const _oldRecoveryUnitState;
 
     // Owned and life-time is controlled
-    const boost::scoped_ptr<RecoveryUnit> _newRecoveryUnit;
+    const std::unique_ptr<RecoveryUnit> _newRecoveryUnit;
 };
 
 void IndexCatalogEntry::setMultikey(OperationContext* txn) {
@@ -189,7 +203,7 @@ void IndexCatalogEntry::setMultikey(OperationContext* txn) {
     // setMultikey. The reason we need is to avoid artificial WriteConflicts, which happen
     // with snapshot isolation.
     {
-        StorageEngine* storageEngine = getGlobalEnvironment()->getGlobalStorageEngine();
+        StorageEngine* storageEngine = getGlobalServiceContext()->getGlobalStorageEngine();
         RecoveryUnitSwap ruSwap(txn, storageEngine->newRecoveryUnit());
 
         WriteUnitOfWork wuow(txn);

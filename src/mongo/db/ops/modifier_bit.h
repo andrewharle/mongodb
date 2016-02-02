@@ -28,7 +28,6 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
 #include <string>
 #include <vector>
 
@@ -60,9 +59,7 @@ public:
     /** Validates the potential application of the init'ed mod to the given Element and
      *  configures the internal state of the mod as necessary.
      */
-    virtual Status prepare(mutablebson::Element root,
-                           const StringData& matchedField,
-                           ExecInfo* execInfo);
+    virtual Status prepare(mutablebson::Element root, StringData matchedField, ExecInfo* execInfo);
 
     /** Updates the Element used in prepare with the effects of the $bit operation */
     virtual Status apply() const;
@@ -92,7 +89,7 @@ private:
     OpEntries _ops;
 
     struct PreparedState;
-    boost::scoped_ptr<PreparedState> _preparedState;
+    std::unique_ptr<PreparedState> _preparedState;
 };
 
 }  // namespace mongo

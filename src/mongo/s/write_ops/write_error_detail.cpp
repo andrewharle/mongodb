@@ -204,7 +204,7 @@ const BSONObj& WriteErrorDetail::getErrInfo() const {
     return _errInfo;
 }
 
-void WriteErrorDetail::setErrMessage(const StringData& errMessage) {
+void WriteErrorDetail::setErrMessage(StringData errMessage) {
     _errMessage = errMessage.toString();
     _isErrMessageSet = true;
 }

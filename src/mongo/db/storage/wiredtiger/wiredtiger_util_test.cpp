@@ -30,7 +30,6 @@
 
 #include "mongo/platform/basic.h"
 
-#include <boost/scoped_ptr.hpp>
 #include <sstream>
 #include <string>
 
@@ -120,8 +119,8 @@ protected:
     }
 
 private:
-    boost::scoped_ptr<WiredTigerUtilHarnessHelper> _harnessHelper;
-    boost::scoped_ptr<OperationContext> _opCtx;
+    std::unique_ptr<WiredTigerUtilHarnessHelper> _harnessHelper;
+    std::unique_ptr<OperationContext> _opCtx;
 };
 
 TEST_F(WiredTigerUtilMetadataTest, GetConfigurationStringInvalidURI) {
@@ -169,15 +168,6 @@ TEST_F(WiredTigerUtilMetadataTest, GetApplicationMetadataString) {
         WiredTigerUtil::getApplicationMetadata(getOperationContext(), getURI());
     ASSERT_NOT_OK(result.getStatus());
     ASSERT_EQUALS(ErrorCodes::FailedToParse, result.getStatus().code());
-}
-
-TEST_F(WiredTigerUtilMetadataTest, GetApplicationMetadataInvalidMetadata) {
-    const char* config = "app_metadata=(abc=def=ghi)";
-    createSession(config);
-    StatusWith<BSONObj> result =
-        WiredTigerUtil::getApplicationMetadata(getOperationContext(), getURI());
-    ASSERT_NOT_OK(result.getStatus());
-    ASSERT_EQUALS(ErrorCodes::BadValue, result.getStatus().code());
 }
 
 TEST_F(WiredTigerUtilMetadataTest, GetApplicationMetadataDuplicateKeys) {

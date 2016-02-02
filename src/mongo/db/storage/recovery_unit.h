@@ -28,12 +28,14 @@
 
 #pragma once
 
+#include <cstdint>
 #include <stdlib.h>
 #include <string>
 
 #include "mongo/base/disallow_copying.h"
+#include "mongo/base/status.h"
 #include "mongo/db/storage/snapshot.h"
-#include "mongo/platform/cstdint.h"
+#include "mongo/db/storage/snapshot_name.h"
 
 namespace mongo {
 
@@ -52,57 +54,85 @@ public:
 
     virtual void reportState(BSONObjBuilder* b) const {}
 
-    virtual void beingReleasedFromOperationContext() {}
-    virtual void beingSetOnOperationContext() {}
-
     /**
      * These should be called through WriteUnitOfWork rather than directly.
      *
-     * begin and end mark the begining and end of a unit of work. Each call to begin must be
-     * matched with exactly one call to end. commit can be called any number of times between
-     * begin and end but must not be called outside. When end() is called, all changes since the
-     * last commit (if any) will be rolled back.
-     *
-     * If UnitsOfWork nest (ie begin is called twice before a call to end), the prior paragraph
-     * describes the behavior of the outermost UnitOfWork. Inner UnitsOfWork neither commit nor
-     * rollback on their own but rely on the outermost to do it. If an inner UnitOfWork commits
-     * any changes, it is illegal for an outer unit to rollback. If an inner UnitOfWork
-     * rollsback any changes, it is illegal for an outer UnitOfWork to do anything other than
-     * rollback.
-     *
-     * The goal is not to fully support nested transaction, instead we want to allow delaying
-     * commit on a unit if it is part of a larger atomic unit.
-     *
-     * TODO see if we can get rid of nested UnitsOfWork.
+     * A call to 'beginUnitOfWork' marks the beginning of a unit of work. Each call to
+     * 'beginUnitOfWork' must be matched with exactly one call to either 'commitUnitOfWork' or
+     * 'abortUnitOfWork'. When 'abortUnitOfWork' is called, all changes made since the begin
+     * of the unit of work will be rolled back.
      */
     virtual void beginUnitOfWork(OperationContext* opCtx) = 0;
     virtual void commitUnitOfWork() = 0;
-    virtual void endUnitOfWork() = 0;
-
-    // WARNING: "commit" in functions below refers to a global journal flush which implicitly
-    // commits the current UnitOfWork as well. They are actually stronger than commitUnitOfWork
-    // as they can commit even if the UnitOfWork is nested. That is because we have already
-    // verified that the db will be left in a valid state at these commit points.
-    // TODO clean up the naming and semantics.
+    virtual void abortUnitOfWork() = 0;
 
     /**
      * Waits until all commits that happened before this call are durable. Returns true, unless the
      * storage engine cannot guarantee durability, which should never happen when isDurable()
      * returned true. This cannot be called from inside a unit of work, and should fail if it is.
      */
-    virtual bool awaitCommit() = 0;
-
-    // This is a hint to the engine that this transaction is going to call awaitCommit at the
-    // end.  This should be called before any work is done so that transactions can be
-    // configured correctly.
-    virtual void goingToAwaitCommit() {}
+    virtual bool waitUntilDurable() = 0;
 
     /**
-     * When this is called, if there is an open transaction, it is commited and a new one is
-     * started.  This cannot be called inside of a WriteUnitOfWork, and should fail if it is.
+     * This is a hint to the engine that this transaction is going to call waitUntilDurable at
+     * the end.  This should be called before any work is done so that transactions can be
+     * configured correctly.
      */
-    virtual void commitAndRestart() = 0;
+    virtual void goingToWaitUntilDurable() {}
 
+    /**
+     * When this is called, if there is an open transaction, it is closed. On return no
+     * transaction is active. This cannot be called inside of a WriteUnitOfWork, and should
+     * fail if it is.
+     */
+    virtual void abandonSnapshot() = 0;
+
+    /**
+     * Informs this RecoveryUnit that all future reads through it should be from a snapshot
+     * marked as Majority Committed. Snapshots should still be separately acquired and newer
+     * committed snapshots should be used if available whenever implementations would normally
+     * change snapshots.
+     *
+     * If no snapshot has yet been marked as Majority Committed, returns a status with error
+     * code ReadConcernMajorityNotAvailableYet. After this returns successfully, at any point where
+     * implementations attempt to acquire committed snapshot, if there are none available due to a
+     * call to SnapshotManager::dropAllSnapshots(), a UserException with the same code should be
+     * thrown.
+     *
+     * StorageEngines that don't support a SnapshotManager should use the default
+     * implementation.
+     */
+    virtual Status setReadFromMajorityCommittedSnapshot() {
+        return {ErrorCodes::CommandNotSupported,
+                "Current storage engine does not support majority readConcerns"};
+    }
+
+    /**
+     * Returns true if setReadFromMajorityCommittedSnapshot() has been called.
+     */
+    virtual bool isReadingFromMajorityCommittedSnapshot() const {
+        return false;
+    }
+
+    /**
+     * Returns the SnapshotName being used by this recovery unit or boost::none if not reading from
+     * a majority committed snapshot.
+     *
+     * It is possible for reads to occur from later snapshots, but they may not occur from earlier
+     * snapshots.
+     */
+    virtual boost::optional<SnapshotName> getMajorityCommittedSnapshot() const {
+        dassert(!isReadingFromMajorityCommittedSnapshot());
+        return {};
+    }
+
+    /**
+     * Gets the local SnapshotId.
+     *
+     * It is only valid to compare SnapshotIds generated by a single RecoveryUnit.
+     *
+     * This is unrelated to SnapshotName which must be globally comparable.
+     */
     virtual SnapshotId getSnapshotId() const = 0;
 
     /**
@@ -134,6 +164,50 @@ public:
      * may not be called during commit or rollback.
      */
     virtual void registerChange(Change* change) = 0;
+
+    /**
+     * Registers a callback to be called if the current WriteUnitOfWork rolls back.
+     *
+     * Be careful about the lifetimes of all variables captured by the callback!
+     */
+    template <typename Callback>
+    void onRollback(Callback callback) {
+        class OnRollbackChange final : public Change {
+        public:
+            OnRollbackChange(Callback&& callback) : _callback(std::move(callback)) {}
+            void rollback() final {
+                _callback();
+            }
+            void commit() final {}
+
+        private:
+            Callback _callback;
+        };
+
+        registerChange(new OnRollbackChange(std::move(callback)));
+    }
+
+    /**
+     * Registers a callback to be called if the current WriteUnitOfWork commits.
+     *
+     * Be careful about the lifetimes of all variables captured by the callback!
+     */
+    template <typename Callback>
+    void onCommit(Callback callback) {
+        class OnCommitChange final : public Change {
+        public:
+            OnCommitChange(Callback&& callback) : _callback(std::move(callback)) {}
+            void rollback() final {}
+            void commit() final {
+                _callback();
+            }
+
+        private:
+            Callback _callback;
+        };
+
+        registerChange(new OnCommitChange(std::move(callback)));
+    }
 
     //
     // The remaining methods probably belong on DurRecoveryUnit rather than on the interface.

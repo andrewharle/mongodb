@@ -30,7 +30,6 @@
 
 #include "mongo/db/storage/kv/kv_engine_test_harness.h"
 
-#include <boost/scoped_ptr.hpp>
 
 #include "mongo/db/operation_context_noop.h"
 #include "mongo/db/index/index_descriptor.h"
@@ -42,7 +41,7 @@
 
 namespace mongo {
 
-using boost::scoped_ptr;
+using std::unique_ptr;
 using std::string;
 
 namespace {
@@ -53,12 +52,12 @@ public:
 }
 
 TEST(KVEngineTestHarness, SimpleRS1) {
-    scoped_ptr<KVHarnessHelper> helper(KVHarnessHelper::create());
+    unique_ptr<KVHarnessHelper> helper(KVHarnessHelper::create());
     KVEngine* engine = helper->getEngine();
     ASSERT(engine);
 
     string ns = "a.b";
-    scoped_ptr<RecordStore> rs;
+    unique_ptr<RecordStore> rs;
     {
         MyOperationContext opCtx(engine);
         ASSERT_OK(engine->createRecordStore(&opCtx, ns, ns, CollectionOptions()));
@@ -91,7 +90,7 @@ TEST(KVEngineTestHarness, SimpleRS1) {
 }
 
 TEST(KVEngineTestHarness, Restart1) {
-    scoped_ptr<KVHarnessHelper> helper(KVHarnessHelper::create());
+    unique_ptr<KVHarnessHelper> helper(KVHarnessHelper::create());
     KVEngine* engine = helper->getEngine();
     ASSERT(engine);
 
@@ -100,7 +99,7 @@ TEST(KVEngineTestHarness, Restart1) {
     // 'loc' holds location of "abc" and is referenced after restarting engine.
     RecordId loc;
     {
-        scoped_ptr<RecordStore> rs;
+        unique_ptr<RecordStore> rs;
         {
             MyOperationContext opCtx(engine);
             ASSERT_OK(engine->createRecordStore(&opCtx, ns, ns, CollectionOptions()));
@@ -126,7 +125,7 @@ TEST(KVEngineTestHarness, Restart1) {
     engine = helper->restartEngine();
 
     {
-        scoped_ptr<RecordStore> rs;
+        unique_ptr<RecordStore> rs;
         MyOperationContext opCtx(engine);
         rs.reset(engine->getRecordStore(&opCtx, ns, ns, CollectionOptions()));
         ASSERT_EQUALS(string("abc"), rs->dataFor(&opCtx, loc).data());
@@ -135,13 +134,13 @@ TEST(KVEngineTestHarness, Restart1) {
 
 
 TEST(KVEngineTestHarness, SimpleSorted1) {
-    scoped_ptr<KVHarnessHelper> helper(KVHarnessHelper::create());
+    unique_ptr<KVHarnessHelper> helper(KVHarnessHelper::create());
     KVEngine* engine = helper->getEngine();
     ASSERT(engine);
 
     string ident = "abc";
     IndexDescriptor desc(NULL, "", BSON("key" << BSON("a" << 1)));
-    scoped_ptr<SortedDataInterface> sorted;
+    unique_ptr<SortedDataInterface> sorted;
     {
         MyOperationContext opCtx(engine);
         ASSERT_OK(engine->createSortedDataInterface(&opCtx, ident, &desc));
@@ -163,11 +162,11 @@ TEST(KVEngineTestHarness, SimpleSorted1) {
 }
 
 TEST(KVCatalogTest, Coll1) {
-    scoped_ptr<KVHarnessHelper> helper(KVHarnessHelper::create());
+    unique_ptr<KVHarnessHelper> helper(KVHarnessHelper::create());
     KVEngine* engine = helper->getEngine();
 
-    scoped_ptr<RecordStore> rs;
-    scoped_ptr<KVCatalog> catalog;
+    unique_ptr<RecordStore> rs;
+    unique_ptr<KVCatalog> catalog;
     {
         MyOperationContext opCtx(engine);
         WriteUnitOfWork uow(&opCtx);
@@ -207,11 +206,11 @@ TEST(KVCatalogTest, Coll1) {
 
 
 TEST(KVCatalogTest, Idx1) {
-    scoped_ptr<KVHarnessHelper> helper(KVHarnessHelper::create());
+    unique_ptr<KVHarnessHelper> helper(KVHarnessHelper::create());
     KVEngine* engine = helper->getEngine();
 
-    scoped_ptr<RecordStore> rs;
-    scoped_ptr<KVCatalog> catalog;
+    unique_ptr<RecordStore> rs;
+    unique_ptr<KVCatalog> catalog;
     {
         MyOperationContext opCtx(engine);
         WriteUnitOfWork uow(&opCtx);
@@ -280,11 +279,11 @@ TEST(KVCatalogTest, Idx1) {
 }
 
 TEST(KVCatalogTest, DirectoryPerDb1) {
-    scoped_ptr<KVHarnessHelper> helper(KVHarnessHelper::create());
+    unique_ptr<KVHarnessHelper> helper(KVHarnessHelper::create());
     KVEngine* engine = helper->getEngine();
 
-    scoped_ptr<RecordStore> rs;
-    scoped_ptr<KVCatalog> catalog;
+    unique_ptr<RecordStore> rs;
+    unique_ptr<KVCatalog> catalog;
     {
         MyOperationContext opCtx(engine);
         WriteUnitOfWork uow(&opCtx);
@@ -322,11 +321,11 @@ TEST(KVCatalogTest, DirectoryPerDb1) {
 }
 
 TEST(KVCatalogTest, Split1) {
-    scoped_ptr<KVHarnessHelper> helper(KVHarnessHelper::create());
+    unique_ptr<KVHarnessHelper> helper(KVHarnessHelper::create());
     KVEngine* engine = helper->getEngine();
 
-    scoped_ptr<RecordStore> rs;
-    scoped_ptr<KVCatalog> catalog;
+    unique_ptr<RecordStore> rs;
+    unique_ptr<KVCatalog> catalog;
     {
         MyOperationContext opCtx(engine);
         WriteUnitOfWork uow(&opCtx);
@@ -364,11 +363,11 @@ TEST(KVCatalogTest, Split1) {
 }
 
 TEST(KVCatalogTest, DirectoryPerAndSplit1) {
-    scoped_ptr<KVHarnessHelper> helper(KVHarnessHelper::create());
+    unique_ptr<KVHarnessHelper> helper(KVHarnessHelper::create());
     KVEngine* engine = helper->getEngine();
 
-    scoped_ptr<RecordStore> rs;
-    scoped_ptr<KVCatalog> catalog;
+    unique_ptr<RecordStore> rs;
+    unique_ptr<KVCatalog> catalog;
     {
         MyOperationContext opCtx(engine);
         WriteUnitOfWork uow(&opCtx);

@@ -35,10 +35,10 @@
 #pragma once
 
 #include <boost/functional/hash.hpp>
+#include <cstdint>
 
 #include "mongo/db/jsobj.h"
 #include "mongo/db/record_id.h"
-#include "mongo/platform/cstdint.h"
 #include "mongo/platform/unordered_set.h"
 
 namespace mongo {
@@ -77,15 +77,16 @@ public:
         Null();
     }
 
-    // Minimum allowed DiskLoc.  No Record may begin at this location because file and extent
-    // headers must precede Records in a file.
+    // Minimum allowed DiskLoc.  No MmapV1RecordHeader may begin at this location because file and
+    // extent headers must precede Records in a file.
     static DiskLoc min() {
         return DiskLoc(0, 0);
     }
 
     // Maximum allowed DiskLoc.
-    // No Record may begin at this location because the minimum size of a Record is larger than
-    // one byte.  Also, the last bit is not able to be used because mmapv1 uses that for "used".
+    // No MmapV1RecordHeader may begin at this location because the minimum size of a
+    // MmapV1RecordHeader is larger than one byte.  Also, the last bit is not able to be used
+    // because mmapv1 uses that for "used".
     static DiskLoc max() {
         return DiskLoc(0x7fffffff, 0x7ffffffe);
     }

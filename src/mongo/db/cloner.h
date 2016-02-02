@@ -51,14 +51,14 @@ public:
         _conn.reset(c);
     }
 
-    /** copy the entire database */
-    bool go(OperationContext* txn,
-            const std::string& toDBName,
-            const std::string& masterHost,
-            const CloneOptions& opts,
-            std::set<std::string>* clonedColls,
-            std::string& errmsg,
-            int* errCode = 0);
+    /**
+     * Copies an entire database from the specified host.
+     */
+    Status copyDb(OperationContext* txn,
+                  const std::string& toDBName,
+                  const std::string& masterHost,
+                  const CloneOptions& opts,
+                  std::set<std::string>* clonedColls);
 
     bool copyCollection(OperationContext* txn,
                         const std::string& ns,
@@ -66,8 +66,7 @@ public:
                         std::string& errmsg,
                         bool mayYield,
                         bool mayBeInterrupted,
-                        bool copyIndexes = true,
-                        bool logForRepl = true);
+                        bool copyIndexes = true);
 
 private:
     void copy(OperationContext* txn,
@@ -75,7 +74,6 @@ private:
               const NamespaceString& from_ns,
               const BSONObj& from_opts,
               const NamespaceString& to_ns,
-              bool logForRepl,
               bool masterSameProcess,
               bool slaveOk,
               bool mayYield,
@@ -87,26 +85,24 @@ private:
                      const NamespaceString& from_ns,
                      const BSONObj& from_opts,
                      const NamespaceString& to_ns,
-                     bool logForRepl,
                      bool masterSameProcess,
                      bool slaveOk,
                      bool mayYield,
                      bool mayBeInterrupted);
 
     struct Fun;
-    std::auto_ptr<DBClientBase> _conn;
+    std::unique_ptr<DBClientBase> _conn;
 };
 
 /**
  *  slaveOk     - if true it is ok if the source of the data is !ismaster.
  *  useReplAuth - use the credentials we normally use as a replication slave for the cloning
- *  snapshot    - use $snapshot mode for copying collections.  note this should not be used
+ *  snapshot    - use snapshot mode for copying collections.  note this should not be used
  *                when it isn't required, as it will be slower.  for example,
  *                repairDatabase need not use it.
  */
 struct CloneOptions {
     CloneOptions() {
-        logForRepl = true;
         slaveOk = false;
         useReplAuth = false;
         snapshot = true;
@@ -120,7 +116,6 @@ struct CloneOptions {
     std::string fromDB;
     std::set<std::string> collsToIgnore;
 
-    bool logForRepl;
     bool slaveOk;
     bool useReplAuth;
     bool snapshot;

@@ -41,13 +41,25 @@ class BackgroundSyncInterface;
 class InitialSync : public SyncTail {
 public:
     virtual ~InitialSync();
-    InitialSync(BackgroundSyncInterface* q);
+    InitialSync(BackgroundSyncInterface* q, MultiSyncApplyFunc func);
+
 
     /**
      * applies up to endOpTime, fetching missing documents as needed.
      */
     void oplogApplication(OperationContext* txn, const OpTime& endOpTime);
+
+private:
+    /**
+     * Applies oplog entries until reaching "endOpTime".
+     *
+     * NOTE:Will not transition or check states
+     */
+    void _applyOplogUntil(OperationContext* txn, const OpTime& endOpTime);
 };
+
+// Used for ReplSetTest testing.
+extern unsigned replSetForceInitialSyncFailure;
 
 }  // namespace repl
 }  // namespace mongo

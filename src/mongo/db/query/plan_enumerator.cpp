@@ -34,13 +34,12 @@
 
 #include "mongo/db/query/indexability.h"
 #include "mongo/db/query/index_tag.h"
-#include "mongo/db/query/qlog.h"
 #include "mongo/util/log.h"
 
 namespace {
 
 using namespace mongo;
-using std::auto_ptr;
+using std::unique_ptr;
 using std::endl;
 using std::set;
 using std::string;
@@ -176,12 +175,12 @@ bool PlanEnumerator::getNext(MatchExpression** tree) {
     // Tag with our first solution.
     tagMemo(memoIDForNode(_root));
 
-    *tree = _root->shallowClone();
+    *tree = _root->shallowClone().release();
     tagForSort(*tree);
     sortUsingTags(*tree);
 
     _root->resetTag();
-    QLOG() << "Enumerator: memo just before moving:" << endl
+    LOG(5) << "Enumerator: memo just before moving:" << endl
            << dumpMemo();
     _done = nextMemo(memoIDForNode(_root));
     return true;
@@ -276,7 +275,7 @@ bool PlanEnumerator::prepMemo(MatchExpression* node, PrepMemoContext context) {
     } else if (Indexability::arrayUsesIndexOnChildren(node)) {
         // Add each of our children as a subnode.  We enumerate through each subnode one at a
         // time until it's exhausted then we move on.
-        auto_ptr<ArrayAssignment> aa(new ArrayAssignment());
+        unique_ptr<ArrayAssignment> aa(new ArrayAssignment());
 
         if (MatchExpression::ELEM_MATCH_OBJECT == node->matchType()) {
             childContext.elemMatchExpr = node;
@@ -1140,7 +1139,7 @@ void PlanEnumerator::compound(const vector<MatchExpression*>& tryCompound,
 //
 
 void PlanEnumerator::tagMemo(size_t id) {
-    QLOG() << "Tagging memoID " << id << endl;
+    LOG(5) << "Tagging memoID " << id << endl;
     NodeAssignment* assign = _memo[id];
     verify(NULL != assign);
 

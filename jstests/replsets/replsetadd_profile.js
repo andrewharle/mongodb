@@ -9,11 +9,10 @@
 var collectionName = 'jstests_replsetadd_profile';
 
 var replTest = new ReplSetTest({name: 'ReplSetAddProfileTestSet',
-                                nodes: [{profile: 2}],
-                                host: "localhost"});
+                                nodes: [{profile: 2}]});
 replTest.startSet();
 replTest.initiate();
-var master = replTest.getMaster();
+var master = replTest.getPrimary();
 var masterCollection = master.getDB('test').getCollection(collectionName);
 masterCollection.save({a: 1});
 
@@ -21,6 +20,7 @@ masterCollection.save({a: 1});
 var newNode = replTest.add();
 replTest.reInitiate();
 
+replTest.waitForState(replTest.nodes[1], ReplSetTest.State.SECONDARY, 60 * 1000);
 // Allow documents to propagate to new replica set member.
 replTest.awaitReplication();
 

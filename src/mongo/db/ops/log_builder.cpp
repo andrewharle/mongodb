@@ -84,8 +84,7 @@ Status LogBuilder::addToSets(Element elt) {
     return addToSection(elt, &_setAccumulator, kSet);
 }
 
-Status LogBuilder::addToSetsWithNewFieldName(const StringData& name,
-                                             const mutablebson::Element val) {
+Status LogBuilder::addToSetsWithNewFieldName(StringData name, const mutablebson::Element val) {
     mutablebson::Element elemToSet = _logRoot.getDocument().makeElementWithNewFieldName(name, val);
     if (!elemToSet.ok())
         return Status(ErrorCodes::InternalError,
@@ -96,7 +95,7 @@ Status LogBuilder::addToSetsWithNewFieldName(const StringData& name,
     return addToSets(elemToSet);
 }
 
-Status LogBuilder::addToSetsWithNewFieldName(const StringData& name, const BSONElement& val) {
+Status LogBuilder::addToSetsWithNewFieldName(StringData name, const BSONElement& val) {
     mutablebson::Element elemToSet = _logRoot.getDocument().makeElementWithNewFieldName(name, val);
     if (!elemToSet.ok())
         return Status(ErrorCodes::InternalError,
@@ -107,7 +106,7 @@ Status LogBuilder::addToSetsWithNewFieldName(const StringData& name, const BSONE
     return addToSets(elemToSet);
 }
 
-Status LogBuilder::addToSets(const StringData& name, const SafeNum& val) {
+Status LogBuilder::addToSets(StringData name, const SafeNum& val) {
     mutablebson::Element elemToSet = _logRoot.getDocument().makeElementSafeNum(name, val);
     if (!elemToSet.ok())
         return Status(ErrorCodes::InternalError,

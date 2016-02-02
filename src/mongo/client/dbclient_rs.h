@@ -29,12 +29,9 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
-#include <boost/shared_ptr.hpp>
 #include <utility>
 
 #include "mongo/client/dbclientinterface.h"
-#include "mongo/client/export_macros.h"
 #include "mongo/util/net/hostandport.h"
 
 namespace mongo {
@@ -42,7 +39,7 @@ namespace mongo {
 class ReplicaSetMonitor;
 class TagSet;
 struct ReadPreferenceSetting;
-typedef boost::shared_ptr<ReplicaSetMonitor> ReplicaSetMonitorPtr;
+typedef std::shared_ptr<ReplicaSetMonitor> ReplicaSetMonitorPtr;
 
 /** Use this class to connect to a replica set of servers.  The class will manage
    checking for which server in a replica set is master, and do failover automatically.
@@ -52,7 +49,7 @@ typedef boost::shared_ptr<ReplicaSetMonitor> ReplicaSetMonitorPtr;
    On a failover situation, expect at least one operation to return an error (throw
    an exception) before the failover is complete.  Operations are not retried.
 */
-class MONGO_CLIENT_API DBClientReplicaSet : public DBClientBase {
+class DBClientReplicaSet : public DBClientBase {
 public:
     using DBClientBase::query;
     using DBClientBase::update;
@@ -84,13 +81,13 @@ public:
     // ----------- simple functions --------------
 
     /** throws userassertion "no master found" */
-    virtual std::auto_ptr<DBClientCursor> query(const std::string& ns,
-                                                Query query,
-                                                int nToReturn = 0,
-                                                int nToSkip = 0,
-                                                const BSONObj* fieldsToReturn = 0,
-                                                int queryOptions = 0,
-                                                int batchSize = 0);
+    virtual std::unique_ptr<DBClientCursor> query(const std::string& ns,
+                                                  Query query,
+                                                  int nToReturn = 0,
+                                                  int nToSkip = 0,
+                                                  const BSONObj* fieldsToReturn = 0,
+                                                  int queryOptions = 0,
+                                                  int batchSize = 0);
 
     /** throws userassertion "no master found" */
     virtual BSONObj findOne(const std::string& ns,
@@ -186,6 +183,17 @@ public:
         return true;
     }
 
+    rpc::UniqueReply runCommandWithMetadata(StringData database,
+                                            StringData command,
+                                            const BSONObj& metadata,
+                                            const BSONObj& commandArgs) final;
+
+    void setRequestMetadataWriter(rpc::RequestMetadataWriter writer) final;
+
+    void setReplyMetadataReader(rpc::ReplyMetadataReader reader) final;
+
+    int getMinWireVersion() final;
+    int getMaxWireVersion() final;
     // ---- low level ------
 
     virtual bool call(Message& toSend,
@@ -208,9 +216,6 @@ public:
      */
     static bool isSecondaryQuery(const std::string& ns, const BSONObj& queryObj, int queryOptions);
 
-    virtual void setRunCommandHook(DBClientWithCommands::RunCommandHookFunc func);
-    virtual void setPostRunCommandHook(DBClientWithCommands::PostRunCommandHookFunc func);
-
     /**
      * Performs a "soft reset" by clearing all states relating to secondary nodes and
      * returning secondary connections to the pool.
@@ -228,10 +233,6 @@ protected:
     */
     virtual void _auth(const BSONObj& params);
 
-    virtual void sayPiggyBack(Message& toSend) {
-        checkMaster()->say(toSend);
-    }
-
 private:
     /**
      * Used to simplify slave-handling logic on errors
@@ -240,7 +241,7 @@ private:
      * @throws DBException if the directed node cannot accept the query because it
      *     is not a master
      */
-    std::auto_ptr<DBClientCursor> checkSlaveQueryResult(std::auto_ptr<DBClientCursor> result);
+    std::unique_ptr<DBClientCursor> checkSlaveQueryResult(std::unique_ptr<DBClientCursor> result);
 
     DBClientConnection* checkMaster();
 
@@ -256,7 +257,7 @@ private:
      * @throws DBException when an error occurred either when trying to connect to
      *     a node that was thought to be ok or when an assertion happened.
      */
-    DBClientConnection* selectNodeUsingTags(boost::shared_ptr<ReadPreferenceSetting> readPref);
+    DBClientConnection* selectNodeUsingTags(std::shared_ptr<ReadPreferenceSetting> readPref);
 
     /**
      * @return true if the last host used in the last slaveOk query is still in the
@@ -302,7 +303,7 @@ private:
     std::string _setName;
 
     HostAndPort _masterHost;
-    boost::scoped_ptr<DBClientConnection> _master;
+    std::unique_ptr<DBClientConnection> _master;
 
     // Last used host in a slaveOk query (can be a primary).
     HostAndPort _lastSlaveOkHost;
@@ -310,8 +311,8 @@ private:
     // Connection can either be owned here or returned to the connection pool. Note that
     // if connection is primary, it is owned by _master so it is incorrect to return
     // it to the pool.
-    std::auto_ptr<DBClientConnection> _lastSlaveOkConn;
-    boost::shared_ptr<ReadPreferenceSetting> _lastReadPref;
+    std::unique_ptr<DBClientConnection> _lastSlaveOkConn;
+    std::shared_ptr<ReadPreferenceSetting> _lastReadPref;
 
     double _so_timeout;
 
@@ -334,61 +335,5 @@ protected:
         int _retries;
 
     } _lazyState;
-};
-
-/**
- * A simple object for representing the list of tags requested by a $readPreference.
- */
-class MONGO_CLIENT_API TagSet {
-public:
-    /**
-     * Creates a TagSet that matches any nodes.
-     *
-     * Do not call during static init.
-     */
-    TagSet();
-
-    /**
-     * Creates a TagSet from a BSONArray of tags.
-     *
-     * @param tags the list of tags associated with this option. This object
-     *     will get a shared copy of the list. Therefore, it is important
-     *     for the the given tag to live longer than the created tag set.
-     */
-    explicit TagSet(const BSONArray& tags) : _tags(tags) {}
-
-    /**
-     * Returns the BSONArray listing all tags that should be accepted.
-     */
-    const BSONArray& getTagBSON() const {
-        return _tags;
-    }
-
-    bool operator==(const TagSet& other) const {
-        return _tags == other._tags;
-    }
-
-private:
-    BSONArray _tags;
-};
-
-struct MONGO_CLIENT_API ReadPreferenceSetting {
-    /**
-     * @parm pref the read preference mode.
-     * @param tag the tag set. Note that this object will have the
-     *     tag set will have this in a reset state (meaning, this
-     *     object's copy of tag will have the iterator in the initial
-     *     position).
-     */
-    ReadPreferenceSetting(ReadPreference pref, const TagSet& tag) : pref(pref), tags(tag) {}
-
-    inline bool equals(const ReadPreferenceSetting& other) const {
-        return pref == other.pref && tags == other.tags;
-    }
-
-    BSONObj toBSON() const;
-
-    const ReadPreference pref;
-    TagSet tags;
 };
 }

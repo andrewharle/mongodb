@@ -59,7 +59,9 @@ while ( ( (new Date()).getTime() - start ) < ( time * 2 ) ){
 
     if ( num++ == 0 ){
         var x = db.currentOp();
-        assert.eq( 1 , x.inprog.length , "nothing in prog" );
+        // one operation for the update, another for currentOp itself.  There may be other internal
+        // operations running.
+        assert.lte( 2 , x.inprog.length , "nothing in prog" );
     }
 
     assert.gt( time / 3 , me );
@@ -68,6 +70,7 @@ while ( ( (new Date()).getTime() - start ) < ( time * 2 ) ){
 join();
 
 x = db.currentOp();
-assert.eq( 0 , x.inprog.length , "weird 2" );
+// currentOp itself shows up as an active operation
+assert.eq( 1 , x.inprog.length , "weird 2" );
 
 testServer.stop();

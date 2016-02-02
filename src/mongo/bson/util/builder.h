@@ -35,11 +35,12 @@
 #include <string>
 #include <string.h>
 
-#include <boost/static_assert.hpp>
 
+#include "mongo/base/data_type_endian.h"
 #include "mongo/base/data_view.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/inline_decls.h"
+#include "mongo/platform/decimal128.h"
 #include "mongo/util/allocator.h"
 #include "mongo/util/assert_util.h"
 
@@ -52,8 +53,6 @@ namespace mongo {
 struct PackedDouble {
     double d;
 } PACKED_DECL;
-
-
 /* Note the limit here is rather arbitrary and is simply a standard. generally the code works
    with any object that fits in ram.
 
@@ -185,7 +184,7 @@ public:
     }
 
     void appendUChar(unsigned char j) {
-        BOOST_STATIC_ASSERT(CHAR_BIT == 8);
+        static_assert(CHAR_BIT == 8, "CHAR_BIT == 8");
         appendNumImpl(j);
     }
     void appendChar(char j) {
@@ -195,36 +194,34 @@ public:
         appendNumImpl(j);
     }
     void appendNum(short j) {
-        BOOST_STATIC_ASSERT(sizeof(short) == 2);
+        static_assert(sizeof(short) == 2, "sizeof(short) == 2");
         appendNumImpl(j);
     }
     void appendNum(int j) {
-        BOOST_STATIC_ASSERT(sizeof(int) == 4);
+        static_assert(sizeof(int) == 4, "sizeof(int) == 4");
         appendNumImpl(j);
     }
     void appendNum(unsigned j) {
         appendNumImpl(j);
     }
 
-// Bool does not have a well defined encoding.
-#if __cplusplus >= 201103L
+    // Bool does not have a well defined encoding.
     void appendNum(bool j) = delete;
-#else
-    void appendNum(bool j) {
-        invariant(false);
-    }
-#endif
 
     void appendNum(double j) {
-        BOOST_STATIC_ASSERT(sizeof(double) == 8);
+        static_assert(sizeof(double) == 8, "sizeof(double) == 8");
         appendNumImpl(j);
     }
     void appendNum(long long j) {
-        BOOST_STATIC_ASSERT(sizeof(long long) == 8);
+        static_assert(sizeof(long long) == 8, "sizeof(long long) == 8");
         appendNumImpl(j);
     }
     void appendNum(unsigned long long j) {
         appendNumImpl(j);
+    }
+    void appendNum(Decimal128 j) {
+        BOOST_STATIC_ASSERT(sizeof(Decimal128::Value) == 16);
+        appendNumImpl(j.getValue());
     }
 
     void appendBuf(const void* src, size_t len) {
@@ -236,7 +233,7 @@ public:
         appendBuf(&s, sizeof(T));
     }
 
-    void appendStr(const StringData& str, bool includeEndingNull = true) {
+    void appendStr(StringData str, bool includeEndingNull = true) {
         const int len = str.size() + (includeEndingNull ? 1 : 0);
         str.copyTo(grow(len), includeEndingNull);
     }
@@ -294,10 +291,8 @@ private:
         // by a BufBuilder are intended for external use: either written to disk
         // or to the wire. Since all of our encoding formats are little endian,
         // we bake that assumption in here. This decision should be revisited soon.
-        DataView(grow(sizeof(t))).writeLE(t);
+        DataView(grow(sizeof(t))).write(tagLittleEndian(t));
     }
-
-
     /* "slow" portion of 'grow()'  */
     void NOINLINE_DECL grow_reallocate(int minSize) {
         int a = 64;
@@ -338,7 +333,7 @@ public:
     void decouple();  // not allowed. not implemented.
 };
 
-#if defined(_WIN32)
+#if defined(_WIN32) && _MSC_VER < 1900
 #pragma push_macro("snprintf")
 #define snprintf _snprintf
 #endif
@@ -396,7 +391,7 @@ public:
     StringBuilderImpl& operator<<(const char* str) {
         return *this << StringData(str);
     }
-    StringBuilderImpl& operator<<(const StringData& str) {
+    StringBuilderImpl& operator<<(StringData str) {
         append(str);
         return *this;
     }
@@ -418,7 +413,7 @@ public:
         memcpy(_buf.grow(len), buf, len);
     }
 
-    void append(const StringData& str) {
+    void append(StringData str) {
         str.copyTo(_buf.grow(str.size()), false);
     }
 
@@ -456,7 +451,7 @@ private:
 typedef StringBuilderImpl<TrivialAllocator> StringBuilder;
 typedef StringBuilderImpl<StackAllocator> StackStringBuilder;
 
-#if defined(_WIN32)
+#if defined(_WIN32) && _MSC_VER < 1900
 #undef snprintf
 #pragma pop_macro("snprintf")
 #endif

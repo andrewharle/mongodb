@@ -29,39 +29,34 @@
 #include "mongo/db/exec/and_sorted.h"
 
 #include "mongo/db/exec/and_common-inl.h"
-#include "mongo/db/exec/filter.h"
 #include "mongo/db/exec/scoped_timer.h"
 #include "mongo/db/exec/working_set_common.h"
+#include "mongo/stdx/memory.h"
 #include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
 
-using std::auto_ptr;
+using std::unique_ptr;
 using std::numeric_limits;
 using std::vector;
+using stdx::make_unique;
 
 // static
 const char* AndSortedStage::kStageType = "AND_SORTED";
 
-AndSortedStage::AndSortedStage(WorkingSet* ws,
-                               const MatchExpression* filter,
+AndSortedStage::AndSortedStage(OperationContext* opCtx,
+                               WorkingSet* ws,
                                const Collection* collection)
-    : _collection(collection),
+    : PlanStage(kStageType, opCtx),
+      _collection(collection),
       _ws(ws),
-      _filter(filter),
       _targetNode(numeric_limits<size_t>::max()),
       _targetId(WorkingSet::INVALID_ID),
-      _isEOF(false),
-      _commonStats(kStageType) {}
+      _isEOF(false) {}
 
-AndSortedStage::~AndSortedStage() {
-    for (size_t i = 0; i < _children.size(); ++i) {
-        delete _children[i];
-    }
-}
 
 void AndSortedStage::addChild(PlanStage* child) {
-    _children.push_back(child);
+    _children.emplace_back(child);
 }
 
 bool AndSortedStage::isEOF() {
@@ -120,6 +115,9 @@ PlanStage::StageState AndSortedStage::getTargetLoc(WorkingSetID* out) {
         _targetId = id;
         _targetLoc = member->loc;
 
+        // Ensure that the BSONObj underlying the WorkingSetMember is owned in case we yield.
+        member->makeObjOwnedIfNeeded();
+
         // We have to AND with all other children.
         for (size_t i = 1; i < _children.size(); ++i) {
             _workingTowardRep.push(i);
@@ -146,8 +144,8 @@ PlanStage::StageState AndSortedStage::getTargetLoc(WorkingSetID* out) {
     } else {
         if (PlanStage::NEED_TIME == state) {
             ++_commonStats.needTime;
-        } else if (PlanStage::NEED_FETCH == state) {
-            ++_commonStats.needFetch;
+        } else if (PlanStage::NEED_YIELD == state) {
+            ++_commonStats.needYield;
             *out = id;
         }
 
@@ -162,7 +160,7 @@ PlanStage::StageState AndSortedStage::moveTowardTargetLoc(WorkingSetID* out) {
 
     // We have nodes that haven't hit _targetLoc yet.
     size_t workingChildNumber = _workingTowardRep.front();
-    PlanStage* next = _children[workingChildNumber];
+    auto& next = _children[workingChildNumber];
     WorkingSetID id = WorkingSet::INVALID_ID;
     StageState state = next->work(&id);
 
@@ -182,31 +180,19 @@ PlanStage::StageState AndSortedStage::moveTowardTargetLoc(WorkingSetID* out) {
             // The front element has hit _targetLoc.  Don't move it forward anymore/work on
             // another element.
             _workingTowardRep.pop();
-            AndCommon::mergeFrom(_ws->get(_targetId), *member);
+            AndCommon::mergeFrom(_ws, _targetId, *member);
             _ws->free(id);
 
             if (0 == _workingTowardRep.size()) {
                 WorkingSetID toReturn = _targetId;
-                WorkingSetMember* toMatchTest = _ws->get(toReturn);
 
                 _targetNode = numeric_limits<size_t>::max();
                 _targetId = WorkingSet::INVALID_ID;
                 _targetLoc = RecordId();
 
-                // Everyone hit it, hooray.  Return it, if it matches.
-                if (Filter::passes(toMatchTest, _filter)) {
-                    if (NULL != _filter) {
-                        ++_specificStats.matchTested;
-                    }
-
-                    *out = toReturn;
-                    ++_commonStats.advanced;
-                    return PlanStage::ADVANCED;
-                } else {
-                    _ws->free(toReturn);
-                    ++_commonStats.needTime;
-                    return PlanStage::NEED_TIME;
-                }
+                *out = toReturn;
+                ++_commonStats.advanced;
+                return PlanStage::ADVANCED;
             }
             // More children need to be advanced to _targetLoc.
             ++_commonStats.needTime;
@@ -227,6 +213,10 @@ PlanStage::StageState AndSortedStage::moveTowardTargetLoc(WorkingSetID* out) {
             _targetNode = workingChildNumber;
             _targetLoc = member->loc;
             _targetId = id;
+
+            // Ensure that the BSONObj underlying the WorkingSetMember is owned in case we yield.
+            member->makeObjOwnedIfNeeded();
+
             _workingTowardRep = std::queue<size_t>();
             for (size_t i = 0; i < _children.size(); ++i) {
                 if (workingChildNumber != i) {
@@ -241,7 +231,7 @@ PlanStage::StageState AndSortedStage::moveTowardTargetLoc(WorkingSetID* out) {
         _isEOF = true;
         _ws->free(_targetId);
         return state;
-    } else if (PlanStage::FAILURE == state) {
+    } else if (PlanStage::FAILURE == state || PlanStage::DEAD == state) {
         *out = id;
         // If a stage fails, it may create a status WSM to indicate why it
         // failed, in which case 'id' is valid.  If ID is invalid, we
@@ -258,8 +248,8 @@ PlanStage::StageState AndSortedStage::moveTowardTargetLoc(WorkingSetID* out) {
     } else {
         if (PlanStage::NEED_TIME == state) {
             ++_commonStats.needTime;
-        } else if (PlanStage::NEED_FETCH == state) {
-            ++_commonStats.needFetch;
+        } else if (PlanStage::NEED_YIELD == state) {
+            ++_commonStats.needYield;
             *out = id;
         }
 
@@ -267,31 +257,13 @@ PlanStage::StageState AndSortedStage::moveTowardTargetLoc(WorkingSetID* out) {
     }
 }
 
-void AndSortedStage::saveState() {
-    ++_commonStats.yields;
 
-    for (size_t i = 0; i < _children.size(); ++i) {
-        _children[i]->saveState();
-    }
-}
-
-void AndSortedStage::restoreState(OperationContext* opCtx) {
-    ++_commonStats.unyields;
-
-    for (size_t i = 0; i < _children.size(); ++i) {
-        _children[i]->restoreState(opCtx);
-    }
-}
-
-void AndSortedStage::invalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) {
-    ++_commonStats.invalidates;
-
+void AndSortedStage::doInvalidate(OperationContext* txn,
+                                  const RecordId& dl,
+                                  InvalidationType type) {
+    // TODO remove this since calling isEOF is illegal inside of doInvalidate().
     if (isEOF()) {
         return;
-    }
-
-    for (size_t i = 0; i < _children.size(); ++i) {
-        _children[i]->invalidate(txn, dl, type);
     }
 
     if (dl == _targetLoc) {
@@ -312,34 +284,19 @@ void AndSortedStage::invalidate(OperationContext* txn, const RecordId& dl, Inval
     }
 }
 
-vector<PlanStage*> AndSortedStage::getChildren() const {
-    return _children;
-}
-
-PlanStageStats* AndSortedStage::getStats() {
+unique_ptr<PlanStageStats> AndSortedStage::getStats() {
     _commonStats.isEOF = isEOF();
 
-    // Add a BSON representation of the filter to the stats tree, if there is one.
-    if (NULL != _filter) {
-        BSONObjBuilder bob;
-        _filter->toBSON(&bob);
-        _commonStats.filter = bob.obj();
-    }
-
-    auto_ptr<PlanStageStats> ret(new PlanStageStats(_commonStats, STAGE_AND_SORTED));
-    ret->specific.reset(new AndSortedStats(_specificStats));
+    unique_ptr<PlanStageStats> ret = make_unique<PlanStageStats>(_commonStats, STAGE_AND_SORTED);
+    ret->specific = make_unique<AndSortedStats>(_specificStats);
     for (size_t i = 0; i < _children.size(); ++i) {
-        ret->children.push_back(_children[i]->getStats());
+        ret->children.emplace_back(_children[i]->getStats());
     }
 
-    return ret.release();
+    return ret;
 }
 
-const CommonStats* AndSortedStage::getCommonStats() {
-    return &_commonStats;
-}
-
-const SpecificStats* AndSortedStage::getSpecificStats() {
+const SpecificStats* AndSortedStage::getSpecificStats() const {
     return &_specificStats;
 }
 

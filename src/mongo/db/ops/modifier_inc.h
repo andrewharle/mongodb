@@ -28,7 +28,6 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
 #include <string>
 
 #include "mongo/base/disallow_copying.h"
@@ -67,9 +66,7 @@ public:
     /** Evaluates the validity of applying $inc to the identified node, and computes
      *  effects, handling upcasting and overflow as necessary.
      */
-    virtual Status prepare(mutablebson::Element root,
-                           const StringData& matchedField,
-                           ExecInfo* execInfo);
+    virtual Status prepare(mutablebson::Element root, StringData matchedField, ExecInfo* execInfo);
 
     /** Updates the node passed in prepare with the results of the $inc */
     virtual Status apply() const;
@@ -90,7 +87,7 @@ private:
     SafeNum _val;
 
     struct PreparedState;
-    boost::scoped_ptr<PreparedState> _preparedState;
+    std::unique_ptr<PreparedState> _preparedState;
 };
 
 }  // namespace mongo

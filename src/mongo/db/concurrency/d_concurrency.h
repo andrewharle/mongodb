@@ -28,16 +28,15 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
 #include <climits>  // For UINT_MAX
 
 #include "mongo/db/concurrency/locker.h"
-#include "mongo/util/concurrency/rwlock.h"
 #include "mongo/util/timer.h"
 
 namespace mongo {
 
 class StringData;
+class NamespaceString;
 
 class Lock {
 public:
@@ -111,19 +110,32 @@ public:
      */
     class GlobalLock {
     public:
+        class EnqueueOnly {};
+
         explicit GlobalLock(Locker* locker);
         GlobalLock(Locker* locker, LockMode lockMode, unsigned timeoutMs);
+
+        /**
+         * Enqueues lock but does not block on lock acquisition.
+         * Call waitForLock() to complete locking process.
+         */
+        GlobalLock(Locker* locker, LockMode lockMode, EnqueueOnly enqueueOnly);
 
         ~GlobalLock() {
             _unlock();
         }
+
+        /**
+         * Waits for lock to be granted.
+         */
+        void waitForLock(unsigned timeoutMs);
 
         bool isLocked() const {
             return _result == LOCK_OK;
         }
 
     private:
-        void _lock(LockMode lockMode, unsigned timeoutMs);
+        void _enqueue(LockMode lockMode);
         void _unlock();
 
         Locker* const _locker;
@@ -184,7 +196,7 @@ public:
      */
     class DBLock {
     public:
-        DBLock(Locker* locker, const StringData& db, LockMode mode);
+        DBLock(Locker* locker, StringData db, LockMode mode);
         ~DBLock();
 
         /**
@@ -227,10 +239,19 @@ public:
         MONGO_DISALLOW_COPYING(CollectionLock);
 
     public:
-        CollectionLock(Locker* lockState, const StringData& ns, LockMode mode);
+        CollectionLock(Locker* lockState, StringData ns, LockMode mode);
         ~CollectionLock();
 
-        void relockWithMode(LockMode mode, Lock::DBLock& dblock);
+        /**
+         * When holding the collection in MODE_IX or MODE_X, calling this will release the
+         * collection and database locks, and relocks the database in MODE_X. This is typically
+         * used if the collection still needs to be created. Upgrading would not be safe as
+         * it could lead to deadlock, similarly for relocking the database without releasing
+         * the collection lock. The collection lock will also be reacquired even though it is
+         * not really needed, as it simplifies invariant checking: the CollectionLock class
+         * has as invariant that a collection lock is being held.
+         */
+        void relockAsDatabaseExclusive(Lock::DBLock& dbLock);
 
     private:
         const ResourceId _id;
@@ -238,9 +259,10 @@ public:
     };
 
     /**
-     * Like the CollectionLock, but optimized for the local oplog. Always locks in MODE_IX.
-     * This means that on storage engines without document level locking, an extra critical section
-     * is needed to ensure serialization until the unit of work is committed or rolled back.
+     * Like the CollectionLock, but optimized for the local oplog. Always locks in MODE_IX,
+     * must call serializeIfNeeded() before doing any concurrent operations in order to
+     * support storage engines without document level locking. It is an error, checked with a
+     * dassert(), to not have a suitable database lock when taking this lock.
      */
     class OplogIntentWriteLock {
         MONGO_DISALLOW_COPYING(OplogIntentWriteLock);
@@ -248,9 +270,11 @@ public:
     public:
         explicit OplogIntentWriteLock(Locker* lockState);
         ~OplogIntentWriteLock();
+        void serializeIfNeeded();
 
     private:
         Locker* const _lockState;
+        bool _serialized;
     };
 
 
@@ -270,4 +294,11 @@ public:
         ResourceLock _pbwm;
     };
 };
+
+/**
+ * Takes a lock on resourceCappedInFlight in MODE_IX which will be held until the end of your
+ * WUOW. This ensures that a MODE_X lock on this resource will wait for all in-flight capped
+ * inserts to either commit or rollback and block new ones from starting.
+ */
+void synchronizeOnCappedInFlightResource(Locker* txn, const NamespaceString& cappedNs);
 }

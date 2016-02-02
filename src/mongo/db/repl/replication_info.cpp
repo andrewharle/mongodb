@@ -30,12 +30,13 @@
 
 #include <list>
 #include <vector>
-#include <boost/scoped_ptr.hpp>
 
 #include "mongo/client/connpool.h"
 #include "mongo/db/commands/server_status.h"
+#include "mongo/db/db_raii.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/db/lasterror.h"
 #include "mongo/db/operation_context_impl.h"
 #include "mongo/db/query/internal_plans.h"
 #include "mongo/db/repl/is_master_response.h"
@@ -43,13 +44,13 @@
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/oplogreader.h"
 #include "mongo/db/repl/replication_coordinator_global.h"
-#include "mongo/db/storage_options.h"
+#include "mongo/db/storage/storage_options.h"
 #include "mongo/db/wire_version.h"
 #include "mongo/s/write_ops/batched_command_request.h"
 
 namespace mongo {
 
-using std::auto_ptr;
+using std::unique_ptr;
 using std::list;
 using std::string;
 using std::stringstream;
@@ -86,12 +87,12 @@ void appendReplicationInfo(OperationContext* txn, BSONObjBuilder& result, int le
         {
             const char* localSources = "local.sources";
             AutoGetCollectionForRead ctx(txn, localSources);
-            auto_ptr<PlanExecutor> exec(
-                InternalPlanner::collectionScan(txn, localSources, ctx.getCollection()));
+            unique_ptr<PlanExecutor> exec(InternalPlanner::collectionScan(
+                txn, localSources, ctx.getCollection(), PlanExecutor::YIELD_MANUAL));
             BSONObj obj;
             PlanExecutor::ExecState state;
             while (PlanExecutor::ADVANCED == (state = exec->getNext(&obj, NULL))) {
-                src.push_back(obj);
+                src.push_back(obj.getOwned());
             }
         }
 
@@ -124,9 +125,8 @@ void appendReplicationInfo(OperationContext* txn, BSONObjBuilder& result, int le
                                                  Query().sort(BSON("$natural" << -1)));
                     bb.appendDate("masterFirst", first["ts"].timestampTime());
                     bb.appendDate("masterLast", last["ts"].timestampTime());
-                    double lag =
-                        (double)(last["ts"].timestampTime() - s["syncedTo"].timestampTime());
-                    bb.append("lagSeconds", lag / 1000);
+                    const auto lag = (last["ts"].timestampTime() - s["syncedTo"].timestampTime());
+                    bb.append("lagSeconds", durationCount<Milliseconds>(lag) / 1000.0);
                 }
                 conn.done();
             }
@@ -177,16 +177,18 @@ public:
         }
 
         BSONObjBuilder result;
-        result.append("latestOptime", replCoord->getMyLastOptime());
+        // TODO(siyuan) Output term of OpTime
+        result.append("latestOptime", replCoord->getMyLastOptime().getTimestamp());
 
-        const char* oplogNS = replCoord->getReplicationMode() == ReplicationCoordinator::modeReplSet
-            ? rsoplog
-            : "local.oplog.$main";
+        const std::string& oplogNS =
+            replCoord->getReplicationMode() == ReplicationCoordinator::modeReplSet
+            ? rsOplogName
+            : masterSlaveOplogName;
         BSONObj o;
         uassert(17347,
                 "Problem reading earliest entry from oplog",
-                Helpers::getSingleton(txn, oplogNS, o));
-        result.append("earliestOptime", o["ts"]._opTime());
+                Helpers::getSingleton(txn, oplogNS.c_str(), o));
+        result.append("earliestOptime", o["ts"].timestamp());
         return result.obj();
     }
 } oplogInfoServerStatus;
@@ -216,22 +218,27 @@ public:
                      BSONObj& cmdObj,
                      int,
                      string& errmsg,
-                     BSONObjBuilder& result,
-                     bool /*fromRepl*/) {
+                     BSONObjBuilder& result) {
         /* currently request to arbiter is (somewhat arbitrarily) an ismaster request that is not
            authenticated.
         */
         if (cmdObj["forShell"].trueValue())
-            lastError.disableForCommand();
+            LastError::get(txn->getClient()).disable();
 
         appendReplicationInfo(txn, result, 0);
+
+        if (serverGlobalParams.configsvrMode == CatalogManager::ConfigServerMode::CSRS) {
+            result.append("configsvr", 1);
+        } else if (serverGlobalParams.configsvrMode == CatalogManager::ConfigServerMode::SCCC) {
+            result.append("configsvr", 0);
+        }
 
         result.appendNumber("maxBsonObjectSize", BSONObjMaxUserSize);
         result.appendNumber("maxMessageSizeBytes", MaxMessageSizeBytes);
         result.appendNumber("maxWriteBatchSize", BatchedCommandRequest::kMaxWriteBatchSize);
         result.appendDate("localTime", jsTime());
-        result.append("maxWireVersion", maxWireVersion);
-        result.append("minWireVersion", minWireVersion);
+        result.append("maxWireVersion", WireSpec::instance().maxWireVersionIncoming);
+        result.append("minWireVersion", WireSpec::instance().minWireVersionIncoming);
         return true;
     }
 } cmdismaster;

@@ -48,15 +48,14 @@ void printShardingVersionInfo(bool out) {
                   << " starting: pid=" << ProcessId::getCurrent()
                   << " port=" << serverGlobalParams.port << (sizeof(int*) == 4 ? " 32" : " 64")
                   << "-bit host=" << getHostNameCached() << " (--help for usage)" << std::endl;
-        DEV std::cout << "_DEBUG build" << std::endl;
+        DEV std::cout << "DEBUG build" << std::endl;
         std::cout << "git version: " << gitVersion() << std::endl;
         std::cout << openSSLVersion("OpenSSL version: ") << std::endl;
-        std::cout << "build sys info: " << sysInfo() << std::endl;
     } else {
         log() << "MongoS version " << versionString << " starting: pid=" << ProcessId::getCurrent()
               << " port=" << serverGlobalParams.port << (sizeof(int*) == 4 ? " 32" : " 64")
               << "-bit host=" << getHostNameCached() << " (--help for usage)" << std::endl;
-        DEV log() << "_DEBUG build" << std::endl;
+        DEV log() << "DEBUG build" << std::endl;
         logProcessDetails();
     }
 }

@@ -35,6 +35,7 @@
 #include <set>
 
 #include "mongo/db/fts/fts_index_format.h"
+#include "mongo/db/fts/fts_spec.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
 #include "mongo/unittest/unittest.h"
@@ -217,6 +218,40 @@ TEST(FTSIndexFormat, LongWordTextIndexVersion2) {
     expectedKeys.insert("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab8e78455d827ebb87cbe87f392bf45f6");
     // sat
     expectedKeys.insert("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaf2d6f58bb3b81b97e611ae7ccac6dea7");
+
+    assertEqualsIndexKeys(expectedKeys, keys);
+}
+
+/**
+ * Tests keys for long terms using text index version 3.
+ * In version 3, long terms (longer than 256 characters)
+ * are hashed with md5 and appended to the first 224
+ * characters of the term to form the index key.
+ */
+TEST(FTSIndexFormat, LongWordTextIndexVersion3) {
+    FTSSpec spec(FTSSpec::fixSpec(BSON("key" << BSON("data"
+                                                     << "text") << "textIndexVersion" << 3)));
+    BSONObjSet keys;
+    string longPrefix(1024U, 'a');
+    // "aaa...aaacat"
+    string longWordCat = longPrefix + "cat";
+    // "aaa...aaasat"
+    string longWordSat = longPrefix + "sat";
+    string text = mongoutils::str::stream() << longWordCat << " " << longWordSat;
+    FTSIndexFormat::getKeys(spec, BSON("data" << text), &keys);
+
+    // Hard-coded expected computed keys for future-proofing.
+    std::set<string> expectedKeys;
+    // cat
+    expectedKeys.insert(
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa256a476d3197f1d31d1834fe91b9ef46");
+    // sat
+    expectedKeys.insert(
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab8c685737a761255443de66dae5d7d0a");
 
     assertEqualsIndexKeys(expectedKeys, keys);
 }

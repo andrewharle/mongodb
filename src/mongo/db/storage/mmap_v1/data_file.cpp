@@ -35,11 +35,14 @@
 #include "mongo/db/storage/mmap_v1/data_file.h"
 
 #include <boost/filesystem/operations.hpp>
+#include <utility>
+#include <vector>
 
 #include "mongo/db/storage/mmap_v1/dur.h"
+#include "mongo/db/storage/mmap_v1/durable_mapped_file.h"
 #include "mongo/db/storage/mmap_v1/mmap_v1_options.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/util/file_allocator.h"
+#include "mongo/db/storage/mmap_v1/file_allocator.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
@@ -61,10 +64,14 @@ void data_file_check(void* _mb) {
 }  // namespace
 
 
-BOOST_STATIC_ASSERT(DataFileHeader::HeaderSize == 8192);
-BOOST_STATIC_ASSERT(sizeof(static_cast<DataFileHeader*>(NULL)->data) == 4);
-BOOST_STATIC_ASSERT(sizeof(DataFileHeader) - sizeof(static_cast<DataFileHeader*>(NULL)->data) ==
-                    DataFileHeader::HeaderSize);
+static_assert(DataFileHeader::HeaderSize == 8192, "DataFileHeader::HeaderSize == 8192");
+static_assert(sizeof(static_cast<DataFileHeader*>(NULL)->data) == 4,
+              "sizeof(static_cast<DataFileHeader*>(NULL)->data) == 4");
+static_assert(sizeof(DataFileHeader) - sizeof(static_cast<DataFileHeader*>(NULL)->data) ==
+                  DataFileHeader::HeaderSize,
+              "sizeof(DataFileHeader) - sizeof(static_cast<DataFileHeader*>(NULL)->data) == "
+              "DataFileHeader::HeaderSize");
+
 
 int DataFile::maxSize() {
     if (sizeof(int*) == 4) {
@@ -210,16 +217,21 @@ void DataFileHeader::init(OperationContext* txn, int fileno, int filelength, con
         // The writes done in this function must not be rolled back. If the containing
         // UnitOfWork rolls back it should roll back to the state *after* these writes. This
         // will leave the file empty, but available for future use. That is why we go directly
-        // to the global dur dirty list rather than going through the OperationContext.
+        // to the global dur dirty list rather than going through the RecoveryUnit.
         getDur().createdFile(filename, filelength);
 
-        DataFileHeader* const h = getDur().writing(this);
-        h->fileLength = filelength;
-        h->version = DataFileVersion::defaultForNewFiles();
-        h->unused.set(fileno, HeaderSize);
-        h->unusedLength = fileLength - HeaderSize - 16;
-        h->freeListStart.Null();
-        h->freeListEnd.Null();
+        typedef std::pair<void*, unsigned> Intent;
+        std::vector<Intent> intent;
+        intent.push_back(std::make_pair(this, sizeof(DataFileHeader)));
+        privateViews.makeWritable(this, sizeof(DataFileHeader));
+        getDur().declareWriteIntents(intent);
+
+        fileLength = filelength;
+        version = DataFileVersion::defaultForNewFiles();
+        unused.set(fileno, HeaderSize);
+        unusedLength = fileLength - HeaderSize - 16;
+        freeListStart.Null();
+        freeListEnd.Null();
     } else {
         checkUpgrade(txn);
     }

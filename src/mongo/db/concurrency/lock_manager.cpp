@@ -28,12 +28,13 @@
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kDefault
 
-#include <vector>
-
 #include "mongo/platform/basic.h"
+
+#include <vector>
 
 #include "mongo/db/concurrency/lock_manager.h"
 
+#include "mongo/config.h"
 #include "mongo/db/concurrency/locker.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/log.h"
@@ -71,7 +72,8 @@ static const int LockConflictsTable[] = {
 const uint64_t intentModes = (1 << MODE_IS) | (1 << MODE_IX);
 
 // Ensure we do not add new modes without updating the conflicts table
-BOOST_STATIC_ASSERT((sizeof(LockConflictsTable) / sizeof(LockConflictsTable[0])) == LockModesCount);
+static_assert((sizeof(LockConflictsTable) / sizeof(LockConflictsTable[0])) == LockModesCount,
+              "(sizeof(LockConflictsTable) / sizeof(LockConflictsTable[0])) == LockModesCount");
 
 
 /**
@@ -82,10 +84,10 @@ static const char* LockModeNames[] = {"NONE", "IS", "IX", "S", "X"};
 static const char* LegacyLockModeNames[] = {"", "r", "w", "R", "W"};
 
 // Ensure we do not add new modes without updating the names array
-BOOST_STATIC_ASSERT((sizeof(LockModeNames) / sizeof(LockModeNames[0])) == LockModesCount);
-BOOST_STATIC_ASSERT((sizeof(LegacyLockModeNames) / sizeof(LegacyLockModeNames[0])) ==
-                    LockModesCount);
-
+static_assert((sizeof(LockModeNames) / sizeof(LockModeNames[0])) == LockModesCount,
+              "(sizeof(LockModeNames) / sizeof(LockModeNames[0])) == LockModesCount");
+static_assert((sizeof(LegacyLockModeNames) / sizeof(LegacyLockModeNames[0])) == LockModesCount,
+              "(sizeof(LegacyLockModeNames) / sizeof(LegacyLockModeNames[0])) == LockModesCount");
 
 // Helper functions for the lock modes
 bool conflicts(LockMode newMode, uint32_t existingModesMask) {
@@ -105,8 +107,8 @@ static const char* ResourceTypeNames[] = {
 };
 
 // Ensure we do not add new types without updating the names array
-BOOST_STATIC_ASSERT((sizeof(ResourceTypeNames) / sizeof(ResourceTypeNames[0])) ==
-                    ResourceTypesCount);
+static_assert((sizeof(ResourceTypeNames) / sizeof(ResourceTypeNames[0])) == ResourceTypesCount,
+              "(sizeof(ResourceTypeNames) / sizeof(ResourceTypeNames[0])) == ResourceTypesCount");
 
 
 /**
@@ -117,8 +119,10 @@ static const char* LockRequestStatusNames[] = {
 };
 
 // Ensure we do not add new status types without updating the names array
-BOOST_STATIC_ASSERT((sizeof(LockRequestStatusNames) / sizeof(LockRequestStatusNames[0])) ==
-                    LockRequest::StatusCount);
+static_assert((sizeof(LockRequestStatusNames) / sizeof(LockRequestStatusNames[0])) ==
+                  LockRequest::StatusCount,
+              "(sizeof(LockRequestStatusNames) / sizeof(LockRequestStatusNames[0])) == "
+              "LockRequest::StatusCount");
 
 }  // namespace
 
@@ -382,7 +386,7 @@ void LockHead::migratePartitionedLockHeads() {
     // Migration time: lock each partition in turn and transfer its requests, if any
     while (partitioned()) {
         LockManager::Partition* partition = partitions.back();
-        SimpleMutex::scoped_lock scopedLock(partition->mutex);
+        stdx::lock_guard<SimpleMutex> scopedLock(partition->mutex);
 
         LockManager::Partition::Map::iterator it = partition->data.find(resourceId);
         if (it != partition->data.end()) {
@@ -442,7 +446,7 @@ LockResult LockManager::lock(ResourceId resId, LockRequest* request, LockMode mo
     // For intent modes, try the PartitionedLockHead
     if (request->partitioned) {
         Partition* partition = _getPartition(request);
-        SimpleMutex::scoped_lock scopedLock(partition->mutex);
+        stdx::lock_guard<SimpleMutex> scopedLock(partition->mutex);
 
         // Fast path for intent locks
         PartitionedLockHead* partitionedLock = partition->find(resId);
@@ -458,14 +462,14 @@ LockResult LockManager::lock(ResourceId resId, LockRequest* request, LockMode mo
 
     // Use regular LockHead, maybe start partitioning
     LockBucket* bucket = _getBucket(resId);
-    SimpleMutex::scoped_lock scopedLock(bucket->mutex);
+    stdx::lock_guard<SimpleMutex> scopedLock(bucket->mutex);
 
     LockHead* lock = bucket->findOrInsert(resId);
 
     // Start a partitioned lock if possible
     if (request->partitioned && !(lock->grantedModes & (~intentModes)) && !lock->conflictModes) {
         Partition* partition = _getPartition(request);
-        SimpleMutex::scoped_lock scopedLock(partition->mutex);
+        stdx::lock_guard<SimpleMutex> scopedLock(partition->mutex);
         PartitionedLockHead* partitionedLock = partition->findOrInsert(resId);
         invariant(partitionedLock);
         lock->partitions.push_back(partition);
@@ -506,7 +510,7 @@ LockResult LockManager::convert(ResourceId resId, LockRequest* request, LockMode
               LockConflictsTable[newMode]);
 
     LockBucket* bucket = _getBucket(resId);
-    SimpleMutex::scoped_lock scopedLock(bucket->mutex);
+    stdx::lock_guard<SimpleMutex> scopedLock(bucket->mutex);
 
     LockBucket::Map::iterator it = bucket->data.find(resId);
     invariant(it != bucket->data.end());
@@ -575,7 +579,7 @@ bool LockManager::unlock(LockRequest* request) {
         invariant(request->status == LockRequest::STATUS_GRANTED ||
                   request->status == LockRequest::STATUS_CONVERTING);
         Partition* partition = _getPartition(request);
-        SimpleMutex::scoped_lock scopedLock(partition->mutex);
+        stdx::lock_guard<SimpleMutex> scopedLock(partition->mutex);
         //  Fast path: still partitioned.
         if (request->partitionedLock) {
             request->partitionedLock->grantedList.remove(request);
@@ -588,7 +592,7 @@ bool LockManager::unlock(LockRequest* request) {
 
     LockHead* lock = request->lock;
     LockBucket* bucket = _getBucket(lock->resourceId);
-    SimpleMutex::scoped_lock scopedLock(bucket->mutex);
+    stdx::lock_guard<SimpleMutex> scopedLock(bucket->mutex);
 
     if (request->status == LockRequest::STATUS_GRANTED) {
         // This releases a currently held lock and is the most common path, so it should be
@@ -647,7 +651,7 @@ void LockManager::downgrade(LockRequest* request, LockMode newMode) {
     LockHead* lock = request->lock;
 
     LockBucket* bucket = _getBucket(lock->resourceId);
-    SimpleMutex::scoped_lock scopedLock(bucket->mutex);
+    stdx::lock_guard<SimpleMutex> scopedLock(bucket->mutex);
 
     lock->incGrantedModeCount(newMode);
     lock->decGrantedModeCount(request->mode);
@@ -660,7 +664,7 @@ void LockManager::cleanupUnusedLocks() {
     size_t deletedLockHeads = 0;
     for (unsigned i = 0; i < _numLockBuckets; i++) {
         LockBucket* bucket = &_lockBuckets[i];
-        SimpleMutex::scoped_lock scopedLock(bucket->mutex);
+        stdx::lock_guard<SimpleMutex> scopedLock(bucket->mutex);
 
         LockBucket::Map::iterator it = bucket->data.begin();
         while (it != bucket->data.end()) {
@@ -808,7 +812,7 @@ void LockManager::dump() const {
 
     for (unsigned i = 0; i < _numLockBuckets; i++) {
         LockBucket* bucket = &_lockBuckets[i];
-        SimpleMutex::scoped_lock scopedLock(bucket->mutex);
+        stdx::lock_guard<SimpleMutex> scopedLock(bucket->mutex);
 
         if (!bucket->data.empty()) {
             _dumpBucket(bucket);
@@ -838,8 +842,6 @@ void LockManager::_dumpBucket(const LockBucket* bucket) const {
                << "CompatibleFirst = " << iter->compatibleFirst << "; " << '\n';
         }
 
-        sb << '\n';
-
         sb << "PENDING:\n";
         for (const LockRequest* iter = lock->conflictList._front; iter != NULL; iter = iter->next) {
             sb << '\t' << "LockRequest " << iter->locker->getId() << " @ " << iter->locker << ": "
@@ -848,6 +850,8 @@ void LockManager::_dumpBucket(const LockBucket* bucket) const {
                << "EnqueueAtFront = " << iter->enqueueAtFront << "; "
                << "CompatibleFirst = " << iter->compatibleFirst << "; " << '\n';
         }
+
+        sb << "-----------------------------------------------------------\n";
 
         log() << sb.str();
     }
@@ -940,7 +944,7 @@ string DeadlockDetector::toString() const {
 void DeadlockDetector::_processNextNode(const UnprocessedNode& node) {
     // Locate the request
     LockManager::LockBucket* bucket = _lockMgr._getBucket(node.resId);
-    SimpleMutex::scoped_lock scopedLock(bucket->mutex);
+    stdx::lock_guard<SimpleMutex> scopedLock(bucket->mutex);
 
     LockManager::LockBucket::Map::const_iterator iter = bucket->data.find(node.resId);
     if (iter == bucket->data.end()) {
@@ -1042,16 +1046,16 @@ uint64_t ResourceId::fullHash(ResourceType type, uint64_t hashId) {
         (hashId & (std::numeric_limits<uint64_t>::max() >> resourceTypeBits));
 }
 
-ResourceId::ResourceId(ResourceType type, const StringData& ns)
+ResourceId::ResourceId(ResourceType type, StringData ns)
     : _fullHash(fullHash(type, stringDataHashFunction(ns))) {
-#ifdef _DEBUG
+#ifdef MONGO_CONFIG_DEBUG_BUILD
     _nsCopy = ns.toString();
 #endif
 }
 
 ResourceId::ResourceId(ResourceType type, const string& ns)
     : _fullHash(fullHash(type, stringDataHashFunction(ns))) {
-#ifdef _DEBUG
+#ifdef MONGO_CONFIG_DEBUG_BUILD
     _nsCopy = ns;
 #endif
 }
@@ -1062,7 +1066,7 @@ string ResourceId::toString() const {
     StringBuilder ss;
     ss << "{" << _fullHash << ": " << resourceTypeName(getType()) << ", " << getHashId();
 
-#ifdef _DEBUG
+#ifdef MONGO_CONFIG_DEBUG_BUILD
     ss << ", " << _nsCopy;
 #endif
 

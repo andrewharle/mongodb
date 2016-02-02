@@ -48,10 +48,15 @@
 #include "mongo/db/background.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/db.h"
-#include "mongo/db/global_environment_experiment.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/instance.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/stats/snapshots.h"
+#include "mongo/rpc/command_reply.h"
+#include "mongo/rpc/command_reply_builder.h"
+#include "mongo/rpc/command_request.h"
+#include "mongo/rpc/command_request_builder.h"
+#include "mongo/rpc/metadata.h"
 #include "mongo/util/admin_access.h"
 #include "mongo/util/md5.hpp"
 #include "mongo/util/mongoutils/html.h"
@@ -75,7 +80,6 @@ void doUnlockedStuff(stringstream& ss) {
     ss << mongodVersion() << '\n';
     ss << "git hash: " << gitVersion() << '\n';
     ss << openSSLVersion("OpenSSL version: ", "\n");
-    ss << "sys info: " << sysInfo() << '\n';
     ss << "uptime: " << time(0) - serverGlobalParams.started << " seconds\n";
     ss << "</pre>";
 }
@@ -173,7 +177,7 @@ public:
             string errmsg;
 
             BSONObjBuilder sub;
-            if (!c->run(txn, "admin.$cmd", co, 0, errmsg, sub, false))
+            if (!c->run(txn, "admin.$cmd", co, 0, errmsg, sub))
                 buf.append(cmd, errmsg);
             else
                 buf.append(cmd, sub.obj());
@@ -268,12 +272,23 @@ public:
 
         BSONObj cmdObj = BSON(cmd << 1);
 
-        BSONObjBuilder result;
-        Command::execCommand(txn, c, 0, "admin.", cmdObj, result, false);
+        rpc::CommandRequestBuilder requestBuilder{};
+
+        requestBuilder.setDatabase("admin").setCommandName(cmd).setCommandArgs(cmdObj).setMetadata(
+            rpc::makeEmptyMetadata());
+
+        auto cmdRequestMsg = requestBuilder.done();
+        rpc::CommandRequest cmdRequest{&cmdRequestMsg};
+        rpc::CommandReplyBuilder cmdReplyBuilder{};
+
+        Command::execCommand(txn, c, cmdRequest, &cmdReplyBuilder);
+
+        auto cmdReplyMsg = cmdReplyBuilder.done();
+        rpc::CommandReply cmdReply{&cmdReplyMsg};
 
         responseCode = 200;
 
-        string j = result.done().jsonString(Strict, text);
+        string j = cmdReply.getCommandReply().jsonString(Strict, text);
         responseMsg = j;
 
         if (text) {
@@ -308,7 +323,8 @@ void DbWebServer::doRequest(const char* rq,
                             int& responseCode,
                             vector<string>& headers,
                             const SockAddr& from) {
-    boost::scoped_ptr<OperationContext> txn(getGlobalEnvironment()->newOpCtx());
+    Client* client = &cc();
+    auto txn = client->makeOperationContext();
 
     if (url.size() > 1) {
         if (!_allowed(txn.get(), rq, headers, from)) {
@@ -422,7 +438,7 @@ bool DbWebServer::_allowed(OperationContext* txn,
                            const char* rq,
                            vector<string>& headers,
                            const SockAddr& from) {
-    AuthorizationSession* authSess = cc().getAuthorizationSession();
+    AuthorizationSession* authSess = AuthorizationSession::get(txn->getClient());
     if (!authSess->getAuthorizationManager().isAuthEnabled()) {
         return true;
     }
@@ -449,8 +465,7 @@ bool DbWebServer::_allowed(OperationContext* txn,
         // Only users in the admin DB are visible by the webserver
         UserName userName(parms["username"], "admin");
         User* user;
-        AuthorizationManager& authzManager =
-            cc().getAuthorizationSession()->getAuthorizationManager();
+        AuthorizationManager& authzManager = authSess->getAuthorizationManager();
         Status status = authzManager.acquireUser(txn, userName, &user);
         if (!status.isOK()) {
             if (status.code() != ErrorCodes::UserNotFound) {
@@ -585,12 +600,10 @@ DbWebHandler* DbWebHandler::findHandler(const string& url) {
 
 vector<DbWebHandler*>* DbWebHandler::_handlers = 0;
 
-void webServerListenThread(boost::shared_ptr<DbWebServer> dbWebServer) {
+void webServerListenThread(std::shared_ptr<DbWebServer> dbWebServer) {
     Client::initThread("websvr");
 
     dbWebServer->initAndListen();
-
-    cc().shutdown();
 }
 
 }  // namespace mongo

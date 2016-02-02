@@ -28,12 +28,13 @@
 
 #include "mongo/s/write_ops/batched_update_request.h"
 
+#include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/field_parser.h"
 #include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
 
-using std::auto_ptr;
+using std::unique_ptr;
 using std::string;
 
 using mongoutils::str::stream;
@@ -43,7 +44,6 @@ const BSONField<std::string> BatchedUpdateRequest::collName("update");
 const BSONField<std::vector<BatchedUpdateDocument*>> BatchedUpdateRequest::updates("updates");
 const BSONField<BSONObj> BatchedUpdateRequest::writeConcern("writeConcern");
 const BSONField<bool> BatchedUpdateRequest::ordered("ordered", true);
-const BSONField<BSONObj> BatchedUpdateRequest::metadata("metadata");
 
 BatchedUpdateRequest::BatchedUpdateRequest() {
     clear();
@@ -60,7 +60,7 @@ bool BatchedUpdateRequest::isValid(std::string* errMsg) const {
     }
 
     // All the mandatory fields must be present.
-    if (!_isCollNameSet) {
+    if (!_isNSSet) {
         *errMsg = stream() << "missing " << collName.name() << " field";
         return false;
     }
@@ -76,8 +76,8 @@ bool BatchedUpdateRequest::isValid(std::string* errMsg) const {
 BSONObj BatchedUpdateRequest::toBSON() const {
     BSONObjBuilder builder;
 
-    if (_isCollNameSet)
-        builder.append(collName(), _collName);
+    if (_isNSSet)
+        builder.append(collName(), _ns.coll());
 
     if (_isUpdatesSet) {
         BSONArrayBuilder updatesBuilder(builder.subarrayStart(updates()));
@@ -96,13 +96,13 @@ BSONObj BatchedUpdateRequest::toBSON() const {
     if (_isOrderedSet)
         builder.append(ordered(), _ordered);
 
-    if (_metadata)
-        builder.append(metadata(), _metadata->toBSON());
+    if (_shouldBypassValidation)
+        builder.append(bypassDocumentValidationCommandOption(), true);
 
     return builder.obj();
 }
 
-bool BatchedUpdateRequest::parseBSON(const BSONObj& source, string* errMsg) {
+bool BatchedUpdateRequest::parseBSON(StringData dbName, const BSONObj& source, string* errMsg) {
     clear();
 
     std::string dummy;
@@ -121,8 +121,8 @@ bool BatchedUpdateRequest::parseBSON(const BSONObj& source, string* errMsg) {
             fieldState = FieldParser::extract(elem, collName, &collNameTemp, errMsg);
             if (fieldState == FieldParser::FIELD_INVALID)
                 return false;
-            _collName = NamespaceString(collNameTemp);
-            _isCollNameSet = fieldState == FieldParser::FIELD_SET;
+            _ns = NamespaceString(dbName, collNameTemp);
+            _isNSSet = fieldState == FieldParser::FIELD_SET;
         } else if (fieldName == updates.name()) {
             fieldState = FieldParser::extract(elem, updates, &_updates, errMsg);
             if (fieldState == FieldParser::FIELD_INVALID)
@@ -138,26 +138,16 @@ bool BatchedUpdateRequest::parseBSON(const BSONObj& source, string* errMsg) {
             if (fieldState == FieldParser::FIELD_INVALID)
                 return false;
             _isOrderedSet = fieldState == FieldParser::FIELD_SET;
-        } else if (fieldName == metadata.name()) {
-            BSONObj metadataObj;
-            fieldState = FieldParser::extract(elem, metadata, &metadataObj, errMsg);
-            if (fieldState == FieldParser::FIELD_INVALID)
-                return false;
-
-            if (!metadataObj.isEmpty()) {
-                _metadata.reset(new BatchedRequestMetadata());
-                if (!_metadata->parseBSON(metadataObj, errMsg)) {
-                    return false;
-                }
-            }
+        } else if (fieldName == bypassDocumentValidationCommandOption()) {
+            _shouldBypassValidation = elem.trueValue();
         }
     }
     return true;
 }
 
 void BatchedUpdateRequest::clear() {
-    _collName = NamespaceString();
-    _isCollNameSet = false;
+    _ns = NamespaceString();
+    _isNSSet = false;
 
     unsetUpdates();
 
@@ -167,19 +157,19 @@ void BatchedUpdateRequest::clear() {
     _ordered = false;
     _isOrderedSet = false;
 
-    _metadata.reset();
+    _shouldBypassValidation = false;
 }
 
 void BatchedUpdateRequest::cloneTo(BatchedUpdateRequest* other) const {
     other->clear();
 
-    other->_collName = _collName;
-    other->_isCollNameSet = _isCollNameSet;
+    other->_ns = _ns;
+    other->_isNSSet = _isNSSet;
 
     for (std::vector<BatchedUpdateDocument*>::const_iterator it = _updates.begin();
          it != _updates.end();
          ++it) {
-        auto_ptr<BatchedUpdateDocument> tempBatchUpdateDocument(new BatchedUpdateDocument);
+        unique_ptr<BatchedUpdateDocument> tempBatchUpdateDocument(new BatchedUpdateDocument);
         (*it)->cloneTo(tempBatchUpdateDocument.get());
         other->addToUpdates(tempBatchUpdateDocument.release());
     }
@@ -191,38 +181,21 @@ void BatchedUpdateRequest::cloneTo(BatchedUpdateRequest* other) const {
     other->_ordered = _ordered;
     other->_isOrderedSet = _isOrderedSet;
 
-    if (_metadata) {
-        other->_metadata.reset(new BatchedRequestMetadata());
-        _metadata->cloneTo(other->_metadata.get());
-    }
+    other->_shouldBypassValidation = _shouldBypassValidation;
 }
 
 std::string BatchedUpdateRequest::toString() const {
     return toBSON().toString();
 }
 
-void BatchedUpdateRequest::setCollName(const StringData& collName) {
-    _collName = NamespaceString(collName);
-    _isCollNameSet = true;
+void BatchedUpdateRequest::setNS(NamespaceString ns) {
+    _ns = std::move(ns);
+    _isNSSet = true;
 }
 
-const std::string& BatchedUpdateRequest::getCollName() const {
-    dassert(_isCollNameSet);
-    return _collName.ns();
-}
-
-void BatchedUpdateRequest::setCollNameNS(const NamespaceString& collName) {
-    _collName = collName;
-    _isCollNameSet = true;
-}
-
-const NamespaceString& BatchedUpdateRequest::getCollNameNS() const {
-    dassert(_isCollNameSet);
-    return _collName;
-}
-
-const NamespaceString& BatchedUpdateRequest::getTargetingNSS() const {
-    return getCollNameNS();
+const NamespaceString& BatchedUpdateRequest::getNS() const {
+    dassert(_isNSSet);
+    return _ns;
 }
 
 void BatchedUpdateRequest::setUpdates(const std::vector<BatchedUpdateDocument*>& updates) {
@@ -230,7 +203,7 @@ void BatchedUpdateRequest::setUpdates(const std::vector<BatchedUpdateDocument*>&
     for (std::vector<BatchedUpdateDocument*>::const_iterator it = updates.begin();
          it != updates.end();
          ++it) {
-        auto_ptr<BatchedUpdateDocument> tempBatchUpdateDocument(new BatchedUpdateDocument);
+        unique_ptr<BatchedUpdateDocument> tempBatchUpdateDocument(new BatchedUpdateDocument);
         (*it)->cloneTo(tempBatchUpdateDocument.get());
         addToUpdates(tempBatchUpdateDocument.release());
     }
@@ -308,21 +281,4 @@ bool BatchedUpdateRequest::getOrdered() const {
         return ordered.getDefault();
     }
 }
-
-void BatchedUpdateRequest::setMetadata(BatchedRequestMetadata* metadata) {
-    _metadata.reset(metadata);
-}
-
-void BatchedUpdateRequest::unsetMetadata() {
-    _metadata.reset();
-}
-
-bool BatchedUpdateRequest::isMetadataSet() const {
-    return _metadata.get();
-}
-
-BatchedRequestMetadata* BatchedUpdateRequest::getMetadata() const {
-    return _metadata.get();
-}
-
 }  // namespace mongo

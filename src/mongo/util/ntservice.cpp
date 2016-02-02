@@ -39,6 +39,9 @@
 
 #include "mongo/db/client.h"
 #include "mongo/db/instance.h"
+#include "mongo/stdx/chrono.h"
+#include "mongo/stdx/future.h"
+#include "mongo/stdx/thread.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/exit.h"
 #include "mongo/util/log.h"
@@ -382,14 +385,15 @@ void installServiceOrDie(const wstring& serviceName,
 #if 1
     if (!serviceInstalled) {
 #else
-    // This code sets the mongod service to auto-restart, forever.
-    // This might be a fine thing to do except that when mongod or Windows has a crash, the
-    // mongo.lock file is still around, so any attempt at a restart will immediately fail.  With
-    // auto-restart, we go into a loop, crashing and restarting, crashing and restarting, until
-    // someone comes in and disables the service or deletes the mongod.lock file.
+    // This code sets the mongod service to auto-restart, forever. This might be a fine thing to do
+    // except that when mongod or Windows has a crash, the mongo.lock file is still around, so any
+    // attempt at a restart will immediately fail.  With auto-restart, we go into a loop, crashing
+    // and restarting, crashing and restarting, until someone comes in and disables the service or
+    // deletes the mongod.lock file.
     //
     // I'm leaving the old code here for now in case we solve this and are able to turn
-    // SC_ACTION_RESTART back on.
+    // SC_ACTION_RESTART
+    // back on.
     //
     if (serviceInstalled) {
         SC_ACTION aActions[3] = {
@@ -517,15 +521,6 @@ bool reportStatus(DWORD reportState, DWORD waitHint, DWORD exitCode) {
     return SetServiceStatus(_statusHandle, &ssStatus);
 }
 
-static void serviceStopWorker() {
-    Client::initThread("serviceStopWorker");
-
-    // Stop the process
-    // TODO: SERVER-5703, separate the "cleanup for shutdown" functionality from
-    // the "terminate process" functionality in exitCleanly.
-    exitCleanly(EXIT_WINDOWS_SERVICE_STOP);
-}
-
 // Minimum of time we tell Windows to wait before we are guilty of a hung shutdown
 const int kStopWaitHintMillis = 30000;
 
@@ -534,12 +529,25 @@ const int kStopWaitHintMillis = 30000;
 // On client OSes, SERVICE_CONTROL_SHUTDOWN has a 5 second timeout configured in
 // HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control
 static void serviceStop() {
-    boost::thread serviceWorkerThread(serviceStopWorker);
+    // VS2013 Doesn't support future<void>, so fake it with a bool.
+    stdx::packaged_task<bool()> exitCleanlyTask([] {
+        Client::initThread("serviceStopWorker");
+        // Stop the process
+        // TODO: SERVER-5703, separate the "cleanup for shutdown" functionality from
+        // the "terminate process" functionality in exitCleanly.
+        exitCleanly(EXIT_WINDOWS_SERVICE_STOP);
+        return true;
+    });
+    stdx::future<bool> exitedCleanly = exitCleanlyTask.get_future();
+
+    // Launch the packaged task in a thread. We needn't ever join it,
+    // so it doesn't even need a name.
+    stdx::thread(std::move(exitCleanlyTask)).detach();
+
+    const auto timeout = stdx::chrono::milliseconds(kStopWaitHintMillis / 2);
 
     // We periodically check if we are done exiting by polling at half of each wait interval
-    //
-    while (!serviceWorkerThread.timed_join(boost::get_system_time() +
-                                           boost::posix_time::millisec(kStopWaitHintMillis / 2))) {
+    while (exitedCleanly.wait_for(timeout) != stdx::future_status::ready) {
         reportStatus(SERVICE_STOP_PENDING, kStopWaitHintMillis);
         log() << "Service Stop is waiting for storage engine to finish shutdown";
     }

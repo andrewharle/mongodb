@@ -29,11 +29,10 @@
 
 #pragma once
 
-#include <boost/noncopyable.hpp>
 #include <stack>
 
+#include "mongo/base/disallow_copying.h"
 #include "mongo/client/dbclientinterface.h"
-#include "mongo/client/export_macros.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/json.h"
 #include "mongo/util/net/message.h"
@@ -45,7 +44,9 @@ class AScopedConnection;
 /** for mock purposes only -- do not create variants of DBClientCursor, nor hang code here
     @see DBClientMockCursor
  */
-class MONGO_CLIENT_API DBClientCursorInterface : boost::noncopyable {
+class DBClientCursorInterface {
+    MONGO_DISALLOW_COPYING(DBClientCursorInterface);
+
 public:
     virtual ~DBClientCursorInterface() {}
     virtual bool more() = 0;
@@ -56,7 +57,9 @@ protected:
 };
 
 /** Queries return a cursor object */
-class MONGO_CLIENT_API DBClientCursor : public DBClientCursorInterface {
+class DBClientCursor : public DBClientCursorInterface {
+    MONGO_DISALLOW_COPYING(DBClientCursor);
+
 public:
     /** If true, safe to call next().  Requests more from server if necessary. */
     bool more();
@@ -150,48 +153,19 @@ public:
     }
 
     DBClientCursor(DBClientBase* client,
-                   const std::string& _ns,
-                   BSONObj _query,
-                   int _nToReturn,
-                   int _nToSkip,
-                   const BSONObj* _fieldsToReturn,
+                   const std::string& ns,
+                   const BSONObj& query,
+                   int nToReturn,
+                   int nToSkip,
+                   const BSONObj* fieldsToReturn,
                    int queryOptions,
-                   int bs)
-        : _client(client),
-          ns(_ns),
-          query(_query),
-          nToReturn(_nToReturn),
-          haveLimit(_nToReturn > 0 && !(queryOptions & QueryOption_CursorTailable)),
-          nToSkip(_nToSkip),
-          fieldsToReturn(_fieldsToReturn),
-          opts(queryOptions),
-          batchSize(bs == 1 ? 2 : bs),
-          resultFlags(0),
-          cursorId(),
-          _ownCursor(true),
-          wasError(false) {
-        _finishConsInit();
-    }
+                   int bs);
 
     DBClientCursor(DBClientBase* client,
-                   const std::string& _ns,
-                   long long _cursorId,
-                   int _nToReturn,
-                   int options)
-        : _client(client),
-          ns(_ns),
-          nToReturn(_nToReturn),
-          haveLimit(_nToReturn > 0 && !(options & QueryOption_CursorTailable)),
-          nToSkip(0),
-          fieldsToReturn(0),
-          opts(options),
-          batchSize(0),
-          resultFlags(0),
-          cursorId(_cursorId),
-          _ownCursor(true),
-          wasError(false) {
-        _finishConsInit();
-    }
+                   const std::string& ns,
+                   long long cursorId,
+                   int nToReturn,
+                   int options);
 
     virtual ~DBClientCursor();
 
@@ -217,7 +191,7 @@ public:
     }
 
     Message* getMessage() {
-        return batch.m.get();
+        return &batch.m;
     }
 
     /**
@@ -238,16 +212,22 @@ public:
     void initLazy(bool isRetry = false);
     bool initLazyFinish(bool& retry);
 
-    class Batch : boost::noncopyable {
+    class Batch {
+        MONGO_DISALLOW_COPYING(Batch);
         friend class DBClientCursor;
-        std::auto_ptr<Message> m;
-        int nReturned;
-        int pos;
-        const char* data;
+        Message m;
+        int nReturned{0};
+        int pos{0};
+        const char* data{nullptr};
 
     public:
-        Batch() : m(new Message()), nReturned(), pos(), data() {}
+        Batch() = default;
     };
+
+    /**
+     * For exhaust. Used in DBClientConnection.
+     */
+    void exhaustReceiveMore();
 
     /**
      * Marks this object as dead and sends the KillCursors message to the server.
@@ -262,16 +242,23 @@ public:
     void kill();
 
 private:
-    friend class DBClientBase;
-    friend class DBClientConnection;
+    DBClientCursor(DBClientBase* client,
+                   const std::string& ns,
+                   const BSONObj& query,
+                   long long cursorId,
+                   int nToReturn,
+                   int nToSkip,
+                   const BSONObj* fieldsToReturn,
+                   int queryOptions,
+                   int bs);
 
     int nextBatchSize();
-    void _finishConsInit();
 
     Batch batch;
     DBClientBase* _client;
     std::string _originalHost;
-    std::string ns;
+    const std::string ns;
+    const bool _isCommand;
     BSONObj query;
     int nToReturn;
     bool haveLimit;
@@ -293,17 +280,20 @@ private:
         dataReceived(retry, lazyHost);
     }
     void dataReceived(bool& retry, std::string& lazyHost);
+
+    /**
+     * Called by dataReceived when the query was actually a command. Parses the command reply
+     * according to the RPC protocol used to send it, and then fills in the internal field
+     * of this cursor with the received data.
+     */
+    void commandDataReceived();
+
     void requestMore();
-    void exhaustReceiveMore();  // for exhaust
 
     // Don't call from a virtual function
     void _assertIfNull() const {
         uassert(13348, "connection died", this);
     }
-
-    // non-copyable , non-assignable
-    DBClientCursor(const DBClientCursor&);
-    DBClientCursor& operator=(const DBClientCursor&);
 
     // init pieces
     void _assembleInit(Message& toSend);
@@ -311,7 +301,7 @@ private:
 
 /** iterate over objects in current batch only - will not cause a network call
  */
-class MONGO_CLIENT_API DBClientCursorBatchIterator {
+class DBClientCursorBatchIterator {
 public:
     DBClientCursorBatchIterator(DBClientCursor& c) : _c(c), _n() {}
     bool moreInCurrentBatch() {

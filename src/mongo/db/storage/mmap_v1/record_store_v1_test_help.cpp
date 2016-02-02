@@ -255,17 +255,17 @@ void DummyExtentManager::freeListStats(OperationContext* txn,
     invariant(false);
 }
 
-RecordFetcher* DummyExtentManager::recordNeedsFetch(const DiskLoc& loc) const {
-    return NULL;
+std::unique_ptr<RecordFetcher> DummyExtentManager::recordNeedsFetch(const DiskLoc& loc) const {
+    return {};
 }
 
-Record* DummyExtentManager::recordForV1(const DiskLoc& loc) const {
+MmapV1RecordHeader* DummyExtentManager::recordForV1(const DiskLoc& loc) const {
     if (static_cast<size_t>(loc.a()) >= _extents.size())
         return NULL;
     if (static_cast<size_t>(loc.getOfs()) >= _extents[loc.a()].length)
         return NULL;
     char* root = _extents[loc.a()].data;
-    return reinterpret_cast<Record*>(root + loc.getOfs());
+    return reinterpret_cast<MmapV1RecordHeader*>(root + loc.getOfs());
 }
 
 Extent* DummyExtentManager::extentForV1(const DiskLoc& loc) const {
@@ -320,7 +320,7 @@ void printRecList(OperationContext* txn, const ExtentManager* em, const RecordSt
         Extent* ext = em->getExtent(extLoc, true);
         DiskLoc actualLoc = ext->firstRecord;
         while (!actualLoc.isNull()) {
-            const Record* actualRec = em->recordForV1(actualLoc);
+            const MmapV1RecordHeader* actualRec = em->recordForV1(actualLoc);
             const int actualSize = actualRec->lengthWithHeaders();
 
             log() << "loc: " << actualLoc  // <--hex
@@ -426,14 +426,14 @@ void initializeV1RS(OperationContext* txn,
                 const DiskLoc loc = records[recIdx].loc;
                 const int size = records[recIdx].size;
                 ;
-                invariant(size >= Record::HeaderSize);
+                invariant(size >= MmapV1RecordHeader::HeaderSize);
 
-                md->incrementStats(txn, size - Record::HeaderSize, 1);
+                md->incrementStats(txn, size - MmapV1RecordHeader::HeaderSize, 1);
 
                 if (ext->firstRecord.isNull())
                     ext->firstRecord = loc;
 
-                Record* rec = em->recordForV1(loc);
+                MmapV1RecordHeader* rec = em->recordForV1(loc);
                 rec->lengthWithHeaders() = size;
                 rec->extentOfs() = 0;
 
@@ -462,7 +462,7 @@ void initializeV1RS(OperationContext* txn,
         while (!drecs[drecIdx].loc.isNull()) {
             const DiskLoc loc = drecs[drecIdx].loc;
             const int size = drecs[drecIdx].size;
-            invariant(size >= Record::HeaderSize);
+            invariant(size >= MmapV1RecordHeader::HeaderSize);
             const int bucket = RecordStoreV1Base::bucket(size);
 
             if (md->isCapped()) {
@@ -504,7 +504,7 @@ void initializeV1RS(OperationContext* txn,
         while (!legacyGrabBag[grabBagIdx].loc.isNull()) {
             const DiskLoc loc = legacyGrabBag[grabBagIdx].loc;
             const int size = legacyGrabBag[grabBagIdx].size;
-            invariant(size >= Record::HeaderSize);
+            invariant(size >= MmapV1RecordHeader::HeaderSize);
 
             if (grabBagIdx == 0) {
                 md->setDeletedListLegacyGrabBag(txn, loc);
@@ -546,11 +546,11 @@ void assertStateV1RS(OperationContext* txn,
                 Extent* ext = em->getExtent(extLoc, true);
                 int expectedPrevOfs = DiskLoc::NullOfs;
                 DiskLoc actualLoc = ext->firstRecord;
-                while (!actualLoc.isNull()) {  // for each Record in this Extent
-                    const Record* actualRec = em->recordForV1(actualLoc);
+                while (!actualLoc.isNull()) {  // for each MmapV1RecordHeader in this Extent
+                    const MmapV1RecordHeader* actualRec = em->recordForV1(actualLoc);
                     const int actualSize = actualRec->lengthWithHeaders();
 
-                    dataSize += actualSize - Record::HeaderSize;
+                    dataSize += actualSize - MmapV1RecordHeader::HeaderSize;
                     numRecs += 1;
 
                     ASSERT_EQUALS(actualLoc, records[recIdx].loc);

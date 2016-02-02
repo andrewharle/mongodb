@@ -71,7 +71,7 @@ public:
      * A return of false means that the authentication process has more steps.
      *
      */
-    virtual StatusWith<bool> step(const StringData& inputData, std::string* outputData) = 0;
+    virtual StatusWith<bool> step(StringData inputData, std::string* outputData) = 0;
 
 protected:
     SaslClientSession* _saslClientSession;

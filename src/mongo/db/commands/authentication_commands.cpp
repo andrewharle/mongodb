@@ -32,8 +32,6 @@
 
 #include "mongo/db/commands/authentication_commands.h"
 
-#include <boost/algorithm/string.hpp>
-#include <boost/scoped_ptr.hpp>
 #include <string>
 #include <vector>
 
@@ -41,6 +39,7 @@
 #include "mongo/bson/mutable/algorithm.h"
 #include "mongo/bson/mutable/document.h"
 #include "mongo/client/sasl_client_authenticate.h"
+#include "mongo/config.h"
 #include "mongo/db/audit.h"
 #include "mongo/db/auth/action_set.h"
 #include "mongo/db/auth/action_type.h"
@@ -49,12 +48,14 @@
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/mongo_authentication_session.h"
 #include "mongo/db/auth/privilege.h"
+#include "mongo/db/auth/sasl_options.h"
 #include "mongo/db/auth/security_key.h"
 #include "mongo/db/client_basic.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/server_options.h"
 #include "mongo/platform/random.h"
+#include "mongo/stdx/memory.h"
 #include "mongo/util/concurrency/mutex.h"
 #include "mongo/util/log.h"
 #include "mongo/util/md5.hpp"
@@ -96,7 +97,7 @@ void CmdAuthenticate::disableAuthMechanism(std::string authMechanism) {
 
 class CmdGetNonce : public Command {
 public:
-    CmdGetNonce() : Command("getnonce"), _randMutex("getnonce"), _random(SecureRandom::create()) {}
+    CmdGetNonce() : Command("getnonce"), _random(SecureRandom::create()) {}
 
     virtual bool slaveOk() const {
         return true;
@@ -115,24 +116,24 @@ public:
              BSONObj& cmdObj,
              int,
              string& errmsg,
-             BSONObjBuilder& result,
-             bool fromRepl) {
+             BSONObjBuilder& result) {
         nonce64 n = getNextNonce();
         stringstream ss;
         ss << hex << n;
         result.append("nonce", ss.str());
-        ClientBasic::getCurrent()->resetAuthenticationSession(new MongoAuthenticationSession(n));
+        AuthenticationSession::set(ClientBasic::getCurrent(),
+                                   stdx::make_unique<MongoAuthenticationSession>(n));
         return true;
     }
 
 private:
     nonce64 getNextNonce() {
-        SimpleMutex::scoped_lock lk(_randMutex);
+        stdx::lock_guard<SimpleMutex> lk(_randMutex);
         return _random->nextInt64();
     }
 
     SimpleMutex _randMutex;  // Synchronizes accesses to _random.
-    boost::scoped_ptr<SecureRandom> _random;
+    std::unique_ptr<SecureRandom> _random;
 } cmdGetNonce;
 
 void CmdAuthenticate::redactForLogging(mutablebson::Document* cmdObj) {
@@ -153,8 +154,7 @@ bool CmdAuthenticate::run(OperationContext* txn,
                           BSONObj& cmdObj,
                           int,
                           string& errmsg,
-                          BSONObjBuilder& result,
-                          bool fromRepl) {
+                          BSONObjBuilder& result) {
     if (!serverGlobalParams.quiet) {
         mutablebson::Document cmdToLog(cmdObj, mutablebson::Document::kInPlaceDisabled);
         redactForLogging(&cmdToLog);
@@ -188,8 +188,7 @@ bool CmdAuthenticate::run(OperationContext* txn,
         } else {
             appendCommandStatus(result, status);
         }
-
-        sleepmillis(getGlobalAuthorizationManager()->getAuthFailedDelay());
+        sleepmillis(saslGlobalParams.authFailedDelay);
         return false;
     }
     result.append("dbname", user.getDB());
@@ -204,7 +203,7 @@ Status CmdAuthenticate::_authenticate(OperationContext* txn,
     if (mechanism == "MONGODB-CR") {
         return _authenticateCR(txn, user, cmdObj);
     }
-#ifdef MONGO_SSL
+#ifdef MONGO_CONFIG_SSL
     if (mechanism == "MONGODB-X509") {
         return _authenticateX509(txn, user, cmdObj);
     }
@@ -242,8 +241,8 @@ Status CmdAuthenticate::_authenticateCR(OperationContext* txn,
 
     {
         ClientBasic* client = ClientBasic::getCurrent();
-        boost::scoped_ptr<AuthenticationSession> session;
-        client->swapAuthenticationSession(session);
+        std::unique_ptr<AuthenticationSession> session;
+        AuthenticationSession::swap(client, session);
         if (!session || session->getType() != AuthenticationSession::SESSION_TYPE_MONGO) {
             sleepmillis(30);
             return Status(ErrorCodes::ProtocolError, "No pending nonce");
@@ -291,7 +290,7 @@ Status CmdAuthenticate::_authenticateCR(OperationContext* txn,
     }
 
     AuthorizationSession* authorizationSession =
-        ClientBasic::getCurrent()->getAuthorizationSession();
+        AuthorizationSession::get(ClientBasic::getCurrent());
     status = authorizationSession->addAndAuthorizeUser(txn, user);
     if (!status.isOK()) {
         return status;
@@ -300,42 +299,7 @@ Status CmdAuthenticate::_authenticateCR(OperationContext* txn,
     return Status::OK();
 }
 
-#ifdef MONGO_SSL
-void canonicalizeClusterDN(std::vector<std::string>* dn) {
-    // remove all RDNs we don't care about
-    for (size_t i = 0; i < dn->size(); i++) {
-        std::string& comp = dn->at(i);
-        boost::algorithm::trim(comp);
-        if (!mongoutils::str::startsWith(comp.c_str(), "DC=") &&
-            !mongoutils::str::startsWith(comp.c_str(), "O=") &&
-            !mongoutils::str::startsWith(comp.c_str(), "OU=")) {
-            dn->erase(dn->begin() + i);
-            i--;
-        }
-    }
-    std::stable_sort(dn->begin(), dn->end());
-}
-
-bool CmdAuthenticate::_clusterIdMatch(const std::string& subjectName,
-                                      const std::string& srvSubjectName) {
-    std::vector<string> clientRDN = StringSplitter::split(subjectName, ",");
-    std::vector<string> serverRDN = StringSplitter::split(srvSubjectName, ",");
-
-    canonicalizeClusterDN(&clientRDN);
-    canonicalizeClusterDN(&serverRDN);
-
-    if (clientRDN.size() == 0 || clientRDN.size() != serverRDN.size()) {
-        return false;
-    }
-
-    for (size_t i = 0; i < serverRDN.size(); i++) {
-        if (clientRDN[i] != serverRDN[i]) {
-            return false;
-        }
-    }
-    return true;
-}
-
+#ifdef MONGO_CONFIG_SSL
 Status CmdAuthenticate::_authenticateX509(OperationContext* txn,
                                           const UserName& user,
                                           const BSONObj& cmdObj) {
@@ -349,20 +313,18 @@ Status CmdAuthenticate::_authenticateX509(OperationContext* txn,
     }
 
     ClientBasic* client = ClientBasic::getCurrent();
-    AuthorizationSession* authorizationSession = client->getAuthorizationSession();
-    std::string subjectName = client->port()->getX509SubjectName();
+    AuthorizationSession* authorizationSession = AuthorizationSession::get(client);
+    std::string clientSubjectName = client->port()->getX509SubjectName();
 
     if (!getSSLManager()->getSSLConfiguration().hasCA) {
         return Status(ErrorCodes::AuthenticationFailed,
                       "Unable to verify x.509 certificate, as no CA has been provided.");
-    } else if (user.getUser() != subjectName) {
+    } else if (user.getUser() != clientSubjectName) {
         return Status(ErrorCodes::AuthenticationFailed,
                       "There is no x.509 client certificate matching the user.");
     } else {
-        std::string srvSubjectName = getSSLManager()->getSSLConfiguration().serverSubjectName;
-
         // Handle internal cluster member auth, only applies to server-server connections
-        if (_clusterIdMatch(subjectName, srvSubjectName)) {
+        if (getSSLManager()->getSSLConfiguration().isClusterMember(clientSubjectName)) {
             int clusterAuthMode = serverGlobalParams.clusterAuthMode.load();
             if (clusterAuthMode == ServerGlobalParams::ClusterAuthMode_undefined ||
                 clusterAuthMode == ServerGlobalParams::ClusterAuthMode_keyFile) {
@@ -410,9 +372,8 @@ public:
              BSONObj& cmdObj,
              int options,
              string& errmsg,
-             BSONObjBuilder& result,
-             bool fromRepl) {
-        AuthorizationSession* authSession = ClientBasic::getCurrent()->getAuthorizationSession();
+             BSONObjBuilder& result) {
+        AuthorizationSession* authSession = AuthorizationSession::get(ClientBasic::getCurrent());
         authSession->logoutDatabase(dbname);
         if (Command::testCommandsEnabled && dbname == "admin") {
             // Allows logging out as the internal user against the admin database, however

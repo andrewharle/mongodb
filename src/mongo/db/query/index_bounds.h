@@ -33,6 +33,7 @@
 
 #include "mongo/db/jsobj.h"
 #include "mongo/db/query/interval.h"
+#include "mongo/db/storage/index_entry_comparison.h"
 
 namespace mongo {
 
@@ -46,7 +47,6 @@ struct OrderedIntervalList {
     // Must be ordered according to the index order.
     std::vector<Interval> intervals;
 
-    // TODO: We could drop this.  Only used in IndexBounds::isValidFor.
     std::string name;
 
     bool isValidFor(int expectedOrientation) const;
@@ -64,6 +64,9 @@ struct OrderedIntervalList {
      *   where this OIL has direction==1.
      */
     void complement();
+
+    bool operator==(const OrderedIntervalList& other) const;
+    bool operator!=(const OrderedIntervalList& other) const;
 };
 
 /**
@@ -93,6 +96,9 @@ struct IndexBounds {
     size_t getNumIntervals(size_t i) const;
     Interval getInterval(size_t i, size_t j) const;
     std::string toString() const;
+
+    bool operator==(const IndexBounds& other) const;
+    bool operator!=(const IndexBounds& other) const;
 
     /**
      * BSON format for explain. The format is an array of strings for each field.
@@ -125,12 +131,15 @@ public:
      */
     IndexBoundsChecker(const IndexBounds* bounds, const BSONObj& keyPattern, int direction);
 
+
     /**
-     * Get the key that we should with.
+     * Get the IndexSeekPoint that we should with.
      *
-     * Returns true if there is a valid start key.  Returns false otherwise.
+     * Returns false if there are no possible index entries that match the bounds. In this case
+     * there is no valid start point to seek to so out will not be filled out and the caller
+     * should emit no results.
      */
-    bool getStartKey(std::vector<const BSONElement*>* valueOut, std::vector<bool>* inclusiveOut);
+    bool getStartSeekPoint(IndexSeekPoint* out);
 
     /**
      * The states of a key from an index scan.  See checkKey below.
@@ -157,8 +166,8 @@ public:
      * key.
      *
      * 2. The key is not in our bounds but has not exceeded the maximum value in our bounds.
-     * Returns MUST_ADVANCE.  Caller must advance to the key provided in the out parameters and
-     * call checkKey again.
+     * Returns MUST_ADVANCE.  Caller must advance to the query provided in the out parameters
+     * and call checkKey again.
      *
      * 3. The key is past our bounds.  Returns DONE.  No further keys will satisfy the bounds
      * and the caller should stop.
@@ -167,31 +176,11 @@ public:
      * out and incOut must already be resized to have as many elements as the key has fields.
      *
      * In parameters:
-     * key is the index key.
+     * currentKey is the index key.
      *
-     * Out parameters, only valid if we return MUST_ADVANCE:
-     *
-     * keyEltsToUse: The key that the caller should advance to is made up of the first
-     *               'keyEltsToUse' of the key that was provided.
-     *
-     * movePastKeyElts: If true, the caller must only use the first 'keyEltsToUse' of the
-     *                  provided key to form its key.  It moves to the first key that is after
-     *                  the key formed by only using those elements.
-     *
-     * out: If keyEltsToUse is less than the number of indexed fields in the key, the remaining
-     *      fields are taken from here.  out is not filled from the start but from the position
-     *      that the key corresponds to.  An example:  If keyEltsToUse is 1, movePastKeyElts is
-     *      false, and the index we're iterating over has two fields, out[1] will have the value
-     *      for the second field.
-     *
-     * incOut: If the i-th element is false, seek to the key *after* the i-th element of out.
-     *         If the i-th element is true, seek to the i-th element of out.
+     * Out parameter only valid if we return MUST_ADVANCE.
      */
-    KeyState checkKey(const BSONObj& key,
-                      int* keyEltsToUse,
-                      bool* movePastKeyElts,
-                      std::vector<const BSONElement*>* out,
-                      std::vector<bool>* incOut);
+    KeyState checkKey(const BSONObj& currentKey, IndexSeekPoint* query);
 
     /**
      * Relative position of a key to an interval.

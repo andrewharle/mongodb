@@ -30,7 +30,6 @@
 
 #include "mongo/db/auth/native_sasl_authentication_session.h"
 
-#include <boost/scoped_ptr.hpp>
 #include <boost/range/size.hpp>
 
 #include "mongo/base/init.h"
@@ -47,13 +46,13 @@
 #include "mongo/db/auth/sasl_options.h"
 #include "mongo/db/auth/sasl_plain_server_conversation.h"
 #include "mongo/db/auth/sasl_scramsha1_server_conversation.h"
-#include "mongo/db/operation_context_noop.h"
+#include "mongo/stdx/memory.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
 
-using boost::scoped_ptr;
+using std::unique_ptr;
 
 namespace {
 SaslAuthenticationSession* createNativeSaslAuthenticationSession(AuthorizationSession* authzSession,
@@ -74,8 +73,8 @@ MONGO_INITIALIZER(NativeSaslServerCore)(InitializerContext* context) {
 // PostSaslCommands is reversely dependent on CyrusSaslCommands having been run
 MONGO_INITIALIZER_WITH_PREREQUISITES(PostSaslCommands, ("NativeSaslServerCore"))
 (InitializerContext*) {
-    AuthorizationManager authzManager(new AuthzManagerExternalStateMock());
-    AuthorizationSession authzSession(new AuthzSessionExternalStateMock(&authzManager));
+    AuthorizationManager authzManager(stdx::make_unique<AuthzManagerExternalStateMock>());
+    std::unique_ptr<AuthorizationSession> authzSession = authzManager.makeAuthorizationSession();
 
     for (size_t i = 0; i < saslGlobalParams.authenticationMechanisms.size(); ++i) {
         const std::string& mechanism = saslGlobalParams.authenticationMechanisms[i];
@@ -83,8 +82,8 @@ MONGO_INITIALIZER_WITH_PREREQUISITES(PostSaslCommands, ("NativeSaslServerCore"))
             // Not a SASL mechanism; no need to smoke test built-in mechanisms.
             continue;
         }
-        scoped_ptr<SaslAuthenticationSession> session(
-            SaslAuthenticationSession::create(&authzSession, mechanism));
+        unique_ptr<SaslAuthenticationSession> session(
+            SaslAuthenticationSession::create(authzSession.get(), mechanism));
         Status status = session->start(
             "test", mechanism, saslGlobalParams.serviceName, saslGlobalParams.hostName, 1, true);
         if (!status.isOK())
@@ -100,10 +99,10 @@ NativeSaslAuthenticationSession::NativeSaslAuthenticationSession(AuthorizationSe
 
 NativeSaslAuthenticationSession::~NativeSaslAuthenticationSession() {}
 
-Status NativeSaslAuthenticationSession::start(const StringData& authenticationDatabase,
-                                              const StringData& mechanism,
-                                              const StringData& serviceName,
-                                              const StringData& serviceHostname,
+Status NativeSaslAuthenticationSession::start(StringData authenticationDatabase,
+                                              StringData mechanism,
+                                              StringData serviceName,
+                                              StringData serviceHostname,
                                               int64_t conversationId,
                                               bool autoAuthorize) {
     fassert(18626, conversationId > 0);
@@ -133,7 +132,7 @@ Status NativeSaslAuthenticationSession::start(const StringData& authenticationDa
     return Status::OK();
 }
 
-Status NativeSaslAuthenticationSession::step(const StringData& inputData, std::string* outputData) {
+Status NativeSaslAuthenticationSession::step(StringData inputData, std::string* outputData) {
     if (!_saslConversation) {
         return Status(ErrorCodes::BadValue,
                       mongoutils::str::stream()

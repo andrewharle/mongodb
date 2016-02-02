@@ -119,15 +119,22 @@ __verify_config_offsets(
 static int
 __verify_tree_shape(WT_SESSION_IMPL *session, WT_VSTUFF *vs)
 {
+	uint32_t total;
 	size_t i;
 
-	WT_RET(__wt_msg(session, "Internal page tree-depth:"));
+	for (i = 0, total = 0; i < WT_ELEMENTS(vs->depth_internal); ++i)
+		total += vs->depth_internal[i];
+	WT_RET(__wt_msg(
+	    session, "Internal page tree-depth (total %" PRIu32 "):", total));
 	for (i = 0; i < WT_ELEMENTS(vs->depth_internal); ++i)
 		if (vs->depth_internal[i] != 0)
 			WT_RET(__wt_msg(session,
 			    "\t%03zu: %u", i, vs->depth_internal[i]));
 
-	WT_RET(__wt_msg(session, "Leaf page tree-depth:"));
+	for (i = 0, total = 0; i < WT_ELEMENTS(vs->depth_leaf); ++i)
+		total += vs->depth_leaf[i];
+	WT_RET(__wt_msg(
+	    session, "Leaf page tree-depth (total %" PRIu32 "):", total));
 	for (i = 0; i < WT_ELEMENTS(vs->depth_leaf); ++i)
 		if (vs->depth_leaf[i] != 0)
 			WT_RET(__wt_msg(session,
@@ -239,9 +246,6 @@ err:	/* Inform the underlying block manager we're done. */
 	if (ckptbase != NULL)
 		__wt_meta_ckptlist_free(session, ckptbase);
 
-	/* Wrap up reporting. */
-	WT_TRET(__wt_progress(session, NULL, vs->fcnt));
-
 	/* Free allocated memory. */
 	__wt_scr_free(session, &vs->max_key);
 	__wt_scr_free(session, &vs->max_addr);
@@ -319,7 +323,7 @@ __verify_tree(WT_SESSION_IMPL *session, WT_REF *ref, WT_VSTUFF *vs)
 	/*
 	 * The page's physical structure was verified when it was read into
 	 * memory by the read server thread, and then the in-memory version
-	 * of the page was built.   Now we make sure the page and tree are
+	 * of the page was built. Now we make sure the page and tree are
 	 * logically consistent.
 	 *
 	 * !!!
@@ -337,9 +341,10 @@ __verify_tree(WT_SESSION_IMPL *session, WT_REF *ref, WT_VSTUFF *vs)
 	 * of the page to be built, and then a subsequent logical verification
 	 * which happens here.
 	 *
-	 * Report progress every 10 pages.
+	 * Report progress occasionally.
 	 */
-	if (++vs->fcnt % 10 == 0)
+#define	WT_VERIFY_PROGRESS_INTERVAL	100
+	if (++vs->fcnt % WT_VERIFY_PROGRESS_INTERVAL == 0)
 		WT_RET(__wt_progress(session, NULL, vs->fcnt));
 
 #ifdef HAVE_DIAGNOSTIC

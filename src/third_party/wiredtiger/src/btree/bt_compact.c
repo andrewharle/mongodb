@@ -45,7 +45,7 @@ __compact_rewrite(WT_SESSION_IMPL *session, WT_REF *ref, bool *skipp)
 	 * Ignore empty pages, they get merged into the parent.
 	 */
 	if (mod == NULL || mod->rec_result == 0) {
-		WT_RET(__wt_ref_info(session, ref, &addr, &addr_size, NULL));
+		__wt_ref_info(ref, &addr, &addr_size, NULL);
 		if (addr == NULL)
 			return (0);
 		WT_RET(
@@ -53,12 +53,14 @@ __compact_rewrite(WT_SESSION_IMPL *session, WT_REF *ref, bool *skipp)
 	} else if (mod->rec_result == WT_PM_REC_REPLACE) {
 		/*
 		 * The page's modification information can change underfoot if
-		 * the page is being reconciled, lock the page down.
+		 * the page is being reconciled, serialize with reconciliation.
 		 */
-		WT_PAGE_LOCK(session, page);
+		WT_RET(__wt_fair_lock(session, &page->page_lock));
+
 		ret = bm->compact_page_skip(bm, session,
 		    mod->mod_replace.addr, mod->mod_replace.size, skipp);
-		WT_PAGE_UNLOCK(session, page);
+
+		WT_TRET(__wt_fair_unlock(session, &page->page_lock));
 		WT_RET(ret);
 	}
 	return (0);
@@ -73,14 +75,12 @@ __wt_compact(WT_SESSION_IMPL *session, const char *cfg[])
 {
 	WT_BM *bm;
 	WT_BTREE *btree;
-	WT_CONNECTION_IMPL *conn;
 	WT_DECL_RET;
 	WT_REF *ref;
-	bool block_manager_begin, evict_reset, skip;
+	bool block_manager_begin, skip;
 
 	WT_UNUSED(cfg);
 
-	conn = S2C(session);
 	btree = S2BT(session);
 	bm = btree->bm;
 	ref = NULL;
@@ -118,25 +118,6 @@ __wt_compact(WT_SESSION_IMPL *session, const char *cfg[])
 	 */
 	__wt_spin_lock(session, &btree->flush_lock);
 
-	/*
-	 * That leaves eviction, we don't want to block eviction.  Set a flag
-	 * so reconciliation knows compaction is running.  If reconciliation
-	 * sees the flag it locks the page it's writing, we acquire the same
-	 * lock when reading the page's modify information, serializing access.
-	 * The same page lock blocks work on the page, but compaction is an
-	 * uncommon, heavy-weight operation.  If it's ever a problem, there's
-	 * no reason we couldn't use an entirely separate lock than the page
-	 * lock.
-	 *
-	 * We also need to ensure we don't race with an on-going reconciliation.
-	 * After we set the flag, wait for eviction of this file to drain, and
-	 * then let eviction continue;
-	 */
-	conn->compact_in_memory_pass = 1;
-	WT_ERR(__wt_evict_file_exclusive_on(session, &evict_reset));
-	if (evict_reset)
-		__wt_evict_file_exclusive_off(session);
-
 	/* Start compaction. */
 	WT_ERR(bm->compact_start(bm, session));
 	block_manager_begin = true;
@@ -149,7 +130,7 @@ __wt_compact(WT_SESSION_IMPL *session, const char *cfg[])
 		 * read, set its generation to a low value so it is evicted
 		 * quickly.
 		 */
-		WT_ERR(__wt_tree_walk(session, &ref, NULL,
+		WT_ERR(__wt_tree_walk(session, &ref,
 		    WT_READ_COMPACT | WT_READ_NO_GEN | WT_READ_WONT_NEED));
 		if (ref == NULL)
 			break;
@@ -172,11 +153,7 @@ err:	if (ref != NULL)
 	if (block_manager_begin)
 		WT_TRET(bm->compact_end(bm, session));
 
-	/*
-	 * Unlock will be a release barrier, use it to update the compaction
-	 * status for reconciliation.
-	 */
-	conn->compact_in_memory_pass = 0;
+	/* Unblock threads writing leaf pages. */
 	__wt_spin_unlock(session, &btree->flush_lock);
 
 	return (ret);
@@ -205,7 +182,7 @@ __wt_compact_page_skip(WT_SESSION_IMPL *session, WT_REF *ref, bool *skipp)
 	 * address, the page isn't on disk, but we have to read internal pages
 	 * to walk the tree regardless; throw up our hands and read it.
 	 */
-	WT_RET(__wt_ref_info(session, ref, &addr, &addr_size, &type));
+	__wt_ref_info(ref, &addr, &addr_size, &type);
 	if (addr == NULL)
 		return (0);
 

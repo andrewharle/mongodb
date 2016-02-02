@@ -29,11 +29,11 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
-#include <boost/noncopyable.hpp>
+#include <memory>
 #include <string>
 #include <vector>
 
+#include "mongo/base/disallow_copying.h"
 #include "mongo/base/status.h"
 
 namespace mongo {
@@ -54,7 +54,9 @@ namespace mongo {
  *  BackgroundJob object must exist for as long the background thread is running.
  */
 
-class BackgroundJob : boost::noncopyable {
+class BackgroundJob {
+    MONGO_DISALLOW_COPYING(BackgroundJob);
+
 protected:
     /**
      * sub-class must instantiate the BackgroundJob
@@ -123,7 +125,7 @@ private:
     const bool _selfDelete;
 
     struct JobStatus;
-    const boost::scoped_ptr<JobStatus> _status;
+    const std::unique_ptr<JobStatus> _status;
 
     void jobBody();
 };

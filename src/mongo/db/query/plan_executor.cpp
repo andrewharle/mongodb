@@ -28,9 +28,10 @@
 
 #include "mongo/db/query/plan_executor.h"
 
-#include <boost/shared_ptr.hpp>
 
 #include "mongo/db/catalog/collection.h"
+#include "mongo/db/concurrency/write_conflict_exception.h"
+#include "mongo/db/curop.h"
 #include "mongo/db/exec/cached_plan.h"
 #include "mongo/db/exec/multi_plan.h"
 #include "mongo/db/exec/pipeline_proxy.h"
@@ -39,18 +40,20 @@
 #include "mongo/db/exec/subplan.h"
 #include "mongo/db/exec/working_set.h"
 #include "mongo/db/exec/working_set_common.h"
-#include "mongo/db/global_environment_experiment.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/query/plan_yield_policy.h"
-#include "mongo/db/query/query_knobs.h"
 #include "mongo/db/storage/record_fetcher.h"
+#include "mongo/stdx/memory.h"
 
 #include "mongo/util/stacktrace.h"
 
 namespace mongo {
 
-using boost::shared_ptr;
+using std::shared_ptr;
 using std::string;
+using std::unique_ptr;
 using std::vector;
+using stdx::make_unique;
 
 namespace {
 
@@ -63,9 +66,9 @@ PlanStage* getStageByType(PlanStage* root, StageType type) {
         return root;
     }
 
-    vector<PlanStage*> children = root->getChildren();
+    const auto& children = root->getChildren();
     for (size_t i = 0; i < children.size(); i++) {
-        PlanStage* result = getStageByType(children[i], type);
+        PlanStage* result = getStageByType(children[i].get(), type);
         if (result) {
             return result;
         }
@@ -76,59 +79,65 @@ PlanStage* getStageByType(PlanStage* root, StageType type) {
 }
 
 // static
-Status PlanExecutor::make(OperationContext* opCtx,
-                          WorkingSet* ws,
-                          PlanStage* rt,
-                          const Collection* collection,
-                          YieldPolicy yieldPolicy,
-                          PlanExecutor** out) {
-    return PlanExecutor::make(opCtx, ws, rt, NULL, NULL, collection, "", yieldPolicy, out);
+StatusWith<unique_ptr<PlanExecutor>> PlanExecutor::make(OperationContext* opCtx,
+                                                        unique_ptr<WorkingSet> ws,
+                                                        unique_ptr<PlanStage> rt,
+                                                        const Collection* collection,
+                                                        YieldPolicy yieldPolicy) {
+    return PlanExecutor::make(
+        opCtx, std::move(ws), std::move(rt), nullptr, nullptr, collection, "", yieldPolicy);
 }
 
 // static
-Status PlanExecutor::make(OperationContext* opCtx,
-                          WorkingSet* ws,
-                          PlanStage* rt,
-                          const std::string& ns,
-                          YieldPolicy yieldPolicy,
-                          PlanExecutor** out) {
-    return PlanExecutor::make(opCtx, ws, rt, NULL, NULL, NULL, ns, yieldPolicy, out);
+StatusWith<unique_ptr<PlanExecutor>> PlanExecutor::make(OperationContext* opCtx,
+                                                        unique_ptr<WorkingSet> ws,
+                                                        unique_ptr<PlanStage> rt,
+                                                        const string& ns,
+                                                        YieldPolicy yieldPolicy) {
+    return PlanExecutor::make(
+        opCtx, std::move(ws), std::move(rt), nullptr, nullptr, nullptr, ns, yieldPolicy);
 }
 
 // static
-Status PlanExecutor::make(OperationContext* opCtx,
-                          WorkingSet* ws,
-                          PlanStage* rt,
-                          CanonicalQuery* cq,
-                          const Collection* collection,
-                          YieldPolicy yieldPolicy,
-                          PlanExecutor** out) {
-    return PlanExecutor::make(opCtx, ws, rt, NULL, cq, collection, "", yieldPolicy, out);
+StatusWith<unique_ptr<PlanExecutor>> PlanExecutor::make(OperationContext* opCtx,
+                                                        unique_ptr<WorkingSet> ws,
+                                                        unique_ptr<PlanStage> rt,
+                                                        unique_ptr<CanonicalQuery> cq,
+                                                        const Collection* collection,
+                                                        YieldPolicy yieldPolicy) {
+    return PlanExecutor::make(
+        opCtx, std::move(ws), std::move(rt), nullptr, std::move(cq), collection, "", yieldPolicy);
 }
 
 // static
-Status PlanExecutor::make(OperationContext* opCtx,
-                          WorkingSet* ws,
-                          PlanStage* rt,
-                          QuerySolution* qs,
-                          CanonicalQuery* cq,
-                          const Collection* collection,
-                          YieldPolicy yieldPolicy,
-                          PlanExecutor** out) {
-    return PlanExecutor::make(opCtx, ws, rt, qs, cq, collection, "", yieldPolicy, out);
+StatusWith<unique_ptr<PlanExecutor>> PlanExecutor::make(OperationContext* opCtx,
+                                                        unique_ptr<WorkingSet> ws,
+                                                        unique_ptr<PlanStage> rt,
+                                                        unique_ptr<QuerySolution> qs,
+                                                        unique_ptr<CanonicalQuery> cq,
+                                                        const Collection* collection,
+                                                        YieldPolicy yieldPolicy) {
+    return PlanExecutor::make(opCtx,
+                              std::move(ws),
+                              std::move(rt),
+                              std::move(qs),
+                              std::move(cq),
+                              collection,
+                              "",
+                              yieldPolicy);
 }
 
 // static
-Status PlanExecutor::make(OperationContext* opCtx,
-                          WorkingSet* ws,
-                          PlanStage* rt,
-                          QuerySolution* qs,
-                          CanonicalQuery* cq,
-                          const Collection* collection,
-                          const std::string& ns,
-                          YieldPolicy yieldPolicy,
-                          PlanExecutor** out) {
-    std::auto_ptr<PlanExecutor> exec(new PlanExecutor(opCtx, ws, rt, qs, cq, collection, ns));
+StatusWith<unique_ptr<PlanExecutor>> PlanExecutor::make(OperationContext* txn,
+                                                        unique_ptr<WorkingSet> ws,
+                                                        unique_ptr<PlanStage> rt,
+                                                        unique_ptr<QuerySolution> qs,
+                                                        unique_ptr<CanonicalQuery> cq,
+                                                        const Collection* collection,
+                                                        const string& ns,
+                                                        YieldPolicy yieldPolicy) {
+    unique_ptr<PlanExecutor> exec(new PlanExecutor(
+        txn, std::move(ws), std::move(rt), std::move(qs), std::move(cq), collection, ns));
 
     // Perform plan selection, if necessary.
     Status status = exec->pickBestPlan(yieldPolicy);
@@ -136,25 +145,24 @@ Status PlanExecutor::make(OperationContext* opCtx,
         return status;
     }
 
-    *out = exec.release();
-    return Status::OK();
+    return std::move(exec);
 }
 
 PlanExecutor::PlanExecutor(OperationContext* opCtx,
-                           WorkingSet* ws,
-                           PlanStage* rt,
-                           QuerySolution* qs,
-                           CanonicalQuery* cq,
+                           unique_ptr<WorkingSet> ws,
+                           unique_ptr<PlanStage> rt,
+                           unique_ptr<QuerySolution> qs,
+                           unique_ptr<CanonicalQuery> cq,
                            const Collection* collection,
-                           const std::string& ns)
+                           const string& ns)
     : _opCtx(opCtx),
       _collection(collection),
-      _cq(cq),
-      _workingSet(ws),
-      _qs(qs),
-      _root(rt),
+      _cq(std::move(cq)),
+      _workingSet(std::move(ws)),
+      _qs(std::move(qs)),
+      _root(std::move(rt)),
       _ns(ns),
-      _killed(false) {
+      _yieldPolicy(new PlanYieldPolicy(this, YIELD_MANUAL)) {
     // We may still need to initialize _ns from either _collection or _cq.
     if (!_ns.empty()) {
         // We already have an _ns set, so there's nothing more to do.
@@ -170,6 +178,7 @@ PlanExecutor::PlanExecutor(OperationContext* opCtx,
 }
 
 Status PlanExecutor::pickBestPlan(YieldPolicy policy) {
+    invariant(_currentState == kUsable);
     // For YIELD_AUTO, this will both set an auto yield policy on the PlanExecutor and
     // register it to receive notifications.
     this->setYieldPolicy(policy);
@@ -189,7 +198,7 @@ Status PlanExecutor::pickBestPlan(YieldPolicy policy) {
         return mps->pickBestPlan(_yieldPolicy.get());
     }
 
-    // ...or, we might have run a plan from the cache for a trial period, falling back on
+    // ...or, we might have to run a plan from the cache for a trial period, falling back on
     // regular planning if the cached plan performs poorly.
     foundStage = getStageByType(_root.get(), STAGE_CACHED_PLAN);
     if (foundStage) {
@@ -205,7 +214,7 @@ Status PlanExecutor::pickBestPlan(YieldPolicy policy) {
 PlanExecutor::~PlanExecutor() {}
 
 // static
-std::string PlanExecutor::statestr(ExecState s) {
+string PlanExecutor::statestr(ExecState s) {
     if (PlanExecutor::ADVANCED == s) {
         return "ADVANCED";
     } else if (PlanExecutor::IS_EOF == s) {
@@ -230,7 +239,7 @@ CanonicalQuery* PlanExecutor::getCanonicalQuery() const {
     return _cq.get();
 }
 
-PlanStageStats* PlanExecutor::getStats() const {
+unique_ptr<PlanStageStats> PlanExecutor::getStats() const {
     return _root->getStats();
 }
 
@@ -243,53 +252,74 @@ OperationContext* PlanExecutor::getOpCtx() const {
 }
 
 void PlanExecutor::saveState() {
-    if (!_killed) {
-        _root->saveState();
-    }
+    invariant(_currentState == kUsable || _currentState == kSaved);
 
     // Doc-locking storage engines drop their transactional context after saving state.
     // The query stages inside this stage tree might buffer record ids (e.g. text, geoNear,
     // mergeSort, sort) which are no longer protected by the storage engine's transactional
-    // boundaries. Force-fetch the documents for any such record ids so that we have our
-    // own copy in the working set.
-    //
-    // This is not necessary for covered plans, as such plans never use buffered record ids
-    // for index or collection lookup.
-    if (supportsDocLocking() && _collection && (!_qs.get() || _qs->root->fetched())) {
-        WorkingSetCommon::forceFetchAllLocs(_opCtx, _workingSet.get(), _collection);
+    // boundaries.
+    if (supportsDocLocking()) {
+        WorkingSetCommon::prepareForSnapshotChange(_workingSet.get());
     }
 
-    _opCtx = NULL;
+    if (!killed()) {
+        _root->saveState();
+    }
+    _currentState = kSaved;
 }
 
-bool PlanExecutor::restoreState(OperationContext* opCtx) {
-    invariant(NULL == _opCtx);
-    invariant(opCtx);
+bool PlanExecutor::restoreState() {
+    try {
+        return restoreStateWithoutRetrying();
+    } catch (const WriteConflictException& wce) {
+        if (!_yieldPolicy->allowedToYield())
+            throw;
 
-    _opCtx = opCtx;
+        // Handles retries by calling restoreStateWithoutRetrying() in a loop.
+        return _yieldPolicy->yield(NULL);
+    }
+}
 
-    // We're restoring after a yield or getMore now. If we're a yielding plan executor, reset
-    // the yield timer in order to prevent from yielding again right away.
-    if (_yieldPolicy.get()) {
-        _yieldPolicy->resetTimer();
+bool PlanExecutor::restoreStateWithoutRetrying() {
+    invariant(_currentState == kSaved);
+
+    if (!killed()) {
+        _root->restoreState();
     }
 
-    if (!_killed) {
-        _root->restoreState(opCtx);
-    }
+    _currentState = kUsable;
+    return !killed();
+}
 
-    return !_killed;
+void PlanExecutor::detachFromOperationContext() {
+    invariant(_currentState == kSaved);
+    _opCtx = nullptr;
+    _root->detachFromOperationContext();
+    _currentState = kDetached;
+    _everDetachedFromOperationContext = true;
+}
+
+void PlanExecutor::reattachToOperationContext(OperationContext* txn) {
+    invariant(_currentState == kDetached);
+
+    // We're reattaching for a getMore now.  Reset the yield timer in order to prevent from
+    // yielding again right away.
+    _yieldPolicy->resetTimer();
+
+    _opCtx = txn;
+    _root->reattachToOperationContext(txn);
+    _currentState = kSaved;
 }
 
 void PlanExecutor::invalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) {
-    if (!_killed) {
+    if (!killed()) {
         _root->invalidate(txn, dl, type);
     }
 }
 
 PlanExecutor::ExecState PlanExecutor::getNext(BSONObj* objOut, RecordId* dlOut) {
     Snapshotted<BSONObj> snapshotted;
-    ExecState state = getNextSnapshotted(objOut ? &snapshotted : NULL, dlOut);
+    ExecState state = getNextImpl(objOut ? &snapshotted : NULL, dlOut);
 
     if (objOut) {
         *objOut = snapshotted.value();
@@ -300,27 +330,57 @@ PlanExecutor::ExecState PlanExecutor::getNext(BSONObj* objOut, RecordId* dlOut) 
 
 PlanExecutor::ExecState PlanExecutor::getNextSnapshotted(Snapshotted<BSONObj>* objOut,
                                                          RecordId* dlOut) {
-    if (_killed) {
+    // Detaching from the OperationContext means that the returned snapshot ids could be invalid.
+    invariant(!_everDetachedFromOperationContext);
+    return getNextImpl(objOut, dlOut);
+}
+
+PlanExecutor::ExecState PlanExecutor::getNextImpl(Snapshotted<BSONObj>* objOut, RecordId* dlOut) {
+    invariant(_currentState == kUsable);
+    if (killed()) {
+        if (NULL != objOut) {
+            Status status(ErrorCodes::OperationFailed,
+                          str::stream() << "Operation aborted because: " << *_killReason);
+            *objOut = Snapshotted<BSONObj>(SnapshotId(),
+                                           WorkingSetCommon::buildMemberStatusObject(status));
+        }
         return PlanExecutor::DEAD;
+    }
+
+    if (!_stash.empty()) {
+        invariant(objOut && !dlOut);
+        *objOut = {SnapshotId(), _stash.front()};
+        _stash.pop();
+        return PlanExecutor::ADVANCED;
     }
 
     // When a stage requests a yield for document fetch, it gives us back a RecordFetcher*
     // to use to pull the record into memory. We take ownership of the RecordFetcher here,
     // deleting it after we've had a chance to do the fetch. For timing-based yields, we
     // just pass a NULL fetcher.
-    boost::scoped_ptr<RecordFetcher> fetcher;
+    unique_ptr<RecordFetcher> fetcher;
+
+    // Incremented on every writeConflict, reset to 0 on any successful call to _root->work.
+    size_t writeConflictsInARow = 0;
 
     for (;;) {
-        // There are two conditions which cause us to yield if we have an YIELD_AUTO
-        // policy:
+        // These are the conditions which can cause us to yield:
         //   1) The yield policy's timer elapsed, or
-        //   2) some stage requested a yield due to a document fetch (NEED_FETCH).
-        // In both cases, the actual yielding happens here.
-        if (NULL != _yieldPolicy.get() && (_yieldPolicy->shouldYield() || NULL != fetcher.get())) {
-            // Here's where we yield.
-            _yieldPolicy->yield(fetcher.get());
+        //   2) some stage requested a yield due to a document fetch, or
+        //   3) we need to yield and retry due to a WriteConflictException.
+        // In all cases, the actual yielding happens here.
+        if (_yieldPolicy->shouldYield()) {
+            if (!_yieldPolicy->yield(fetcher.get())) {
+                // A return of false from a yield should only happen if we've been killed during the
+                // yield.
+                invariant(killed());
 
-            if (_killed) {
+                if (NULL != objOut) {
+                    Status status(ErrorCodes::OperationFailed,
+                                  str::stream() << "Operation aborted because: " << *_killReason);
+                    *objOut = Snapshotted<BSONObj>(
+                        SnapshotId(), WorkingSetCommon::buildMemberStatusObject(status));
+                }
                 return PlanExecutor::DEAD;
             }
         }
@@ -331,6 +391,9 @@ PlanExecutor::ExecState PlanExecutor::getNextSnapshotted(Snapshotted<BSONObj>* o
 
         WorkingSetID id = WorkingSet::INVALID_ID;
         PlanStage::StageState code = _root->work(&id);
+
+        if (code != PlanStage::NEED_YIELD)
+            writeConflictsInARow = 0;
 
         if (PlanStage::ADVANCED == code) {
             // Fast count.
@@ -344,7 +407,7 @@ PlanExecutor::ExecState PlanExecutor::getNextSnapshotted(Snapshotted<BSONObj>* o
             bool hasRequestedData = true;
 
             if (NULL != objOut) {
-                if (WorkingSetMember::LOC_AND_IDX == member->state) {
+                if (WorkingSetMember::LOC_AND_IDX == member->getState()) {
                     if (1 != member->keyData.size()) {
                         _workingSet->free(id);
                         hasRequestedData = false;
@@ -375,33 +438,47 @@ PlanExecutor::ExecState PlanExecutor::getNextSnapshotted(Snapshotted<BSONObj>* o
                 return PlanExecutor::ADVANCED;
             }
             // This result didn't have the data the caller wanted, try again.
-        } else if (PlanStage::NEED_FETCH == code) {
-            // Yielding on a NEED_FETCH is handled above, so there's not much to do here.
-            // Just verify that the NEED_FETCH gave us back a WSM that is actually fetchable.
-            WorkingSetMember* member = _workingSet->get(id);
-            invariant(member->hasFetcher());
-            // Transfer ownership of the fetcher. Next time around the loop a yield will happen.
-            fetcher.reset(member->releaseFetcher());
+        } else if (PlanStage::NEED_YIELD == code) {
+            if (id == WorkingSet::INVALID_ID) {
+                if (!_yieldPolicy->allowedToYield())
+                    throw WriteConflictException();
+                CurOp::get(_opCtx)->debug().writeConflicts++;
+                writeConflictsInARow++;
+                WriteConflictException::logAndBackoff(
+                    writeConflictsInARow, "plan execution", _collection->ns().ns());
+
+            } else {
+                WorkingSetMember* member = _workingSet->get(id);
+                invariant(member->hasFetcher());
+                // Transfer ownership of the fetcher. Next time around the loop a yield will
+                // happen.
+                fetcher.reset(member->releaseFetcher());
+            }
+
+            // If we're allowed to, we will yield next time through the loop.
+            if (_yieldPolicy->allowedToYield())
+                _yieldPolicy->forceYield();
         } else if (PlanStage::NEED_TIME == code) {
             // Fall through to yield check at end of large conditional.
         } else if (PlanStage::IS_EOF == code) {
             return PlanExecutor::IS_EOF;
-        } else if (PlanStage::DEAD == code) {
-            return PlanExecutor::DEAD;
         } else {
-            verify(PlanStage::FAILURE == code);
+            invariant(PlanStage::DEAD == code || PlanStage::FAILURE == code);
+
             if (NULL != objOut) {
                 BSONObj statusObj;
                 WorkingSetCommon::getStatusMemberObject(*_workingSet, id, &statusObj);
                 *objOut = Snapshotted<BSONObj>(SnapshotId(), statusObj);
             }
-            return PlanExecutor::FAILURE;
+
+            return (PlanStage::DEAD == code) ? PlanExecutor::DEAD : PlanExecutor::FAILURE;
         }
     }
 }
 
 bool PlanExecutor::isEOF() {
-    return _killed || _root->isEOF();
+    invariant(_currentState == kUsable);
+    return killed() || (_stash.empty() && _root->isEOF());
 }
 
 void PlanExecutor::registerExec() {
@@ -412,8 +489,8 @@ void PlanExecutor::deregisterExec() {
     _safety.reset();
 }
 
-void PlanExecutor::kill() {
-    _killed = true;
+void PlanExecutor::kill(string reason) {
+    _killReason = std::move(reason);
     _collection = NULL;
 
     // XXX: PlanExecutor is designed to wrap a single execution tree. In the case of
@@ -434,30 +511,24 @@ void PlanExecutor::kill() {
             PipelineProxyStage* proxyStage = static_cast<PipelineProxyStage*>(foundStage);
             shared_ptr<PlanExecutor> childExec = proxyStage->getChildExecutor();
             if (childExec) {
-                childExec->kill();
+                childExec->kill(*_killReason);
             }
-        }
-
-        foundStage = getStageByType(_root.get(), STAGE_CACHED_PLAN);
-        if (foundStage) {
-            CachedPlanStage* cacheStage = static_cast<CachedPlanStage*>(foundStage);
-            cacheStage->kill();
         }
     }
 }
 
 Status PlanExecutor::executePlan() {
+    invariant(_currentState == kUsable);
     BSONObj obj;
     PlanExecutor::ExecState state = PlanExecutor::ADVANCED;
     while (PlanExecutor::ADVANCED == state) {
         state = this->getNext(&obj, NULL);
     }
 
-    if (PlanExecutor::DEAD == state) {
-        return Status(ErrorCodes::OperationFailed, "Exec error: PlanExecutor killed");
-    } else if (PlanExecutor::FAILURE == state) {
+    if (PlanExecutor::DEAD == state || PlanExecutor::FAILURE == state) {
         return Status(ErrorCodes::OperationFailed,
-                      str::stream() << "Exec error: " << WorkingSetCommon::toStatusString(obj));
+                      str::stream() << "Exec error: " << WorkingSetCommon::toStatusString(obj)
+                                    << ", state: " << PlanExecutor::statestr(state));
     }
 
     invariant(PlanExecutor::IS_EOF == state);
@@ -469,20 +540,21 @@ const string& PlanExecutor::ns() {
 }
 
 void PlanExecutor::setYieldPolicy(YieldPolicy policy, bool registerExecutor) {
-    if (PlanExecutor::YIELD_MANUAL == policy) {
-        _yieldPolicy.reset();
-    } else {
-        invariant(PlanExecutor::YIELD_AUTO == policy);
-        _yieldPolicy.reset(new PlanYieldPolicy(this));
-
+    _yieldPolicy->setPolicy(policy);
+    if (PlanExecutor::YIELD_AUTO == policy) {
         // Runners that yield automatically generally need to be registered so that
         // after yielding, they receive notifications of events like deletions and
         // index drops. The only exception is that a few PlanExecutors get registered
-        // by ClientCursor instead of being registered here.
+        // by ClientCursor instead of being registered here. This is unneeded if we only do
+        // partial "yields" for WriteConflict retrying.
         if (registerExecutor) {
             this->registerExec();
         }
     }
+}
+
+void PlanExecutor::enqueue(const BSONObj& obj) {
+    _stash.push(obj.getOwned());
 }
 
 //

@@ -28,27 +28,25 @@
 
 #include "mongo/s/shard_key_pattern.h"
 
-#include <boost/scoped_ptr.hpp>
-#include <boost/shared_ptr.hpp>
 #include <vector>
 
 #include "mongo/db/field_ref.h"
 #include "mongo/db/field_ref_set.h"
 #include "mongo/db/hasher.h"
 #include "mongo/db/index_names.h"
+#include "mongo/db/matcher/extensions_callback_noop.h"
 #include "mongo/db/ops/path_support.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
 
-using boost::scoped_ptr;
-using boost::shared_ptr;
-using std::auto_ptr;
-using std::pair;
 using std::make_pair;
-using std::vector;
+using std::pair;
+using std::shared_ptr;
 using std::string;
+using std::unique_ptr;
+using std::vector;
 
 using pathsupport::EqualityMatches;
 using mongoutils::str::stream;
@@ -194,7 +192,7 @@ BSONObj ShardKeyPattern::normalizeShardKey(const BSONObj& shardKey) const {
 }
 
 static BSONElement extractKeyElementFromMatchable(const MatchableDocument& matchable,
-                                                  const StringData& pathStr) {
+                                                  StringData pathStr) {
     ElementPath path;
     path.init(pathStr);
     path.setTraverseNonleafArrays(false);
@@ -267,21 +265,28 @@ StatusWith<BSONObj> ShardKeyPattern::extractShardKeyFromQuery(const BSONObj& bas
     if (!isValid())
         return StatusWith<BSONObj>(BSONObj());
 
-    // Extract equalities from query
-    CanonicalQuery* rawQuery;
-    Status queryStatus =
-        CanonicalQuery::canonicalize("", basicQuery, &rawQuery, WhereCallbackNoop());
-    if (!queryStatus.isOK())
-        return StatusWith<BSONObj>(queryStatus);
-    scoped_ptr<CanonicalQuery> query(rawQuery);
+    auto statusWithCQ =
+        CanonicalQuery::canonicalize(NamespaceString(""), basicQuery, ExtensionsCallbackNoop());
+    if (!statusWithCQ.isOK()) {
+        return StatusWith<BSONObj>(statusWithCQ.getStatus());
+    }
+    unique_ptr<CanonicalQuery> query = std::move(statusWithCQ.getValue());
 
+    return extractShardKeyFromQuery(*query);
+}
+
+StatusWith<BSONObj> ShardKeyPattern::extractShardKeyFromQuery(const CanonicalQuery& query) const {
+    if (!isValid())
+        return StatusWith<BSONObj>(BSONObj());
+
+    // Extract equalities from query.
     EqualityMatches equalities;
     // TODO: Build the path set initially?
     FieldRefSet keyPatternPathSet(_keyPatternPaths.vector());
     // We only care about extracting the full key pattern paths - if they don't exist (or are
     // conflicting), we don't contain the shard key.
     Status eqStatus =
-        pathsupport::extractFullEqualityMatches(*query->root(), keyPatternPathSet, &equalities);
+        pathsupport::extractFullEqualityMatches(*query.root(), keyPatternPathSet, &equalities);
     // NOTE: Failure to extract equality matches just means we return no shard key - it's not
     // an error we propagate
     if (!eqStatus.isOK())

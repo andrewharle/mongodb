@@ -3,8 +3,7 @@
  * via the --enableTestCommands flag fail when that flag isn't provided.
  */
 
-var testOnlyCommands = ['_testDistLockWithSyncCluster',
-                        '_testDistLockWithSkew',
+var testOnlyCommands = ['_testDistLockWithSkew',
                         '_skewClockCommand',
                         'configureFailPoint',
                         '_hashBSONElement',
@@ -13,7 +12,7 @@ var testOnlyCommands = ['_testDistLockWithSyncCluster',
                         'godinsert',
                         'sleep',
                         'captrunc',
-                        'emptycapped']
+                        'emptycapped'];
 
 var assertCmdNotFound = function(db, cmdName) {
     var res = db.runCommand(cmdName);
@@ -32,7 +31,7 @@ var assertCmdFound = function(db, cmdName) {
 
 jsTest.setOption('enableTestCommands', false);
 
-var conn = startMongodTest();
+var conn = MongoRunner.runMongod({});
 for (i in testOnlyCommands) {
     assertCmdNotFound(conn.getDB('test'), testOnlyCommands[i]);
 }
@@ -41,7 +40,7 @@ MongoRunner.stopMongod(conn.port);
 // Now enable the commands
 jsTest.setOption('enableTestCommands', true);
 
-var conn = startMongodTest();
+var conn = MongoRunner.runMongod({});
 for (i in testOnlyCommands) {
     assertCmdFound(conn.getDB('test'), testOnlyCommands[i]);
 }

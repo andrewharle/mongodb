@@ -35,6 +35,7 @@
 #include "mongo/bson/mutable/mutable_bson_test_utils.h"
 #include "mongo/bson/mutable/damage_vector.h"
 #include "mongo/db/json.h"
+#include "mongo/platform/decimal128.h"
 #include "mongo/unittest/unittest.h"
 
 namespace {
@@ -553,14 +554,19 @@ TEST(Element, setters) {
     t0.setValueLong(12345LL);
     ASSERT_EQUALS(mongo::NumberLong, t0.getType());
 
-    t0.setValueTimestamp(mongo::OpTime());
-    ASSERT_EQUALS(mongo::Timestamp, t0.getType());
+    t0.setValueTimestamp(mongo::Timestamp());
+    ASSERT_EQUALS(mongo::bsonTimestamp, t0.getType());
 
-    t0.setValueDate(12345LL);
+    t0.setValueDate(mongo::Date_t::fromMillisSinceEpoch(12345LL));
     ASSERT_EQUALS(mongo::Date, t0.getType());
 
     t0.setValueDouble(123.45);
     ASSERT_EQUALS(mongo::NumberDouble, t0.getType());
+
+    if (mongo::Decimal128::enabled) {
+        t0.setValueDecimal(mongo::Decimal128("123.45E1234"));
+        ASSERT_EQUALS(mongo::NumberDecimal, t0.getType());
+    }
 
     t0.setValueOID(mongo::OID("47cc67093475061e3d95369d"));
     ASSERT_EQUALS(mongo::jstOID, t0.getType());
@@ -606,44 +612,81 @@ TEST(Element, toString) {
     ASSERT_FALSE(docChild.ok());
 }
 
+TEST(DecimalType, createElement) {
+    if (mongo::Decimal128::enabled) {
+        mmb::Document doc;
+
+        mmb::Element d0 = doc.makeElementDecimal("d0", mongo::Decimal128("12345"));
+        ASSERT_TRUE(mongo::Decimal128("12345").isEqual(d0.getValueDecimal()));
+    }
+}
+
+TEST(DecimalType, setElement) {
+    if (mongo::Decimal128::enabled) {
+        mmb::Document doc;
+
+        mmb::Element d0 = doc.makeElementDecimal("d0", mongo::Decimal128("128"));
+        d0.setValueDecimal(mongo::Decimal128("123456"));
+        ASSERT_TRUE(mongo::Decimal128("123456").isEqual(d0.getValueDecimal()));
+
+        d0.setValueDouble(0.1);
+        ASSERT_EQUALS(0.1, d0.getValueDouble());
+        d0.setValueDecimal(mongo::Decimal128("23"));
+        ASSERT_TRUE(mongo::Decimal128("23").isEqual(d0.getValueDecimal()));
+    }
+}
+
+TEST(DecimalType, appendElement) {
+    if (mongo::Decimal128::enabled) {
+        mmb::Document doc;
+
+        mmb::Element d0 = doc.makeElementObject("e0");
+        d0.appendDecimal("precision", mongo::Decimal128(34));
+
+        mmb::Element it = mmb::findFirstChildNamed(d0, "precision");
+        ASSERT_TRUE(it.ok());
+        ASSERT_TRUE(mongo::Decimal128(34).isEqual(it.getValueDecimal()));
+    }
+}
+
 TEST(TimestampType, createElement) {
     mmb::Document doc;
 
-    mmb::Element t0 = doc.makeElementTimestamp("t0", mongo::OpTime());
-    ASSERT(mongo::OpTime() == t0.getValueTimestamp());
+    mmb::Element t0 = doc.makeElementTimestamp("t0", mongo::Timestamp());
+    ASSERT(mongo::Timestamp() == t0.getValueTimestamp());
 
-    mmb::Element t1 = doc.makeElementTimestamp("t1", mongo::OpTime(123, 456));
-    ASSERT(mongo::OpTime(123, 456) == t1.getValueTimestamp());
+    mmb::Element t1 = doc.makeElementTimestamp("t1", mongo::Timestamp(123, 456));
+    ASSERT(mongo::Timestamp(123, 456) == t1.getValueTimestamp());
 }
 
 TEST(TimestampType, setElement) {
     mmb::Document doc;
 
-    mmb::Element t0 = doc.makeElementTimestamp("t0", mongo::OpTime());
-    t0.setValueTimestamp(mongo::OpTime(123, 456));
-    ASSERT(mongo::OpTime(123, 456) == t0.getValueTimestamp());
+    mmb::Element t0 = doc.makeElementTimestamp("t0", mongo::Timestamp());
+    t0.setValueTimestamp(mongo::Timestamp(123, 456));
+    ASSERT(mongo::Timestamp(123, 456) == t0.getValueTimestamp());
 
-    // Try setting to other types and back to OpTime
+    // Try setting to other types and back to Timestamp
     t0.setValueLong(1234567890);
     ASSERT_EQUALS(1234567890LL, t0.getValueLong());
-    t0.setValueTimestamp(mongo::OpTime(789, 321));
-    ASSERT(mongo::OpTime(789, 321) == t0.getValueTimestamp());
+    t0.setValueTimestamp(mongo::Timestamp(789, 321));
+    ASSERT(mongo::Timestamp(789, 321) == t0.getValueTimestamp());
 
     t0.setValueString("foo bar baz");
     ASSERT_EQUALS("foo bar baz", t0.getValueString());
-    t0.setValueTimestamp(mongo::OpTime(9876, 5432));
-    ASSERT(mongo::OpTime(9876, 5432) == t0.getValueTimestamp());
+    t0.setValueTimestamp(mongo::Timestamp(9876, 5432));
+    ASSERT(mongo::Timestamp(9876, 5432) == t0.getValueTimestamp());
 }
 
 TEST(TimestampType, appendElement) {
     mmb::Document doc;
 
     mmb::Element t0 = doc.makeElementObject("e0");
-    t0.appendTimestamp("a timestamp field", mongo::OpTime(1352151971, 471));
+    t0.appendTimestamp("a timestamp field", mongo::Timestamp(1352151971, 471));
 
     mmb::Element it = mmb::findFirstChildNamed(t0, "a timestamp field");
     ASSERT_TRUE(it.ok());
-    ASSERT(mongo::OpTime(1352151971, 471) == it.getValueTimestamp());
+    ASSERT(mongo::Timestamp(1352151971, 471) == it.getValueTimestamp());
 }
 
 TEST(SafeNumType, createElement) {
@@ -671,6 +714,13 @@ TEST(SafeNumType, getSafeNum) {
     ASSERT_EQUALS(123.456789, t0.getValueDouble());
     num = t0.getValueSafeNum();
     ASSERT_EQUALS(num, 123.456789);
+
+    if (mongo::Decimal128::enabled) {
+        t0.setValueDecimal(mongo::Decimal128("12345678.1234"));
+        ASSERT_TRUE(mongo::Decimal128("12345678.1234").isEqual(t0.getValueDecimal()));
+        num = t0.getValueSafeNum();
+        ASSERT_EQUALS(num, mongo::Decimal128("12345678.1234"));
+    }
 }
 
 TEST(SafeNumType, setSafeNum) {
@@ -744,8 +794,30 @@ static const char jsonSample[] =
     "pattern:/match.*this/,"
     "lastfield:\"last\"}";
 
+static const char jsonSampleWithDecimal[] =
+    "{_id:ObjectId(\"47cc67093475061e3d95369d\"),"
+    "query:\"kate hudson\","
+    "owner:1234567887654321,"
+    "date:\"2011-05-13T14:22:46.777Z\","
+    "score:123.456,"
+    "decimal:NumberDecimal(\"2\"),"
+    "field1:Infinity,"
+    "\"field2\":-Infinity,"
+    "\"field3\":NaN,"
+    "users:["
+    "{uname:\"@aaaa\",editid:\"123\",date:1303959350,yes_votes:0,no_votes:0},"
+    "{uname:\"@bbbb\",editid:\"456\",date:1303959350,yes_votes:0,no_votes:0},"
+    "{uname:\"@cccc\",editid:\"789\",date:1303959350,yes_votes:0,no_votes:0}],"
+    "pattern:/match.*this/,"
+    "lastfield:\"last\"}";
+
 TEST(Serialization, RoundTrip) {
-    mongo::BSONObj obj = mongo::fromjson(jsonSample);
+    mongo::BSONObj obj;
+    if (mongo::Decimal128::enabled) {
+        obj = mongo::fromjson(jsonSampleWithDecimal);
+    } else {
+        obj = mongo::fromjson(jsonSample);
+    }
     mmb::Document doc(obj.copy());
     mongo::BSONObj built = doc.getObject();
     ASSERT_EQUALS(obj, built);
@@ -1313,6 +1385,11 @@ TEST(Element, IsNumeric) {
 
     elt = doc.makeElementDouble("dummy", 42.0);
     ASSERT_TRUE(elt.isNumeric());
+
+    if (mongo::Decimal128::enabled) {
+        elt = doc.makeElementDecimal("dummy", mongo::Decimal128(20));
+        ASSERT_TRUE(elt.isNumeric());
+    }
 }
 
 TEST(Element, IsIntegral) {
@@ -1332,6 +1409,11 @@ TEST(Element, IsIntegral) {
 
     elt = doc.makeElementDouble("dummy", 42.0);
     ASSERT_FALSE(elt.isIntegral());
+
+    if (mongo::Decimal128::enabled) {
+        elt = doc.makeElementDecimal("dummy", mongo::Decimal128(20));
+        ASSERT_FALSE(elt.isIntegral());
+    }
 }
 
 TEST(Document, ArraySerialization) {
@@ -1377,168 +1459,6 @@ TEST(Document, SetValueBSONElementFieldNameHandling) {
 
     static const char outJson[] = "{ a : 5 }";
     ASSERT_EQUALS(mongo::fromjson(outJson), doc.getObject());
-}
-
-TEST(Document, SetValueElementFromSeparateDocument) {
-    mongo::BSONObj inObj = mongo::fromjson("{ a : 4 }");
-    mmb::Document doc1(inObj);
-
-    mongo::BSONObj inObj2 = mongo::fromjson("{ b : 5 }");
-    const mmb::Document doc2(inObj2);
-
-    auto setTo = doc1.root().leftChild();
-    auto setFrom = doc2.root().leftChild();
-    ASSERT_OK(setTo.setValueElement(setFrom));
-
-    ASSERT_EQ(mongo::fromjson("{ a : 5 }"), doc1.getObject());
-
-    // Doc containing the 'setFrom' element should be unchanged.
-    ASSERT_EQ(inObj2, doc2.getObject());
-}
-
-TEST(Document, SetValueElementIsNoopWhenSetToSelf) {
-    mongo::BSONObj inObj = mongo::fromjson("{ a : 4 }");
-    mmb::Document doc(inObj);
-
-    auto element = doc.root().leftChild();
-    ASSERT_OK(element.setValueElement(element));
-
-    ASSERT_EQ(inObj, doc.getObject());
-}
-
-TEST(Document, SetValueElementIsNoopWhenSetToSelfFromCopy) {
-    mongo::BSONObj inObj = mongo::fromjson("{ a : 4 }");
-    mmb::Document doc(inObj);
-
-    auto element = doc.root().leftChild();
-    auto elementCopy = element;
-    ASSERT_OK(element.setValueElement(elementCopy));
-
-    ASSERT_EQ(inObj, doc.getObject());
-}
-
-TEST(Document, SetValueElementIsNoopWhenSetToSelfNonRootElement) {
-    mongo::BSONObj inObj = mongo::fromjson("{ a : { b : { c: 4 } } }");
-    mmb::Document doc(inObj);
-
-    auto element = doc.root().leftChild().leftChild().leftChild();
-    ASSERT_EQ("c", element.getFieldName());
-    ASSERT_OK(element.setValueElement(element));
-
-    ASSERT_EQ(inObj, doc.getObject());
-}
-
-TEST(Document, SetValueElementSetToNestedObject) {
-    mongo::BSONObj inObj = mongo::fromjson("{ a : 4 }");
-    mmb::Document doc1(inObj);
-
-    mongo::BSONObj inObj2 = mongo::fromjson("{ b : { c : 5, d : 6 } }");
-    const mmb::Document doc2(inObj2);
-
-    auto setTo = doc1.root().leftChild();
-    auto setFrom = doc2.root().leftChild();
-    ASSERT_OK(setTo.setValueElement(setFrom));
-
-    ASSERT_EQ(mongo::fromjson("{ a : { c : 5, d : 6 } }"), doc1.getObject());
-
-    // Doc containing the 'setFrom' element should be unchanged.
-    ASSERT_EQ(inObj2, doc2.getObject());
-}
-
-TEST(Document, SetValueElementNonRootElements) {
-    mongo::BSONObj inObj = mongo::fromjson("{ a : { b : 5, c : 6 } }");
-    mmb::Document doc1(inObj);
-
-    mongo::BSONObj inObj2 = mongo::fromjson("{ d : { e : 8, f : 9 } }");
-    const mmb::Document doc2(inObj2);
-
-    auto setTo = doc1.root().leftChild().rightChild();
-    ASSERT_EQ("c", setTo.getFieldName());
-    auto setFrom = doc2.root().leftChild().leftChild();
-    ASSERT_EQ("e", setFrom.getFieldName());
-    ASSERT_OK(setTo.setValueElement(setFrom));
-
-    ASSERT_EQ(mongo::fromjson("{ a : { b : 5, c : 8 } }"), doc1.getObject());
-
-    // Doc containing the 'setFrom' element should be unchanged.
-    ASSERT_EQ(inObj2, doc2.getObject());
-}
-
-TEST(Document, SetValueElementSetRootToSelfErrors) {
-    mongo::BSONObj inObj = mongo::fromjson("{ a : 4 }");
-    mmb::Document doc(inObj);
-
-    auto element = doc.root();
-    ASSERT_NOT_OK(element.setValueElement(element));
-    ASSERT_EQ(inObj, doc.getObject());
-}
-
-TEST(Document, SetValueElementSetRootToAnotherDocRootErrors) {
-    mongo::BSONObj inObj = mongo::fromjson("{ a : 4 }");
-    mmb::Document doc1(inObj);
-
-    mongo::BSONObj inObj2 = mongo::fromjson("{ b : 5 }");
-    const mmb::Document doc2(inObj2);
-
-    auto setTo = doc1.root();
-    auto setFrom = doc2.root();
-    ASSERT_NOT_OK(setTo.setValueElement(setFrom));
-
-    ASSERT_EQ(inObj, doc1.getObject());
-    ASSERT_EQ(inObj2, doc2.getObject());
-}
-
-TEST(Document, SetValueElementSetRootToNotRootInSelfErrors) {
-    mongo::BSONObj inObj = mongo::fromjson("{ a : 4 }");
-    mmb::Document doc(inObj);
-
-    auto setTo = doc.root();
-    auto setFrom = doc.root().leftChild();
-    ASSERT_NOT_OK(setTo.setValueElement(setFrom));
-    ASSERT_EQ(inObj, doc.getObject());
-}
-
-TEST(Document, SetValueElementSetRootToNotRootInAnotherDocErrors) {
-    mongo::BSONObj inObj = mongo::fromjson("{ a : 4 }");
-    mmb::Document doc1(inObj);
-
-    mongo::BSONObj inObj2 = mongo::fromjson("{ b : 5 }");
-    const mmb::Document doc2(inObj2);
-
-    auto setTo = doc1.root();
-    auto setFrom = doc2.root().leftChild();
-    ASSERT_NOT_OK(setTo.setValueElement(setFrom));
-
-    ASSERT_EQ(inObj, doc1.getObject());
-    ASSERT_EQ(inObj2, doc2.getObject());
-}
-
-TEST(Document, SetValueElementSetToOwnRootErrors) {
-    mongo::BSONObj inObj = mongo::fromjson("{ a : { b : 4 } }");
-    mmb::Document doc(inObj);
-
-    auto setTo = doc.root().leftChild().leftChild();
-    ASSERT_EQ("b", setTo.getFieldName());
-    auto setFrom = doc.root();
-
-    ASSERT_NOT_OK(setTo.setValueElement(setFrom));
-    ASSERT_EQ(inObj, doc.getObject());
-}
-
-TEST(Document, SetValueElementSetToOtherDocRoot) {
-    mongo::BSONObj inObj = mongo::fromjson("{ a : { b : 4 } }");
-    mmb::Document doc1(inObj);
-
-    mongo::BSONObj inObj2 = mongo::fromjson("{ c : 5 } }");
-    mmb::Document doc2(inObj2);
-
-    auto setTo = doc1.root().leftChild().leftChild();
-    ASSERT_EQ("b", setTo.getFieldName());
-    auto setFrom = doc2.root();
-
-    ASSERT_OK(setTo.setValueElement(setFrom));
-    ASSERT_EQ(mongo::fromjson("{ a : { b : { c : 5 } } }"), doc1.getObject());
-    ASSERT_EQ(inObj2, doc2.getObject());
 }
 
 TEST(Document, CreateElementWithEmptyFieldName) {
@@ -2415,11 +2335,11 @@ TEST(TypeSupport, EncodingEquivalenceInt) {
 TEST(TypeSupport, EncodingEquivalenceTimestamp) {
     mongo::BSONObjBuilder builder;
     const char name[] = "thing";
-    const mongo::OpTime value1 = mongo::OpTime(mongo::jsTime());
+    const mongo::Timestamp value1 = mongo::Timestamp(mongo::jsTime());
     builder.append(name, value1);
     mongo::BSONObj source = builder.done();
     const mongo::BSONElement thing = source.firstElement();
-    ASSERT_TRUE(thing.type() == mongo::Timestamp);
+    ASSERT_TRUE(thing.type() == mongo::bsonTimestamp);
 
     mmb::Document doc;
 
@@ -2427,7 +2347,7 @@ TEST(TypeSupport, EncodingEquivalenceTimestamp) {
     ASSERT_OK(doc.root().appendTimestamp(name, value1));
     mmb::Element a = doc.root().rightChild();
     ASSERT_TRUE(a.ok());
-    ASSERT_EQUALS(a.getType(), mongo::Timestamp);
+    ASSERT_EQUALS(a.getType(), mongo::bsonTimestamp);
     ASSERT_TRUE(a.hasValue());
     ASSERT_TRUE(value1 == mmb::ConstElement(a).getValueTimestamp());
 
@@ -2435,7 +2355,7 @@ TEST(TypeSupport, EncodingEquivalenceTimestamp) {
     ASSERT_OK(doc.root().appendElement(thing));
     mmb::Element b = doc.root().rightChild();
     ASSERT_TRUE(b.ok());
-    ASSERT_EQUALS(b.getType(), mongo::Timestamp);
+    ASSERT_EQUALS(b.getType(), mongo::bsonTimestamp);
     ASSERT_TRUE(b.hasValue());
 
     // Construct via setValue call.
@@ -2443,7 +2363,7 @@ TEST(TypeSupport, EncodingEquivalenceTimestamp) {
     mmb::Element c = doc.root().rightChild();
     ASSERT_TRUE(c.ok());
     c.setValueTimestamp(value1);
-    ASSERT_EQUALS(c.getType(), mongo::Timestamp);
+    ASSERT_EQUALS(c.getType(), mongo::bsonTimestamp);
     ASSERT_TRUE(c.hasValue());
 
     // Ensure identity:
@@ -2490,6 +2410,48 @@ TEST(TypeSupport, EncodingEquivalenceLong) {
     ASSERT_TRUE(identical(thing, mmb::ConstElement(a).getValue()));
     ASSERT_TRUE(identical(a.getValue(), b.getValue()));
     ASSERT_TRUE(identical(b.getValue(), c.getValue()));
+}
+
+TEST(TypeSupport, EncodingEquivalenceDecimal) {
+    if (mongo::Decimal128::enabled) {
+        mongo::BSONObjBuilder builder;
+        const char name[] = "thing";
+        const mongo::Decimal128 value1 = mongo::Decimal128(2);
+        builder.append(name, value1);
+        mongo::BSONObj source = builder.done();
+        const mongo::BSONElement thing = source.firstElement();
+        ASSERT_TRUE(thing.type() == mongo::NumberDecimal);
+
+        mmb::Document doc;
+
+        // Construct via direct call to append/make
+        ASSERT_OK(doc.root().appendDecimal(name, value1));
+        mmb::Element a = doc.root().rightChild();
+        ASSERT_TRUE(a.ok());
+        ASSERT_EQUALS(a.getType(), mongo::NumberDecimal);
+        ASSERT_TRUE(a.hasValue());
+        ASSERT_TRUE(value1.isEqual(mmb::ConstElement(a).getValueDecimal()));
+
+        // Construct via call passong BSON element
+        ASSERT_OK(doc.root().appendElement(thing));
+        mmb::Element b = doc.root().rightChild();
+        ASSERT_TRUE(b.ok());
+        ASSERT_EQUALS(b.getType(), mongo::NumberDecimal);
+        ASSERT_TRUE(b.hasValue());
+
+        // Construct via setValue call
+        ASSERT_OK(doc.root().appendNull(name));
+        mmb::Element c = doc.root().rightChild();
+        ASSERT_TRUE(c.ok());
+        c.setValueDecimal(value1);
+        ASSERT_EQUALS(c.getType(), mongo::NumberDecimal);
+        ASSERT_TRUE(c.hasValue());
+
+        // Ensure identity:
+        ASSERT_TRUE(identical(thing, mmb::ConstElement(a).getValue()));
+        ASSERT_TRUE(identical(a.getValue(), b.getValue()));
+        ASSERT_TRUE(identical(b.getValue(), c.getValue()));
+    }
 }
 
 TEST(TypeSupport, EncodingEquivalenceMinKey) {
@@ -2890,7 +2852,7 @@ TEST(DocumentInPlace, BooleanLifecycle) {
 }
 
 TEST(DocumentInPlace, DateLifecycle) {
-    mongo::BSONObj obj(BSON("x" << mongo::Date_t(1000)));
+    mongo::BSONObj obj(BSON("x" << mongo::Date_t::fromMillisSinceEpoch(1000)));
     mmb::Document doc(obj, mmb::Document::kInPlaceEnabled);
 
     mmb::Element x = doc.root().leftChild();
@@ -2898,13 +2860,13 @@ TEST(DocumentInPlace, DateLifecycle) {
     mmb::DamageVector damages;
     const char* source = NULL;
 
-    x.setValueDate(mongo::Date_t(20000));
+    x.setValueDate(mongo::Date_t::fromMillisSinceEpoch(20000));
     ASSERT_TRUE(doc.getInPlaceUpdates(&damages, &source));
     ASSERT_EQUALS(1U, damages.size());
     apply(&obj, damages, source);
     ASSERT_TRUE(x.hasValue());
     ASSERT_TRUE(x.isType(mongo::Date));
-    ASSERT_EQUALS(mongo::Date_t(20000), x.getValueDate());
+    ASSERT_EQUALS(mongo::Date_t::fromMillisSinceEpoch(20000), x.getValueDate());
 
     // TODO: When in-place updates for leaf elements is implemented, add tests here.
 }
@@ -2938,7 +2900,7 @@ TEST(DocumentInPlace, NumberIntLifecycle) {
 }
 
 TEST(DocumentInPlace, TimestampLifecycle) {
-    mongo::BSONObj obj(BSON("x" << mongo::OpTime(mongo::Date_t(1000))));
+    mongo::BSONObj obj(BSON("x" << mongo::Timestamp(mongo::Date_t::fromMillisSinceEpoch(1000))));
     mmb::Document doc(obj, mmb::Document::kInPlaceEnabled);
 
     mmb::Element x = doc.root().leftChild();
@@ -2946,13 +2908,13 @@ TEST(DocumentInPlace, TimestampLifecycle) {
     mmb::DamageVector damages;
     const char* source = NULL;
 
-    x.setValueTimestamp(mongo::OpTime(mongo::Date_t(20000)));
+    x.setValueTimestamp(mongo::Timestamp(mongo::Date_t::fromMillisSinceEpoch(20000)));
     ASSERT_TRUE(doc.getInPlaceUpdates(&damages, &source));
     ASSERT_EQUALS(1U, damages.size());
     apply(&obj, damages, source);
     ASSERT_TRUE(x.hasValue());
-    ASSERT_TRUE(x.isType(mongo::Timestamp));
-    ASSERT_TRUE(mongo::OpTime(mongo::Date_t(20000)) == x.getValueTimestamp());
+    ASSERT_TRUE(x.isType(mongo::bsonTimestamp));
+    ASSERT_TRUE(mongo::Timestamp(20000U) == x.getValueTimestamp());
 
     // TODO: When in-place updates for leaf elements is implemented, add tests here.
 }
@@ -3013,6 +2975,37 @@ TEST(DocumentInPlace, NumberDoubleLifecycle) {
     // ASSERT_TRUE(x.hasValue());
     // ASSERT_TRUE(x.isType(mongo::NumberDouble));
     // ASSERT_EQUALS(value1, x.getValueDouble());
+}
+
+TEST(DocumentInPlace, NumberDecimalLifecycle) {
+    if (mongo::Decimal128::enabled) {
+        const mongo::Decimal128 value1 = mongo::Decimal128(32);
+        const mongo::Decimal128 value2 = mongo::Decimal128(2);
+
+        mongo::BSONObj obj(BSON("x" << value1));
+        mmb::Document doc(obj, mmb::Document::kInPlaceEnabled);
+
+        mmb::Element x = doc.root().leftChild();
+
+        mmb::DamageVector damages;
+        const char* source = NULL;
+
+        x.setValueDecimal(value2);
+        ASSERT_TRUE(doc.getInPlaceUpdates(&damages, &source));
+        ASSERT_EQUALS(1U, damages.size());
+        apply(&obj, damages, source);
+        ASSERT_TRUE(x.hasValue());
+        ASSERT_TRUE(x.isType(mongo::NumberDecimal));
+        ASSERT_TRUE(value2.isEqual(x.getValueDecimal()));
+
+        // TODO: Re-enable when in-place updates to leaf elements is supported
+        // x.setValueDecimal(value1);
+        // ASSERT_TRUE(doc.getInPlaceUpdates(&damages, &source));
+        // apply(&obj, damages, source);
+        // ASSERT_TRUE(x.hasValue());
+        // ASSERT_TRUE(x.isType(mongo::NumberDecimal));
+        // ASSERT_TRUE(value1.isEqual(x.getValueDecimal()));
+    }
 }
 
 // Doubles and longs are the same size, 8 bytes, so we should be able to do in-place

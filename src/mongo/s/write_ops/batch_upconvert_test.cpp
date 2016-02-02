@@ -25,6 +25,7 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
+#include "mongo/platform/basic.h"
 
 #include "mongo/s/write_ops/batch_upconvert.h"
 
@@ -69,7 +70,7 @@ TEST(WriteBatchUpconvert, BasicInsert) {
     ASSERT_EQUALS(request->getBatchType(), BatchedCommandRequest::BatchType_Insert);
     string errMsg;
     ASSERT(request->isValid(&errMsg));
-    ASSERT_EQUALS(request->getNS(), ns);
+    ASSERT_EQUALS(request->getNS().toString(), ns);
     ASSERT(!request->getOrdered());
     ASSERT_EQUALS(request->sizeWriteOps(), 1u);
     bool isSameDoc = doc.woCompare(request->getInsertRequest()->getDocumentsAt(0)) == 0;
@@ -105,7 +106,7 @@ TEST(WriteBatchUpconvert, BasicUpdate) {
     ASSERT_EQUALS(request->getBatchType(), BatchedCommandRequest::BatchType_Update);
     string errMsg;
     ASSERT(request->isValid(&errMsg));
-    ASSERT_EQUALS(request->getNS(), ns);
+    ASSERT_EQUALS(request->getNS().toString(), ns);
     ASSERT_EQUALS(request->sizeWriteOps(), 1u);
     ASSERT(query.woCompare(request->getUpdateRequest()->getUpdatesAt(0)->getQuery()) == 0);
     ASSERT(update.woCompare(request->getUpdateRequest()->getUpdatesAt(0)->getUpdateExpr()) == 0);
@@ -139,7 +140,7 @@ TEST(WriteBatchUpconvert, BasicDelete) {
     ASSERT_EQUALS(request->getBatchType(), BatchedCommandRequest::BatchType_Delete);
     string errMsg;
     ASSERT(request->isValid(&errMsg));
-    ASSERT_EQUALS(request->getNS(), ns);
+    ASSERT_EQUALS(request->getNS().toString(), ns);
     ASSERT_EQUALS(request->sizeWriteOps(), 1u);
     ASSERT(query.woCompare(request->getDeleteRequest()->getDeletesAt(0)->getQuery()) == 0);
     ASSERT(request->getDeleteRequest()->getDeletesAt(0)->getLimit() == 1);

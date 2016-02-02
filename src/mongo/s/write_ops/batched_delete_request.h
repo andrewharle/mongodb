@@ -28,17 +28,13 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
 #include <string>
 #include <vector>
 
 #include "mongo/base/string_data.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/s/bson_serializable.h"
-#include "mongo/s/chunk_version.h"
 #include "mongo/s/write_ops/batched_delete_document.h"
-#include "mongo/s/write_ops/batched_request_metadata.h"
 
 namespace mongo {
 
@@ -46,7 +42,7 @@ namespace mongo {
  * This class represents the layout and content of a batched delete runCommand,
  * the request side.
  */
-class BatchedDeleteRequest : public BSONSerializable {
+class BatchedDeleteRequest {
     MONGO_DISALLOW_COPYING(BatchedDeleteRequest);
 
 public:
@@ -62,38 +58,29 @@ public:
     static const BSONField<std::vector<BatchedDeleteDocument*>> deletes;
     static const BSONField<BSONObj> writeConcern;
     static const BSONField<bool> ordered;
-    static const BSONField<BSONObj> metadata;
 
     //
     // construction / destruction
     //
 
     BatchedDeleteRequest();
-    virtual ~BatchedDeleteRequest();
+    ~BatchedDeleteRequest();
 
     /** Copies all the fields present in 'this' to 'other'. */
     void cloneTo(BatchedDeleteRequest* other) const;
 
-    //
-    // bson serializable interface implementation
-    //
-
-    virtual bool isValid(std::string* errMsg) const;
-    virtual BSONObj toBSON() const;
-    virtual bool parseBSON(const BSONObj& source, std::string* errMsg);
-    virtual void clear();
-    virtual std::string toString() const;
+    bool isValid(std::string* errMsg) const;
+    BSONObj toBSON() const;
+    bool parseBSON(StringData dbName, const BSONObj& source, std::string* errMsg);
+    void clear();
+    std::string toString() const;
 
     //
     // individual field accessors
     //
 
-    void setCollName(const StringData& collName);
-    void setCollNameNS(const NamespaceString& collName);
-    const std::string& getCollName() const;
-    const NamespaceString& getCollNameNS() const;
-
-    const NamespaceString& getTargetingNSS() const;
+    void setNS(NamespaceString ns);
+    const NamespaceString& getNS() const;
 
     void setDeletes(const std::vector<BatchedDeleteDocument*>& deletes);
 
@@ -117,20 +104,21 @@ public:
     bool isOrderedSet() const;
     bool getOrdered() const;
 
-    /*
-     * metadata ownership will be transferred to this.
+    /**
+     * These are no-ops since delete never validates documents. They only exist to fulfill the
+     * unified API.
      */
-    void setMetadata(BatchedRequestMetadata* metadata);
-    void unsetMetadata();
-    bool isMetadataSet() const;
-    BatchedRequestMetadata* getMetadata() const;
+    void setShouldBypassValidation(bool newVal) {}
+    bool shouldBypassValidation() const {
+        return false;
+    }
 
 private:
     // Convention: (M)andatory, (O)ptional
 
     // (M)  collection we're deleting from
-    NamespaceString _collName;
-    bool _isCollNameSet;
+    NamespaceString _ns;
+    bool _isNSSet;
 
     // (M)  array of individual deletes
     std::vector<BatchedDeleteDocument*> _deletes;
@@ -143,9 +131,6 @@ private:
     // (O)  whether batch is issued in parallel or not
     bool _ordered;
     bool _isOrderedSet;
-
-    // (O)  metadata associated with this request for internal use.
-    boost::scoped_ptr<BatchedRequestMetadata> _metadata;
 };
 
 }  // namespace mongo

@@ -33,7 +33,6 @@
 
 #include "mongo/base/status.h"
 #include "mongo/bson/util/bson_extract.h"
-#include "mongo/client/auth_helpers.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/privilege.h"
@@ -70,7 +69,7 @@ Status _extractWriteConcern(const BSONObj& cmdObj, BSONObj* writeConcern) {
 }
 
 Status _checkNoExtraFields(const BSONObj& cmdObj,
-                           const StringData& cmdName,
+                           StringData cmdName,
                            const unordered_set<std::string>& validFieldNames) {
     // Iterate through all fields in command object and make sure there are no unexpected
     // ones.
@@ -89,9 +88,9 @@ Status _checkNoExtraFields(const BSONObj& cmdObj,
 // Extracts a UserName or RoleName object from a BSONElement.
 template <typename Name>
 Status _parseNameFromBSONElement(const BSONElement& element,
-                                 const StringData& dbname,
-                                 const StringData& nameFieldName,
-                                 const StringData& sourceFieldName,
+                                 StringData dbname,
+                                 StringData nameFieldName,
+                                 StringData sourceFieldName,
                                  Name* parsedName) {
     if (element.type() == String) {
         *parsedName = Name(element.String(), dbname);
@@ -120,9 +119,9 @@ Status _parseNameFromBSONElement(const BSONElement& element,
 // Extracts UserName or RoleName objects from a BSONArray of role/user names.
 template <typename Name>
 Status _parseNamesFromBSONArray(const BSONArray& array,
-                                const StringData& dbname,
-                                const StringData& nameFieldName,
-                                const StringData& sourceFieldName,
+                                StringData dbname,
+                                StringData nameFieldName,
+                                StringData sourceFieldName,
                                 std::vector<Name>* parsedNames) {
     for (BSONObjIterator it(array); it.more(); it.next()) {
         BSONElement element = *it;
@@ -138,7 +137,7 @@ Status _parseNamesFromBSONArray(const BSONArray& array,
 }
 
 Status parseUserNamesFromBSONArray(const BSONArray& usersArray,
-                                   const StringData& dbname,
+                                   StringData dbname,
                                    std::vector<UserName>* parsedUserNames) {
     return _parseNamesFromBSONArray(usersArray,
                                     dbname,
@@ -148,7 +147,7 @@ Status parseUserNamesFromBSONArray(const BSONArray& usersArray,
 }
 
 Status parseRoleNamesFromBSONArray(const BSONArray& rolesArray,
-                                   const StringData& dbname,
+                                   StringData dbname,
                                    std::vector<RoleName>* parsedRoleNames) {
     return _parseNamesFromBSONArray(rolesArray,
                                     dbname,
@@ -158,7 +157,7 @@ Status parseRoleNamesFromBSONArray(const BSONArray& rolesArray,
 }
 
 Status parseRolePossessionManipulationCommands(const BSONObj& cmdObj,
-                                               const StringData& cmdName,
+                                               StringData cmdName,
                                                const std::string& dbname,
                                                std::string* parsedName,
                                                vector<RoleName>* parsedRoleNames,
@@ -167,6 +166,7 @@ Status parseRolePossessionManipulationCommands(const BSONObj& cmdObj,
     validFieldNames.insert(cmdName.toString());
     validFieldNames.insert("roles");
     validFieldNames.insert("writeConcern");
+    validFieldNames.insert("maxTimeMS");
 
     Status status = _checkNoExtraFields(cmdObj, cmdName, validFieldNames);
     if (!status.isOK()) {
@@ -203,7 +203,7 @@ Status parseRolePossessionManipulationCommands(const BSONObj& cmdObj,
 }
 
 Status parseCreateOrUpdateUserCommands(const BSONObj& cmdObj,
-                                       const StringData& cmdName,
+                                       StringData cmdName,
                                        const std::string& dbname,
                                        CreateOrUpdateUserArgs* parsedArgs) {
     unordered_set<std::string> validFieldNames;
@@ -213,6 +213,7 @@ Status parseCreateOrUpdateUserCommands(const BSONObj& cmdObj,
     validFieldNames.insert("pwd");
     validFieldNames.insert("roles");
     validFieldNames.insert("writeConcern");
+    validFieldNames.insert("maxTimeMS");
 
     Status status = _checkNoExtraFields(cmdObj, cmdName, validFieldNames);
     if (!status.isOK()) {
@@ -231,9 +232,6 @@ Status parseCreateOrUpdateUserCommands(const BSONObj& cmdObj,
     status = bsonExtractStringField(cmdObj, cmdName, &userName);
     if (!status.isOK()) {
         return status;
-    }
-    if (userName.find('\0') != std::string::npos) {
-        return Status(ErrorCodes::BadValue, "Username cannot contain NULL characters");
     }
 
     parsedArgs->userName = UserName(userName, dbname);
@@ -300,6 +298,7 @@ Status parseAndValidateDropUserCommand(const BSONObj& cmdObj,
     unordered_set<std::string> validFieldNames;
     validFieldNames.insert("dropUser");
     validFieldNames.insert("writeConcern");
+    validFieldNames.insert("maxTimeMS");
 
     Status status = _checkNoExtraFields(cmdObj, "dropUser", validFieldNames);
     if (!status.isOK()) {
@@ -321,14 +320,16 @@ Status parseAndValidateDropUserCommand(const BSONObj& cmdObj,
     return Status::OK();
 }
 
-Status parseAndValidateDropAllUsersFromDatabaseCommand(const BSONObj& cmdObj,
-                                                       const std::string& dbname,
-                                                       BSONObj* parsedWriteConcern) {
+Status parseFromDatabaseCommand(const BSONObj& cmdObj,
+                                const std::string& dbname,
+                                BSONObj* parsedWriteConcern,
+                                std::string command) {
     unordered_set<std::string> validFieldNames;
-    validFieldNames.insert("dropAllUsersFromDatabase");
+    validFieldNames.insert(command);
     validFieldNames.insert("writeConcern");
+    validFieldNames.insert("maxTimeMS");
 
-    Status status = _checkNoExtraFields(cmdObj, "dropAllUsersFromDatabase", validFieldNames);
+    Status status = _checkNoExtraFields(cmdObj, command, validFieldNames);
     if (!status.isOK()) {
         return status;
     }
@@ -340,14 +341,18 @@ Status parseAndValidateDropAllUsersFromDatabaseCommand(const BSONObj& cmdObj,
 
     return Status::OK();
 }
+Status parseAndValidateDropAllUsersFromDatabaseCommand(const BSONObj& cmdObj,
+                                                       const std::string& dbname,
+                                                       BSONObj* parsedWriteConcern) {
+    return parseFromDatabaseCommand(cmdObj, dbname, parsedWriteConcern, "dropAllUsersFromDatabase");
+}
 
-Status parseUsersInfoCommand(const BSONObj& cmdObj,
-                             const StringData& dbname,
-                             UsersInfoArgs* parsedArgs) {
+Status parseUsersInfoCommand(const BSONObj& cmdObj, StringData dbname, UsersInfoArgs* parsedArgs) {
     unordered_set<std::string> validFieldNames;
     validFieldNames.insert("usersInfo");
     validFieldNames.insert("showPrivileges");
     validFieldNames.insert("showCredentials");
+    validFieldNames.insert("maxTimeMS");
 
     Status status = _checkNoExtraFields(cmdObj, "usersInfo", validFieldNames);
     if (!status.isOK()) {
@@ -389,13 +394,12 @@ Status parseUsersInfoCommand(const BSONObj& cmdObj,
     return Status::OK();
 }
 
-Status parseRolesInfoCommand(const BSONObj& cmdObj,
-                             const StringData& dbname,
-                             RolesInfoArgs* parsedArgs) {
+Status parseRolesInfoCommand(const BSONObj& cmdObj, StringData dbname, RolesInfoArgs* parsedArgs) {
     unordered_set<std::string> validFieldNames;
     validFieldNames.insert("rolesInfo");
     validFieldNames.insert("showPrivileges");
     validFieldNames.insert("showBuiltinRoles");
+    validFieldNames.insert("maxTimeMS");
 
     Status status = _checkNoExtraFields(cmdObj, "rolesInfo", validFieldNames);
     if (!status.isOK()) {
@@ -471,7 +475,7 @@ Status parseAndValidatePrivilegeArray(const BSONArray& privileges,
 }
 
 Status parseCreateOrUpdateRoleCommands(const BSONObj& cmdObj,
-                                       const StringData& cmdName,
+                                       StringData cmdName,
                                        const std::string& dbname,
                                        CreateOrUpdateRoleArgs* parsedArgs) {
     unordered_set<std::string> validFieldNames;
@@ -479,6 +483,7 @@ Status parseCreateOrUpdateRoleCommands(const BSONObj& cmdObj,
     validFieldNames.insert("privileges");
     validFieldNames.insert("roles");
     validFieldNames.insert("writeConcern");
+    validFieldNames.insert("maxTimeMS");
 
     Status status = _checkNoExtraFields(cmdObj, cmdName, validFieldNames);
     if (!status.isOK()) {
@@ -530,7 +535,7 @@ Status parseCreateOrUpdateRoleCommands(const BSONObj& cmdObj,
 }
 
 Status parseAndValidateRolePrivilegeManipulationCommands(const BSONObj& cmdObj,
-                                                         const StringData& cmdName,
+                                                         StringData cmdName,
                                                          const std::string& dbname,
                                                          RoleName* parsedRoleName,
                                                          PrivilegeVector* parsedPrivileges,
@@ -539,6 +544,7 @@ Status parseAndValidateRolePrivilegeManipulationCommands(const BSONObj& cmdObj,
     validFieldNames.insert(cmdName.toString());
     validFieldNames.insert("privileges");
     validFieldNames.insert("writeConcern");
+    validFieldNames.insert("maxTimeMS");
 
     Status status = _checkNoExtraFields(cmdObj, cmdName, validFieldNames);
     if (!status.isOK()) {
@@ -586,6 +592,7 @@ Status parseDropRoleCommand(const BSONObj& cmdObj,
     unordered_set<std::string> validFieldNames;
     validFieldNames.insert("dropRole");
     validFieldNames.insert("writeConcern");
+    validFieldNames.insert("maxTimeMS");
 
     Status status = _checkNoExtraFields(cmdObj, "dropRole", validFieldNames);
     if (!status.isOK()) {
@@ -610,21 +617,7 @@ Status parseDropRoleCommand(const BSONObj& cmdObj,
 Status parseDropAllRolesFromDatabaseCommand(const BSONObj& cmdObj,
                                             const std::string& dbname,
                                             BSONObj* parsedWriteConcern) {
-    unordered_set<std::string> validFieldNames;
-    validFieldNames.insert("dropAllRolesFromDatabase");
-    validFieldNames.insert("writeConcern");
-
-    Status status = _checkNoExtraFields(cmdObj, "dropAllRolesFromDatabase", validFieldNames);
-    if (!status.isOK()) {
-        return status;
-    }
-
-    status = _extractWriteConcern(cmdObj, parsedWriteConcern);
-    if (!status.isOK()) {
-        return status;
-    }
-
-    return Status::OK();
+    return parseFromDatabaseCommand(cmdObj, dbname, parsedWriteConcern, "dropAllRolesFromDatabase");
 }
 
 Status parseMergeAuthzCollectionsCommand(const BSONObj& cmdObj,
@@ -636,6 +629,7 @@ Status parseMergeAuthzCollectionsCommand(const BSONObj& cmdObj,
     validFieldNames.insert("db");
     validFieldNames.insert("drop");
     validFieldNames.insert("writeConcern");
+    validFieldNames.insert("maxTimeMS");
 
     Status status = _checkNoExtraFields(cmdObj, "_mergeAuthzCollections", validFieldNames);
     if (!status.isOK()) {
@@ -678,11 +672,9 @@ Status parseMergeAuthzCollectionsCommand(const BSONObj& cmdObj,
     return Status::OK();
 }
 
-Status parseAuthSchemaUpgradeStepCommand(const BSONObj& cmdObj,
-                                         const std::string& dbname,
-                                         int* maxSteps,
-                                         bool* shouldUpgradeShards,
-                                         BSONObj* parsedWriteConcern) {
+Status parseAuthSchemaUpgradeCommand(const BSONObj& cmdObj,
+                                     const std::string& dbname,
+                                     AuthSchemaUpgradeArgs* parsedArgs) {
     static const int minUpgradeSteps = 1;
     static const int maxUpgradeSteps = 2;
 
@@ -691,13 +683,15 @@ Status parseAuthSchemaUpgradeStepCommand(const BSONObj& cmdObj,
     validFieldNames.insert("maxSteps");
     validFieldNames.insert("upgradeShards");
     validFieldNames.insert("writeConcern");
+    validFieldNames.insert("maxTimeMS");
 
     Status status = _checkNoExtraFields(cmdObj, "authSchemaUpgrade", validFieldNames);
     if (!status.isOK()) {
         return status;
     }
 
-    status = bsonExtractBooleanFieldWithDefault(cmdObj, "upgradeShards", true, shouldUpgradeShards);
+    status = bsonExtractBooleanFieldWithDefault(
+        cmdObj, "upgradeShards", true, &parsedArgs->shouldUpgradeShards);
     if (!status.isOK()) {
         return status;
     }
@@ -712,15 +706,14 @@ Status parseAuthSchemaUpgradeStepCommand(const BSONObj& cmdObj,
                                                 << minUpgradeSteps << " and no more than "
                                                 << maxUpgradeSteps << "; found " << steps);
     }
-    *maxSteps = static_cast<int>(steps);
+    parsedArgs->maxSteps = static_cast<int>(steps);
 
-    status = _extractWriteConcern(cmdObj, parsedWriteConcern);
+    status = _extractWriteConcern(cmdObj, &parsedArgs->writeConcern);
     if (!status.isOK()) {
         return status;
     }
 
     return Status::OK();
 }
-
 }  // namespace auth
 }  // namespace mongo

@@ -31,14 +31,13 @@
 
 #pragma once
 
-#include <boost/shared_ptr.hpp>
 
 #include "mongo/db/instance.h"
 #include "mongo/unittest/unittest.h"
 
 using namespace mongo;
 using namespace mongo::unittest;
-using boost::shared_ptr;
+using std::shared_ptr;
 
 namespace mongo {
 class BSONObj;
@@ -53,14 +52,11 @@ extern const std::string default_test_dbpath;
 /**
  * Creates an index if it does not already exist.
  */
-Status createIndex(OperationContext* txn,
-                   const StringData& ns,
-                   const BSONObj& keys,
-                   bool unique = false);
+Status createIndex(OperationContext* txn, StringData ns, const BSONObj& keys, bool unique = false);
 
 /**
  * Creates an index from a BSON spec, if it does not already exist.
  */
-Status createIndexFromSpec(OperationContext* txn, const StringData& ns, const BSONObj& spec);
+Status createIndexFromSpec(OperationContext* txn, StringData ns, const BSONObj& spec);
 }  // namespace dbtests
 }  // namespace mongo

@@ -33,10 +33,12 @@
 
 #include "mongo/platform/basic.h"
 
-#include <boost/thread.hpp>
+#include <boost/thread/barrier.hpp>
 #include <boost/version.hpp>
 #include <iostream>
 
+#include "mongo/config.h"
+#include "mongo/db/client.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/lock_state.h"
 #include "mongo/db/operation_context_impl.h"
@@ -44,16 +46,18 @@
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/bits.h"
 #include "mongo/stdx/functional.h"
-#include "mongo/util/concurrency/mvar.h"
-#include "mongo/util/concurrency/thread_pool.h"
-#include "mongo/util/timer.h"
+#include "mongo/stdx/thread.h"
+#include "mongo/util/concurrency/old_thread_pool.h"
+#include "mongo/util/concurrency/rwlock.h"
 #include "mongo/util/concurrency/synchronization.h"
+#include "mongo/util/concurrency/old_thread_pool.h"
 #include "mongo/util/concurrency/ticketholder.h"
 #include "mongo/util/log.h"
+#include "mongo/util/timer.h"
 
 namespace ThreadedTests {
 
-using std::auto_ptr;
+using std::unique_ptr;
 using std::cout;
 using std::endl;
 using std::string;
@@ -80,7 +84,7 @@ private:
         if (!remaining)
             return;
 
-        boost::thread athread(stdx::bind(&ThreadedTest::subthread, this, remaining));
+        stdx::thread athread(stdx::bind(&ThreadedTest::subthread, this, remaining));
         launch_subthreads(remaining - 1);
         athread.join();
     }
@@ -94,7 +98,7 @@ const int nthr = 45;
 const int nthr = 135;
 #endif
 class MongoMutexTest : public ThreadedTest<nthr> {
-#if defined(_DEBUG)
+#if defined(MONGO_CONFIG_DEBUG_BUILD)
     enum { N = 2000 };
 #else
     enum { N = 4000 /*0*/ };
@@ -226,7 +230,6 @@ private:
             }
             pm.hit();
         }
-        cc().shutdown();
     }
 
     virtual void validate() {
@@ -271,27 +274,6 @@ class IsAtomicWordAtomic : public ThreadedTest<> {
     }
 };
 
-class MVarTest : public ThreadedTest<> {
-    static const int iterations = 10000;
-    MVar<int> target;
-
-public:
-    MVarTest() : target(0) {}
-    void subthread(int) {
-        for (int i = 0; i < iterations; i++) {
-            int val = target.take();
-#if BOOST_VERSION >= 103500
-            // increase chances of catching failure
-            boost::this_thread::yield();
-#endif
-            target.put(val + 1);
-        }
-    }
-    void validate() {
-        ASSERT_EQUALS(target.take(), nthreads * iterations);
-    }
-};
-
 class ThreadPoolTest {
     static const unsigned iterations = 10000;
     static const unsigned nThreads = 8;
@@ -305,7 +287,7 @@ class ThreadPoolTest {
 
 public:
     void run() {
-        ThreadPool tp(nThreads);
+        OldThreadPool tp(nThreads);
 
         for (unsigned i = 0; i < iterations; i++) {
             tp.schedule(&ThreadPoolTest::increment, this, 2);
@@ -342,17 +324,17 @@ public:
          */
         RWLockRecursiveNongreedy lk("eliot2", 120 * 1000);
         cout << "RWLock impl: " << lk.implType() << endl;
-        auto_ptr<RWLockRecursiveNongreedy::Shared> a(new RWLockRecursiveNongreedy::Shared(lk));
+        unique_ptr<RWLockRecursiveNongreedy::Shared> a(new RWLockRecursiveNongreedy::Shared(lk));
         AtomicUInt32 x1(0);
         cout << "A : " << &x1 << endl;
-        boost::thread t1(stdx::bind(worker1, &lk, &x1));
+        stdx::thread t1(stdx::bind(worker1, &lk, &x1));
         while (!x1.load())
             ;
         verify(x1.load() == 1);
         sleepmillis(500);
         verify(x1.load() == 1);
         AtomicUInt32 x2(0);
-        boost::thread t2(stdx::bind(worker2, &lk, &x2));
+        stdx::thread t2(stdx::bind(worker2, &lk, &x2));
         t2.join();
         verify(x2.load() == 1);
         a.reset();
@@ -381,11 +363,11 @@ public:
 
         RWLockRecursiveNongreedy lk("eliot2", 120 * 1000);
 
-        auto_ptr<RWLockRecursiveNongreedy::Shared> a(new RWLockRecursiveNongreedy::Shared(lk));
+        unique_ptr<RWLockRecursiveNongreedy::Shared> a(new RWLockRecursiveNongreedy::Shared(lk));
 
         AtomicUInt32 x2(0);
 
-        boost::thread t2(stdx::bind(worker2, &lk, &x2));
+        stdx::thread t2(stdx::bind(worker2, &lk, &x2));
         t2.join();
         verify(x2.load() == 1);
 
@@ -432,7 +414,7 @@ public:
         verify(pthread_rwlock_rdlock(&lk) == 0);
 
         AtomicUInt32 x1(0);
-        boost::thread t1(stdx::bind(worker1, &lk, &x1));
+        stdx::thread t1(stdx::bind(worker1, &lk, &x1));
         while (!x1.load())
             ;
         verify(x1.load() == 1);
@@ -441,7 +423,7 @@ public:
 
         AtomicUInt32 x2(0);
 
-        boost::thread t2(stdx::bind(worker2, &lk, &x2));
+        stdx::thread t2(stdx::bind(worker2, &lk, &x2));
         t2.join();
         verify(x2.load() == 1);
 
@@ -510,7 +492,7 @@ private:
                     if (t.millis() > 20) {
 #endif
                         DEV {
-                            // a _DEBUG buildbot might be slow, try to avoid false positives
+                            // a debug buildbot might be slow, try to avoid false positives
                             mongo::unittest::log() << "warning lock upgrade was slow " << t.millis()
                                                    << endl;
                         }
@@ -533,8 +515,9 @@ private:
                 if (what[x] == 'R') {
                     if (t.millis() > 15) {
                         // commented out for less chatter, we aren't using upgradeable anyway right
-                        // now: log() << x << " info: when in upgradable, write locks are still
-                        // greedy on this platform" << endl;
+                        // now:
+                        // log() << x << " info: when in upgradable, write locks are still greedy "
+                        // "on this platform" << endl;
                     }
                 }
                 sleepmillis(200);
@@ -544,15 +527,13 @@ private:
             default:
                 ASSERT(false);
         }
-
-        cc().shutdown();
     }
 };
 
 void sleepalittle() {
     Timer t;
     while (1) {
-        boost::this_thread::yield();
+        stdx::this_thread::yield();
         if (t.micros() > 8)
             break;
     }
@@ -561,13 +542,13 @@ void sleepalittle() {
 int once;
 
 /* This test is to see how long it takes to get a lock after there has been contention -- the OS
-     will need to reschedule us. if a spinlock, it will be fast of course, but these aren't spin
-     locks. Experimenting with different # of threads would be a good idea.
+   will need to reschedule us. if a spinlock, it will be fast of course, but these aren't spin
+   locks. Experimenting with different # of threads would be a good idea.
 */
 template <class whichmutex, class scoped>
 class Slack : public ThreadedTest<17> {
 public:
-    Slack() : m("slack") {
+    Slack() {
         k = 0;
         done = false;
         a = b = 0;
@@ -716,7 +697,6 @@ private:
             LOG(Z) << t.millis() << endl;
             ASSERT(t.millis() > 50);
         }
-        cc().shutdown();
     }
 };
 
@@ -733,10 +713,10 @@ public:
 private:
     class Hotel {
     public:
-        Hotel(int nRooms) : _frontDesk("frontDesk"), _nRooms(nRooms), _checkedIn(0), _maxRooms(0) {}
+        Hotel(int nRooms) : _nRooms(nRooms), _checkedIn(0), _maxRooms(0) {}
 
         void checkIn() {
-            scoped_lock lk(_frontDesk);
+            stdx::lock_guard<stdx::mutex> lk(_frontDesk);
             _checkedIn++;
             verify(_checkedIn <= _nRooms);
             if (_checkedIn > _maxRooms)
@@ -744,12 +724,12 @@ private:
         }
 
         void checkOut() {
-            scoped_lock lk(_frontDesk);
+            stdx::lock_guard<stdx::mutex> lk(_frontDesk);
             _checkedIn--;
             verify(_checkedIn >= 0);
         }
 
-        mongo::mutex _frontDesk;
+        stdx::mutex _frontDesk;
         int _nRooms;
         int _checkedIn;
         int _maxRooms;
@@ -777,8 +757,6 @@ private:
             if ((i % (checkIns / 10)) == 0)
                 mongo::unittest::log() << "checked in " << i << " times..." << endl;
         }
-
-        cc().shutdown();
     }
 
     virtual void validate() {
@@ -798,8 +776,7 @@ public:
         // Slack is a test to see how long it takes for another thread to pick up
         // and begin work after another relinquishes the lock.  e.g. a spin lock
         // would have very little slack.
-        add<Slack<mongo::mutex, mongo::mutex::scoped_lock>>();
-        add<Slack<SimpleMutex, SimpleMutex::scoped_lock>>();
+        add<Slack<SimpleMutex, stdx::lock_guard<SimpleMutex>>>();
         add<Slack<SimpleRWLock, SimpleRWLock::Exclusive>>();
         add<CondSlack>();
 
@@ -807,7 +784,6 @@ public:
 
         add<IsAtomicWordAtomic<AtomicUInt32>>();
         add<IsAtomicWordAtomic<AtomicUInt64>>();
-        add<MVarTest>();
         add<ThreadPoolTest>();
 
         add<RWLockTest1>();

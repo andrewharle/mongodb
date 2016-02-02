@@ -156,8 +156,7 @@ Status addSSLClientOptions(moe::OptionSection* options) {
         .requires("ssl");
 
     options->addOptionChaining(
-                 "ssl.FIPSMode", "sslFIPSMode", moe::Switch, "activate FIPS 140-2 mode at startup")
-        .requires("ssl");
+        "ssl.FIPSMode", "sslFIPSMode", moe::Switch, "activate FIPS 140-2 mode at startup");
 
     return Status::OK();
 }
@@ -214,13 +213,13 @@ Status storeSSLServerOptions(const moe::Environment& params) {
     if (params.count("net.ssl.mode")) {
         std::string sslModeParam = params["net.ssl.mode"].as<string>();
         if (sslModeParam == "disabled") {
-            sslGlobalParams.sslMode.store(SSLGlobalParams::SSLMode_disabled);
+            sslGlobalParams.sslMode.store(SSLParams::SSLMode_disabled);
         } else if (sslModeParam == "allowSSL") {
-            sslGlobalParams.sslMode.store(SSLGlobalParams::SSLMode_allowSSL);
+            sslGlobalParams.sslMode.store(SSLParams::SSLMode_allowSSL);
         } else if (sslModeParam == "preferSSL") {
-            sslGlobalParams.sslMode.store(SSLGlobalParams::SSLMode_preferSSL);
+            sslGlobalParams.sslMode.store(SSLParams::SSLMode_preferSSL);
         } else if (sslModeParam == "requireSSL") {
-            sslGlobalParams.sslMode.store(SSLGlobalParams::SSLMode_requireSSL);
+            sslGlobalParams.sslMode.store(SSLParams::SSLMode_requireSSL);
         } else {
             return Status(ErrorCodes::BadValue, "unsupported value for sslMode " + sslModeParam);
         }
@@ -269,22 +268,22 @@ Status storeSSLServerOptions(const moe::Environment& params) {
 
         // All accepted tokens, and their corresponding enum representation. The noTLS* tokens
         // exist for backwards compatibility.
-        std::map<std::string, SSLGlobalParams::Protocols> validConfigs;
-        validConfigs["TLS1_0"] = SSLGlobalParams::TLS1_0;
-        validConfigs["noTLS1_0"] = SSLGlobalParams::TLS1_0;
-        validConfigs["TLS1_1"] = SSLGlobalParams::TLS1_1;
-        validConfigs["noTLS1_1"] = SSLGlobalParams::TLS1_1;
-        validConfigs["TLS1_2"] = SSLGlobalParams::TLS1_2;
-        validConfigs["noTLS1_2"] = SSLGlobalParams::TLS1_2;
+        const std::map<std::string, SSLParams::Protocols> validConfigs{
+            {"TLS1_0", SSLParams::Protocols::TLS1_0},
+            {"noTLS1_0", SSLParams::Protocols::TLS1_0},
+            {"TLS1_1", SSLParams::Protocols::TLS1_1},
+            {"noTLS1_1", SSLParams::Protocols::TLS1_1},
+            {"TLS1_2", SSLParams::Protocols::TLS1_2},
+            {"noTLS1_2", SSLParams::Protocols::TLS1_2}};
 
         // Map the tokens to their enum values, and push them onto the list of disabled protocols.
-        for (std::vector<std::string>::iterator it = tokens.begin(); it != tokens.end(); ++it) {
-            std::map<std::string, SSLGlobalParams::Protocols>::iterator mappedToken =
-                validConfigs.find(*it);
+        for (const std::string& token : tokens) {
+            auto mappedToken = validConfigs.find(token);
             if (mappedToken != validConfigs.end()) {
                 sslGlobalParams.sslDisabledProtocols.push_back(mappedToken->second);
             } else {
-                return Status(ErrorCodes::BadValue, "Unrecognized disabledProtocols '" + *it + "'");
+                return Status(ErrorCodes::BadValue,
+                              "Unrecognized disabledProtocols '" + token + "'");
             }
         }
     }
@@ -309,7 +308,7 @@ Status storeSSLServerOptions(const moe::Environment& params) {
     }
 
     int clusterAuthMode = serverGlobalParams.clusterAuthMode.load();
-    if (sslGlobalParams.sslMode.load() != SSLGlobalParams::SSLMode_disabled) {
+    if (sslGlobalParams.sslMode.load() != SSLParams::SSLMode_disabled) {
         if (sslGlobalParams.sslPEMKeyFile.size() == 0) {
             return Status(ErrorCodes::BadValue, "need sslPEMKeyFile when SSL is enabled");
         }
@@ -335,7 +334,7 @@ Status storeSSLServerOptions(const moe::Environment& params) {
                sslGlobalParams.sslCAFile.size() || sslGlobalParams.sslCRLFile.size() ||
                sslGlobalParams.sslCipherConfig.size() ||
                sslGlobalParams.sslDisabledProtocols.size() ||
-               sslGlobalParams.sslWeakCertificateValidation || sslGlobalParams.sslFIPSMode) {
+               sslGlobalParams.sslWeakCertificateValidation) {
         return Status(ErrorCodes::BadValue,
                       "need to enable SSL via the sslMode flag when "
                       "using SSL configuration parameters");
@@ -343,11 +342,11 @@ Status storeSSLServerOptions(const moe::Environment& params) {
     if (clusterAuthMode == ServerGlobalParams::ClusterAuthMode_sendKeyFile ||
         clusterAuthMode == ServerGlobalParams::ClusterAuthMode_sendX509 ||
         clusterAuthMode == ServerGlobalParams::ClusterAuthMode_x509) {
-        if (sslGlobalParams.sslMode.load() == SSLGlobalParams::SSLMode_disabled) {
+        if (sslGlobalParams.sslMode.load() == SSLParams::SSLMode_disabled) {
             return Status(ErrorCodes::BadValue, "need to enable SSL via the sslMode flag");
         }
     }
-    if (sslGlobalParams.sslMode.load() == SSLGlobalParams::SSLMode_allowSSL) {
+    if (sslGlobalParams.sslMode.load() == SSLParams::SSLMode_allowSSL) {
         if (clusterAuthMode == ServerGlobalParams::ClusterAuthMode_sendX509 ||
             clusterAuthMode == ServerGlobalParams::ClusterAuthMode_x509) {
             return Status(ErrorCodes::BadValue,
@@ -359,7 +358,7 @@ Status storeSSLServerOptions(const moe::Environment& params) {
 
 Status storeSSLClientOptions(const moe::Environment& params) {
     if (params.count("ssl") && params["ssl"].as<bool>() == true) {
-        sslGlobalParams.sslMode.store(SSLGlobalParams::SSLMode_requireSSL);
+        sslGlobalParams.sslMode.store(SSLParams::SSLMode_requireSSL);
     }
     if (params.count("ssl.PEMKeyFile")) {
         sslGlobalParams.sslPEMKeyFile = params["ssl.PEMKeyFile"].as<std::string>();

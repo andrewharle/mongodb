@@ -35,6 +35,7 @@
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/privilege.h"
+#include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/client_basic.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/namespace_string.h"
@@ -64,15 +65,19 @@ Status checkAuthForCopydbCommand(ClientBasic* client,
     ActionSet actions;
     actions.addAction(ActionType::insert);
     actions.addAction(ActionType::createIndex);
-    if (!client->getAuthorizationSession()->isAuthorizedForActionsOnResource(
-            ResourcePattern::forDatabaseName(todb), actions)) {
+    if (shouldBypassDocumentValidationForCommand(cmdObj)) {
+        actions.addAction(ActionType::bypassDocumentValidation);
+    }
+
+    if (!AuthorizationSession::get(client)
+             ->isAuthorizedForActionsOnResource(ResourcePattern::forDatabaseName(todb), actions)) {
         return Status(ErrorCodes::Unauthorized, "Unauthorized");
     }
 
     actions.removeAllActions();
     actions.addAction(ActionType::insert);
     for (size_t i = 0; i < legalClientSystemCollections.size(); ++i) {
-        if (!client->getAuthorizationSession()->isAuthorizedForActionsOnNamespace(
+        if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnNamespace(
                 NamespaceString(todb, legalClientSystemCollections[i]), actions)) {
             return Status(ErrorCodes::Unauthorized, "Unauthorized");
         }
@@ -82,12 +87,12 @@ Status checkAuthForCopydbCommand(ClientBasic* client,
         // If copying from self, also require privileges on source db
         actions.removeAllActions();
         actions.addAction(ActionType::find);
-        if (!client->getAuthorizationSession()->isAuthorizedForActionsOnResource(
+        if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
                 ResourcePattern::forDatabaseName(fromdb), actions)) {
             return Status(ErrorCodes::Unauthorized, "Unauthorized");
         }
         for (size_t i = 0; i < legalClientSystemCollections.size(); ++i) {
-            if (!client->getAuthorizationSession()->isAuthorizedForActionsOnNamespace(
+            if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnNamespace(
                     NamespaceString(fromdb, legalClientSystemCollections[i]), actions)) {
                 return Status(ErrorCodes::Unauthorized, "Unauthorized");
             }

@@ -40,19 +40,19 @@
 namespace mongo {
 
 TwoDAccessMethod::TwoDAccessMethod(IndexCatalogEntry* btreeState, SortedDataInterface* btree)
-    : BtreeBasedAccessMethod(btreeState, btree) {
+    : IndexAccessMethod(btreeState, btree) {
     const IndexDescriptor* descriptor = btreeState->descriptor();
 
     ExpressionParams::parseTwoDParams(descriptor->infoObj(), &_params);
 }
 
 /** Finds the key objects to put in an index */
-void TwoDAccessMethod::getKeys(const BSONObj& obj, BSONObjSet* keys) {
+void TwoDAccessMethod::getKeys(const BSONObj& obj, BSONObjSet* keys) const {
     ExpressionKeysPrivate::get2DKeys(obj, _params, keys, NULL);
 }
 
 /** Finds all locations in a geo-indexed object */
-void TwoDAccessMethod::getKeys(const BSONObj& obj, vector<BSONObj>& locs) const {
+void TwoDAccessMethod::getKeys(const BSONObj& obj, std::vector<BSONObj>& locs) const {
     ExpressionKeysPrivate::get2DKeys(obj, _params, NULL, &locs);
 }
 

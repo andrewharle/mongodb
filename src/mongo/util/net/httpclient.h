@@ -29,20 +29,21 @@
 
 #pragma once
 
-#include "mongo/client/export_macros.h"
+#include "mongo/base/disallow_copying.h"
 #include "mongo/platform/basic.h"
 
-#include <boost/noncopyable.hpp>
 #include <map>
 #include <string>
 
 namespace mongo {
 
-class MONGO_CLIENT_API HttpClient : boost::noncopyable {
+class HttpClient {
+    MONGO_DISALLOW_COPYING(HttpClient);
+
 public:
     typedef std::map<std::string, std::string> Headers;
 
-    class MONGO_CLIENT_API Result {
+    class Result {
     public:
         Result() {}
 

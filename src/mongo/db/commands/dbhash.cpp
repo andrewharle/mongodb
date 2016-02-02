@@ -32,12 +32,13 @@
 
 #include "mongo/db/commands/dbhash.h"
 
-#include <boost/scoped_ptr.hpp>
 
-#include "mongo/db/client.h"
-#include "mongo/db/commands.h"
+#include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/database_catalog_entry.h"
+#include "mongo/db/client.h"
+#include "mongo/db/commands.h"
+#include "mongo/db/db_raii.h"
 #include "mongo/db/query/internal_plans.h"
 #include "mongo/util/log.h"
 #include "mongo/util/md5.hpp"
@@ -45,12 +46,11 @@
 
 namespace mongo {
 
-using boost::scoped_ptr;
-using std::auto_ptr;
-using std::list;
 using std::endl;
+using std::list;
 using std::set;
 using std::string;
+using std::unique_ptr;
 using std::vector;
 
 DBHashCmd dbhashCmd;
@@ -62,8 +62,7 @@ void logOpForDbHash(OperationContext* txn, const char* ns) {
 
 // ----
 
-DBHashCmd::DBHashCmd()
-    : Command("dbHash", false, "dbhash"), _cachedHashedMutex("_cachedHashedMutex") {}
+DBHashCmd::DBHashCmd() : Command("dbHash", false, "dbhash") {}
 
 void DBHashCmd::addRequiredPrivileges(const std::string& dbname,
                                       const BSONObj& cmdObj,
@@ -73,14 +72,14 @@ void DBHashCmd::addRequiredPrivileges(const std::string& dbname,
     out->push_back(Privilege(ResourcePattern::forDatabaseName(dbname), actions));
 }
 
-string DBHashCmd::hashCollection(OperationContext* opCtx,
-                                 Database* db,
-                                 const string& fullCollectionName,
-                                 bool* fromCache) {
-    scoped_ptr<scoped_lock> cachedHashedLock;
+std::string DBHashCmd::hashCollection(OperationContext* opCtx,
+                                      Database* db,
+                                      const std::string& fullCollectionName,
+                                      bool* fromCache) {
+    stdx::unique_lock<stdx::mutex> cachedHashedLock(_cachedHashedMutex, stdx::defer_lock);
 
     if (isCachable(fullCollectionName)) {
-        cachedHashedLock.reset(new scoped_lock(_cachedHashedMutex));
+        cachedHashedLock.lock();
         string hash = _cachedHashed[fullCollectionName];
         if (hash.size() > 0) {
             *fromCache = true;
@@ -95,18 +94,20 @@ string DBHashCmd::hashCollection(OperationContext* opCtx,
 
     IndexDescriptor* desc = collection->getIndexCatalog()->findIdIndex(opCtx);
 
-    auto_ptr<PlanExecutor> exec;
+    unique_ptr<PlanExecutor> exec;
     if (desc) {
-        exec.reset(InternalPlanner::indexScan(opCtx,
-                                              collection,
-                                              desc,
-                                              BSONObj(),
-                                              BSONObj(),
-                                              false,
-                                              InternalPlanner::FORWARD,
-                                              InternalPlanner::IXSCAN_FETCH));
+        exec = InternalPlanner::indexScan(opCtx,
+                                          collection,
+                                          desc,
+                                          BSONObj(),
+                                          BSONObj(),
+                                          false,  // endKeyInclusive
+                                          PlanExecutor::YIELD_MANUAL,
+                                          InternalPlanner::FORWARD,
+                                          InternalPlanner::IXSCAN_FETCH);
     } else if (collection->isCapped()) {
-        exec.reset(InternalPlanner::collectionScan(opCtx, fullCollectionName, collection));
+        exec = InternalPlanner::collectionScan(
+            opCtx, fullCollectionName, collection, PlanExecutor::YIELD_MANUAL);
     } else {
         log() << "can't find _id index for: " << fullCollectionName << endl;
         return "no _id _index";
@@ -130,7 +131,7 @@ string DBHashCmd::hashCollection(OperationContext* opCtx,
     md5_finish(&st, d);
     string hash = digestToString(d);
 
-    if (cachedHashedLock.get()) {
+    if (cachedHashedLock.owns_lock()) {
         _cachedHashed[fullCollectionName] = hash;
     }
 
@@ -142,8 +143,7 @@ bool DBHashCmd::run(OperationContext* txn,
                     BSONObj& cmdObj,
                     int,
                     string& errmsg,
-                    BSONObjBuilder& result,
-                    bool) {
+                    BSONObjBuilder& result) {
     Timer timer;
 
     set<string> desiredCollections;
@@ -172,7 +172,6 @@ bool DBHashCmd::run(OperationContext* txn,
         colls.sort();
     }
 
-    result.appendNumber("numCollections", (long long)colls.size());
     result.append("host", prettyHostName());
 
     md5_state_t globalState;
@@ -218,24 +217,15 @@ bool DBHashCmd::run(OperationContext* txn,
     return 1;
 }
 
-class DBHashCmd::DBHashLogOpHandler : public RecoveryUnit::Change {
-public:
-    DBHashLogOpHandler(DBHashCmd* dCmd, StringData ns) : _dCmd(dCmd), _ns(ns.toString()) {}
-    void commit() {
-        scoped_lock lk(_dCmd->_cachedHashedMutex);
-        _dCmd->_cachedHashed.erase(_ns);
-    }
-    void rollback() {}
-
-private:
-    DBHashCmd* _dCmd;
-    const std::string _ns;
-};
-
 void DBHashCmd::wipeCacheForCollection(OperationContext* txn, StringData ns) {
     if (!isCachable(ns))
         return;
-    txn->recoveryUnit()->registerChange(new DBHashLogOpHandler(this, ns));
+
+    std::string nsOwned = ns.toString();
+    txn->recoveryUnit()->onCommit([this, txn, nsOwned] {
+        stdx::lock_guard<stdx::mutex> lk(_cachedHashedMutex);
+        _cachedHashed.erase(nsOwned);
+    });
 }
 
 bool DBHashCmd::isCachable(StringData ns) const {

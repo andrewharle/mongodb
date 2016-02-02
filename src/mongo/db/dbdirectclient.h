@@ -58,13 +58,13 @@ public:
     // XXX: is this valid or useful?
     void setOpCtx(OperationContext* txn);
 
-    virtual std::auto_ptr<DBClientCursor> query(const std::string& ns,
-                                                Query query,
-                                                int nToReturn = 0,
-                                                int nToSkip = 0,
-                                                const BSONObj* fieldsToReturn = 0,
-                                                int queryOptions = 0,
-                                                int batchSize = 0);
+    virtual std::unique_ptr<DBClientCursor> query(const std::string& ns,
+                                                  Query query,
+                                                  int nToReturn = 0,
+                                                  int nToSkip = 0,
+                                                  const BSONObj* fieldsToReturn = 0,
+                                                  int queryOptions = 0,
+                                                  int batchSize = 0);
 
     virtual bool isFailed() const;
 
@@ -81,10 +81,6 @@ public:
 
     virtual void say(Message& toSend, bool isRetry = false, std::string* actualServer = 0);
 
-    virtual void sayPiggyBack(Message& toSend);
-
-    virtual void killCursor(long long cursorID);
-
     virtual bool callRead(Message& toSend, Message& response);
 
     virtual unsigned long long count(const std::string& ns,
@@ -100,6 +96,9 @@ public:
     virtual bool lazySupported() const;
 
     virtual QueryOptions _lookupAvailableOptions();
+
+    int getMinWireVersion() final;
+    int getMaxWireVersion() final;
 
 private:
     OperationContext* _txn;

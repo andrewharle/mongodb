@@ -131,23 +131,21 @@ MONGO_INITIALIZER(AuthorizationBuiltinRoles)(InitializerContext* context) {
 
 
     // DB admin role
-    dbAdminRoleActions << ActionType::collMod
-                       << ActionType::collStats  // clusterMonitor gets this also
-                       << ActionType::compact
-                       << ActionType::convertToCapped   // read_write gets this also
-                       << ActionType::createCollection  // read_write gets this also
-                       << ActionType::dbStats           // clusterMonitor gets this also
-                       << ActionType::dropCollection
-                       // clusterAdmin gets this also TODO(spencer): should readWriteAnyDatabase?
-                       << ActionType::dropDatabase << ActionType::dropIndex
-                       << ActionType::createIndex << ActionType::indexStats
-                       << ActionType::enableProfiler << ActionType::listCollections
-                       << ActionType::listIndexes << ActionType::planCacheIndexFilter
-                       << ActionType::planCacheRead << ActionType::planCacheWrite
-                       << ActionType::reIndex
-                       << ActionType::renameCollectionSameDB  // read_write gets this also
-                       << ActionType::repairDatabase << ActionType::storageDetails
-                       << ActionType::validate;
+    dbAdminRoleActions
+        << ActionType::bypassDocumentValidation << ActionType::collMod
+        << ActionType::collStats                               // clusterMonitor gets this also
+        << ActionType::compact << ActionType::convertToCapped  // read_write gets this also
+        << ActionType::createCollection                        // read_write gets this also
+        << ActionType::dbStats                                 // clusterMonitor gets this also
+        << ActionType::dropCollection
+        << ActionType::dropDatabase  // clusterAdmin gets this also TODO(spencer): should
+                                     // readWriteAnyDatabase?
+        << ActionType::dropIndex << ActionType::createIndex << ActionType::enableProfiler
+        << ActionType::listCollections << ActionType::listIndexes
+        << ActionType::planCacheIndexFilter << ActionType::planCacheRead
+        << ActionType::planCacheWrite << ActionType::reIndex
+        << ActionType::renameCollectionSameDB  // read_write gets this also
+        << ActionType::repairDatabase << ActionType::storageDetails << ActionType::validate;
 
     // clusterMonitor role actions that target the cluster resource
     clusterMonitorRoleClusterActions
@@ -156,13 +154,13 @@ MONGO_INITIALIZER(AuthorizationBuiltinRoles)(InitializerContext* context) {
         << ActionType::listDatabases << ActionType::listShards  // clusterManager gets this also
         << ActionType::netstat << ActionType::replSetGetConfig  // clusterManager gets this also
         << ActionType::replSetGetStatus                         // clusterManager gets this also
-        << ActionType::serverStatus << ActionType::top << ActionType::cursorInfo
-        << ActionType::inprog << ActionType::shardingState;
+        << ActionType::serverStatus << ActionType::top << ActionType::inprog
+        << ActionType::shardingState;
 
     // clusterMonitor role actions that target a database (or collection) resource
     clusterMonitorRoleDatabaseActions << ActionType::collStats  // dbAdmin gets this also
                                       << ActionType::dbStats    // dbAdmin gets this also
-                                      << ActionType::getShardVersion;
+                                      << ActionType::getShardVersion << ActionType::indexStats;
 
     // hostManager role actions that target the cluster resource
     hostManagerRoleClusterActions
@@ -198,7 +196,7 @@ MONGO_INITIALIZER(AuthorizationBuiltinRoles)(InitializerContext* context) {
     return Status::OK();
 }
 
-void addReadOnlyDbPrivileges(PrivilegeVector* privileges, const StringData& dbName) {
+void addReadOnlyDbPrivileges(PrivilegeVector* privileges, StringData dbName) {
     Privilege::addPrivilegeToPrivilegeVector(
         privileges, Privilege(ResourcePattern::forDatabaseName(dbName), readRoleActions));
     Privilege::addPrivilegeToPrivilegeVector(
@@ -218,7 +216,7 @@ void addReadOnlyDbPrivileges(PrivilegeVector* privileges, const StringData& dbNa
                   readRoleActions));
 }
 
-void addReadWriteDbPrivileges(PrivilegeVector* privileges, const StringData& dbName) {
+void addReadWriteDbPrivileges(PrivilegeVector* privileges, StringData dbName) {
     addReadOnlyDbPrivileges(privileges, dbName);
     Privilege::addPrivilegeToPrivilegeVector(
         privileges, Privilege(ResourcePattern::forDatabaseName(dbName), readWriteRoleActions));
@@ -228,12 +226,12 @@ void addReadWriteDbPrivileges(PrivilegeVector* privileges, const StringData& dbN
                   readWriteRoleActions));
 }
 
-void addUserAdminDbPrivileges(PrivilegeVector* privileges, const StringData& dbName) {
+void addUserAdminDbPrivileges(PrivilegeVector* privileges, StringData dbName) {
     privileges->push_back(
         Privilege(ResourcePattern::forDatabaseName(dbName), userAdminRoleActions));
 }
 
-void addDbAdminDbPrivileges(PrivilegeVector* privileges, const StringData& dbName) {
+void addDbAdminDbPrivileges(PrivilegeVector* privileges, StringData dbName) {
     Privilege::addPrivilegeToPrivilegeVector(
         privileges, Privilege(ResourcePattern::forDatabaseName(dbName), dbAdminRoleActions));
     Privilege::addPrivilegeToPrivilegeVector(
@@ -255,7 +253,7 @@ void addDbAdminDbPrivileges(PrivilegeVector* privileges, const StringData& dbNam
                   profileActions));
 }
 
-void addDbOwnerPrivileges(PrivilegeVector* privileges, const StringData& dbName) {
+void addDbOwnerPrivileges(PrivilegeVector* privileges, StringData dbName) {
     addReadWriteDbPrivileges(privileges, dbName);
     addDbAdminDbPrivileges(privileges, dbName);
     addUserAdminDbPrivileges(privileges, dbName);
@@ -480,8 +478,10 @@ void addBackupPrivileges(PrivilegeVector* privileges) {
 
 void addRestorePrivileges(PrivilegeVector* privileges) {
     ActionSet actions;
-    actions << ActionType::insert << ActionType::dropCollection << ActionType::createIndex
-            << ActionType::createCollection << ActionType::collMod;
+    actions << ActionType::bypassDocumentValidation << ActionType::collMod
+            << ActionType::createCollection << ActionType::createIndex << ActionType::dropCollection
+            << ActionType::insert;
+
     Privilege::addPrivilegeToPrivilegeVector(
         privileges, Privilege(ResourcePattern::forAnyNormalResource(), actions));
 

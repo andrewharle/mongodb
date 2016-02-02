@@ -43,17 +43,26 @@ class UpdateLifecycle;
 
 class UpdateRequest {
 public:
+    enum ReturnDocOption {
+        // Return no document.
+        RETURN_NONE,
+
+        // Return the document as it was before the update. If the update results in an insert,
+        // no document will be returned.
+        RETURN_OLD,
+
+        // Return the document as it is after the update.
+        RETURN_NEW
+    };
     inline UpdateRequest(const NamespaceString& nsString)
         : _nsString(nsString),
           _god(false),
           _upsert(false),
           _multi(false),
-          _callLogOp(false),
           _fromMigration(false),
-          _fromReplication(false),
           _lifecycle(NULL),
           _isExplain(false),
-          _storeResultDoc(false),
+          _returnDocs(ReturnDocOption::RETURN_NONE),
           _yieldPolicy(PlanExecutor::YIELD_MANUAL) {}
 
     const NamespaceString& getNamespaceString() const {
@@ -66,6 +75,22 @@ public:
 
     inline const BSONObj& getQuery() const {
         return _query;
+    }
+
+    inline void setProj(const BSONObj& proj) {
+        _proj = proj;
+    }
+
+    inline const BSONObj& getProj() const {
+        return _proj;
+    }
+
+    inline void setSort(const BSONObj& sort) {
+        _sort = sort;
+    }
+
+    inline const BSONObj& getSort() const {
+        return _sort;
     }
 
     inline void setUpdates(const BSONObj& updates) {
@@ -103,28 +128,12 @@ public:
         return _multi;
     }
 
-    inline void setUpdateOpLog(bool value = true) {
-        _callLogOp = value;
-    }
-
-    bool shouldCallLogOp() const {
-        return _callLogOp;
-    }
-
     inline void setFromMigration(bool value = true) {
         _fromMigration = value;
     }
 
     bool isFromMigration() const {
         return _fromMigration;
-    }
-
-    inline void setFromReplication(bool value = true) {
-        _fromReplication = value;
-    }
-
-    bool isFromReplication() const {
-        return _fromReplication;
     }
 
     inline void setLifecycle(UpdateLifecycle* value) {
@@ -143,12 +152,20 @@ public:
         return _isExplain;
     }
 
-    inline void setStoreResultDoc(bool value = true) {
-        _storeResultDoc = value;
+    inline void setReturnDocs(ReturnDocOption value) {
+        _returnDocs = value;
     }
 
-    inline bool shouldStoreResultDoc() const {
-        return _storeResultDoc;
+    inline bool shouldReturnOldDocs() const {
+        return _returnDocs == ReturnDocOption::RETURN_OLD;
+    }
+
+    inline bool shouldReturnNewDocs() const {
+        return _returnDocs == ReturnDocOption::RETURN_NEW;
+    }
+
+    inline bool shouldReturnAnyDocs() const {
+        return shouldReturnOldDocs() || shouldReturnNewDocs();
     }
 
     inline void setYieldPolicy(PlanExecutor::YieldPolicy yieldPolicy) {
@@ -160,10 +177,10 @@ public:
     }
 
     const std::string toString() const {
-        return str::stream() << " query: " << _query << " updated: " << _updates << " god: " << _god
+        return str::stream() << " query: " << _query << " projection: " << _proj
+                             << " sort: " << _sort << " updated: " << _updates << " god: " << _god
                              << " upsert: " << _upsert << " multi: " << _multi
-                             << " callLogOp: " << _callLogOp << " fromMigration: " << _fromMigration
-                             << " fromReplications: " << _fromReplication
+                             << " fromMigration: " << _fromMigration
                              << " isExplain: " << _isExplain;
     }
 
@@ -172,6 +189,12 @@ private:
 
     // Contains the query that selects documents to update.
     BSONObj _query;
+
+    // Contains the projection information.
+    BSONObj _proj;
+
+    // Contains the sort order information.
+    BSONObj _sort;
 
     // Contains the modifiers to apply to matched objects, or a replacement document.
     BSONObj _updates;
@@ -188,14 +211,8 @@ private:
     // True if this update is allowed to affect more than one document.
     bool _multi;
 
-    // True if the effects of the update should be written to the oplog.
-    bool _callLogOp;
-
     // True if this update is on behalf of a chunk migration.
     bool _fromMigration;
-
-    // True if this update is being applied during the application for the oplog.
-    bool _fromReplication;
 
     // The lifecycle data, and events used during the update request.
     UpdateLifecycle* _lifecycle;
@@ -203,13 +220,19 @@ private:
     // Whether or not we are requesting an explained update. Explained updates are read-only.
     bool _isExplain;
 
-    // Whether or not we keep an owned copy of the resulting document for a non-multi update.
-    // This allows someone executing an update to retrieve the resulting document without
-    // another query once the update is complete.
+    // Specifies which version of the documents to return, if any.
     //
-    // It is illegal to use this flag in combination with the '_multi' flag, and doing so will
-    // trigger an invariant check.
-    bool _storeResultDoc;
+    //   RETURN_NONE (default): Never return any documents, old or new.
+    //   RETURN_OLD: Return ADVANCED when a matching document is encountered, and the value of
+    //               the document before it was updated. If there were no matches, return
+    //               IS_EOF instead (even in case of an upsert).
+    //   RETURN_NEW: Return ADVANCED when a matching document is encountered, and the value of
+    //               the document after being updated. If an upsert was specified and it
+    //               resulted in an insert, return the inserted document.
+    //
+    // This allows findAndModify to execute an update and retrieve the resulting document
+    // without another query before or after the update.
+    ReturnDocOption _returnDocs;
 
     // Whether or not the update should yield. Defaults to YIELD_MANUAL.
     PlanExecutor::YieldPolicy _yieldPolicy;

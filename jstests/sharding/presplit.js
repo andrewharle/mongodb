@@ -1,7 +1,12 @@
-// presplit.js
+(function() {
 
-// Starts a new sharding environment limiting the chunksize to 1MB. 
-s = new ShardingTest( "presplit" , 2 , 2 , 1 , { chunksize : 1 } );
+var s = new ShardingTest({ name: "presplit",
+                           shards: 2,
+                           mongos: 1,
+                           other: { chunkSize : 1 } });
+
+s.adminCommand( { enablesharding : "test" } );
+s.ensurePrimaryShard('test', 'shard0001');
 
 // Insert enough data in 'test.foo' to fill several chunks, if it was sharded.
 bigString = "";
@@ -25,8 +30,6 @@ primary = s.getServer( "test" ).getDB( "test" );
 assert.eq( 0 , s.config.chunks.count()  , "single chunk assertion" );
 assert.eq( num , primary.foo.count() );
 
-// Turn on sharding on the 'test.foo' collection
-s.adminCommand( { enablesharding : "test" } );
 s.adminCommand( { shardcollection : "test.foo" , key : { _id : 1 } } );
 
 // Make sure the collection's original chunk got split 
@@ -36,3 +39,5 @@ assert.eq( num , primary.foo.count() );
 
 s.printChangeLog();
 s.stop();
+
+})();

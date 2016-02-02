@@ -26,19 +26,23 @@
  *    then also delete it in the license file.
  */
 
+#include "mongo/platform/basic.h"
+
 #include "mongo/client/dbclientcursor.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/database_holder.h"
+#include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/operation_context_impl.h"
+#include "mongo/db/range_arithmetic.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/dbtests/dbtests.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo {
 
-using std::auto_ptr;
+using std::unique_ptr;
 using std::set;
 
 /**
@@ -65,7 +69,7 @@ public:
             // Remove _id range [_min, _max).
             ScopedTransaction transaction(&txn, MODE_IX);
             Lock::DBLock lk(txn.lockState(), nsToDatabaseSubstring(ns), MODE_X);
-            Client::Context ctx(&txn, ns);
+            OldClientContext ctx(&txn, ns);
 
             KeyRange range(ns, BSON("_id" << _min), BSON("_id" << _max), BSON("_id" << 1));
             mongo::WriteConcernOptions dummyWriteConcern;
@@ -90,7 +94,7 @@ private:
 
     BSONArray docs(OperationContext* txn) const {
         DBDirectClient client(txn);
-        auto_ptr<DBClientCursor> cursor = client.query(ns, Query().hint(BSON("_id" << 1)));
+        unique_ptr<DBClientCursor> cursor = client.query(ns, Query().hint(BSON("_id" << 1)));
         BSONArrayBuilder bab;
         while (cursor->more()) {
             bab << cursor->next();

@@ -28,10 +28,10 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
+#include <boost/optional.hpp>
 
 #include "mongo/base/disallow_copying.h"
-#include "mongo/s/bson_serializable.h"
+#include "mongo/s/chunk_version.h"
 #include "mongo/s/write_ops/batched_insert_request.h"
 #include "mongo/s/write_ops/batched_update_request.h"
 #include "mongo/s/write_ops/batched_delete_request.h"
@@ -47,7 +47,7 @@ class NamespaceString;
  * Designed to be a very thin wrapper that mimics the underlying requests exactly.  Owns the
  * wrapped request object once constructed.
  */
-class BatchedCommandRequest : public BSONSerializable {
+class BatchedCommandRequest {
     MONGO_DISALLOW_COPYING(BatchedCommandRequest);
 
 public:
@@ -80,20 +80,16 @@ public:
     BatchedCommandRequest(BatchedDeleteRequest* deleteReq)
         : _batchType(BatchType_Delete), _deleteReq(deleteReq) {}
 
-    virtual ~BatchedCommandRequest(){};
+    ~BatchedCommandRequest(){};
 
     /** Copies all the fields present in 'this' to 'other'. */
     void cloneTo(BatchedCommandRequest* other) const;
 
-    //
-    // bson serializable interface implementation
-    //
-
-    virtual bool isValid(std::string* errMsg) const;
-    virtual BSONObj toBSON() const;
-    virtual bool parseBSON(const BSONObj& source, std::string* errMsg);
-    virtual void clear();
-    virtual std::string toString() const;
+    bool isValid(std::string* errMsg) const;
+    BSONObj toBSON() const;
+    bool parseBSON(StringData dbName, const BSONObj& source, std::string* errMsg);
+    void clear();
+    std::string toString() const;
 
     //
     // Batch type accessors
@@ -117,10 +113,11 @@ public:
 
     bool isVerboseWC() const;
 
-    void setNSS(const NamespaceString& nss);
-    void setNS(const StringData& collName);
-    const std::string& getNS() const;
-    const NamespaceString& getNSS() const;
+    /**
+     * Sets the namespace for this batched request.
+     */
+    void setNS(NamespaceString ns);
+    const NamespaceString& getNS() const;
 
     std::size_t sizeWriteOps() const;
 
@@ -134,10 +131,20 @@ public:
     bool isOrderedSet() const;
     bool getOrdered() const;
 
-    void setMetadata(BatchedRequestMetadata* metadata);
-    void unsetMetadata();
-    bool isMetadataSet() const;
-    BatchedRequestMetadata* getMetadata() const;
+    void setShardVersion(ChunkVersion shardVersion) {
+        _shardVersion = std::move(shardVersion);
+    }
+
+    bool hasShardVersion() const {
+        return _shardVersion.is_initialized();
+    }
+
+    const ChunkVersion& getShardVersion() const {
+        return _shardVersion.get();
+    }
+
+    void setShouldBypassValidation(bool newVal);
+    bool shouldBypassValidation() const;
 
     //
     // Helpers for batch pre-processing
@@ -176,9 +183,12 @@ public:
 
 private:
     BatchType _batchType;
-    boost::scoped_ptr<BatchedInsertRequest> _insertReq;
-    boost::scoped_ptr<BatchedUpdateRequest> _updateReq;
-    boost::scoped_ptr<BatchedDeleteRequest> _deleteReq;
+
+    boost::optional<ChunkVersion> _shardVersion;
+
+    std::unique_ptr<BatchedInsertRequest> _insertReq;
+    std::unique_ptr<BatchedUpdateRequest> _updateReq;
+    std::unique_ptr<BatchedDeleteRequest> _deleteReq;
 };
 
 /**

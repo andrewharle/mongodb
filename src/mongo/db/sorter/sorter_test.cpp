@@ -31,10 +31,13 @@
 #include "mongo/db/sorter/sorter.h"
 
 #include <boost/filesystem.hpp>
-#include <boost/make_shared.hpp>
-#include <boost/shared_ptr.hpp>
-#include <boost/thread.hpp>
 
+#include "mongo/config.h"
+#include "mongo/base/init.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/service_context_noop.h"
+#include "mongo/stdx/memory.h"
+#include "mongo/stdx/thread.h"
 #include "mongo/unittest/temp_dir.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/mongoutils/str.h"
@@ -44,13 +47,19 @@
 
 namespace mongo {
 using namespace mongo::sorter;
-using boost::make_shared;
+using std::make_shared;
 using std::pair;
 
 // Stub to avoid including the server_options library
 // TODO: This should go away once we can do these checks at compile time
 bool isMongos() {
     return false;
+}
+
+// Stub to avoid including the server environment library.
+MONGO_INITIALIZER(SetGlobalEnvironment)(InitializerContext* context) {
+    setGlobalServiceContext(stdx::make_unique<ServiceContextNoop>());
+    return Status::OK();
 }
 
 //
@@ -138,7 +147,7 @@ public:
 
 class LimitIterator : public IWIterator {
 public:
-    LimitIterator(long long limit, boost::shared_ptr<IWIterator> source)
+    LimitIterator(long long limit, std::shared_ptr<IWIterator> source)
         : _remaining(limit), _source(source) {
         verify(limit > 0);
     }
@@ -154,7 +163,7 @@ public:
 
 private:
     long long _remaining;
-    boost::shared_ptr<IWIterator> _source;
+    std::shared_ptr<IWIterator> _source;
 };
 
 template <typename It1, typename It2>
@@ -182,21 +191,21 @@ void _assertIteratorsEquivalent(It1 it1, It2 it2, int line) {
 #define ASSERT_ITERATORS_EQUIVALENT(it1, it2) _assertIteratorsEquivalent(it1, it2, __LINE__)
 
 template <int N>
-boost::shared_ptr<IWIterator> makeInMemIterator(const int(&array)[N]) {
+std::shared_ptr<IWIterator> makeInMemIterator(const int(&array)[N]) {
     std::vector<IWPair> vec;
     for (int i = 0; i < N; i++)
         vec.push_back(IWPair(array[i], -array[i]));
-    return boost::make_shared<sorter::InMemIterator<IntWrapper, IntWrapper>>(vec);
+    return std::make_shared<sorter::InMemIterator<IntWrapper, IntWrapper>>(vec);
 }
 
 template <typename IteratorPtr, int N>
-boost::shared_ptr<IWIterator> mergeIterators(IteratorPtr(&array)[N],
-                                             Direction Dir = ASC,
-                                             const SortOptions& opts = SortOptions()) {
-    std::vector<boost::shared_ptr<IWIterator>> vec;
+std::shared_ptr<IWIterator> mergeIterators(IteratorPtr(&array)[N],
+                                           Direction Dir = ASC,
+                                           const SortOptions& opts = SortOptions()) {
+    std::vector<std::shared_ptr<IWIterator>> vec;
     for (int i = 0; i < N; i++)
-        vec.push_back(boost::shared_ptr<IWIterator>(array[i]));
-    return boost::shared_ptr<IWIterator>(IWIterator::merge(vec, opts, IWComparator(Dir)));
+        vec.push_back(std::shared_ptr<IWIterator>(array[i]));
+    return std::shared_ptr<IWIterator>(IWIterator::merge(vec, opts, IWComparator(Dir)));
 }
 
 //
@@ -252,7 +261,7 @@ public:
             sorter.addAlreadySorted(2, -2);
             sorter.addAlreadySorted(3, -3);
             sorter.addAlreadySorted(4, -4);
-            ASSERT_ITERATORS_EQUIVALENT(boost::shared_ptr<IWIterator>(sorter.done()),
+            ASSERT_ITERATORS_EQUIVALENT(std::shared_ptr<IWIterator>(sorter.done()),
                                         make_shared<IntIterator>(0, 5));
         }
         {  // big
@@ -260,7 +269,7 @@ public:
             for (int i = 0; i < 10 * 1000 * 1000; i++)
                 sorter.addAlreadySorted(i, -i);
 
-            ASSERT_ITERATORS_EQUIVALENT(boost::shared_ptr<IWIterator>(sorter.done()),
+            ASSERT_ITERATORS_EQUIVALENT(std::shared_ptr<IWIterator>(sorter.done()),
                                         make_shared<IntIterator>(0, 10 * 1000 * 1000));
         }
 
@@ -273,22 +282,22 @@ class MergeIteratorTests {
 public:
     void run() {
         {  // test empty (no inputs)
-            std::vector<boost::shared_ptr<IWIterator>> vec;
-            boost::shared_ptr<IWIterator> mergeIter(
+            std::vector<std::shared_ptr<IWIterator>> vec;
+            std::shared_ptr<IWIterator> mergeIter(
                 IWIterator::merge(vec, SortOptions(), IWComparator()));
             ASSERT_ITERATORS_EQUIVALENT(mergeIter, make_shared<EmptyIterator>());
         }
         {  // test empty (only empty inputs)
-            boost::shared_ptr<IWIterator> iterators[] = {make_shared<EmptyIterator>(),
-                                                         make_shared<EmptyIterator>(),
-                                                         make_shared<EmptyIterator>()};
+            std::shared_ptr<IWIterator> iterators[] = {make_shared<EmptyIterator>(),
+                                                       make_shared<EmptyIterator>(),
+                                                       make_shared<EmptyIterator>()};
 
             ASSERT_ITERATORS_EQUIVALENT(mergeIterators(iterators, ASC),
                                         make_shared<EmptyIterator>());
         }
 
         {  // test ASC
-            boost::shared_ptr<IWIterator> iterators[] = {
+            std::shared_ptr<IWIterator> iterators[] = {
                 make_shared<IntIterator>(1, 20, 2)  // 1, 3, ... 19
                 ,
                 make_shared<IntIterator>(0, 20, 2)  // 0, 2, ... 18
@@ -299,7 +308,7 @@ public:
         }
 
         {  // test DESC with an empty source
-            boost::shared_ptr<IWIterator> iterators[] = {
+            std::shared_ptr<IWIterator> iterators[] = {
                 make_shared<IntIterator>(30, 0, -3)  // 30, 27, ... 3
                 ,
                 make_shared<IntIterator>(29, 0, -3)  // 29, 26, ... 2
@@ -312,7 +321,7 @@ public:
                                         make_shared<IntIterator>(30, 0, -1));
         }
         {  // test Limit
-            boost::shared_ptr<IWIterator> iterators[] = {
+            std::shared_ptr<IWIterator> iterators[] = {
                 make_shared<IntIterator>(1, 20, 2)  // 1, 3, ... 19
                 ,
                 make_shared<IntIterator>(0, 20, 2)  // 0, 2, ... 18
@@ -347,40 +356,40 @@ public:
         }
 
         {  // test all data ASC
-            boost::shared_ptr<IWSorter> sorter = makeSorter(opts, IWComparator(ASC));
+            std::shared_ptr<IWSorter> sorter = makeSorter(opts, IWComparator(ASC));
             addData(sorter);
             ASSERT_ITERATORS_EQUIVALENT(done(sorter), correct());
         }
         {  // test all data DESC
-            boost::shared_ptr<IWSorter> sorter = makeSorter(opts, IWComparator(DESC));
+            std::shared_ptr<IWSorter> sorter = makeSorter(opts, IWComparator(DESC));
             addData(sorter);
             ASSERT_ITERATORS_EQUIVALENT(done(sorter), correctReverse());
         }
 
 // The debug builds are too slow to run these tests.
 // Among other things, MSVC++ makes all heap functions O(N) not O(logN).
-#if !defined(_DEBUG)
+#if !defined(MONGO_CONFIG_DEBUG_BUILD)
         {  // merge all data ASC
-            boost::shared_ptr<IWSorter> sorters[] = {makeSorter(opts, IWComparator(ASC)),
-                                                     makeSorter(opts, IWComparator(ASC))};
+            std::shared_ptr<IWSorter> sorters[] = {makeSorter(opts, IWComparator(ASC)),
+                                                   makeSorter(opts, IWComparator(ASC))};
 
             addData(sorters[0]);
             addData(sorters[1]);
 
-            boost::shared_ptr<IWIterator> iters1[] = {done(sorters[0]), done(sorters[1])};
-            boost::shared_ptr<IWIterator> iters2[] = {correct(), correct()};
+            std::shared_ptr<IWIterator> iters1[] = {done(sorters[0]), done(sorters[1])};
+            std::shared_ptr<IWIterator> iters2[] = {correct(), correct()};
             ASSERT_ITERATORS_EQUIVALENT(mergeIterators(iters1, ASC), mergeIterators(iters2, ASC));
         }
         {  // merge all data DESC and use multiple threads to insert
-            boost::shared_ptr<IWSorter> sorters[] = {makeSorter(opts, IWComparator(DESC)),
-                                                     makeSorter(opts, IWComparator(DESC))};
+            std::shared_ptr<IWSorter> sorters[] = {makeSorter(opts, IWComparator(DESC)),
+                                                   makeSorter(opts, IWComparator(DESC))};
 
-            boost::thread inBackground(&Basic::addData, this, sorters[0]);
+            stdx::thread inBackground(&Basic::addData, this, sorters[0]);
             addData(sorters[1]);
             inBackground.join();
 
-            boost::shared_ptr<IWIterator> iters1[] = {done(sorters[0]), done(sorters[1])};
-            boost::shared_ptr<IWIterator> iters2[] = {correctReverse(), correctReverse()};
+            std::shared_ptr<IWIterator> iters1[] = {done(sorters[0]), done(sorters[1])};
+            std::shared_ptr<IWIterator> iters2[] = {correctReverse(), correctReverse()};
             ASSERT_ITERATORS_EQUIVALENT(mergeIterators(iters1, DESC), mergeIterators(iters2, DESC));
         }
 #endif
@@ -388,7 +397,7 @@ public:
     }
 
     // add data to the sorter
-    virtual void addData(ptr<IWSorter> sorter) {
+    virtual void addData(unowned_ptr<IWSorter> sorter) {
         sorter->add(2, -2);
         sorter->add(1, -1);
         sorter->add(0, 0);
@@ -397,12 +406,12 @@ public:
     }
 
     // returns an iterator with the correct results
-    virtual boost::shared_ptr<IWIterator> correct() {
+    virtual std::shared_ptr<IWIterator> correct() {
         return make_shared<IntIterator>(0, 5);  // 0, 1, ... 4
     }
 
     // like correct but with opposite sort direction
-    virtual boost::shared_ptr<IWIterator> correctReverse() {
+    virtual std::shared_ptr<IWIterator> correctReverse() {
         return make_shared<IntIterator>(4, -1, -1);  // 4, 3, ... 0
     }
 
@@ -413,13 +422,12 @@ public:
 
 private:
     // Make a new sorter with desired opts and comp. Opts may be ignored but not comp
-    boost::shared_ptr<IWSorter> makeSorter(SortOptions opts,
-                                           IWComparator comp = IWComparator(ASC)) {
-        return boost::shared_ptr<IWSorter>(IWSorter::make(adjustSortOptions(opts), comp));
+    std::shared_ptr<IWSorter> makeSorter(SortOptions opts, IWComparator comp = IWComparator(ASC)) {
+        return std::shared_ptr<IWSorter>(IWSorter::make(adjustSortOptions(opts), comp));
     }
 
-    boost::shared_ptr<IWIterator> done(ptr<IWSorter> sorter) {
-        return boost::shared_ptr<IWIterator>(sorter->done());
+    std::shared_ptr<IWIterator> done(unowned_ptr<IWSorter> sorter) {
+        return std::shared_ptr<IWIterator>(sorter->done());
     }
 };
 
@@ -427,7 +435,7 @@ class Limit : public Basic {
     virtual SortOptions adjustSortOptions(SortOptions opts) {
         return opts.Limit(5);
     }
-    void addData(ptr<IWSorter> sorter) {
+    void addData(unowned_ptr<IWSorter> sorter) {
         sorter->add(0, 0);
         sorter->add(3, -3);
         sorter->add(4, -4);
@@ -435,16 +443,16 @@ class Limit : public Basic {
         sorter->add(1, -1);
         sorter->add(-1, 1);
     }
-    virtual boost::shared_ptr<IWIterator> correct() {
+    virtual std::shared_ptr<IWIterator> correct() {
         return make_shared<IntIterator>(-1, 4);
     }
-    virtual boost::shared_ptr<IWIterator> correctReverse() {
+    virtual std::shared_ptr<IWIterator> correctReverse() {
         return make_shared<IntIterator>(4, -1, -1);
     }
 };
 
 class Dupes : public Basic {
-    void addData(ptr<IWSorter> sorter) {
+    void addData(unowned_ptr<IWSorter> sorter) {
         sorter->add(1, -1);
         sorter->add(-1, 1);
         sorter->add(1, -1);
@@ -456,11 +464,11 @@ class Dupes : public Basic {
         sorter->add(2, -2);
         sorter->add(3, -3);
     }
-    virtual boost::shared_ptr<IWIterator> correct() {
+    virtual std::shared_ptr<IWIterator> correct() {
         const int array[] = {-1, -1, -1, 0, 1, 1, 1, 2, 2, 3};
         return makeInMemIterator(array);
     }
-    virtual boost::shared_ptr<IWIterator> correctReverse() {
+    virtual std::shared_ptr<IWIterator> correctReverse() {
         const int array[] = {3, 2, 2, 1, 1, 1, 0, -1, -1, -1};
         return makeInMemIterator(array);
     }
@@ -479,13 +487,15 @@ public:
 
     SortOptions adjustSortOptions(SortOptions opts) {
         // Make sure we use a reasonable number of files when we spill
-        BOOST_STATIC_ASSERT((NUM_ITEMS * sizeof(IWPair)) / MEM_LIMIT > 50);
-        BOOST_STATIC_ASSERT((NUM_ITEMS * sizeof(IWPair)) / MEM_LIMIT < 500);
+        static_assert((NUM_ITEMS * sizeof(IWPair)) / MEM_LIMIT > 50,
+                      "(NUM_ITEMS * sizeof(IWPair)) / MEM_LIMIT > 50");
+        static_assert((NUM_ITEMS * sizeof(IWPair)) / MEM_LIMIT < 500,
+                      "(NUM_ITEMS * sizeof(IWPair)) / MEM_LIMIT < 500");
 
         return opts.MaxMemoryUsageBytes(MEM_LIMIT).ExtSortAllowed();
     }
 
-    void addData(ptr<IWSorter> sorter) {
+    void addData(unowned_ptr<IWSorter> sorter) {
         for (int i = 0; i < NUM_ITEMS; i++)
             sorter->add(_array[i], -_array[i]);
 
@@ -496,10 +506,10 @@ public:
         }
     }
 
-    virtual boost::shared_ptr<IWIterator> correct() {
+    virtual std::shared_ptr<IWIterator> correct() {
         return make_shared<IntIterator>(0, NUM_ITEMS);
     }
-    virtual boost::shared_ptr<IWIterator> correctReverse() {
+    virtual std::shared_ptr<IWIterator> correctReverse() {
         return make_shared<IntIterator>(NUM_ITEMS - 1, -1, -1);
     }
 
@@ -507,7 +517,7 @@ public:
         NUM_ITEMS = 500 * 1000,
         MEM_LIMIT = 64 * 1024,
     };
-    boost::scoped_array<int> _array;
+    std::unique_ptr<int[]> _array;
 };
 
 
@@ -516,20 +526,24 @@ class LotsOfDataWithLimit : public LotsOfDataLittleMemory<Random> {
     typedef LotsOfDataLittleMemory<Random> Parent;
     SortOptions adjustSortOptions(SortOptions opts) {
         // Make sure our tests will spill or not as desired
-        BOOST_STATIC_ASSERT(MEM_LIMIT / 2 > (100 * sizeof(IWPair)));
-        BOOST_STATIC_ASSERT(MEM_LIMIT < (5000 * sizeof(IWPair)));
-        BOOST_STATIC_ASSERT(MEM_LIMIT * 2 > (5000 * sizeof(IWPair)));
+        static_assert(MEM_LIMIT / 2 > (100 * sizeof(IWPair)),
+                      "MEM_LIMIT / 2 > (100 * sizeof(IWPair))");
+        static_assert(MEM_LIMIT < (5000 * sizeof(IWPair)), "MEM_LIMIT < (5000 * sizeof(IWPair))");
+        static_assert(MEM_LIMIT * 2 > (5000 * sizeof(IWPair)),
+                      "MEM_LIMIT * 2 > (5000 * sizeof(IWPair))");
 
         // Make sure we use a reasonable number of files when we spill
-        BOOST_STATIC_ASSERT((Parent::NUM_ITEMS * sizeof(IWPair)) / MEM_LIMIT > 100);
-        BOOST_STATIC_ASSERT((Parent::NUM_ITEMS * sizeof(IWPair)) / MEM_LIMIT < 500);
+        static_assert((Parent::NUM_ITEMS * sizeof(IWPair)) / MEM_LIMIT > 100,
+                      "(Parent::NUM_ITEMS * sizeof(IWPair)) / MEM_LIMIT > 100");
+        static_assert((Parent::NUM_ITEMS * sizeof(IWPair)) / MEM_LIMIT < 500,
+                      "(Parent::NUM_ITEMS * sizeof(IWPair)) / MEM_LIMIT < 500");
 
         return opts.MaxMemoryUsageBytes(MEM_LIMIT).ExtSortAllowed().Limit(Limit);
     }
-    virtual boost::shared_ptr<IWIterator> correct() {
+    virtual std::shared_ptr<IWIterator> correct() {
         return make_shared<LimitIterator>(Limit, Parent::correct());
     }
-    virtual boost::shared_ptr<IWIterator> correctReverse() {
+    virtual std::shared_ptr<IWIterator> correctReverse() {
         return make_shared<LimitIterator>(Limit, Parent::correctReverse());
     }
     enum { MEM_LIMIT = 32 * 1024 };

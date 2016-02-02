@@ -28,17 +28,19 @@
 
 #pragma once
 
-#include "mongo/db/catalog/database.h"
-#include "mongo/db/client.h"
-#include "mongo/db/exec/collection_scan.h"
-#include "mongo/db/exec/eof.h"
-#include "mongo/db/exec/fetch.h"
-#include "mongo/db/exec/index_scan.h"
+#include "mongo/base/string_data.h"
 #include "mongo/db/query/plan_executor.h"
+#include "mongo/db/record_id.h"
 
 namespace mongo {
 
+class BSONObj;
+class Collection;
+class IndexDescriptor;
 class OperationContext;
+class PlanStage;
+class WorkingSet;
+struct DeleteStageParams;
 
 /**
  * The internal planner is a one-stop shop for "off-the-shelf" plans.  Most internal procedures
@@ -62,84 +64,56 @@ public:
     };
 
     /**
-     * Return a collection scan.  Caller owns pointer.
+     * Returns a collection scan.  Caller owns pointer.
      */
-    static PlanExecutor* collectionScan(OperationContext* txn,
-                                        const StringData& ns,
-                                        Collection* collection,
-                                        const Direction direction = FORWARD,
-                                        const RecordId startLoc = RecordId()) {
-        WorkingSet* ws = new WorkingSet();
-
-        if (NULL == collection) {
-            EOFStage* eof = new EOFStage();
-            PlanExecutor* exec;
-            // Takes ownership of 'ws' and 'eof'.
-            Status execStatus =
-                PlanExecutor::make(txn, ws, eof, ns.toString(), PlanExecutor::YIELD_MANUAL, &exec);
-            invariant(execStatus.isOK());
-            return exec;
-        }
-
-        invariant(ns == collection->ns().ns());
-
-        CollectionScanParams params;
-        params.collection = collection;
-        params.start = startLoc;
-
-        if (FORWARD == direction) {
-            params.direction = CollectionScanParams::FORWARD;
-        } else {
-            params.direction = CollectionScanParams::BACKWARD;
-        }
-
-        CollectionScan* cs = new CollectionScan(txn, params, ws, NULL);
-        PlanExecutor* exec;
-        // Takes ownership of 'ws' and 'cs'.
-        Status execStatus =
-            PlanExecutor::make(txn, ws, cs, collection, PlanExecutor::YIELD_MANUAL, &exec);
-        invariant(execStatus.isOK());
-        return exec;
-    }
+    static std::unique_ptr<PlanExecutor> collectionScan(OperationContext* txn,
+                                                        StringData ns,
+                                                        Collection* collection,
+                                                        PlanExecutor::YieldPolicy yieldPolicy,
+                                                        const Direction direction = FORWARD,
+                                                        const RecordId startLoc = RecordId());
 
     /**
-     * Return an index scan.  Caller owns returned pointer.
+     * Returns an index scan.  Caller owns returned pointer.
      */
-    static PlanExecutor* indexScan(OperationContext* txn,
-                                   const Collection* collection,
-                                   const IndexDescriptor* descriptor,
-                                   const BSONObj& startKey,
-                                   const BSONObj& endKey,
-                                   bool endKeyInclusive,
-                                   Direction direction = FORWARD,
-                                   int options = 0) {
-        invariant(collection);
-        invariant(descriptor);
+    static std::unique_ptr<PlanExecutor> indexScan(OperationContext* txn,
+                                                   const Collection* collection,
+                                                   const IndexDescriptor* descriptor,
+                                                   const BSONObj& startKey,
+                                                   const BSONObj& endKey,
+                                                   bool endKeyInclusive,
+                                                   PlanExecutor::YieldPolicy yieldPolicy,
+                                                   Direction direction = FORWARD,
+                                                   int options = IXSCAN_DEFAULT);
 
-        IndexScanParams params;
-        params.descriptor = descriptor;
-        params.direction = direction;
-        params.bounds.isSimpleRange = true;
-        params.bounds.startKey = startKey;
-        params.bounds.endKey = endKey;
-        params.bounds.endKeyInclusive = endKeyInclusive;
+    /**
+     * Returns an IXSCAN => FETCH => DELETE plan.
+     */
+    static std::unique_ptr<PlanExecutor> deleteWithIndexScan(OperationContext* txn,
+                                                             Collection* collection,
+                                                             const DeleteStageParams& params,
+                                                             const IndexDescriptor* descriptor,
+                                                             const BSONObj& startKey,
+                                                             const BSONObj& endKey,
+                                                             bool endKeyInclusive,
+                                                             PlanExecutor::YieldPolicy yieldPolicy,
+                                                             Direction direction = FORWARD);
 
-        WorkingSet* ws = new WorkingSet();
-        IndexScan* ix = new IndexScan(txn, params, ws, NULL);
-
-        PlanStage* root = ix;
-
-        if (IXSCAN_FETCH & options) {
-            root = new FetchStage(txn, ws, root, NULL, collection);
-        }
-
-        PlanExecutor* exec;
-        // Takes ownership of 'ws' and 'root'.
-        Status execStatus =
-            PlanExecutor::make(txn, ws, root, collection, PlanExecutor::YIELD_MANUAL, &exec);
-        invariant(execStatus.isOK());
-        return exec;
-    }
+private:
+    /**
+     * Returns a plan stage that is either an index scan or an index scan with a fetch stage.
+     *
+     * Used as a helper for indexScan() and deleteWithIndexScan().
+     */
+    static std::unique_ptr<PlanStage> _indexScan(OperationContext* txn,
+                                                 WorkingSet* ws,
+                                                 const Collection* collection,
+                                                 const IndexDescriptor* descriptor,
+                                                 const BSONObj& startKey,
+                                                 const BSONObj& endKey,
+                                                 bool endKeyInclusive,
+                                                 Direction direction = FORWARD,
+                                                 int options = IXSCAN_DEFAULT);
 };
 
 }  // namespace mongo

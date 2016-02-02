@@ -115,6 +115,30 @@ assert.neq(null,
     t.findOne({ loc : { $geoNear : { $geometry : { type: 'Point', coordinates: [0, 0] } } } }));
 
 t.drop();
-t.save({loc: [0,0]})
+t.save({loc: [0,0]});
 res = t.ensureIndex({ loc: "2dsphere" }, { finestIndexedLevel: 30, coarsestIndexedLevel: -1 });
 assert.commandFailed(res);
+
+// SERVER-21491 Verify that 2dsphere index options require correct types.
+res = t.ensureIndex({ loc: '2dsphere' }, { '2dsphereIndexVersion': 'NOT_A_NUMBER' });
+assert.commandFailed(res);
+
+res = t.ensureIndex({ loc: '2dsphere' }, { finestIndexedLevel: 'NOT_A_NUMBER' });
+assert.commandFailedWithCode(res, ErrorCodes.TypeMismatch);
+
+res = t.ensureIndex({ loc: '2dsphere' }, { coarsestIndexedLevel: 'NOT_A_NUMBER' });
+assert.commandFailedWithCode(res, ErrorCodes.TypeMismatch);
+
+// Ensure polygon which previously triggered an assertion error in SERVER-19674
+// is able to be indexed.
+t.drop();
+t.insert({
+    loc: {
+        "type" : "Polygon",
+        "coordinates" : [
+            [[-45, 0], [-44.875, 0], [-44.875, 0.125], [-45, 0.125], [-45,0]]
+        ]
+    }
+});
+res = t.createIndex({loc: "2dsphere"});
+assert.commandWorked(res);

@@ -69,7 +69,7 @@ var _bulk_api_module = (function() {
       if (typeof opts.wtimeout != 'number')
         throw Error("wtimeout must be a number, not " + opts.wtimeout);
       if (NumberInt( opts.wtimeout ).toNumber() < 0)
-        throw Error("wtimeout must be a number greater than 0, not " + opts.wtimeout);
+        throw Error("wtimeout must be a number greater than or equal to 0, not " + opts.wtimeout);
     }
 
     if (typeof opts.j != 'undefined' && typeof opts.j != 'boolean')
@@ -357,7 +357,6 @@ var _bulk_api_module = (function() {
     if(!(this instanceof BulkWriteError))
         return new BulkWriteError(bulkResult, singleBatchType, writeConcern, message);
       
-    Error.captureStackTrace(this, this.constructor);
     this.name = 'BulkWriteError';
     this.message = message || 'unknown bulk write error';
       
@@ -370,6 +369,7 @@ var _bulk_api_module = (function() {
     this.toString = function() {
       return "BulkWriteError(" + this.tojson() + ")";
     }
+    this.stack = this.toString() + "\n" + (new Error().stack);
 
     this.toResult = function() {
       return new BulkWriteResult(bulkResult, singleBatchType, writeConcern);
@@ -403,7 +403,6 @@ var _bulk_api_module = (function() {
     defineReadOnlyProperty(this, "code", commandError.code);
     defineReadOnlyProperty(this, "errmsg", commandError.errmsg);
 
-    Error.captureStackTrace(this, this.constructor);
     this.name = 'WriteCommandError';
     this.message = this.errmsg;
 
@@ -417,6 +416,7 @@ var _bulk_api_module = (function() {
     this.toString = function() {
       return "WriteCommandError(" + this.tojson() + ")";
     }
+    this.stack = this.toString() + "\n" + (new Error().stack);
 
     this.shellPrint = function() {
       return this.toString();

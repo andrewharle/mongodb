@@ -29,6 +29,8 @@
 
 #include "mongo/db/ops/modifier_set.h"
 
+#include <cstdint>
+
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/mutable/algorithm.h"
@@ -37,7 +39,6 @@
 #include "mongo/db/jsobj.h"
 #include "mongo/db/json.h"
 #include "mongo/db/ops/log_builder.h"
-#include "mongo/platform/cstdint.h"
 #include "mongo/unittest/unittest.h"
 
 namespace {
@@ -65,15 +66,13 @@ public:
                    ? ModifierSet::SET_ON_INSERT
                    : ModifierSet::SET_NORMAL) {
         _modObj = modObj;
-        const StringData& modName = modObj.firstElement().fieldName();
+        StringData modName = modObj.firstElement().fieldName();
         ASSERT_OK(_mod.init(_modObj[modName].embeddedObject().firstElement(),
                             !fromRepl ? ModifierInterface::Options::normal()
                                       : ModifierInterface::Options::fromRepl()));
     }
 
-    Status prepare(Element root,
-                   const StringData& matchedField,
-                   ModifierInterface::ExecInfo* execInfo) {
+    Status prepare(Element root, StringData matchedField, ModifierInterface::ExecInfo* execInfo) {
         return _mod.prepare(root, matchedField, execInfo);
     }
 

@@ -18,7 +18,7 @@ printAll = function(){
     print( "---------------------" );
 }
 
-s = new ShardingTest( "shard2" , 2 , 2 );
+s = new ShardingTest({name: "shard2", shards: 2});
 
 // We're doing a lot of checks here that can get screwed up by the balancer, now that
 // it moves small #s of chunks too
@@ -27,6 +27,7 @@ s.stopBalancer()
 db = s.getDB( "test" );
 
 s.adminCommand( { enablesharding : "test" } );
+s.ensurePrimaryShard('test', 'shard0001');
 s.adminCommand( { shardcollection : "test.foo" , key : { num : 1 } } );
 assert.eq( 1 , s.config.chunks.count()  , "sanity check 1" );
 

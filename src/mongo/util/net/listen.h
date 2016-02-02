@@ -29,15 +29,14 @@
 
 #pragma once
 
-#include <boost/noncopyable.hpp>
-#include <boost/shared_ptr.hpp>
-#include <boost/thread/mutex.hpp>
-#include <boost/thread/condition_variable.hpp>
 #include <set>
 #include <string>
 #include <vector>
 
+#include "mongo/config.h"
 #include "mongo/platform/atomic_word.h"
+#include "mongo/stdx/condition_variable.h"
+#include "mongo/stdx/mutex.h"
 #include "mongo/util/concurrency/ticketholder.h"
 #include "mongo/util/net/sock.h"
 
@@ -47,7 +46,9 @@ const int DEFAULT_MAX_CONN = 1000000;
 
 class MessagingPort;
 
-class Listener : boost::noncopyable {
+class Listener {
+    MONGO_DISALLOW_COPYING(Listener);
+
 public:
     Listener(const std::string& name, const std::string& ip, int port, bool logConnect = true);
 
@@ -56,7 +57,7 @@ public:
     void initAndListen();  // never returns unless error (start a thread)
 
     /* spawn a thread, etc., then return */
-    virtual void accepted(boost::shared_ptr<Socket> psocket, long long connectionId);
+    virtual void accepted(std::shared_ptr<Socket> psocket, long long connectionId);
     virtual void acceptedMP(MessagingPort* mp);
 
     const int _port;
@@ -79,8 +80,9 @@ public:
     /**
      * Allocate sockets for the listener and set _setupSocketsSuccessful to true
      * iff the process was successful.
+     * Returns _setupSocketsSuccessful.
      */
-    void setupSockets();
+    bool setupSockets();
 
     void setAsTimeTracker() {
         _timeTracker = this;
@@ -115,12 +117,12 @@ private:
     bool _setupSocketsSuccessful;
     bool _logConnect;
     long long _elapsedTime;
-    mutable boost::mutex _readyMutex;                   // Protects _ready
-    mutable boost::condition_variable _readyCondition;  // Used to wait for changes to _ready
+    mutable stdx::mutex _readyMutex;                   // Protects _ready
+    mutable stdx::condition_variable _readyCondition;  // Used to wait for changes to _ready
     // Boolean that indicates whether this Listener is ready to accept incoming network requests
     bool _ready;
 
-#ifdef MONGO_SSL
+#ifdef MONGO_CONFIG_SSL
     SSLManagerInterface* _ssl;
 #endif
 
@@ -145,27 +147,24 @@ public:
 
 class ListeningSockets {
 public:
-    ListeningSockets()
-        : _mutex("ListeningSockets"),
-          _sockets(new std::set<int>()),
-          _socketPaths(new std::set<std::string>()) {}
+    ListeningSockets() : _sockets(new std::set<int>()), _socketPaths(new std::set<std::string>()) {}
     void add(int sock) {
-        scoped_lock lk(_mutex);
+        stdx::lock_guard<stdx::mutex> lk(_mutex);
         _sockets->insert(sock);
     }
     void addPath(const std::string& path) {
-        scoped_lock lk(_mutex);
+        stdx::lock_guard<stdx::mutex> lk(_mutex);
         _socketPaths->insert(path);
     }
     void remove(int sock) {
-        scoped_lock lk(_mutex);
+        stdx::lock_guard<stdx::mutex> lk(_mutex);
         _sockets->erase(sock);
     }
     void closeAll();
     static ListeningSockets* get();
 
 private:
-    mongo::mutex _mutex;
+    stdx::mutex _mutex;
     std::set<int>* _sockets;
     std::set<std::string>* _socketPaths;  // for unix domain sockets
     static ListeningSockets* _instance;

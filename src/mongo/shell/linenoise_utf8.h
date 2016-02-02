@@ -27,14 +27,18 @@
  *    then also delete it in the license file.
  */
 
-#include <boost/smart_ptr/scoped_array.hpp>
 #include <algorithm>
+#include <memory>
 #include <string.h>
+
+#if defined(_MSC_VER) && _MSC_VER < 1900
+#include <string>
+#endif
 
 namespace linenoise_utf8 {
 
 typedef unsigned char UChar8;  // UTF-8 octet
-typedef unsigned int UChar32;  // Unicode code point
+typedef char32_t UChar32;      // Unicode code point
 
 // Error bits (or-ed together) returned from utf8toUChar32string
 //
@@ -90,7 +94,8 @@ size_t copyString32to8counted(UChar8* dest8,
 
 /**
  * Convert a null terminated UChar32 std::string to UTF-8 and store it in a UChar8 destination
- * buffer Always null terminates the destination std::string if at least one character position is
+ * buffer
+ * Always null terminates the destination std::string if at least one character position is
  * available
  *
  * @param dest8                     Destination UChar8 buffer
@@ -183,7 +188,7 @@ protected:
     size_t _len;    // in units of char_t without nul
     size_t _cap;    // size of _str buffer including nul
     size_t _chars;  // number of codepoints
-    boost::scoped_array<char_t> _str;
+    std::unique_ptr<char_t[]> _str;
 };
 
 struct Utf32String;

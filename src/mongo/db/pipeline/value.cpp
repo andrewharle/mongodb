@@ -30,12 +30,14 @@
 
 #include "mongo/db/pipeline/value.h"
 
+#include <cmath>
+#include <limits>
 #include <boost/functional/hash.hpp>
-#include <boost/scoped_array.hpp>
 
 #include "mongo/base/compare_numbers.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/pipeline/document.h"
+#include "mongo/platform/decimal128.h"
 #include "mongo/util/hex.h"
 #include "mongo/util/mongoutils/str.h"
 
@@ -55,7 +57,7 @@ void ValueStorage::verifyRefCountingIfShould() const {
         case MaxKey:
         case jstOID:
         case Date:
-        case Timestamp:
+        case bsonTimestamp:
         case EOO:
         case jstNULL:
         case Undefined:
@@ -75,6 +77,7 @@ void ValueStorage::verifyRefCountingIfShould() const {
             verify(refCounter == !shortStr);
             break;
 
+        case NumberDecimal:
         case BinData:  // TODO this should probably support short-string optimization
         case Array:    // TODO this should probably support empty-is-NULL optimization
         case DBRef:
@@ -91,7 +94,7 @@ void ValueStorage::verifyRefCountingIfShould() const {
     }
 }
 
-void ValueStorage::putString(const StringData& s) {
+void ValueStorage::putString(StringData s) {
     // Note: this also stores data portion of BinData
     const size_t sizeNoNUL = s.size();
     if (sizeNoNUL <= sizeof(shortStrStorage)) {
@@ -122,7 +125,7 @@ void ValueStorage::putRegEx(const BSONRegEx& re) {
     const size_t totalLen = patternLen + 1 /*middle NUL*/ + flagsLen;
 
     // Need to copy since putString doesn't support scatter-gather.
-    boost::scoped_array<char> buf(new char[totalLen]);
+    std::unique_ptr<char[]> buf(new char[totalLen]);
     re.pattern.copyTo(buf.get(), true);
     re.flags.copyTo(buf.get() + patternLen + 1, false);  // no NUL
     putString(StringData(buf.get(), totalLen));
@@ -175,7 +178,8 @@ Value::Value(const BSONElement& elem) : _storage(elem.type()) {
         }
 
         case jstOID:
-            BOOST_STATIC_ASSERT(sizeof(_storage.oid) == OID::kOIDSize);
+            static_assert(sizeof(_storage.oid) == OID::kOIDSize,
+                          "sizeof(_storage.oid) == OID::kOIDSize");
             memcpy(_storage.oid, elem.OID().view().view(), OID::kOIDSize);
             break;
 
@@ -184,8 +188,7 @@ Value::Value(const BSONElement& elem) : _storage(elem.type()) {
             break;
 
         case Date:
-            // this is really signed but typed as unsigned for historical reasons
-            _storage.dateValue = static_cast<long long>(elem.date().millis);
+            _storage.dateValue = elem.date().toMillisSinceEpoch();
             break;
 
         case RegEx: {
@@ -197,13 +200,16 @@ Value::Value(const BSONElement& elem) : _storage(elem.type()) {
             _storage.intValue = elem.numberInt();
             break;
 
-        case Timestamp:
-            // asDate is a poorly named function that returns a ReplTime
-            _storage.timestampValue = elem._opTime().asDate();
+        case bsonTimestamp:
+            _storage.timestampValue = elem.timestamp().asULL();
             break;
 
         case NumberLong:
             _storage.longValue = elem.numberLong();
+            break;
+
+        case NumberDecimal:
+            _storage.putDecimal(elem.numberDecimal());
             break;
 
         case CodeWScope: {
@@ -244,12 +250,26 @@ Value Value::createIntOrLong(long long longValue) {
     return Value(intValue);
 }
 
+Decimal128 Value::getDecimal() const {
+    BSONType type = getType();
+    if (type == NumberInt)
+        return Decimal128(_storage.intValue);
+    if (type == NumberLong)
+        return Decimal128(_storage.longValue);
+    if (type == NumberDouble)
+        return Decimal128(_storage.doubleValue);
+    invariant(type == NumberDecimal);
+    return _storage.getDecimal();
+}
+
 double Value::getDouble() const {
     BSONType type = getType();
     if (type == NumberInt)
         return _storage.intValue;
     if (type == NumberLong)
         return static_cast<double>(_storage.longValue);
+    if (type == NumberDecimal)
+        return _storage.getDecimal().toDouble();
 
     verify(type == NumberDouble);
     return _storage.doubleValue;
@@ -294,13 +314,15 @@ BSONObjBuilder& operator<<(BSONObjBuilderValueStream& builder, const Value& val)
             return builder << val.getLong();
         case NumberDouble:
             return builder << val.getDouble();
+        case NumberDecimal:
+            return builder << val.getDecimal();
         case String:
             return builder << val.getStringData();
         case Bool:
             return builder << val.getBool();
         case Date:
-            return builder << Date_t(val.getDate());
-        case Timestamp:
+            return builder << Date_t::fromMillisSinceEpoch(val.getDate());
+        case bsonTimestamp:
             return builder << val.getTimestamp();
         case Object:
             return builder << val.getDocument();
@@ -363,7 +385,7 @@ bool Value::coerceToBool() const {
         case Date:
         case RegEx:
         case Symbol:
-        case Timestamp:
+        case bsonTimestamp:
             return true;
 
         case EOO:
@@ -379,6 +401,8 @@ bool Value::coerceToBool() const {
             return _storage.longValue;
         case NumberDouble:
             return _storage.doubleValue;
+        case NumberDecimal:
+            return !_storage.getDecimal().isZero();
     }
     verify(false);
 }
@@ -393,6 +417,9 @@ int Value::coerceToInt() const {
 
         case NumberDouble:
             return static_cast<int>(_storage.doubleValue);
+
+        case NumberDecimal:
+            return (_storage.getDecimal()).toInt();
 
         default:
             uassert(16003,
@@ -413,6 +440,9 @@ long long Value::coerceToLong() const {
         case NumberDouble:
             return static_cast<long long>(_storage.doubleValue);
 
+        case NumberDecimal:
+            return (_storage.getDecimal()).toLong();
+
         default:
             uassert(16004,
                     str::stream() << "can't convert from BSON type " << typeName(getType())
@@ -432,10 +462,35 @@ double Value::coerceToDouble() const {
         case NumberLong:
             return static_cast<double>(_storage.longValue);
 
+        case NumberDecimal:
+            return (_storage.getDecimal()).toDouble();
+
         default:
             uassert(16005,
                     str::stream() << "can't convert from BSON type " << typeName(getType())
                                   << " to double",
+                    false);
+    }  // switch(getType())
+}
+
+Decimal128 Value::coerceToDecimal() const {
+    switch (getType()) {
+        case NumberDecimal:
+            return _storage.getDecimal();
+
+        case NumberInt:
+            return Decimal128(_storage.intValue);
+
+        case NumberLong:
+            return Decimal128(_storage.longValue);
+
+        case NumberDouble:
+            return Decimal128(_storage.doubleValue);
+
+        default:
+            uassert(16008,
+                    str::stream() << "can't convert from BSON type " << typeName(getType())
+                                  << " to decimal",
                     false);
     }  // switch(getType())
 }
@@ -445,7 +500,7 @@ long long Value::coerceToDate() const {
         case Date:
             return getDate();
 
-        case Timestamp:
+        case bsonTimestamp:
             return getTimestamp().getSecs() * 1000LL;
 
         default:
@@ -518,12 +573,15 @@ string Value::coerceToString() const {
         case NumberLong:
             return str::stream() << _storage.longValue;
 
+        case NumberDecimal:
+            return str::stream() << _storage.getDecimal().toString();
+
         case Code:
         case Symbol:
         case String:
             return getStringData().toString();
 
-        case Timestamp:
+        case bsonTimestamp:
             return getTimestamp().toStringPretty();
 
         case Date:
@@ -542,9 +600,9 @@ string Value::coerceToString() const {
     }  // switch(getType())
 }
 
-OpTime Value::coerceToTimestamp() const {
+Timestamp Value::coerceToTimestamp() const {
     switch (getType()) {
-        case Timestamp:
+        case bsonTimestamp:
             return getTimestamp();
 
         default:
@@ -595,13 +653,30 @@ int Value::compare(const Value& rL, const Value& rR) {
         case Bool:
             return rL.getBool() - rR.getBool();
 
-        case Timestamp:  // unsigned
+        case bsonTimestamp:  // unsigned
             return cmp(rL._storage.timestampValue, rR._storage.timestampValue);
 
         case Date:  // signed
             return cmp(rL._storage.dateValue, rR._storage.dateValue);
 
         // Numbers should compare by equivalence even if different types
+
+        case NumberDecimal: {
+            switch (rType) {
+                case NumberDecimal:
+                    return compareDecimals(rL._storage.getDecimal(), rR._storage.getDecimal());
+                case NumberInt:
+                    return compareDecimalToInt(rL._storage.getDecimal(), rR._storage.intValue);
+                case NumberLong:
+                    return compareDecimalToLong(rL._storage.getDecimal(), rR._storage.longValue);
+                case NumberDouble:
+                    return compareDecimalToDouble(rL._storage.getDecimal(),
+                                                  rR._storage.doubleValue);
+                default:
+                    invariant(false);
+            }
+        }
+
         case NumberInt: {
             // All types can precisely represent all NumberInts, so it is safe to simply convert to
             // whatever rhs's type is.
@@ -612,6 +687,8 @@ int Value::compare(const Value& rL, const Value& rR) {
                     return compareLongs(rL._storage.intValue, rR._storage.longValue);
                 case NumberDouble:
                     return compareDoubles(rL._storage.intValue, rR._storage.doubleValue);
+                case NumberDecimal:
+                    return compareIntToDecimal(rL._storage.intValue, rR._storage.getDecimal());
                 default:
                     invariant(false);
             }
@@ -625,6 +702,8 @@ int Value::compare(const Value& rL, const Value& rR) {
                     return compareLongs(rL._storage.longValue, rR._storage.intValue);
                 case NumberDouble:
                     return compareLongToDouble(rL._storage.longValue, rR._storage.doubleValue);
+                case NumberDecimal:
+                    return compareLongToDecimal(rL._storage.longValue, rR._storage.getDecimal());
                 default:
                     invariant(false);
             }
@@ -638,6 +717,9 @@ int Value::compare(const Value& rL, const Value& rR) {
                     return compareDoubles(rL._storage.doubleValue, rR._storage.intValue);
                 case NumberLong:
                     return compareDoubleToLong(rL._storage.doubleValue, rR._storage.longValue);
+                case NumberDecimal:
+                    return compareDoubleToDecimal(rL._storage.doubleValue,
+                                                  rR._storage.getDecimal());
                 default:
                     invariant(false);
             }
@@ -730,21 +812,40 @@ void Value::hash_combine(size_t& seed) const {
             boost::hash_combine(seed, getBool());
             break;
 
-        case Timestamp:
+        case bsonTimestamp:
         case Date:
-            BOOST_STATIC_ASSERT(sizeof(_storage.dateValue) == sizeof(_storage.timestampValue));
+            static_assert(sizeof(_storage.dateValue) == sizeof(_storage.timestampValue),
+                          "sizeof(_storage.dateValue) == sizeof(_storage.timestampValue)");
             boost::hash_combine(seed, _storage.dateValue);
             break;
 
+        case mongo::NumberDecimal: {
+            const Decimal128 dcml = getDecimal();
+            if (dcml.toAbs().isGreater(Decimal128(std::numeric_limits<double>::max())) &&
+                !dcml.isInfinite() && !dcml.isNaN()) {
+                // Normalize our decimal to force equivalent decimals
+                // in the same cohort to hash to the same value
+                Decimal128 dcmlNorm(dcml.normalize());
+                boost::hash_combine(seed, dcmlNorm.getValue().low64);
+                boost::hash_combine(seed, dcmlNorm.getValue().high64);
+                break;
+            }
+            // Else, fall through and convert the decimal to a double and hash.
+            // At this point the decimal fits into the range of doubles, is infinity, or is NaN,
+            // which doubles have a cheaper representation for.
+        }
         // This converts all numbers to doubles, which ignores the low-order bits of
-        // NumberLongs > 2**53, but that is ok since the hash will still be the same for
-        // equal numbers and is still likely to be different for different numbers.
+        // NumberLongs > 2**53 and precise decimal numbers without double representations,
+        // but that is ok since the hash will still be the same for equal numbers and is
+        // still likely to be different for different numbers. (Note: this issue only
+        // applies for decimals when they are inside of the valid double range. See
+        // the above case.)
         // SERVER-16851
         case NumberDouble:
         case NumberLong:
         case NumberInt: {
             const double dbl = getDouble();
-            if (isNaN(dbl)) {
+            if (std::isnan(dbl)) {
                 boost::hash_combine(seed, numeric_limits<double>::quiet_NaN());
             } else {
                 boost::hash_combine(seed, dbl);
@@ -806,6 +907,9 @@ void Value::hash_combine(size_t& seed) const {
 BSONType Value::getWidestNumeric(BSONType lType, BSONType rType) {
     if (lType == NumberDouble) {
         switch (rType) {
+            case NumberDecimal:
+                return NumberDecimal;
+
             case NumberDouble:
             case NumberLong:
             case NumberInt:
@@ -816,6 +920,9 @@ BSONType Value::getWidestNumeric(BSONType lType, BSONType rType) {
         }
     } else if (lType == NumberLong) {
         switch (rType) {
+            case NumberDecimal:
+                return NumberDecimal;
+
             case NumberDouble:
                 return NumberDouble;
 
@@ -828,6 +935,9 @@ BSONType Value::getWidestNumeric(BSONType lType, BSONType rType) {
         }
     } else if (lType == NumberInt) {
         switch (rType) {
+            case NumberDecimal:
+                return NumberDecimal;
+
             case NumberDouble:
                 return NumberDouble;
 
@@ -840,10 +950,39 @@ BSONType Value::getWidestNumeric(BSONType lType, BSONType rType) {
             default:
                 break;
         }
+    } else if (lType == NumberDecimal) {
+        switch (rType) {
+            case NumberInt:
+            case NumberLong:
+            case NumberDouble:
+            case NumberDecimal:
+                return NumberDecimal;
+
+            default:
+                break;
+        }
     }
 
     // Reachable, but callers must subsequently err out in this case.
     return Undefined;
+}
+
+// TODO: Add Decimal128 support to Value::integral()
+// SERVER-19735
+bool Value::integral() const {
+    switch (getType()) {
+        case NumberInt:
+            return true;
+        case NumberLong:
+            return (_storage.longValue <= numeric_limits<int>::max() &&
+                    _storage.longValue >= numeric_limits<int>::min());
+        case NumberDouble:
+            return (_storage.doubleValue <= numeric_limits<int>::max() &&
+                    _storage.doubleValue >= numeric_limits<int>::min() &&
+                    _storage.doubleValue == static_cast<int>(_storage.doubleValue));
+        default:
+            return false;
+    }
 }
 
 size_t Value::getApproximateSize() const {
@@ -877,6 +1016,9 @@ size_t Value::getApproximateSize() const {
         case DBRef:
             return sizeof(Value) + sizeof(RCDBRef) + _storage.getDBRef()->ns.size();
 
+        case NumberDecimal:
+            return sizeof(Value) + sizeof(RCDecimal);
+
         // These types are always contained within the Value
         case EOO:
         case MinKey:
@@ -886,7 +1028,7 @@ size_t Value::getApproximateSize() const {
         case Bool:
         case Date:
         case NumberInt:
-        case Timestamp:
+        case bsonTimestamp:
         case NumberLong:
         case jstNULL:
         case Undefined:
@@ -922,6 +1064,8 @@ ostream& operator<<(ostream& out, const Value& val) {
             return out << "Code(\"" << val.getCode() << "\")";
         case Bool:
             return out << (val.getBool() ? "true" : "false");
+        case NumberDecimal:
+            return out << val.getDecimal().toString();
         case NumberDouble:
             return out << val.getDouble();
         case NumberLong:
@@ -934,7 +1078,7 @@ ostream& operator<<(ostream& out, const Value& val) {
             return out << "undefined";
         case Date:
             return out << tmToISODateString(val.coerceToTm());
-        case Timestamp:
+        case bsonTimestamp:
             return out << val.getTimestamp().toString();
         case Object:
             return out << val.getDocument().toString();
@@ -992,13 +1136,16 @@ void Value::serializeForSorter(BufBuilder& buf) const {
         case NumberDouble:
             buf.appendNum(_storage.doubleValue);
             break;
+        case NumberDecimal:
+            buf.appendNum(_storage.getDecimal());
+            break;
         case Bool:
             buf.appendChar(_storage.boolValue);
             break;
         case Date:
             buf.appendNum(_storage.dateValue);
             break;
-        case Timestamp:
+        case bsonTimestamp:
             buf.appendStruct(getTimestamp());
             break;
 
@@ -1073,12 +1220,14 @@ Value Value::deserializeForSorter(BufReader& buf, const SorterDeserializeSetting
             return Value(buf.read<long long>());
         case NumberDouble:
             return Value(buf.read<double>());
+        case NumberDecimal:
+            return Value(buf.read<Decimal128>());
         case Bool:
             return Value(bool(buf.read<char>()));
         case Date:
-            return Value(Date_t(buf.read<long long>()));
-        case Timestamp:
-            return Value(buf.read<OpTime>());
+            return Value(Date_t::fromMillisSinceEpoch(buf.read<long long>()));
+        case bsonTimestamp:
+            return Value(buf.read<Timestamp>());
 
         // types that are like strings
         case String:
@@ -1125,7 +1274,7 @@ Value Value::deserializeForSorter(BufReader& buf, const SorterDeserializeSetting
             array.reserve(numElems);
             for (int i = 0; i < numElems; i++)
                 array.push_back(deserializeForSorter(buf, settings));
-            return Value::consume(array);
+            return Value(std::move(array));
         }
     }
     verify(false);

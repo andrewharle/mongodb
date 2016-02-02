@@ -29,8 +29,6 @@
 
 #include "mongo/bson/mutable/document.h"
 
-#include <boost/scoped_ptr.hpp>
-#include <boost/static_assert.hpp>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -415,11 +413,7 @@ const char kRootFieldName[] = "";
 // How many reps do we cache before we spill to heap. Use a power of two. For debug
 // builds we make this very small so it is less likely to mask vector invalidation
 // logic errors. We don't make it zero so that we do execute the fastRep code paths.
-#if defined(_DEBUG)
-const size_t kFastReps = 2;
-#else
-const size_t kFastReps = 128;
-#endif
+const size_t kFastReps = kDebugBuild ? 2 : 128;
 
 // An ElementRep contains the information necessary to locate the data for an Element,
 // and the topology information for how the Element is related to other Elements in the
@@ -472,7 +466,7 @@ struct ElementRep {
 };
 #pragma pack(pop)
 
-BOOST_STATIC_ASSERT(sizeof(ElementRep) == 32);
+static_assert(sizeof(ElementRep) == 32, "sizeof(ElementRep) == 32");
 
 // We want ElementRep to be a POD so Document::Impl can grow the std::vector with
 // memmove.
@@ -642,7 +636,7 @@ public:
         } else {
             verify(id <= Element::kMaxRepIdx);
 
-            if (debug && paranoid) {
+            if (kDebugBuild && paranoid) {
                 // Force all reps to new addresses to help catch invalid rep usage.
                 std::vector<ElementRep> newSlowElements(_slowElements);
                 _slowElements.swap(newSlowElements);
@@ -691,7 +685,7 @@ public:
         const size_t objIdx = _objects.size();
         verify(objIdx <= kMaxObjIdx);
         _objects.push_back(newObj);
-        if (debug && paranoid) {
+        if (kDebugBuild && paranoid) {
             // Force reallocation to catch use after invalidation.
             std::vector<BSONObj> new_objects(_objects);
             _objects.swap(new_objects);
@@ -708,7 +702,7 @@ public:
 
     // A helper method that either inserts the field name into the field name heap and
     // updates element.
-    void insertFieldName(ElementRep& rep, const StringData& fieldName) {
+    void insertFieldName(ElementRep& rep, StringData fieldName) {
         dassert(!rep.serialized);
         rep.offset = insertFieldName(fieldName);
     }
@@ -910,12 +904,12 @@ public:
         }
     }
 
-    inline bool doesNotAlias(const StringData& s) const {
+    inline bool doesNotAlias(StringData s) const {
         // StringData may come from either the field name heap or the leaf builder.
         return doesNotAliasLeafBuilder(s) && !inFieldNameHeap(s.rawData());
     }
 
-    inline bool doesNotAliasLeafBuilder(const StringData& s) const {
+    inline bool doesNotAliasLeafBuilder(StringData s) const {
         return !inLeafBuilder(s.rawData());
     }
 
@@ -999,7 +993,7 @@ public:
         _damages.back().targetOffset = targetOffset;
         _damages.back().sourceOffset = sourceOffset;
         _damages.back().size = size;
-        if (debug && paranoid) {
+        if (kDebugBuild && paranoid) {
             // Force damage events to new addresses to catch invalidation errors.
             DamageVector new_damages(_damages);
             _damages.swap(new_damages);
@@ -1049,13 +1043,13 @@ public:
 private:
     // Insert the given field name into the field name heap, and return an ID for this
     // field name.
-    int32_t insertFieldName(const StringData& fieldName) {
+    int32_t insertFieldName(StringData fieldName) {
         const uint32_t id = _fieldNames.size();
         if (!fieldName.empty())
             _fieldNames.insert(
                 _fieldNames.end(), fieldName.rawData(), fieldName.rawData() + fieldName.size());
         _fieldNames.push_back('\0');
-        if (debug && paranoid) {
+        if (kDebugBuild && paranoid) {
             // Force names to new addresses to catch invalidation errors.
             std::vector<char> new_fieldNames(_fieldNames);
             _fieldNames.swap(new_fieldNames);
@@ -1253,7 +1247,7 @@ Status Element::remove() {
     return Status::OK();
 }
 
-Status Element::rename(const StringData& newName) {
+Status Element::rename(StringData newName) {
     verify(ok());
     Document::Impl& impl = getDocument().getImpl();
 
@@ -1381,7 +1375,7 @@ Element Element::findNthChild(size_t n) const {
     return Element(_doc, current);
 }
 
-Element Element::findFirstChildNamed(const StringData& name) const {
+Element Element::findFirstChildNamed(StringData name) const {
     verify(ok());
     Document::Impl& impl = _doc->getImpl();
     Element::RepIdx current = _repIdx;
@@ -1392,7 +1386,7 @@ Element Element::findFirstChildNamed(const StringData& name) const {
     return Element(_doc, current);
 }
 
-Element Element::findElementNamed(const StringData& name) const {
+Element Element::findElementNamed(StringData name) const {
     verify(ok());
     Document::Impl& impl = _doc->getImpl();
     Element::RepIdx current = _repIdx;
@@ -1456,7 +1450,7 @@ bool Element::isNumeric() const {
     const ElementRep& thisRep = impl.getElementRep(_repIdx);
     const BSONType type = impl.getType(thisRep);
     return ((type == mongo::NumberLong) || (type == mongo::NumberInt) ||
-            (type == mongo::NumberDouble));
+            (type == mongo::NumberDouble) || (type == mongo::NumberDecimal));
 }
 
 bool Element::isIntegral() const {
@@ -1484,6 +1478,8 @@ SafeNum Element::getValueSafeNum() const {
             return static_cast<long long int>(getValueLong());
         case mongo::NumberDouble:
             return getValueDouble();
+        case mongo::NumberDecimal:
+            return getValueDecimal();
         default:
             return SafeNum();
     }
@@ -1667,7 +1663,7 @@ Status Element::setValueDouble(const double value) {
     return setValue(newValue._repIdx);
 }
 
-Status Element::setValueString(const StringData& value) {
+Status Element::setValueString(StringData value) {
     verify(ok());
     Document::Impl& impl = getDocument().getImpl();
 
@@ -1762,7 +1758,7 @@ Status Element::setValueNull() {
     return setValue(newValue._repIdx);
 }
 
-Status Element::setValueRegex(const StringData& re, const StringData& flags) {
+Status Element::setValueRegex(StringData re, StringData flags) {
     verify(ok());
     Document::Impl& impl = getDocument().getImpl();
 
@@ -1775,7 +1771,7 @@ Status Element::setValueRegex(const StringData& re, const StringData& flags) {
     return setValue(newValue._repIdx);
 }
 
-Status Element::setValueDBRef(const StringData& ns, const OID oid) {
+Status Element::setValueDBRef(StringData ns, const OID oid) {
     verify(ok());
     Document::Impl& impl = getDocument().getImpl();
 
@@ -1787,7 +1783,7 @@ Status Element::setValueDBRef(const StringData& ns, const OID oid) {
     return setValue(newValue._repIdx);
 }
 
-Status Element::setValueCode(const StringData& value) {
+Status Element::setValueCode(StringData value) {
     verify(ok());
     Document::Impl& impl = getDocument().getImpl();
 
@@ -1799,7 +1795,7 @@ Status Element::setValueCode(const StringData& value) {
     return setValue(newValue._repIdx);
 }
 
-Status Element::setValueSymbol(const StringData& value) {
+Status Element::setValueSymbol(StringData value) {
     verify(ok());
     Document::Impl& impl = getDocument().getImpl();
 
@@ -1811,7 +1807,7 @@ Status Element::setValueSymbol(const StringData& value) {
     return setValue(newValue._repIdx);
 }
 
-Status Element::setValueCodeWithScope(const StringData& code, const BSONObj& scope) {
+Status Element::setValueCodeWithScope(StringData code, const BSONObj& scope) {
     verify(ok());
     Document::Impl& impl = getDocument().getImpl();
 
@@ -1833,7 +1829,7 @@ Status Element::setValueInt(const int32_t value) {
     return setValue(newValue._repIdx);
 }
 
-Status Element::setValueTimestamp(const OpTime value) {
+Status Element::setValueTimestamp(const Timestamp value) {
     verify(ok());
     Document::Impl& impl = getDocument().getImpl();
     const ElementRep& thisRep = impl.getElementRep(_repIdx);
@@ -1848,6 +1844,15 @@ Status Element::setValueLong(const int64_t value) {
     ElementRep thisRep = impl.getElementRep(_repIdx);
     const StringData fieldName = impl.getFieldNameForNewElement(thisRep);
     Element newValue = getDocument().makeElementLong(fieldName, value);
+    return setValue(newValue._repIdx);
+}
+
+Status Element::setValueDecimal(const Decimal128 value) {
+    verify(ok());
+    Document::Impl& impl = getDocument().getImpl();
+    ElementRep thisRep = impl.getElementRep(_repIdx);
+    const StringData fieldName = impl.getFieldNameForNewElement(thisRep);
+    Element newValue = getDocument().makeElementDecimal(fieldName, value);
     return setValue(newValue._repIdx);
 }
 
@@ -1894,34 +1899,12 @@ Status Element::setValueSafeNum(const SafeNum value) {
             return setValueLong(value._value.int64Val);
         case mongo::NumberDouble:
             return setValueDouble(value._value.doubleVal);
+        case mongo::NumberDecimal:
+            return setValueDecimal(value._value.decimalVal);
         default:
             return Status(ErrorCodes::UnsupportedFormat,
                           "Don't know how to handle unexpected SafeNum type");
     }
-}
-
-Status Element::setValueElement(ConstElement setFrom) {
-    verify(ok());
-
-    // Can't set to your own root element, since this would create a circular document.
-    if (_doc->root() == setFrom) {
-        return Status(ErrorCodes::IllegalOperation,
-                      "Attempt to set an element to its own document's root");
-    }
-
-    // Setting to self is a no-op.
-    //
-    // Setting the root is always an error so we want to fall through to the error handling in this
-    // case.
-    if (*this == setFrom && _repIdx != kRootRepIdx) {
-        return Status::OK();
-    }
-
-    Document::Impl& impl = getDocument().getImpl();
-    ElementRep thisRep = impl.getElementRep(_repIdx);
-    const StringData fieldName = impl.getFieldNameForNewElement(thisRep);
-    Element newValue = getDocument().makeElementWithNewFieldName(fieldName, setFrom);
-    return setValue(newValue._repIdx);
 }
 
 BSONType Element::getType() const {
@@ -2072,7 +2055,7 @@ struct SubBuilder;
 
 template <>
 struct SubBuilder<BSONObjBuilder> {
-    SubBuilder(BSONObjBuilder* builder, BSONType type, const StringData& fieldName)
+    SubBuilder(BSONObjBuilder* builder, BSONType type, StringData fieldName)
         : buffer((type == mongo::Array) ? builder->subarrayStart(fieldName)
                                         : builder->subobjStart(fieldName)) {}
     BufBuilder& buffer;
@@ -2080,7 +2063,7 @@ struct SubBuilder<BSONObjBuilder> {
 
 template <>
 struct SubBuilder<BSONArrayBuilder> {
-    SubBuilder(BSONArrayBuilder* builder, BSONType type, const StringData&)
+    SubBuilder(BSONArrayBuilder* builder, BSONType type, StringData)
         : buffer((type == mongo::Array) ? builder->subarrayStart() : builder->subobjStart()) {}
     BufBuilder& buffer;
 };
@@ -2241,7 +2224,7 @@ Document::InPlaceMode Document::getCurrentInPlaceMode() const {
     return getImpl().getCurrentInPlaceMode();
 }
 
-Element Document::makeElementDouble(const StringData& fieldName, const double value) {
+Element Document::makeElementDouble(StringData fieldName, const double value) {
     Impl& impl = getImpl();
     dassert(impl.doesNotAlias(fieldName));
 
@@ -2251,7 +2234,7 @@ Element Document::makeElementDouble(const StringData& fieldName, const double va
     return Element(this, impl.insertLeafElement(leafRef, fieldName.size() + 1));
 }
 
-Element Document::makeElementString(const StringData& fieldName, const StringData& value) {
+Element Document::makeElementString(StringData fieldName, StringData value) {
     Impl& impl = getImpl();
     dassert(impl.doesNotAlias(fieldName));
     dassert(impl.doesNotAlias(value));
@@ -2262,7 +2245,7 @@ Element Document::makeElementString(const StringData& fieldName, const StringDat
     return Element(this, impl.insertLeafElement(leafRef, fieldName.size() + 1));
 }
 
-Element Document::makeElementObject(const StringData& fieldName) {
+Element Document::makeElementObject(StringData fieldName) {
     Impl& impl = getImpl();
     dassert(impl.doesNotAlias(fieldName));
 
@@ -2272,7 +2255,7 @@ Element Document::makeElementObject(const StringData& fieldName) {
     return Element(this, newEltIdx);
 }
 
-Element Document::makeElementObject(const StringData& fieldName, const BSONObj& value) {
+Element Document::makeElementObject(StringData fieldName, const BSONObj& value) {
     Impl& impl = getImpl();
     dassert(impl.doesNotAliasLeafBuilder(fieldName));
     dassert(impl.doesNotAlias(value));
@@ -2290,7 +2273,7 @@ Element Document::makeElementObject(const StringData& fieldName, const BSONObj& 
     return Element(this, newEltIdx);
 }
 
-Element Document::makeElementArray(const StringData& fieldName) {
+Element Document::makeElementArray(StringData fieldName) {
     Impl& impl = getImpl();
     dassert(impl.doesNotAlias(fieldName));
 
@@ -2301,7 +2284,7 @@ Element Document::makeElementArray(const StringData& fieldName) {
     return Element(this, newEltIdx);
 }
 
-Element Document::makeElementArray(const StringData& fieldName, const BSONObj& value) {
+Element Document::makeElementArray(StringData fieldName, const BSONObj& value) {
     Impl& impl = getImpl();
     dassert(impl.doesNotAliasLeafBuilder(fieldName));
     dassert(impl.doesNotAlias(value));
@@ -2317,7 +2300,7 @@ Element Document::makeElementArray(const StringData& fieldName, const BSONObj& v
     return Element(this, newEltIdx);
 }
 
-Element Document::makeElementBinary(const StringData& fieldName,
+Element Document::makeElementBinary(StringData fieldName,
                                     const uint32_t len,
                                     const mongo::BinDataType binType,
                                     const void* const data) {
@@ -2331,7 +2314,7 @@ Element Document::makeElementBinary(const StringData& fieldName,
     return Element(this, impl.insertLeafElement(leafRef, fieldName.size() + 1));
 }
 
-Element Document::makeElementUndefined(const StringData& fieldName) {
+Element Document::makeElementUndefined(StringData fieldName) {
     Impl& impl = getImpl();
     dassert(impl.doesNotAlias(fieldName));
 
@@ -2341,13 +2324,13 @@ Element Document::makeElementUndefined(const StringData& fieldName) {
     return Element(this, impl.insertLeafElement(leafRef, fieldName.size() + 1));
 }
 
-Element Document::makeElementNewOID(const StringData& fieldName) {
+Element Document::makeElementNewOID(StringData fieldName) {
     OID newOID;
     newOID.init();
     return makeElementOID(fieldName, newOID);
 }
 
-Element Document::makeElementOID(const StringData& fieldName, const OID value) {
+Element Document::makeElementOID(StringData fieldName, const OID value) {
     Impl& impl = getImpl();
     dassert(impl.doesNotAlias(fieldName));
 
@@ -2357,7 +2340,7 @@ Element Document::makeElementOID(const StringData& fieldName, const OID value) {
     return Element(this, impl.insertLeafElement(leafRef, fieldName.size() + 1));
 }
 
-Element Document::makeElementBool(const StringData& fieldName, const bool value) {
+Element Document::makeElementBool(StringData fieldName, const bool value) {
     Impl& impl = getImpl();
     dassert(impl.doesNotAlias(fieldName));
 
@@ -2367,7 +2350,7 @@ Element Document::makeElementBool(const StringData& fieldName, const bool value)
     return Element(this, impl.insertLeafElement(leafRef, fieldName.size() + 1));
 }
 
-Element Document::makeElementDate(const StringData& fieldName, const Date_t value) {
+Element Document::makeElementDate(StringData fieldName, const Date_t value) {
     Impl& impl = getImpl();
     dassert(impl.doesNotAlias(fieldName));
 
@@ -2377,7 +2360,7 @@ Element Document::makeElementDate(const StringData& fieldName, const Date_t valu
     return Element(this, impl.insertLeafElement(leafRef, fieldName.size() + 1));
 }
 
-Element Document::makeElementNull(const StringData& fieldName) {
+Element Document::makeElementNull(StringData fieldName) {
     Impl& impl = getImpl();
     dassert(impl.doesNotAlias(fieldName));
 
@@ -2387,9 +2370,7 @@ Element Document::makeElementNull(const StringData& fieldName) {
     return Element(this, impl.insertLeafElement(leafRef, fieldName.size() + 1));
 }
 
-Element Document::makeElementRegex(const StringData& fieldName,
-                                   const StringData& re,
-                                   const StringData& flags) {
+Element Document::makeElementRegex(StringData fieldName, StringData re, StringData flags) {
     Impl& impl = getImpl();
     dassert(impl.doesNotAlias(fieldName));
     dassert(impl.doesNotAlias(re));
@@ -2401,9 +2382,7 @@ Element Document::makeElementRegex(const StringData& fieldName,
     return Element(this, impl.insertLeafElement(leafRef, fieldName.size() + 1));
 }
 
-Element Document::makeElementDBRef(const StringData& fieldName,
-                                   const StringData& ns,
-                                   const OID value) {
+Element Document::makeElementDBRef(StringData fieldName, StringData ns, const OID value) {
     Impl& impl = getImpl();
     dassert(impl.doesNotAlias(fieldName));
     BSONObjBuilder& builder = impl.leafBuilder();
@@ -2412,7 +2391,7 @@ Element Document::makeElementDBRef(const StringData& fieldName,
     return Element(this, impl.insertLeafElement(leafRef, fieldName.size() + 1));
 }
 
-Element Document::makeElementCode(const StringData& fieldName, const StringData& value) {
+Element Document::makeElementCode(StringData fieldName, StringData value) {
     Impl& impl = getImpl();
     dassert(impl.doesNotAlias(fieldName));
     dassert(impl.doesNotAlias(value));
@@ -2423,7 +2402,7 @@ Element Document::makeElementCode(const StringData& fieldName, const StringData&
     return Element(this, impl.insertLeafElement(leafRef, fieldName.size() + 1));
 }
 
-Element Document::makeElementSymbol(const StringData& fieldName, const StringData& value) {
+Element Document::makeElementSymbol(StringData fieldName, StringData value) {
     Impl& impl = getImpl();
     dassert(impl.doesNotAlias(fieldName));
     dassert(impl.doesNotAlias(value));
@@ -2434,8 +2413,8 @@ Element Document::makeElementSymbol(const StringData& fieldName, const StringDat
     return Element(this, impl.insertLeafElement(leafRef, fieldName.size() + 1));
 }
 
-Element Document::makeElementCodeWithScope(const StringData& fieldName,
-                                           const StringData& code,
+Element Document::makeElementCodeWithScope(StringData fieldName,
+                                           StringData code,
                                            const BSONObj& scope) {
     Impl& impl = getImpl();
     dassert(impl.doesNotAlias(fieldName));
@@ -2448,7 +2427,7 @@ Element Document::makeElementCodeWithScope(const StringData& fieldName,
     return Element(this, impl.insertLeafElement(leafRef, fieldName.size() + 1));
 }
 
-Element Document::makeElementInt(const StringData& fieldName, const int32_t value) {
+Element Document::makeElementInt(StringData fieldName, const int32_t value) {
     Impl& impl = getImpl();
     dassert(impl.doesNotAlias(fieldName));
 
@@ -2458,17 +2437,17 @@ Element Document::makeElementInt(const StringData& fieldName, const int32_t valu
     return Element(this, impl.insertLeafElement(leafRef, fieldName.size() + 1));
 }
 
-Element Document::makeElementTimestamp(const StringData& fieldName, const OpTime value) {
+Element Document::makeElementTimestamp(StringData fieldName, const Timestamp value) {
     Impl& impl = getImpl();
     dassert(impl.doesNotAlias(fieldName));
 
     BSONObjBuilder& builder = impl.leafBuilder();
     const int leafRef = builder.len();
-    builder.appendTimestamp(fieldName, value.asDate());
+    builder.append(fieldName, value);
     return Element(this, impl.insertLeafElement(leafRef, fieldName.size() + 1));
 }
 
-Element Document::makeElementLong(const StringData& fieldName, const int64_t value) {
+Element Document::makeElementLong(StringData fieldName, const int64_t value) {
     Impl& impl = getImpl();
     dassert(impl.doesNotAlias(fieldName));
 
@@ -2478,7 +2457,17 @@ Element Document::makeElementLong(const StringData& fieldName, const int64_t val
     return Element(this, impl.insertLeafElement(leafRef, fieldName.size() + 1));
 }
 
-Element Document::makeElementMinKey(const StringData& fieldName) {
+Element Document::makeElementDecimal(StringData fieldName, const Decimal128 value) {
+    Impl& impl = getImpl();
+    dassert(impl.doesNotAlias(fieldName));
+
+    BSONObjBuilder& builder = impl.leafBuilder();
+    const int leafRef = builder.len();
+    builder.append(fieldName, value);
+    return Element(this, impl.insertLeafElement(leafRef, fieldName.size() + 1));
+}
+
+Element Document::makeElementMinKey(StringData fieldName) {
     Impl& impl = getImpl();
     dassert(impl.doesNotAlias(fieldName));
 
@@ -2488,7 +2477,7 @@ Element Document::makeElementMinKey(const StringData& fieldName) {
     return Element(this, impl.insertLeafElement(leafRef, fieldName.size() + 1));
 }
 
-Element Document::makeElementMaxKey(const StringData& fieldName) {
+Element Document::makeElementMaxKey(StringData fieldName) {
     Impl& impl = getImpl();
     dassert(impl.doesNotAlias(fieldName));
 
@@ -2520,8 +2509,7 @@ Element Document::makeElement(const BSONElement& value) {
     }
 }
 
-Element Document::makeElementWithNewFieldName(const StringData& fieldName,
-                                              const BSONElement& value) {
+Element Document::makeElementWithNewFieldName(StringData fieldName, const BSONElement& value) {
     Impl& impl = getImpl();
 
     // See the above makeElement for notes on these cases.
@@ -2541,7 +2529,7 @@ Element Document::makeElementWithNewFieldName(const StringData& fieldName,
     }
 }
 
-Element Document::makeElementSafeNum(const StringData& fieldName, SafeNum value) {
+Element Document::makeElementSafeNum(StringData fieldName, SafeNum value) {
     dassert(getImpl().doesNotAlias(fieldName));
 
     switch (value.type()) {
@@ -2551,6 +2539,8 @@ Element Document::makeElementSafeNum(const StringData& fieldName, SafeNum value)
             return makeElementLong(fieldName, value._value.int64Val);
         case mongo::NumberDouble:
             return makeElementDouble(fieldName, value._value.doubleVal);
+        case mongo::NumberDecimal:
+            return makeElementDecimal(fieldName, value._value.decimalVal);
         default:
             // Return an invalid element to indicate that we failed.
             return end();
@@ -2561,7 +2551,7 @@ Element Document::makeElement(ConstElement element) {
     return makeElement(element, NULL);
 }
 
-Element Document::makeElementWithNewFieldName(const StringData& fieldName, ConstElement element) {
+Element Document::makeElementWithNewFieldName(StringData fieldName, ConstElement element) {
     return makeElement(element, &fieldName);
 }
 
@@ -2627,7 +2617,7 @@ Element Document::makeElement(ConstElement element, const StringData* fieldName)
 }
 
 inline Document::Impl& Document::getImpl() {
-    // Don't use scoped_ptr<Impl>::operator* since it may generate assertions that the
+    // Don't use unique_ptr<Impl>::operator* since it may generate assertions that the
     // pointer is non-null, but we already know that to be always and forever true, and
     // otherwise the assertion code gets spammed into every method that inlines the call to
     // this function. We just dereference the pointer returned from 'get' ourselves.

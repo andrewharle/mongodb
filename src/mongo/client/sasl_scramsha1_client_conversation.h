@@ -59,7 +59,7 @@ public:
      * authentication conversation is finished or not.
      *
      **/
-    virtual StatusWith<bool> step(const StringData& inputData, std::string* outputData);
+    virtual StatusWith<bool> step(StringData inputData, std::string* outputData);
 
 private:
     /**

@@ -30,7 +30,8 @@
 
 #pragma once
 
-#include "mutex.h"
+#include "mongo/stdx/chrono.h"
+#include "mongo/util/concurrency/mutex.h"
 
 #if defined(NTDDI_VERSION) && defined(NTDDI_WIN7) && (NTDDI_VERSION >= NTDDI_WIN7)
 
@@ -41,7 +42,8 @@
 namespace mongo {
 unsigned long long curTimeMicros64();
 
-class RWLockBase : boost::noncopyable {
+class RWLockBase {
+    MONGO_DISALLOW_COPYING(RWLockBase);
     friend class SimpleRWLock;
     SRWLOCK _lock;
 
@@ -114,21 +116,29 @@ public:
 #if defined(_WIN32)
 #include "shared_mutex_win.hpp"
 namespace mongo {
-typedef boost::modified_shared_mutex shared_mutex;
-}
+namespace detail {
+using rwlock_underlying_shared_mutex = boost::modified_shared_mutex;
+}  // namespace detail
+}  // namespace mongo
 #else
+#include <boost/chrono.hpp>
 #include <boost/thread/shared_mutex.hpp>
 namespace mongo {
-using boost::shared_mutex;
-}
+namespace detail {
+using rwlock_underlying_shared_mutex = boost::shared_mutex;  // NOLINT
+}  // namespace detail
+}  // namespace mongo
 #endif
 
 namespace mongo {
-class RWLockBase : boost::noncopyable {
+class RWLockBase {
+    MONGO_DISALLOW_COPYING(RWLockBase);
     friend class SimpleRWLock;
-    shared_mutex _m;
+    detail::rwlock_underlying_shared_mutex _m;
 
 protected:
+    RWLockBase() = default;
+
     void lock() {
         _m.lock();
     }
@@ -151,10 +161,18 @@ protected:
         _m.unlock_shared();
     }
     bool lock_shared_try(int millis) {
+#if defined(_WIN32)
         return _m.timed_lock_shared(boost::posix_time::milliseconds(millis));
+#else
+        return _m.try_lock_shared_for(boost::chrono::milliseconds(millis));  // NOLINT
+#endif
     }
     bool lock_try(int millis = 0) {
+#if defined(_WIN32)
         return _m.timed_lock(boost::posix_time::milliseconds(millis));
+#else
+        return _m.try_lock_for(boost::chrono::milliseconds(millis));         // NOLINT
+#endif
     }
 
 public:

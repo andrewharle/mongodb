@@ -35,6 +35,10 @@
 #include <limits>
 #include <string>
 
+#define MONGO_INCLUDE_INVARIANT_H_WHITELISTED
+#include "mongo/util/invariant.h"
+#undef MONGO_INCLUDE_INVARIANT_H_WHITELISTED
+
 namespace mongo {
 
 /**
@@ -51,47 +55,61 @@ namespace mongo {
  *    rawData() terminates with a null.
  */
 class StringData {
+    struct TrustedInitTag {};
+    StringData(const char* c, size_t len, TrustedInitTag) : _data(c), _size(len) {}
+
 public:
-    /** Constructs an empty std::string data */
-    StringData() : _data(NULL), _size(0) {}
+    /** Constructs an empty StringData. */
+    StringData() = default;
 
     /**
-     * Constructs a StringData, for the case where the length of std::string is not known. 'c'
-     * must be a pointer to a null-terminated string.
+     * Constructs a StringData, for the case where the length of the
+     * string is not known. 'c' must either be NULL, or a pointer to a
+     * null-terminated string.
      */
-    StringData(const char* str) : _data(str), _size((str == NULL) ? 0 : std::strlen(str)) {}
+    StringData(const char* str) : StringData(str, str ? std::strlen(str) : 0) {}
 
     /**
-     * Constructs a StringData explicitly, for the case where the length of the std::string is
-     * already known. 'c' must be a pointer to a null-terminated string, and len must
-     * be the length that strlen(c) would return, a.k.a the index of the terminator in c.
-     */
-    StringData(const char* c, size_t len) : _data(c), _size(len) {}
-
-    /** Constructs a StringData, for the case of a string. */
-    StringData(const std::string& s) : _data(s.c_str()), _size(s.size()) {}
-
-    /**
-     * Constructs a StringData explicitly, for the case of a literal whose size is known at
-     * compile time.
+     * Constructs a StringData explicitly, for the case of a literal
+     * whose size is known at compile time. Note that you probably
+     * don't need this on a modern compiler that can see that the call
+     * to std::strlen on StringData("foo") can be constexpr'ed out.
      */
     struct LiteralTag {};
     template <size_t N>
     StringData(const char(&val)[N], LiteralTag)
-        : _data(&val[0]), _size(N - 1) {}
+        : StringData(&val[0], N - 1) {}
+
+    /**
+     * Constructs a StringData, for the case of a std::string. We can
+     * use the trusted init path with no follow on checks because
+     * string::data is assured to never return nullptr.
+     */
+    StringData(const std::string& s) : StringData(s.data(), s.length(), TrustedInitTag()) {}
+
+    /**
+     * Constructs a StringData with an explicit length. 'c' must
+     * either be NULL (in which case len must be zero), or be a
+     * pointer into a character array. The StringData will refer to
+     * the first 'len' characters starting at 'c'. The range of
+     * characters c to c+len must be valid.
+     */
+    StringData(const char* c, size_t len) : StringData(c, len, TrustedInitTag()) {
+        invariant(_data || (_size == 0));
+    }
 
     /**
      * Returns -1, 0, or 1 if 'this' is less, equal, or greater than 'other' in
      * lexicographical order.
      */
-    int compare(const StringData& other) const;
+    int compare(StringData other) const;
 
     /**
      * note: this uses tolower, and therefore does not handle
      *       come languages correctly.
      *       should be use sparingly
      */
-    bool equalCaseInsensitive(const StringData& other) const;
+    bool equalCaseInsensitive(StringData other) const;
 
     void copyTo(char* dest, bool includeEndingNull) const;
 
@@ -102,18 +120,18 @@ public:
     //
 
     size_t find(char c, size_t fromPos = 0) const;
-    size_t find(const StringData& needle) const;
+    size_t find(StringData needle) const;
     size_t rfind(char c, size_t fromPos = std::string::npos) const;
 
     /**
      * Returns true if 'prefix' is a substring of this instance, anchored at position 0.
      */
-    bool startsWith(const StringData& prefix) const;
+    bool startsWith(StringData prefix) const;
 
     /**
      * Returns true if 'suffix' is a substring of this instance, anchored at the end.
      */
-    bool endsWith(const StringData& suffix) const;
+    bool endsWith(StringData suffix) const;
 
     //
     // accessors
@@ -147,7 +165,7 @@ public:
      *          to be consistent across versions.
      */
     struct Hasher {
-        size_t operator()(const StringData& str) const;
+        size_t operator()(StringData str) const;
     };
 
     //
@@ -164,35 +182,35 @@ public:
     }
 
 private:
-    const char* _data;  // is not guaranted to be null terminated (see "notes" above)
-    size_t _size;       // 'size' does not include the null terminator
+    const char* _data = nullptr;  // is not guaranted to be null terminated (see "notes" above)
+    size_t _size = 0;             // 'size' does not include the null terminator
 };
 
-inline bool operator==(const StringData& lhs, const StringData& rhs) {
+inline bool operator==(StringData lhs, StringData rhs) {
     return (lhs.size() == rhs.size()) && (lhs.compare(rhs) == 0);
 }
 
-inline bool operator!=(const StringData& lhs, const StringData& rhs) {
+inline bool operator!=(StringData lhs, StringData rhs) {
     return !(lhs == rhs);
 }
 
-inline bool operator<(const StringData& lhs, const StringData& rhs) {
+inline bool operator<(StringData lhs, StringData rhs) {
     return lhs.compare(rhs) < 0;
 }
 
-inline bool operator<=(const StringData& lhs, const StringData& rhs) {
+inline bool operator<=(StringData lhs, StringData rhs) {
     return lhs.compare(rhs) <= 0;
 }
 
-inline bool operator>(const StringData& lhs, const StringData& rhs) {
+inline bool operator>(StringData lhs, StringData rhs) {
     return lhs.compare(rhs) > 0;
 }
 
-inline bool operator>=(const StringData& lhs, const StringData& rhs) {
+inline bool operator>=(StringData lhs, StringData rhs) {
     return lhs.compare(rhs) >= 0;
 }
 
-std::ostream& operator<<(std::ostream& stream, const StringData& value);
+std::ostream& operator<<(std::ostream& stream, StringData value);
 
 }  // namespace mongo
 

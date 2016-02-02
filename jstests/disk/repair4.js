@@ -18,14 +18,21 @@ if ( !doIt ) {
 }
 
 if ( doIt ) {
+    var repairpath = MongoRunner.dataPath + baseName + "/";
 
-    port = allocatePorts( 1 )[ 0 ];
-    repairpath = MongoRunner.dataPath + baseName + "/";
-    
     resetDbpath( smallpath );
     resetDbpath( repairpath );
     
-    m = startMongoProgram( "mongod", "--nssize", "8", "--noprealloc", "--smallfiles", "--port", port, "--dbpath", smallpath, "--repairpath", repairpath, "--nohttpinterface", "--bind_ip", "127.0.0.1" );
+    var m = MongoRunner.runMongod({
+        nssize: "8",
+        noprealloc: "",
+        smallfiles: "",
+        dbpath: smallpath,
+        repairpath: repairpath,
+        nohttpinterface: "",
+        bind_ip: "127.0.0.1",
+    });
+
     db = m.getDB( baseName );
     db[ baseName ].save( {} );
     assert.commandWorked( db.runCommand( {repairDatabase:1, backupOriginalFiles:true} ) );
@@ -39,6 +46,6 @@ if ( doIt ) {
     }
     
     check();
-    stopMongod( port );
+    MongoRunner.stopMongod( port );
 
 }

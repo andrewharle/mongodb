@@ -26,12 +26,14 @@
 *    it in the license file.
 */
 
-#include <boost/thread/tss.hpp>
-
 #include "mongo/client/dbclientinterface.h"
 
 namespace mongo {
 
-extern thread_specific_ptr<DBClientBase> authConn_;
+class Client;
+
+struct CopyDbAuthConnection {
+    static std::unique_ptr<DBClientBase>& forClient(Client* client);
+};
 
 }  // namespace mongo

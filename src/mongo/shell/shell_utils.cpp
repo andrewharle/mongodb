@@ -35,11 +35,13 @@
 #include "mongo/client/dbclientinterface.h"
 #include "mongo/db/catalog/index_key_validate.h"
 #include "mongo/db/index/external_key_generator.h"
+#include "mongo/platform/random.h"
 #include "mongo/shell/bench.h"
 #include "mongo/scripting/engine.h"
 #include "mongo/shell/shell_options.h"
 #include "mongo/shell/shell_utils_extended.h"
 #include "mongo/shell/shell_utils_launcher.h"
+#include "mongo/util/concurrency/threadlocal.h"
 #include "mongo/util/processinfo.h"
 #include "mongo/util/quick_exit.h"
 #include "mongo/util/text.h"
@@ -53,11 +55,10 @@ using std::string;
 
 namespace JSFiles {
 extern const JSFile servers;
-extern const JSFile mongodtest;
 extern const JSFile shardingtest;
 extern const JSFile servers_misc;
 extern const JSFile replsettest;
-extern const JSFile replsetbridge;
+extern const JSFile bridge;
 }
 
 namespace shell_utils {
@@ -94,15 +95,6 @@ const char* getUserDir() {
 
 // real methods
 
-BSONObj Quit(const BSONObj& args, void* data) {
-    // If no arguments are given first element will be EOO, which
-    // converts to the integer value 0.
-    goingAwaySoon();
-    int exit_code = int(args.firstElement().number());
-    quickExit(exit_code);
-    return undefinedReturn;
-}
-
 BSONObj JSGetMemInfo(const BSONObj& args, void* data) {
     ProcessInfo pi;
     uassert(10258, "processinfo not supported", pi.supported());
@@ -122,16 +114,21 @@ ThreadLocalValue<unsigned int> _randomSeed;
 #endif
 
 BSONObj JSSrand(const BSONObj& a, void* data) {
-    uassert(12518,
-            "srand requires a single numeric argument",
-            a.nFields() == 1 && a.firstElement().isNumber());
+    unsigned int seed;
+    // grab the least significant bits of either the supplied argument or
+    // a random number from SecureRandom.
+    if (a.nFields() == 1 && a.firstElement().isNumber())
+        seed = static_cast<unsigned int>(a.firstElement().numberLong());
+    else {
+        std::unique_ptr<SecureRandom> rand(SecureRandom::create());
+        seed = static_cast<unsigned int>(rand->nextInt64());
+    }
 #if !defined(_WIN32)
-    _randomSeed.set(
-        static_cast<unsigned int>(a.firstElement().numberLong()));  // grab least significant digits
+    _randomSeed.set(seed);
 #else
-    srand(static_cast<unsigned int>(a.firstElement().numberLong()));
+    srand(seed);
 #endif
-    return undefinedReturn;
+    return BSON("" << static_cast<double>(seed));
 }
 
 BSONObj JSRand(const BSONObj& a, void* data) {
@@ -202,11 +199,12 @@ BSONObj replMonitorStats(const BSONObj& a, void* data) {
             "replMonitorStats requires a single string argument (the ReplSet name)",
             a.nFields() == 1 && a.firstElement().type() == String);
 
-    ReplicaSetMonitorPtr rsm = ReplicaSetMonitor::get(a.firstElement().valuestrsafe(), true);
+    ReplicaSetMonitorPtr rsm = ReplicaSetMonitor::get(a.firstElement().valuestrsafe());
     if (!rsm) {
         return BSON(""
                     << "no ReplSetMonitor exists by that name");
     }
+
     BSONObjBuilder result;
     rsm->appendInfo(result);
     return result.obj();
@@ -220,13 +218,16 @@ BSONObj writeMode(const BSONObj&, void*) {
     return BSON("" << shellGlobalParams.writeMode);
 }
 
+BSONObj readMode(const BSONObj&, void*) {
+    return BSON("" << shellGlobalParams.readMode);
+}
+
 BSONObj interpreterVersion(const BSONObj& a, void* data) {
     uassert(16453, "interpreterVersion accepts no arguments", a.nFields() == 0);
     return BSON("" << globalScriptEngine->getInterpreterVersionString());
 }
 
 void installShellUtils(Scope& scope) {
-    scope.injectNative("quit", Quit);
     scope.injectNative("getMemInfo", JSGetMemInfo);
     scope.injectNative("_replMonitorStats", replMonitorStats);
     scope.injectNative("_srand", JSSrand);
@@ -249,14 +250,14 @@ void initScope(Scope& scope) {
     // Need to define this method before JSFiles::utils is executed.
     scope.injectNative("_useWriteCommandsDefault", useWriteCommandsDefault);
     scope.injectNative("_writeMode", writeMode);
+    scope.injectNative("_readMode", readMode);
     scope.externalSetup();
     mongo::shell_utils::installShellUtils(scope);
     scope.execSetup(JSFiles::servers);
-    scope.execSetup(JSFiles::mongodtest);
     scope.execSetup(JSFiles::shardingtest);
     scope.execSetup(JSFiles::servers_misc);
     scope.execSetup(JSFiles::replsettest);
-    scope.execSetup(JSFiles::replsetbridge);
+    scope.execSetup(JSFiles::bridge);
 
     scope.injectNative("benchRun", BenchRunner::benchRunSync);
     scope.injectNative("benchRunSync", BenchRunner::benchRunSync);
@@ -289,41 +290,49 @@ bool Prompter::confirm() {
     return _confirmed = matchedY;
 }
 
-ConnectionRegistry::ConnectionRegistry() : _mutex("connectionRegistryMutex") {}
+ConnectionRegistry::ConnectionRegistry() = default;
 
 void ConnectionRegistry::registerConnection(DBClientWithCommands& client) {
     BSONObj info;
     if (client.runCommand("admin", BSON("whatsmyuri" << 1), info)) {
         string connstr = dynamic_cast<DBClientBase&>(client).getServerAddress();
-        mongo::mutex::scoped_lock lk(_mutex);
+        stdx::lock_guard<stdx::mutex> lk(_mutex);
         _connectionUris[connstr].insert(info["you"].str());
     }
 }
 
 void ConnectionRegistry::killOperationsOnAllConnections(bool withPrompt) const {
     Prompter prompter("do you want to kill the current op(s) on the server?");
-    mongo::mutex::scoped_lock lk(_mutex);
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
     for (map<string, set<string>>::const_iterator i = _connectionUris.begin();
          i != _connectionUris.end();
          ++i) {
-        string errmsg;
-        ConnectionString cs = ConnectionString::parse(i->first, errmsg);
-        if (!cs.isValid()) {
+        auto status = ConnectionString::parse(i->first);
+        if (!status.isOK()) {
             continue;
         }
-        boost::scoped_ptr<DBClientWithCommands> conn(cs.connect(errmsg));
+
+        const ConnectionString cs(status.getValue());
+
+        string errmsg;
+        std::unique_ptr<DBClientWithCommands> conn(cs.connect(errmsg));
         if (!conn) {
             continue;
         }
 
         const set<string>& uris = i->second;
 
-        BSONObj inprog =
-            conn->findOne("admin.$cmd.sys.inprog", Query())["inprog"].embeddedObject().getOwned();
+        BSONObj currentOpRes;
+        conn->runPseudoCommand("admin", "currentOp", "$cmd.sys.inprog", {}, currentOpRes);
+        auto inprog = currentOpRes["inprog"].embeddedObject();
         BSONForEach(op, inprog) {
             if (uris.count(op["client"].String())) {
                 if (!withPrompt || prompter.confirm()) {
-                    conn->findOne("admin.$cmd.sys.killop", QUERY("op" << op["opid"]));
+                    BSONObjBuilder cmdBob;
+                    BSONObj info;
+                    cmdBob.append("op", op["opid"]);
+                    auto cmdArgs = cmdBob.done();
+                    conn->runPseudoCommand("admin", "killOp", "$cmd.sys.killop", cmdArgs, info);
                 } else {
                     return;
                 }
@@ -339,6 +348,12 @@ void onConnect(DBClientWithCommands& c) {
     if (_nokillop) {
         return;
     }
+
+    // Only override the default rpcProtocols if they were set on the command line.
+    if (shellGlobalParams.rpcProtocols) {
+        c.setClientRPCProtocols(*shellGlobalParams.rpcProtocols);
+    }
+
     connectionRegistry.registerConnection(c);
 }
 
@@ -354,5 +369,8 @@ bool fileExists(const std::string& file) {
         return false;
     }
 }
+
+
+stdx::mutex& mongoProgramOutputMutex(*(new stdx::mutex()));
 }
 }

@@ -31,15 +31,16 @@
 
 #include "mongo/platform/basic.h"
 
-#include <boost/scoped_ptr.hpp>
-#include <boost/thread/thread.hpp>
 #include <memory>
+#include <system_error>
 
 #include "mongo/base/disallow_copying.h"
+#include "mongo/config.h"
 #include "mongo/db/lasterror.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/stdx/functional.h"
+#include "mongo/stdx/thread.h"
 #include "mongo/util/concurrency/synchronization.h"
 #include "mongo/util/concurrency/thread_name.h"
 #include "mongo/util/concurrency/ticketholder.h"
@@ -64,7 +65,7 @@
 
 namespace mongo {
 
-using boost::scoped_ptr;
+using std::unique_ptr;
 using std::endl;
 
 namespace {
@@ -73,7 +74,7 @@ class MessagingPortWithHandler : public MessagingPort {
     MONGO_DISALLOW_COPYING(MessagingPortWithHandler);
 
 public:
-    MessagingPortWithHandler(const boost::shared_ptr<Socket>& socket,
+    MessagingPortWithHandler(const std::shared_ptr<Socket>& socket,
                              MessageHandler* handler,
                              long long connectionId)
         : MessagingPort(socket), _handler(handler) {
@@ -103,9 +104,9 @@ public:
     PortMessageServer(const MessageServer::Options& opts, MessageHandler* handler)
         : Listener("", opts.ipList, opts.port), _handler(handler) {}
 
-    virtual void accepted(boost::shared_ptr<Socket> psocket, long long connectionId) {
+    virtual void accepted(std::shared_ptr<Socket> psocket, long long connectionId) {
         ScopeGuard sleepAfterClosingPort = MakeGuard(sleepmillis, 2);
-        std::auto_ptr<MessagingPortWithHandler> portWithHandler(
+        std::unique_ptr<MessagingPortWithHandler> portWithHandler(
             new MessagingPortWithHandler(psocket, _handler, connectionId));
 
         if (!Listener::globalTicketHolder.tryAcquire()) {
@@ -116,7 +117,10 @@ public:
 
         try {
 #ifndef __linux__  // TODO: consider making this ifdef _WIN32
-            { boost::thread thr(stdx::bind(&handleIncomingMsg, portWithHandler.get())); }
+            {
+                stdx::thread thr(stdx::bind(&handleIncomingMsg, portWithHandler.get()));
+                thr.detach();
+            }
 #else
             pthread_attr_t attrs;
             pthread_attr_init(&attrs);
@@ -130,7 +134,7 @@ public:
             if (limits.rlim_cur > STACK_SIZE) {
                 size_t stackSizeToSet = STACK_SIZE;
 #if !__has_feature(address_sanitizer)
-                if (DEBUG_BUILD)
+                if (kDebugBuild)
                     stackSizeToSet /= 2;
 #endif
                 pthread_attr_setstacksize(&attrs, stackSizeToSet);
@@ -147,18 +151,16 @@ public:
 
             if (failed) {
                 log() << "pthread_create failed: " << errnoWithDescription(failed) << endl;
-                throw boost::thread_resource_error();  // for consistency with boost::thread
+                throw std::system_error(
+                    std::make_error_code(std::errc::resource_unavailable_try_again));
             }
 #endif  // __linux__
 
             portWithHandler.release();
             sleepAfterClosingPort.Dismiss();
-        } catch (boost::thread_resource_error&) {
-            Listener::globalTicketHolder.release();
-            log() << "can't create new thread, closing connection" << endl;
         } catch (...) {
             Listener::globalTicketHolder.release();
-            log() << "unknown error accepting new socket" << endl;
+            log() << "failed to create thread after accepting new connection, closing connection";
         }
     }
 
@@ -166,8 +168,8 @@ public:
         Listener::setAsTimeTracker();
     }
 
-    virtual void setupSockets() {
-        Listener::setupSockets();
+    virtual bool setupSockets() {
+        return Listener::setupSockets();
     }
 
     void run() {
@@ -197,7 +199,7 @@ private:
         TicketHolderReleaser connTicketReleaser(&Listener::globalTicketHolder);
 
         invariant(arg);
-        scoped_ptr<MessagingPortWithHandler> portWithHandler(
+        unique_ptr<MessagingPortWithHandler> portWithHandler(
             static_cast<MessagingPortWithHandler*>(arg));
         MessageHandler* const handler = portWithHandler->getHandler();
 
@@ -207,10 +209,8 @@ private:
         Message m;
         int64_t counter = 0;
         try {
-            LastError* le = new LastError();
-            lastError.reset(le);  // lastError now has ownership
-
             handler->connected(portWithHandler.get());
+            ON_BLOCK_EXIT([handler]() { handler->close(); });
 
             while (!inShutdown()) {
                 m.reset();
@@ -223,11 +223,10 @@ private:
                         log() << "end connection " << portWithHandler->psock->remoteString() << " ("
                               << conns << word << " now open)" << endl;
                     }
-                    portWithHandler->shutdown();
                     break;
                 }
 
-                handler->process(m, portWithHandler.get(), le);
+                handler->process(m, portWithHandler.get());
                 networkCounter.hit(portWithHandler->psock->getBytesIn(),
                                    portWithHandler->psock->getBytesOut());
 
@@ -239,26 +238,23 @@ private:
         } catch (AssertionException& e) {
             log() << "AssertionException handling request, closing client connection: " << e
                   << endl;
-            portWithHandler->shutdown();
         } catch (SocketException& e) {
             log() << "SocketException handling request, closing client connection: " << e << endl;
-            portWithHandler->shutdown();
         } catch (const DBException&
                      e) {  // must be right above std::exception to avoid catching subclasses
             log() << "DBException handling request, closing client connection: " << e << endl;
-            portWithHandler->shutdown();
         } catch (std::exception& e) {
             error() << "Uncaught std::exception: " << e.what() << ", terminating" << endl;
             dbexit(EXIT_UNCAUGHT);
         }
+        portWithHandler->shutdown();
 
 // Normal disconnect path.
-#ifdef MONGO_SSL
+#ifdef MONGO_CONFIG_SSL
         SSLManagerInterface* manager = getSSLManager();
         if (manager)
             manager->cleanupThreadLocals();
 #endif
-        handler->disconnected(portWithHandler.get());
 
         return NULL;
     }

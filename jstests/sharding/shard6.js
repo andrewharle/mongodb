@@ -2,11 +2,12 @@
 
 summary = "";
 
-s = new ShardingTest( "shard6" , 2 , 0 , 2 );
+s = new ShardingTest({name: "shard6", shards: 2});
 
 s.config.settings.update( { _id: "balancer" }, { $set : { stopped: true } } , true );
 
 s.adminCommand( { enablesharding : "test" } );
+s.ensurePrimaryShard('test', 'shard0001');
 s.adminCommand( { shardcollection : "test.data" , key : { num : 1 } } );
 
 db = s.getDB( "test" );

@@ -1,32 +1,30 @@
-// @file version_manager.cpp
-
 /**
-*    Copyright (C) 2010 10gen Inc.
-*
-*    This program is free software: you can redistribute it and/or  modify
-*    it under the terms of the GNU Affero General Public License, version 3,
-*    as published by the Free Software Foundation.
-*
-*    This program is distributed in the hope that it will be useful,
-*    but WITHOUT ANY WARRANTY; without even the implied warranty of
-*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*    GNU Affero General Public License for more details.
-*
-*    You should have received a copy of the GNU Affero General Public License
-*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*
-*    As a special exception, the copyright holders give permission to link the
-*    code of portions of this program with the OpenSSL library under certain
-*    conditions as described in each individual source file and distribute
-*    linked combinations including the program with the OpenSSL library. You
-*    must comply with the GNU Affero General Public License in all respects
-*    for all of the code used other than as permitted herein. If you modify
-*    file(s) with this exception, you may extend this exception to your
-*    version of the file(s), but you are not obligated to do so. If you do not
-*    wish to do so, delete this exception statement from your version. If you
-*    delete this exception statement from all source files in the program,
-*    then also delete it in the license file.
-*/
+ *    Copyright (C) 2010-2015 MongoDB Inc.
+ *
+ *    This program is free software: you can redistribute it and/or  modify
+ *    it under the terms of the GNU Affero General Public License, version 3,
+ *    as published by the Free Software Foundation.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    GNU Affero General Public License for more details.
+ *
+ *    You should have received a copy of the GNU Affero General Public License
+ *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the GNU Affero General Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
+ */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kSharding
 
@@ -34,22 +32,28 @@
 
 #include "mongo/s/version_manager.h"
 
-#include "mongo/s/chunk.h"
+#include "mongo/client/dbclient_rs.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/s/catalog/catalog_cache.h"
+#include "mongo/s/catalog/catalog_manager.h"
+#include "mongo/s/chunk_manager.h"
 #include "mongo/s/chunk_version.h"
+#include "mongo/s/client/shard_connection.h"
+#include "mongo/s/client/shard_registry.h"
 #include "mongo/s/config.h"
 #include "mongo/s/grid.h"
-#include "mongo/s/shard.h"
-#include "mongo/s/stale_exception.h"  // for SendStaleConfigException
+#include "mongo/s/mongos_options.h"
+#include "mongo/s/set_shard_version_request.h"
+#include "mongo/s/stale_exception.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
 
-using std::endl;
+using std::shared_ptr;
 using std::map;
 using std::string;
 
-// Global version manager
-VersionManager versionManager;
+namespace {
 
 /**
  * Tracking information, per-connection, of the latest chunk manager iteration or sequence
@@ -57,18 +61,17 @@ VersionManager versionManager;
  * When the chunk manager is replaced, implying new versions were loaded, the chunk manager
  * sequence number is iterated by 1 and connections need to re-send shard versions.
  */
-struct ConnectionShardStatus {
-    ConnectionShardStatus() : _mutex("ConnectionShardStatus") {}
-
+class ConnectionShardStatus {
+public:
     bool hasAnySequenceSet(DBClientBase* conn) {
-        scoped_lock lk(_mutex);
+        stdx::lock_guard<stdx::mutex> lk(_mutex);
 
         SequenceMap::const_iterator seenConnIt = _map.find(conn->getConnectionId());
         return seenConnIt != _map.end() && seenConnIt->second.size() > 0;
     }
 
     bool getSequence(DBClientBase* conn, const string& ns, unsigned long long* sequence) {
-        scoped_lock lk(_mutex);
+        stdx::lock_guard<stdx::mutex> lk(_mutex);
 
         SequenceMap::const_iterator seenConnIt = _map.find(conn->getConnectionId());
         if (seenConnIt == _map.end())
@@ -83,17 +86,18 @@ struct ConnectionShardStatus {
     }
 
     void setSequence(DBClientBase* conn, const string& ns, const unsigned long long& s) {
-        scoped_lock lk(_mutex);
+        stdx::lock_guard<stdx::mutex> lk(_mutex);
         _map[conn->getConnectionId()][ns] = s;
     }
 
     void reset(DBClientBase* conn) {
-        scoped_lock lk(_mutex);
+        stdx::lock_guard<stdx::mutex> lk(_mutex);
         _map.erase(conn->getConnectionId());
     }
 
+private:
     // protects _map
-    mongo::mutex _mutex;
+    stdx::mutex _mutex;
 
     // a map from a connection into ChunkManager's sequence number for each namespace
     typedef map<unsigned long long, map<string, unsigned long long>> SequenceMap;
@@ -101,14 +105,52 @@ struct ConnectionShardStatus {
 
 } connectionShardStatus;
 
-void VersionManager::resetShardVersionCB(DBClientBase* conn) {
-    connectionShardStatus.reset(conn);
+/**
+ * Sends the setShardVersion command on the specified connection.
+ */
+bool setShardVersion(OperationContext* txn,
+                     DBClientBase* conn,
+                     const string& ns,
+                     const ConnectionString& configServer,
+                     ChunkVersion version,
+                     ChunkManager* manager,
+                     bool authoritative,
+                     BSONObj& result) {
+    ShardId shardId;
+    ConnectionString shardCS;
+    {
+        const auto shard = grid.shardRegistry()->getShardForHostNoReload(
+            uassertStatusOK(HostAndPort::parse(conn->getServerAddress())));
+        uassert(ErrorCodes::ShardNotFound,
+                str::stream() << conn->getServerAddress() << " is not recognized as a shard",
+                shard);
+
+        shardId = shard->getId();
+        shardCS = shard->getConnString();
+    }
+
+    BSONObj cmd;
+
+    if (ns.empty()) {
+        SetShardVersionRequest ssv =
+            SetShardVersionRequest::makeForInit(configServer, shardId, shardCS);
+        cmd = ssv.toBSON();
+    } else {
+        SetShardVersionRequest ssv = SetShardVersionRequest::makeForVersioning(
+            configServer, shardId, shardCS, NamespaceString(ns), version, authoritative);
+        cmd = ssv.toBSON();
+    }
+
+    LOG(1) << "    setShardVersion  " << shardId << " " << conn->getServerAddress() << "  " << ns
+           << "  " << cmd
+           << (manager ? string(str::stream() << " " << manager->getSequenceNumber()) : "");
+
+    return conn->runCommand("admin", cmd, result, 0);
 }
 
-bool VersionManager::isVersionableCB(DBClientBase* conn) {
-    return conn->type() == ConnectionString::MASTER || conn->type() == ConnectionString::SET;
-}
-
+/**
+ * Checks whether the specified connection supports versioning.
+ */
 DBClientBase* getVersionable(DBClientBase* conn) {
     switch (conn->type()) {
         case ConnectionString::INVALID:
@@ -116,51 +158,27 @@ DBClientBase* getVersionable(DBClientBase* conn) {
                     str::stream() << "cannot set version on invalid connection "
                                   << conn->toString(),
                     false);
-            return NULL;
+            return nullptr;
         case ConnectionString::MASTER:
             return conn;
-        case ConnectionString::PAIR:
-            massert(15905,
-                    str::stream() << "cannot set version or shard on pair connection "
-                                  << conn->toString(),
-                    false);
-            return NULL;
         case ConnectionString::SYNC:
             massert(15906,
                     str::stream() << "cannot set version or shard on sync connection "
                                   << conn->toString(),
                     false);
-            return NULL;
+            return nullptr;
         case ConnectionString::CUSTOM:
             massert(16334,
                     str::stream() << "cannot set version or shard on custom connection "
                                   << conn->toString(),
                     false);
-            return NULL;
+            return nullptr;
         case ConnectionString::SET:
             DBClientReplicaSet* set = (DBClientReplicaSet*)conn;
             return &(set->masterConn());
     }
 
-    verify(false);
-    return NULL;
-}
-
-bool VersionManager::forceRemoteCheckShardVersionCB(const string& ns) {
-    DBConfigPtr conf = grid.getDBConfig(ns);
-    if (!conf)
-        return false;
-    conf->reload();
-
-    // If we don't have a collection, don't refresh the chunk manager
-    if (nsGetCollection(ns).size() == 0)
-        return false;
-
-    ChunkManagerPtr manager = conf->getChunkManagerIfExists(ns, true, true);
-    if (!manager)
-        return false;
-
-    return true;
+    MONGO_UNREACHABLE;
 }
 
 /**
@@ -170,29 +188,32 @@ bool VersionManager::forceRemoteCheckShardVersionCB(const string& ns) {
  * Eventually this should go completely away, but for now many commands rely on unversioned but
  * mongos-specific behavior on mongod (auditing and replication information in commands)
  */
-static bool initShardVersionEmptyNS(DBClientBase* conn_in) {
-    bool ok;
-    BSONObj result;
-    DBClientBase* conn = NULL;
+bool initShardVersionEmptyNS(OperationContext* txn, DBClientBase* conn_in) {
     try {
         // May throw if replica set primary is down
-        conn = getVersionable(conn_in);
+        DBClientBase* const conn = getVersionable(conn_in);
         dassert(conn);  // errors thrown above
 
-        // Check to see if we've already initialized this connection
-        if (connectionShardStatus.hasAnySequenceSet(conn))
+        // Check to see if we've already initialized this connection. This avoids sending
+        // setShardVersion multiple times.
+        if (connectionShardStatus.hasAnySequenceSet(conn)) {
             return false;
+        }
 
-        // Check to see if this is actually a shard and not a single config server
-        // NOTE: Config servers are registered only by the name "config" in the shard cache, not
-        // by host, so lookup by host will fail unless the host is also a shard.
-        Shard shard = Shard::findIfExists(conn->getServerAddress());
-        if (!shard.ok())
-            return false;
+        BSONObj result;
+        const bool ok = setShardVersion(txn,
+                                        conn,
+                                        "",
+                                        grid.shardRegistry()->getConfigServerConnectionString(),
+                                        ChunkVersion(),
+                                        NULL,
+                                        true,
+                                        result);
 
-        LOG(1) << "initializing shard connection to " << shard.toString() << endl;
+        LOG(3) << "initial sharding result : " << result;
 
-        ok = setShardVersion(*conn, "", ChunkVersion(), ChunkManagerPtr(), true, result);
+        connectionShardStatus.setSequence(conn, "", 0);
+        return ok;
     } catch (const DBException&) {
         // NOTE: Replica sets may fail to initShardVersion because future calls relying on
         // correct versioning must later call checkShardVersion on the primary.
@@ -208,24 +229,11 @@ static bool initShardVersionEmptyNS(DBClientBase* conn_in) {
 
         OCCASIONALLY {
             warning() << "failed to initialize new replica set connection version, "
-                      << "will initialize on first use" << endl;
+                      << "will initialize on first use";
         }
 
         return false;
     }
-
-    // Record the connection wire version if sent in the response, initShardVersion is a
-    // handshake for mongos->mongod connections.
-    if (!result["minWireVersion"].eoo()) {
-        int minWireVersion = result["minWireVersion"].numberInt();
-        int maxWireVersion = result["maxWireVersion"].numberInt();
-        conn->setWireVersions(minWireVersion, maxWireVersion);
-    }
-
-    LOG(3) << "initial sharding result : " << result << endl;
-
-    connectionShardStatus.setSequence(conn, "", 0);
-    return ok;
 }
 
 /**
@@ -247,55 +255,69 @@ static bool initShardVersionEmptyNS(DBClientBase* conn_in) {
  *
  * @return true if we contacted the remote host
  */
-bool checkShardVersion(DBClientBase* conn_in,
+bool checkShardVersion(OperationContext* txn,
+                       DBClientBase* conn_in,
                        const string& ns,
                        ChunkManagerPtr refManager,
                        bool authoritative,
                        int tryNumber) {
-    // TODO: cache, optimize, etc...
-
     // Empty namespaces are special - we require initialization but not versioning
     if (ns.size() == 0) {
-        return initShardVersionEmptyNS(conn_in);
+        return initShardVersionEmptyNS(txn, conn_in);
     }
 
-    DBConfigPtr conf = grid.getDBConfig(ns);
-    if (!conf)
+    auto status = grid.catalogCache()->getDatabase(txn, nsToDatabase(ns));
+    if (!status.isOK()) {
         return false;
+    }
 
-    DBClientBase* conn = getVersionable(conn_in);
+    DBClientBase* const conn = getVersionable(conn_in);
     verify(conn);  // errors thrown above
+
+    shared_ptr<DBConfig> conf = status.getValue();
+
+    if (authoritative) {
+        conf->getChunkManagerIfExists(txn, ns, true);
+    }
+
+    shared_ptr<Shard> primary;
+    shared_ptr<ChunkManager> manager;
+
+    conf->getChunkManagerOrPrimary(txn, ns, manager, primary);
 
     unsigned long long officialSequenceNumber = 0;
 
-    ShardPtr primary;
-    ChunkManagerPtr manager;
-    if (authoritative)
-        conf->getChunkManagerIfExists(ns, true);
-
-    conf->getChunkManagerOrPrimary(ns, manager, primary);
-
-    if (manager)
+    if (manager) {
         officialSequenceNumber = manager->getSequenceNumber();
+    } else if (primary && primary->isConfig()) {
+        // Do not send setShardVersion to collections on the config servers - this causes problems
+        // when config servers are also shards and get SSV with conflicting names.
+        return false;
+    }
+
+    const auto shard = grid.shardRegistry()->getShardForHostNoReload(
+        uassertStatusOK(HostAndPort::parse(conn->getServerAddress())));
+    uassert(ErrorCodes::ShardNotFound,
+            str::stream() << conn->getServerAddress() << " is not recognized as a shard",
+            shard);
 
     // Check this manager against the reference manager
     if (manager) {
-        Shard shard = Shard::make(conn->getServerAddress());
-        if (refManager && !refManager->compatibleWith(*manager, shard.getName())) {
-            const ChunkVersion refVersion(refManager->getVersion(shard.getName()));
-            const ChunkVersion currentVersion(manager->getVersion(shard.getName()));
+        if (refManager && !refManager->compatibleWith(*manager, shard->getId())) {
+            const ChunkVersion refVersion(refManager->getVersion(shard->getId()));
+            const ChunkVersion currentVersion(manager->getVersion(shard->getId()));
+
             string msg(str::stream()
                        << "manager (" << currentVersion.toString() << " : "
                        << manager->getSequenceNumber() << ") "
                        << "not compatible with reference manager (" << refVersion.toString()
                        << " : " << refManager->getSequenceNumber() << ") "
-                       << "on shard " << shard.getName() << " (" << shard.getAddress().toString()
+                       << "on shard " << shard->getId() << " (" << shard->getConnString().toString()
                        << ")");
 
             throw SendStaleConfigException(ns, msg, refVersion, currentVersion);
         }
     } else if (refManager) {
-        Shard shard = Shard::make(conn->getServerAddress());
         string msg(str::stream() << "not sharded ("
                                  << ((manager.get() == 0) ? string("<none>") : str::stream()
                                              << manager->getSequenceNumber())
@@ -305,14 +327,7 @@ bool checkShardVersion(DBClientBase* conn_in,
                                  << conn_in->getServerAddress() << ")");
 
         throw SendStaleConfigException(
-            ns, msg, refManager->getVersion(shard.getName()), ChunkVersion::UNSHARDED());
-    }
-
-    // Do not send setShardVersion to collections on the config servers - this causes problems
-    // when config servers are also shards and get SSV with conflicting names.
-    // TODO: Make config servers regular shards
-    if (primary && primary->getName() == "config") {
-        return false;
+            ns, msg, refManager->getVersion(shard->getId()), ChunkVersion::UNSHARDED());
     }
 
     // Has the ChunkManager been reloaded since the last time we updated the shard version over
@@ -324,28 +339,32 @@ bool checkShardVersion(DBClientBase* conn_in,
         }
     }
 
-    // Now that we're sure we're sending SSV and not to a single config server, get the shard
-    Shard shard = Shard::make(conn->getServerAddress());
-
     ChunkVersion version = ChunkVersion(0, 0, OID());
-    if (manager)
-        version = manager->getVersion(shard.getName());
+    if (manager) {
+        version = manager->getVersion(shard->getId());
+    }
 
     LOG(1) << "setting shard version of " << version << " for " << ns << " on shard "
-           << shard.toString();
+           << shard->toString();
 
     LOG(3) << "last version sent with chunk manager iteration " << sequenceNumber
            << ", current chunk manager iteration is " << officialSequenceNumber;
 
     BSONObj result;
-    if (setShardVersion(*conn, ns, version, manager, authoritative, result)) {
-        // success!
-        LOG(1) << "      setShardVersion success: " << result << endl;
+    if (setShardVersion(txn,
+                        conn,
+                        ns,
+                        grid.shardRegistry()->getConfigServerConnectionString(),
+                        version,
+                        manager.get(),
+                        authoritative,
+                        result)) {
+        LOG(1) << "      setShardVersion success: " << result;
         connectionShardStatus.setSequence(conn, ns, officialSequenceNumber);
         return true;
     }
 
-    LOG(1) << "       setShardVersion failed!\n" << result << endl;
+    LOG(1) << "       setShardVersion failed!\n" << result;
 
     if (result["need_authoritative"].trueValue())
         massert(10428, "need_authoritative set but in authoritative mode already", !authoritative);
@@ -353,53 +372,99 @@ bool checkShardVersion(DBClientBase* conn_in,
     if (!authoritative) {
         // use the original connection and get a fresh versionable connection
         // since conn can be invalidated (or worse, freed) after the failure
-        checkShardVersion(conn_in, ns, refManager, 1, tryNumber + 1);
+        checkShardVersion(txn, conn_in, ns, refManager, 1, tryNumber + 1);
         return true;
     }
 
     if (result["reloadConfig"].trueValue()) {
-        if (result["version"].timestampTime() == 0) {
-            warning() << "reloading full configuration for " << conf->getName()
-                      << ", connection state indicates significant version changes" << endl;
+        if (result["version"].timestampTime() == Date_t()) {
+            warning() << "reloading full configuration for " << conf->name()
+                      << ", connection state indicates significant version changes";
 
             // reload db
-            conf->reload();
+            conf->reload(txn);
         } else {
             // reload config
-            conf->getChunkManager(ns, true);
+            conf->getChunkManager(txn, ns, true);
         }
     }
 
     const int maxNumTries = 7;
     if (tryNumber < maxNumTries) {
         LOG(tryNumber < (maxNumTries / 2) ? 1 : 0)
-            << "going to retry checkShardVersion shard: " << shard.toString() << " " << result;
+            << "going to retry checkShardVersion shard: " << shard->toString() << " " << result;
         sleepmillis(10 * tryNumber);
         // use the original connection and get a fresh versionable connection
         // since conn can be invalidated (or worse, freed) after the failure
-        checkShardVersion(conn_in, ns, refManager, true, tryNumber + 1);
+        checkShardVersion(txn, conn_in, ns, refManager, true, tryNumber + 1);
         return true;
     }
 
-    string errmsg = str::stream() << "setShardVersion failed shard: " << shard.toString() << " "
+    string errmsg = str::stream() << "setShardVersion failed shard: " << shard->toString() << " "
                                   << result;
-    log() << "     " << errmsg << endl;
+    log() << "     " << errmsg;
     massert(10429, errmsg, 0);
     return true;
 }
 
-bool VersionManager::checkShardVersionCB(DBClientBase* conn_in,
+}  // namespace
+
+// Global version manager
+VersionManager versionManager;
+
+void VersionManager::resetShardVersionCB(DBClientBase* conn) {
+    connectionShardStatus.reset(conn);
+}
+
+bool VersionManager::isVersionableCB(DBClientBase* conn) {
+    // We do not version shard connections when issued from mongod
+    if (!isMongos()) {
+        return false;
+    }
+
+    return conn->type() == ConnectionString::MASTER || conn->type() == ConnectionString::SET;
+}
+
+bool VersionManager::forceRemoteCheckShardVersionCB(OperationContext* txn, const string& ns) {
+    const NamespaceString nss(ns);
+
+    // This will force the database catalog entry to be reloaded
+    grid.catalogCache()->invalidate(nss.db().toString());
+
+    auto status = grid.catalogCache()->getDatabase(txn, nss.db().toString());
+    if (!status.isOK()) {
+        return false;
+    }
+
+    shared_ptr<DBConfig> conf = status.getValue();
+
+    // If we don't have a collection, don't refresh the chunk manager
+    if (nsGetCollection(ns).size() == 0) {
+        return false;
+    }
+
+    ChunkManagerPtr manager = conf->getChunkManagerIfExists(txn, ns, true, true);
+    if (!manager) {
+        return false;
+    }
+
+    return true;
+}
+
+bool VersionManager::checkShardVersionCB(OperationContext* txn,
+                                         DBClientBase* conn_in,
                                          const string& ns,
                                          bool authoritative,
                                          int tryNumber) {
-    return checkShardVersion(conn_in, ns, ChunkManagerPtr(), authoritative, tryNumber);
+    return checkShardVersion(txn, conn_in, ns, nullptr, authoritative, tryNumber);
 }
 
-bool VersionManager::checkShardVersionCB(ShardConnection* conn_in,
+bool VersionManager::checkShardVersionCB(OperationContext* txn,
+                                         ShardConnection* conn_in,
                                          bool authoritative,
                                          int tryNumber) {
     return checkShardVersion(
-        conn_in->get(), conn_in->getNS(), conn_in->getManager(), authoritative, tryNumber);
+        txn, conn_in->get(), conn_in->getNS(), conn_in->getManager(), authoritative, tryNumber);
 }
 
 }  // namespace mongo

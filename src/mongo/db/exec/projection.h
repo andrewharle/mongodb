@@ -28,7 +28,6 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
 
 #include "mongo/db/exec/plan_stage.h"
 #include "mongo/db/exec/projection_exec.h"
@@ -37,6 +36,8 @@
 #include "mongo/db/record_id.h"
 
 namespace mongo {
+
+class ExtensionsCallback;
 
 struct ProjectionStageParams {
     enum ProjectionImplementation {
@@ -50,8 +51,8 @@ struct ProjectionStageParams {
         SIMPLE_DOC
     };
 
-    ProjectionStageParams(const MatchExpressionParser::WhereCallback& wc)
-        : projImpl(NO_FAST_PATH), fullExpression(NULL), whereCallback(&wc) {}
+    ProjectionStageParams(const ExtensionsCallback& wc)
+        : projImpl(NO_FAST_PATH), fullExpression(NULL), extensionsCallback(&wc) {}
 
     ProjectionImplementation projImpl;
 
@@ -67,39 +68,32 @@ struct ProjectionStageParams {
     // from.  Otherwise, this field is ignored.
     BSONObj coveredKeyObj;
 
-    // Used for creating context for the $where clause processing. Not owned.
-    const MatchExpressionParser::WhereCallback* whereCallback;
+    // Used for creating context for the match extensions processing. Not owned.
+    const ExtensionsCallback* extensionsCallback;
 };
 
 /**
  * This stage computes a projection.
  */
-class ProjectionStage : public PlanStage {
+class ProjectionStage final : public PlanStage {
 public:
-    ProjectionStage(const ProjectionStageParams& params, WorkingSet* ws, PlanStage* child);
+    ProjectionStage(OperationContext* opCtx,
+                    const ProjectionStageParams& params,
+                    WorkingSet* ws,
+                    PlanStage* child);
 
-    virtual ~ProjectionStage();
+    bool isEOF() final;
+    StageState work(WorkingSetID* out) final;
 
-    virtual bool isEOF();
-    virtual StageState work(WorkingSetID* out);
-
-    virtual void saveState();
-    virtual void restoreState(OperationContext* opCtx);
-    virtual void invalidate(OperationContext* txn, const RecordId& dl, InvalidationType type);
-
-    virtual std::vector<PlanStage*> getChildren() const;
-
-    virtual StageType stageType() const {
+    StageType stageType() const final {
         return STAGE_PROJECTION;
     }
 
-    PlanStageStats* getStats();
+    std::unique_ptr<PlanStageStats> getStats();
 
-    virtual const CommonStats* getCommonStats();
+    const SpecificStats* getSpecificStats() const final;
 
-    virtual const SpecificStats* getSpecificStats();
-
-    typedef unordered_set<StringData, StringData::Hasher> FieldSet;
+    using FieldSet = StringMap<bool>;  // Value is unused.
 
     /**
      * Given the projection spec for a simple inclusion projection,
@@ -123,14 +117,12 @@ public:
 private:
     Status transform(WorkingSetMember* member);
 
-    boost::scoped_ptr<ProjectionExec> _exec;
+    std::unique_ptr<ProjectionExec> _exec;
 
     // _ws is not owned by us.
     WorkingSet* _ws;
-    boost::scoped_ptr<PlanStage> _child;
 
     // Stats
-    CommonStats _commonStats;
     ProjectionStats _specificStats;
 
     // Fast paths:
@@ -141,7 +133,7 @@ private:
 
     // Data used for both SIMPLE_DOC and COVERED_ONE_INDEX paths.
     // Has the field names present in the simple projection.
-    unordered_set<StringData, StringData::Hasher> _includedFields;
+    FieldSet _includedFields;
 
     //
     // Used for the COVERED_ONE_INDEX path.

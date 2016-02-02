@@ -45,7 +45,7 @@
 
 namespace UpdateTests {
 
-using std::auto_ptr;
+using std::unique_ptr;
 using std::numeric_limits;
 using std::string;
 using std::stringstream;
@@ -54,12 +54,10 @@ using std::vector;
 class ClientBase {
 public:
     ClientBase() : _client(&_txn) {
-        _prevError = mongo::lastError._get(false);
-        mongo::lastError.release();
-        mongo::lastError.reset(new LastError());
+        mongo::LastError::get(_txn.getClient()).reset();
     }
     virtual ~ClientBase() {
-        mongo::lastError.reset(_prevError);
+        mongo::LastError::get(_txn.getClient()).reset();
     }
 
 protected:
@@ -75,9 +73,6 @@ protected:
 
     OperationContextImpl _txn;
     DBDirectClient _client;
-
-private:
-    LastError* _prevError;
 };
 
 class Fail : public ClientBase {
@@ -431,7 +426,7 @@ class MultiInc : public SetBase {
 public:
     string s() {
         stringstream ss;
-        auto_ptr<DBClientCursor> cc = _client.query(ns(), Query().sort(BSON("_id" << 1)));
+        unique_ptr<DBClientCursor> cc = _client.query(ns(), Query().sort(BSON("_id" << 1)));
         bool first = true;
         while (cc->more()) {
             if (first)

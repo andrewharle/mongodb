@@ -5,18 +5,16 @@
 if (db.serverBuildInfo().bits == 32) {
     print("skip on 32 bit systems");
 } else {
-    var dbpath = MongoRunner.dataDir + "/dur_remove_old_journals";
     var conn = MongoRunner.runMongod({
         journal: "",
         smallfiles: "",
         syncdelay: 5,  // seconds between fsyncs.
-        dbpath: dbpath,
     });
     db = conn.getDB("test");
 
     // Returns true if j._0 exists.
     function firstJournalFileExists() {
-        var files = listFiles(dbpath + "/journal");
+        var files = listFiles(conn.dbpath + "/journal");
         for (var i = 0; i < files.length; i++) {
             if (files[i].baseName === "j._0") {
                 return true;
@@ -27,7 +25,7 @@ if (db.serverBuildInfo().bits == 32) {
 
     // Represents the cummulative total of the number of journal files created.
     function getLatestJournalFileNum() {
-        var files = listFiles(dbpath + "/journal");
+        var files = listFiles(conn.dbpath + "/journal");
         var latest = 0;
         files.forEach(function(file) {
             if (file.baseName !== "lsn") {

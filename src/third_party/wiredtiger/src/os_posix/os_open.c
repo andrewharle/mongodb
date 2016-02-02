@@ -179,7 +179,6 @@ setupfh:
 	if (!matched) {
 		WT_CONN_FILE_INSERT(conn, fh, bucket);
 		(void)__wt_atomic_add32(&conn->open_file_count, 1);
-
 		*fhp = fh;
 	}
 	__wt_spin_unlock(session, &conn->fh_lock);
@@ -214,6 +213,8 @@ __wt_close(WT_SESSION_IMPL *session, WT_FH **fhp)
 		return (0);
 	fh = *fhp;
 	*fhp = NULL;
+
+	WT_RET(__wt_verbose(session, WT_VERB_FILEOPS, "%s: close", fh->name));
 
 	__wt_spin_lock(session, &conn->fh_lock);
 	if (fh == NULL || fh->ref == 0 || --fh->ref > 0) {

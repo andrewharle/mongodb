@@ -26,16 +26,13 @@
  *    then also delete it in the license file.
  */
 
-#include <boost/scoped_ptr.hpp>
-#include <memory>
-
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/database_holder.h"
-#include "mongo/db/client.h"
 #include "mongo/db/exec/cached_plan.h"
 #include "mongo/db/exec/queued_data_stage.h"
+#include "mongo/db/db_raii.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/json.h"
 #include "mongo/db/operation_context_impl.h"
@@ -46,9 +43,11 @@
 #include "mongo/db/query/query_knobs.h"
 #include "mongo/db/query/query_planner_params.h"
 #include "mongo/dbtests/dbtests.h"
-#include "mongo/util/scopeguard.h"
+#include "mongo/stdx/memory.h"
 
 namespace QueryStageCachedPlan {
+
+static const NamespaceString nss("unittests.QueryStageCachedPlan");
 
 class QueryStageCachedPlanBase {
 public:
@@ -60,7 +59,7 @@ public:
         addIndex(BSON("a" << 1));
         addIndex(BSON("b" << 1));
 
-        Client::WriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_txn, nss.ns());
         Collection* collection = ctx.getCollection();
         ASSERT(collection);
 
@@ -71,20 +70,19 @@ public:
     }
 
     void addIndex(const BSONObj& obj) {
-        ASSERT_OK(dbtests::createIndex(&_txn, ns(), obj));
+        ASSERT_OK(dbtests::createIndex(&_txn, nss.ns(), obj));
     }
 
     void dropCollection() {
-        const NamespaceString nsString(ns());
         ScopedTransaction transaction(&_txn, MODE_X);
-        Lock::DBLock dbLock(_txn.lockState(), nsString.db(), MODE_X);
-        Database* database = dbHolder().get(&_txn, nsString.db());
+        Lock::DBLock dbLock(_txn.lockState(), nss.db(), MODE_X);
+        Database* database = dbHolder().get(&_txn, nss.db());
         if (!database) {
             return;
         }
 
         WriteUnitOfWork wuow(&_txn);
-        database->dropCollection(&_txn, ns());
+        database->dropCollection(&_txn, nss.ns());
         wuow.commit();
     }
 
@@ -92,18 +90,8 @@ public:
         WriteUnitOfWork wuow(&_txn);
 
         const bool enforceQuota = false;
-        StatusWith<RecordId> res = collection->insertDocument(&_txn, obj, enforceQuota);
-        ASSERT(res.isOK());
-
+        ASSERT_OK(collection->insertDocument(&_txn, obj, enforceQuota));
         wuow.commit();
-    }
-
-    static void resetEvictionEnabled(bool resetTo) {
-        internalQueryCacheReplanningEnabled = resetTo;
-    }
-
-    static const char* ns() {
-        return "unittests.QueryStageCachedPlan";
     }
 
 protected:
@@ -118,19 +106,14 @@ protected:
 class QueryStageCachedPlanFailure : public QueryStageCachedPlanBase {
 public:
     void run() {
-        bool oldReplanningFlagValue = internalQueryCacheReplanningEnabled;
-        internalQueryCacheReplanningEnabled = true;
-        ScopeGuard flagResetter =
-            MakeGuard(&QueryStageCachedPlanBase::resetEvictionEnabled, oldReplanningFlagValue);
-
-        AutoGetCollectionForRead ctx(&_txn, ns());
+        AutoGetCollectionForRead ctx(&_txn, nss.ns());
         Collection* collection = ctx.getCollection();
         ASSERT(collection);
 
         // Query can be answered by either index on "a" or index on "b".
-        CanonicalQuery* rawCq;
-        ASSERT_OK(CanonicalQuery::canonicalize(ns(), fromjson("{a: {$gte: 8}, b: 1}"), &rawCq));
-        boost::scoped_ptr<CanonicalQuery> cq(rawCq);
+        auto statusWithCQ = CanonicalQuery::canonicalize(nss, fromjson("{a: {$gte: 8}, b: 1}"));
+        ASSERT_OK(statusWithCQ.getStatus());
+        const std::unique_ptr<CanonicalQuery> cq = std::move(statusWithCQ.getValue());
 
         // We shouldn't have anything in the plan cache for this shape yet.
         PlanCache* cache = collection->infoCache()->getPlanCache();
@@ -143,22 +126,17 @@ public:
         fillOutPlannerParams(&_txn, collection, cq.get(), &plannerParams);
 
         // Queued data stage will return a failure during the cached plan trial period.
-        std::auto_ptr<QueuedDataStage> mockChild(new QueuedDataStage(&_ws));
+        auto mockChild = stdx::make_unique<QueuedDataStage>(&_txn, &_ws);
         mockChild->pushBack(PlanStage::FAILURE);
 
         // High enough so that we shouldn't trigger a replan based on works.
         const size_t decisionWorks = 50;
-        CachedPlanStage cachedPlanStage(&_txn,
-                                        collection,
-                                        &_ws,
-                                        cq.get(),
-                                        plannerParams,
-                                        decisionWorks,
-                                        mockChild.release(),
-                                        NULL);
+        CachedPlanStage cachedPlanStage(
+            &_txn, collection, &_ws, cq.get(), plannerParams, decisionWorks, mockChild.release());
 
         // This should succeed after triggering a replan.
-        ASSERT_OK(cachedPlanStage.pickBestPlan(NULL));
+        PlanYieldPolicy yieldPolicy(nullptr, PlanExecutor::YIELD_MANUAL);
+        ASSERT_OK(cachedPlanStage.pickBestPlan(&yieldPolicy));
 
         // Make sure that we get 2 legit results back.
         size_t numResults = 0;
@@ -182,9 +160,6 @@ public:
         // Plan cache should still be empty, as we don't write to it when we replan a failed
         // query.
         ASSERT_NOT_OK(cache->get(*cq, &rawCachedSolution));
-
-        resetEvictionEnabled(oldReplanningFlagValue);
-        flagResetter.Dismiss();
     }
 };
 
@@ -195,19 +170,14 @@ public:
 class QueryStageCachedPlanHitMaxWorks : public QueryStageCachedPlanBase {
 public:
     void run() {
-        bool oldReplanningFlagValue = internalQueryCacheReplanningEnabled;
-        internalQueryCacheReplanningEnabled = true;
-        ScopeGuard flagResetter =
-            MakeGuard(&QueryStageCachedPlanBase::resetEvictionEnabled, oldReplanningFlagValue);
-
-        AutoGetCollectionForRead ctx(&_txn, ns());
+        AutoGetCollectionForRead ctx(&_txn, nss.ns());
         Collection* collection = ctx.getCollection();
         ASSERT(collection);
 
         // Query can be answered by either index on "a" or index on "b".
-        CanonicalQuery* rawCq;
-        ASSERT_OK(CanonicalQuery::canonicalize(ns(), fromjson("{a: {$gte: 8}, b: 1}"), &rawCq));
-        boost::scoped_ptr<CanonicalQuery> cq(rawCq);
+        auto statusWithCQ = CanonicalQuery::canonicalize(nss, fromjson("{a: {$gte: 8}, b: 1}"));
+        ASSERT_OK(statusWithCQ.getStatus());
+        const std::unique_ptr<CanonicalQuery> cq = std::move(statusWithCQ.getValue());
 
         // We shouldn't have anything in the plan cache for this shape yet.
         PlanCache* cache = collection->infoCache()->getPlanCache();
@@ -224,22 +194,17 @@ public:
         const size_t decisionWorks = 10;
         const size_t mockWorks =
             1U + static_cast<size_t>(internalQueryCacheEvictionRatio * decisionWorks);
-        std::auto_ptr<QueuedDataStage> mockChild(new QueuedDataStage(&_ws));
+        auto mockChild = stdx::make_unique<QueuedDataStage>(&_txn, &_ws);
         for (size_t i = 0; i < mockWorks; i++) {
             mockChild->pushBack(PlanStage::NEED_TIME);
         }
 
-        CachedPlanStage cachedPlanStage(&_txn,
-                                        collection,
-                                        &_ws,
-                                        cq.get(),
-                                        plannerParams,
-                                        decisionWorks,
-                                        mockChild.release(),
-                                        NULL);
+        CachedPlanStage cachedPlanStage(
+            &_txn, collection, &_ws, cq.get(), plannerParams, decisionWorks, mockChild.release());
 
         // This should succeed after triggering a replan.
-        ASSERT_OK(cachedPlanStage.pickBestPlan(NULL));
+        PlanYieldPolicy yieldPolicy(nullptr, PlanExecutor::YIELD_MANUAL);
+        ASSERT_OK(cachedPlanStage.pickBestPlan(&yieldPolicy));
 
         // Make sure that we get 2 legit results back.
         size_t numResults = 0;
@@ -263,10 +228,7 @@ public:
         // This time we expect to find something in the plan cache. Replans after hitting the
         // works threshold result in a cache entry.
         ASSERT_OK(cache->get(*cq, &rawCachedSolution));
-        boost::scoped_ptr<CachedSolution> cachedSolution(rawCachedSolution);
-
-        resetEvictionEnabled(oldReplanningFlagValue);
-        flagResetter.Dismiss();
+        const std::unique_ptr<CachedSolution> cachedSolution(rawCachedSolution);
     }
 };
 

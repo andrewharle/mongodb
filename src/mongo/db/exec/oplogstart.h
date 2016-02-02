@@ -28,7 +28,6 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
 
 #include "mongo/base/owned_pointer_vector.h"
 #include "mongo/db/exec/collection_scan.h"
@@ -38,6 +37,8 @@
 #include "mongo/util/timer.h"
 
 namespace mongo {
+
+class RecordCursor;
 
 /**
  * OplogStart walks a collection backwards to find the first object in the collection that
@@ -59,41 +60,35 @@ namespace mongo {
  * Why is this a stage?  Because we want to yield, and we want to be notified of RecordId
  * invalidations.  :(
  */
-class OplogStart : public PlanStage {
+class OplogStart final : public PlanStage {
 public:
     // Does not take ownership.
     OplogStart(OperationContext* txn,
                const Collection* collection,
                MatchExpression* filter,
                WorkingSet* ws);
-    virtual ~OplogStart();
 
-    virtual StageState work(WorkingSetID* out);
-    virtual bool isEOF();
+    StageState work(WorkingSetID* out) final;
+    bool isEOF() final;
 
-    virtual void invalidate(OperationContext* txn, const RecordId& dl, InvalidationType type);
-    virtual void saveState();
-    virtual void restoreState(OperationContext* opCtx);
+    void doInvalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) final;
+    void doSaveState() final;
+    void doRestoreState() final;
+    void doDetachFromOperationContext() final;
+    void doReattachToOperationContext() final;
 
-    virtual std::vector<PlanStage*> getChildren() const;
+    // Returns empty PlanStageStats object
+    std::unique_ptr<PlanStageStats> getStats() final;
 
     //
-    // Exec stats -- do not call these for the oplog start stage.
+    // Exec stats -- do not call for the oplog start stage.
     //
 
-    virtual PlanStageStats* getStats() {
+    const SpecificStats* getSpecificStats() const final {
         return NULL;
     }
 
-    virtual const CommonStats* getCommonStats() {
-        return NULL;
-    }
-
-    virtual const SpecificStats* getSpecificStats() {
-        return NULL;
-    }
-
-    virtual StageType stageType() const {
+    StageType stageType() const final {
         return STAGE_OPLOG_START;
     }
 
@@ -108,6 +103,8 @@ public:
         return _backwardsScanning;
     }
 
+    static const char* kStageType;
+
 private:
     StageState workBackwardsScan(WorkingSetID* out);
 
@@ -115,15 +112,8 @@ private:
 
     StageState workExtentHopping(WorkingSetID* out);
 
-    // transactional context for read locks. Not owned by us
-    OperationContext* _txn;
-
-    // If we're backwards scanning we just punt to a collscan.
-    boost::scoped_ptr<CollectionScan> _cs;
-
     // This is only used for the extent hopping scan.
-    typedef OwnedPointerVector<RecordIterator> SubIterators;
-    SubIterators _subIterators;
+    std::vector<std::unique_ptr<RecordCursor>> _subIterators;
 
     // Have we done our heavy init yet?
     bool _needInit;

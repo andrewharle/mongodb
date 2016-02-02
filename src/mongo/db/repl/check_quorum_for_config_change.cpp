@@ -45,6 +45,8 @@
 namespace mongo {
 namespace repl {
 
+using executor::RemoteCommandRequest;
+
 QuorumChecker::QuorumChecker(const ReplicaSetConfig* rsConfig, int myIndex)
     : _rsConfig(rsConfig),
       _myIndex(myIndex),
@@ -69,11 +71,11 @@ QuorumChecker::QuorumChecker(const ReplicaSetConfig* rsConfig, int myIndex)
 
 QuorumChecker::~QuorumChecker() {}
 
-std::vector<ReplicationExecutor::RemoteCommandRequest> QuorumChecker::getRequests() const {
+std::vector<RemoteCommandRequest> QuorumChecker::getRequests() const {
     const bool isInitialConfig = _rsConfig->getConfigVersion() == 1;
     const MemberConfig& myConfig = _rsConfig->getMemberAt(_myIndex);
 
-    std::vector<ReplicationExecutor::RemoteCommandRequest> requests;
+    std::vector<RemoteCommandRequest> requests;
     if (hasReceivedSufficientResponses()) {
         return requests;
     }
@@ -96,17 +98,16 @@ std::vector<ReplicationExecutor::RemoteCommandRequest> QuorumChecker::getRequest
             // No need to check self for liveness or unreadiness.
             continue;
         }
-        requests.push_back(ReplicationExecutor::RemoteCommandRequest(
-            _rsConfig->getMemberAt(i).getHostAndPort(),
-            "admin",
-            hbRequest,
-            _rsConfig->getHeartbeatTimeoutPeriodMillis()));
+        requests.push_back(RemoteCommandRequest(_rsConfig->getMemberAt(i).getHostAndPort(),
+                                                "admin",
+                                                hbRequest,
+                                                _rsConfig->getHeartbeatTimeoutPeriodMillis()));
     }
 
     return requests;
 }
 
-void QuorumChecker::processResponse(const ReplicationExecutor::RemoteCommandRequest& request,
+void QuorumChecker::processResponse(const RemoteCommandRequest& request,
                                     const ResponseStatus& response) {
     _tabulateHeartbeatResponse(request, response);
     if (hasReceivedSufficientResponses()) {
@@ -172,8 +173,8 @@ void QuorumChecker::_onQuorumCheckComplete() {
     _finalStatus = Status::OK();
 }
 
-void QuorumChecker::_tabulateHeartbeatResponse(
-    const ReplicationExecutor::RemoteCommandRequest& request, const ResponseStatus& response) {
+void QuorumChecker::_tabulateHeartbeatResponse(const RemoteCommandRequest& request,
+                                               const ResponseStatus& response) {
     ++_numResponses;
     if (!response.isOK()) {
         warning() << "Failed to complete heartbeat request to " << request.target << "; "
@@ -184,7 +185,7 @@ void QuorumChecker::_tabulateHeartbeatResponse(
 
     BSONObj resBSON = response.getValue().data;
     ReplSetHeartbeatResponse hbResp;
-    Status hbStatus = hbResp.initialize(resBSON);
+    Status hbStatus = hbResp.initialize(resBSON, 0);
 
     if (hbStatus.code() == ErrorCodes::InconsistentReplicaSetNames) {
         std::string message = str::stream() << "Our set name did not match that of "
@@ -202,11 +203,11 @@ void QuorumChecker::_tabulateHeartbeatResponse(
     }
 
     if (!hbResp.getReplicaSetName().empty()) {
-        if (hbResp.getVersion() >= _rsConfig->getConfigVersion()) {
+        if (hbResp.getConfigVersion() >= _rsConfig->getConfigVersion()) {
             std::string message = str::stream()
                 << "Our config version of " << _rsConfig->getConfigVersion()
                 << " is no larger than the version on " << request.target.toString()
-                << ", which is " << hbResp.getVersion();
+                << ", which is " << hbResp.getConfigVersion();
             _vetoStatus = Status(ErrorCodes::NewReplicaSetConfigurationIncompatible, message);
             warning() << message;
             return;

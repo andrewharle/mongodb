@@ -35,7 +35,6 @@
 #include "mongo/db/storage/mmap_v1/mmap_v1_engine.h"
 
 #include <boost/filesystem/operations.hpp>
-#include <boost/scoped_ptr.hpp>
 
 #include "mongo/db/background.h"
 #include "mongo/db/catalog/collection.h"
@@ -43,19 +42,20 @@
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/index_create.h"
 #include "mongo/db/client.h"
+#include "mongo/db/db_raii.h"
 #include "mongo/db/index/index_descriptor.h"
-#include "mongo/db/storage/mmap_v1/mmap_v1_database_catalog_entry.h"
 #include "mongo/db/storage/mmap_v1/dur.h"
+#include "mongo/db/storage/mmap_v1/mmap.h"
+#include "mongo/db/storage/mmap_v1/mmap_v1_database_catalog_entry.h"
 #include "mongo/db/storage/mmap_v1/mmap_v1_options.h"
 #include "mongo/util/file.h"
-#include "mongo/util/file_allocator.h"
+#include "mongo/db/storage/mmap_v1/file_allocator.h"
 #include "mongo/util/log.h"
-#include "mongo/util/mmap.h"
 #include "mongo/util/scopeguard.h"
 
 namespace mongo {
 
-using boost::scoped_ptr;
+using std::unique_ptr;
 using std::endl;
 using std::map;
 using std::string;
@@ -280,7 +280,7 @@ Status MMAPV1Engine::repairDatabase(OperationContext* txn,
                                     const std::string& dbName,
                                     bool preserveClonedFilesOnFailure,
                                     bool backupOriginalFiles) {
-    scoped_ptr<RepairFileDeleter> repairFileDeleter;
+    unique_ptr<RepairFileDeleter> repairFileDeleter;
 
     // Must be done before and after repair
     getDur().syncDataAndTruncateJournal(txn);
@@ -314,8 +314,8 @@ Status MMAPV1Engine::repairDatabase(OperationContext* txn,
             return Status(ErrorCodes::NamespaceNotFound, "database does not exist to repair");
         }
 
-        scoped_ptr<MMAPV1DatabaseCatalogEntry> dbEntry;
-        scoped_ptr<Database> tempDatabase;
+        unique_ptr<MMAPV1DatabaseCatalogEntry> dbEntry;
+        unique_ptr<Database> tempDatabase;
 
         // Must call this before MMAPV1DatabaseCatalogEntry's destructor closes the DB files
         ON_BLOCK_EXIT(&dur::DurableInterface::syncDataAndTruncateJournal, &getDur(), txn);
@@ -329,13 +329,12 @@ Status MMAPV1Engine::repairDatabase(OperationContext* txn,
         map<string, CollectionOptions> namespacesToCopy;
         {
             string ns = dbName + ".system.namespaces";
-            Client::Context ctx(txn, ns);
+            OldClientContext ctx(txn, ns);
             Collection* coll = originalDatabase->getCollection(ns);
             if (coll) {
-                scoped_ptr<RecordIterator> it(coll->getIterator(txn));
-                while (!it->isEOF()) {
-                    RecordId loc = it->getNext();
-                    BSONObj obj = coll->docFor(txn, loc).value();
+                auto cursor = coll->getCursor(txn);
+                while (auto record = cursor->next()) {
+                    BSONObj obj = record->data.releaseToBson();
 
                     string ns = obj["name"].String();
 
@@ -370,11 +369,11 @@ Status MMAPV1Engine::repairDatabase(OperationContext* txn,
             Collection* tempCollection = NULL;
             {
                 WriteUnitOfWork wunit(txn);
-                tempCollection = tempDatabase->createCollection(txn, ns, options, true, false);
+                tempCollection = tempDatabase->createCollection(txn, ns, options, false);
                 wunit.commit();
             }
 
-            Client::Context readContext(txn, ns, originalDatabase);
+            OldClientContext readContext(txn, ns, originalDatabase);
             Collection* originalCollection = originalDatabase->getCollection(ns);
             invariant(originalCollection);
 
@@ -392,22 +391,19 @@ Status MMAPV1Engine::repairDatabase(OperationContext* txn,
                 }
 
                 Status status = indexer.init(indexes);
-                if (!status.isOK())
+                if (!status.isOK()) {
                     return status;
+                }
             }
 
-            scoped_ptr<RecordIterator> iterator(originalCollection->getIterator(txn));
-            while (!iterator->isEOF()) {
-                RecordId loc = iterator->getNext();
-                invariant(!loc.isNull());
-
-                BSONObj doc = originalCollection->docFor(txn, loc).value();
+            auto cursor = originalCollection->getCursor(txn);
+            while (auto record = cursor->next()) {
+                BSONObj doc = record->data.releaseToBson();
 
                 WriteUnitOfWork wunit(txn);
-                StatusWith<RecordId> result =
-                    tempCollection->insertDocument(txn, doc, &indexer, false);
-                if (!result.isOK())
-                    return result.getStatus();
+                Status status = tempCollection->insertDocument(txn, doc, &indexer, false);
+                if (!status.isOK())
+                    return status;
 
                 wunit.commit();
                 txn->checkForInterrupt();

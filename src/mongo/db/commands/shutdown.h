@@ -37,6 +37,8 @@ namespace mongo {
 
 class CmdShutdown : public Command {
 public:
+    CmdShutdown() : Command("shutdown") {}
+
     virtual bool requiresAuth() {
         return true;
     }
@@ -55,17 +57,8 @@ public:
     virtual bool isWriteCommandForConfigServer() const {
         return false;
     }
-    virtual void help(std::stringstream& help) const;
-    CmdShutdown() : Command("shutdown") {}
-    bool run(OperationContext* txn,
-             const std::string& dbname,
-             BSONObj& cmdObj,
-             int options,
-             std::string& errmsg,
-             BSONObjBuilder& result,
-             bool fromRepl);
 
-private:
+protected:
     static void shutdownHelper();
 };
 

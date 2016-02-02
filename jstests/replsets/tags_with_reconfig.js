@@ -6,7 +6,7 @@
 
 // Start a replica set with 3 nodes
 var host = getHostName();
-var replTest = new ReplSetTest( {name: "tags_with_reconfig", nodes: 3, startPort: 32000} );
+var replTest = new ReplSetTest({ name: "tags_with_reconfig", nodes: 3 });
 var nodes = replTest.startSet();
 var ports = replTest.ports;
 
@@ -24,7 +24,7 @@ replTest.initiate( conf );
 replTest.awaitReplication();
 
 
-master = replTest.getMaster();
+master = replTest.getPrimary();
 var db = master.getDB("test");
 
 // Insert a document with write concern : anydc
@@ -54,7 +54,7 @@ var config = master.getDB("local").system.replset.findOne();
 printjson(config);
 
 
-master = replTest.getMaster();
+master = replTest.getPrimary();
 var db = master.getDB("test");
 
 // Insert a document with write concern : anydc

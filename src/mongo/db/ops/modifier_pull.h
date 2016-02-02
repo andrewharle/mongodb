@@ -28,7 +28,6 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
 
 #include "mongo/base/disallow_copying.h"
 #include "mongo/bson/mutable/document.h"
@@ -50,9 +49,7 @@ public:
     virtual Status init(const BSONElement& modExpr, const Options& opts, bool* positional = NULL);
 
     /** Decides which portion of the array items will be removed from the provided element */
-    virtual Status prepare(mutablebson::Element root,
-                           const StringData& matchedField,
-                           ExecInfo* execInfo);
+    virtual Status prepare(mutablebson::Element root, StringData matchedField, ExecInfo* execInfo);
 
     /** Updates the Element used in prepare with the effects of the $pull operation. */
     virtual Status apply() const;
@@ -77,11 +74,11 @@ private:
     BSONObj _exprObj;
 
     // If we are using the matcher, this is the match expression we built around _exprObj.
-    boost::scoped_ptr<MatchExpression> _matchExpr;
+    std::unique_ptr<MatchExpression> _matchExpr;
     bool _matcherOnPrimitive;
 
     struct PreparedState;
-    boost::scoped_ptr<PreparedState> _preparedState;
+    std::unique_ptr<PreparedState> _preparedState;
 };
 
 }  // namespace mongo

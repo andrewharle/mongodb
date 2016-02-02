@@ -46,7 +46,7 @@ const size_t MaxDatabaseNameLen = 128;  // max str len for the db name, includin
     For example <dbname>.system.users is ok for regular clients to update.
     @param write used when .system.js
 */
-bool legalClientSystemNS(const StringData& ns, bool write);
+bool legalClientSystemNS(StringData ns, bool write);
 
 /* e.g.
    NamespaceString ns("acme.orders");
@@ -54,6 +54,15 @@ bool legalClientSystemNS(const StringData& ns, bool write);
 */
 class NamespaceString {
 public:
+    // Reserved system namespaces
+
+    // Namespace for storing configuration data, which needs to be replicated if the server is
+    // running as a replica set. Documents in this collection should represent some configuration
+    // state of the server, which needs to be recovered/consulted at startup. Each document in this
+    // namespace should have its _id set to some string, which meaningfully describes what it
+    // represents.
+    static const NamespaceString kConfigCollectionNamespace;
+
     /**
      * Constructs an empty NamespaceString.
      */
@@ -62,13 +71,13 @@ public:
     /**
      * Constructs a NamespaceString from the fully qualified namespace named in "ns".
      */
-    explicit NamespaceString(const StringData& ns);
+    explicit NamespaceString(StringData ns);
 
     /**
      * Constructs a NamespaceString for the given database and collection names.
      * "dbName" must not contain a ".", and "collectionName" must not start with one.
      */
-    NamespaceString(const StringData& dbName, const StringData& collectionName);
+    NamespaceString(StringData dbName, StringData collectionName);
 
     /**
      * Note that these values are derived from the mmap_v1 implementation and that
@@ -94,9 +103,6 @@ public:
         return _ns;
     }
 
-    operator const std::string&() const {
-        return ns();
-    }
     const std::string& toString() const {
         return ns();
     }
@@ -104,6 +110,12 @@ public:
     size_t size() const {
         return _ns.size();
     }
+
+    struct Hasher {
+        size_t operator()(const NamespaceString& nss) const {
+            return std::hash<std::string>()(nss._ns);
+        }
+    };
 
     //
     // The following methods assume isValid() is true for this NamespaceString.
@@ -114,6 +126,9 @@ public:
     }
     bool isSystemDotIndexes() const {
         return coll() == "system.indexes";
+    }
+    bool isSystemDotProfile() const {
+        return coll() == "system.profile";
     }
     bool isConfigDB() const {
         return db() == "config";
@@ -130,17 +145,20 @@ public:
     bool isSpecial() const {
         return special(_ns);
     }
+    bool isOnInternalDb() const {
+        return internalDb(db());
+    }
     bool isNormal() const {
         return normal(_ns);
     }
-    bool isListCollectionsGetMore() const;
-    bool isListIndexesGetMore() const;
+    bool isListCollectionsCursorNS() const;
+    bool isListIndexesCursorNS() const;
 
     /**
-     * Given a NamespaceString for which isListIndexesGetMore() returns true, returns the
-     * NamespaceString for the collection that the "listIndexesGetMore" targets.
+     * Given a NamespaceString for which isListIndexesCursorNS() returns true, returns the
+     * NamespaceString for the collection that the "listIndexes" targets.
      */
-    NamespaceString getTargetNSForListIndexesGetMore() const;
+    NamespaceString getTargetNSForListIndexes() const;
 
     /**
      * @return true if the namespace is valid. Special namespaces for internal use are considered as
@@ -153,7 +171,7 @@ public:
     bool operator==(const std::string& nsIn) const {
         return nsIn == _ns;
     }
-    bool operator==(const StringData& nsIn) const {
+    bool operator==(StringData nsIn) const {
         return nsIn == _ns;
     }
     bool operator==(const NamespaceString& nsIn) const {
@@ -173,7 +191,7 @@ public:
 
     /** ( foo.bar ).getSisterNS( "blah" ) == foo.blah
      */
-    std::string getSisterNS(const StringData& local) const;
+    std::string getSisterNS(StringData local) const;
 
     // @return db() + ".system.indexes"
     std::string getSystemIndexesCollection() const;
@@ -182,17 +200,35 @@ public:
     std::string getCommandNS() const;
 
     /**
+     * Function to escape most non-alpha characters from file names
+     */
+    static std::string escapeDbName(const StringData dbname);
+
+    /**
      * @return true if ns is 'normal'.  A "$" is used for namespaces holding index data,
      * which do not contain BSON objects in their records. ("oplog.$main" is the exception)
      */
-    static bool normal(const StringData& ns);
+    static bool normal(StringData ns);
 
     /**
      * @return true if the ns is an oplog one, otherwise false.
      */
-    static bool oplog(const StringData& ns);
+    static bool oplog(StringData ns);
 
-    static bool special(const StringData& ns);
+    static bool special(StringData ns);
+
+    /**
+     * Returns true for DBs with special meaning to mongodb.
+     */
+    static bool internalDb(StringData ns) {
+        if (ns == "admin")
+            return true;
+        if (ns == "local")
+            return true;
+        if (ns == "config")
+            return true;
+        return false;
+    }
 
     /**
      * samples:
@@ -208,7 +244,7 @@ public:
      * @param db - a possible database name
      * @return if db is an allowed database name
      */
-    static bool validDBName(const StringData& dbin);
+    static bool validDBName(StringData dbin);
 
     /**
      * Takes a fully qualified namespace (ie dbname.collectionName), and returns true if
@@ -222,7 +258,7 @@ public:
      * @param ns - a full namespace (a.b)
      * @return if db.coll is an allowed collection name
      */
-    static bool validCollectionComponent(const StringData& ns);
+    static bool validCollectionComponent(StringData ns);
 
     /**
      * Takes a collection name and returns true if it is a valid collection name.
@@ -235,16 +271,15 @@ public:
      * @param coll - a collection name component of a namespace
      * @return if the input is a valid collection name
      */
-    static bool validCollectionName(const StringData& coll);
+    static bool validCollectionName(StringData coll);
 
 private:
     std::string _ns;
     size_t _dotIndex;
 };
 
-
 // "database.a.b.c" -> "database"
-inline StringData nsToDatabaseSubstring(const StringData& ns) {
+inline StringData nsToDatabaseSubstring(StringData ns) {
     size_t i = ns.find('.');
     if (i == std::string::npos) {
         massert(10078, "nsToDatabase: db too long", ns.size() < MaxDatabaseNameLen);
@@ -255,18 +290,18 @@ inline StringData nsToDatabaseSubstring(const StringData& ns) {
 }
 
 // "database.a.b.c" -> "database"
-inline void nsToDatabase(const StringData& ns, char* database) {
+inline void nsToDatabase(StringData ns, char* database) {
     StringData db = nsToDatabaseSubstring(ns);
     db.copyTo(database, true);
 }
 
 // TODO: make this return a StringData
-inline std::string nsToDatabase(const StringData& ns) {
+inline std::string nsToDatabase(StringData ns) {
     return nsToDatabaseSubstring(ns).toString();
 }
 
 // "database.a.b.c" -> "a.b.c"
-inline StringData nsToCollectionSubstring(const StringData& ns) {
+inline StringData nsToCollectionSubstring(StringData ns) {
     size_t i = ns.find('.');
     massert(16886, "nsToCollectionSubstring: no .", i != std::string::npos);
     return ns.substr(i + 1);
@@ -277,7 +312,7 @@ inline StringData nsToCollectionSubstring(const StringData& ns) {
  * foo. = false
  * foo.a = true
  */
-inline bool nsIsFull(const StringData& ns) {
+inline bool nsIsFull(StringData ns) {
     size_t i = ns.find('.');
     if (i == std::string::npos)
         return false;
@@ -291,7 +326,7 @@ inline bool nsIsFull(const StringData& ns) {
  * foo. = false
  * foo.a = false
  */
-inline bool nsIsDbOnly(const StringData& ns) {
+inline bool nsIsDbOnly(StringData ns) {
     size_t i = ns.find('.');
     if (i == std::string::npos)
         return true;
@@ -323,7 +358,7 @@ struct NamespaceDBEquals {
         return nsDBEquals(a, b);
     }
 };
-}
 
+}  // namespace mongo
 
 #include "mongo/db/namespace_string-inl.h"

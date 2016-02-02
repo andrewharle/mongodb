@@ -33,12 +33,13 @@
 #include "mongo/db/index_builder.h"
 
 #include "mongo/db/auth/authorization_session.h"
-#include "mongo/db/client.h"
-#include "mongo/db/curop.h"
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/index_create.h"
+#include "mongo/db/client.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
+#include "mongo/db/curop.h"
+#include "mongo/db/db_raii.h"
 #include "mongo/db/operation_context_impl.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/log.h"
@@ -55,11 +56,11 @@ namespace {
 // The bool is 'true' when a new background index has started in a new thread but the
 // parent thread has not yet synchronized with it.
 bool _bgIndexStarting(false);
-boost::mutex _bgIndexStartingMutex;
-boost::condition_variable _bgIndexStartingCondVar;
+stdx::mutex _bgIndexStartingMutex;
+stdx::condition_variable _bgIndexStartingCondVar;
 
 void _setBgIndexStarting() {
-    boost::mutex::scoped_lock lk(_bgIndexStartingMutex);
+    stdx::lock_guard<stdx::mutex> lk(_bgIndexStartingMutex);
     invariant(_bgIndexStarting == false);
     _bgIndexStarting = true;
     _bgIndexStartingCondVar.notify_one();
@@ -84,14 +85,17 @@ void IndexBuilder::run() {
     OperationContextImpl txn;
     txn.lockState()->setIsBatchWriter(true);
 
-    txn.getClient()->getAuthorizationSession()->grantInternalAuthorization();
+    AuthorizationSession::get(txn.getClient())->grantInternalAuthorization();
 
-    txn.getCurOp()->reset(HostAndPort(), dbInsert);
+    {
+        stdx::lock_guard<Client> lk(*txn.getClient());
+        CurOp::get(txn)->setNetworkOp_inlock(dbInsert);
+    }
     NamespaceString ns(_index["ns"].String());
 
     ScopedTransaction transaction(&txn, MODE_IX);
     Lock::DBLock dlk(txn.lockState(), ns.db(), MODE_X);
-    Client::Context ctx(&txn, ns.getSystemIndexesCollection());
+    OldClientContext ctx(&txn, ns.getSystemIndexesCollection());
 
     Database* db = dbHolder().get(&txn, ns.db().toString());
 
@@ -100,8 +104,6 @@ void IndexBuilder::run() {
         error() << "IndexBuilder could not build index: " << status.toString();
         fassert(28555, ErrorCodes::isInterruption(status.code()));
     }
-
-    txn.getClient()->shutdown();
 }
 
 Status IndexBuilder::buildInForeground(OperationContext* txn, Database* db) const {
@@ -109,7 +111,7 @@ Status IndexBuilder::buildInForeground(OperationContext* txn, Database* db) cons
 }
 
 void IndexBuilder::waitForBgIndexStarting() {
-    boost::unique_lock<boost::mutex> lk(_bgIndexStartingMutex);
+    stdx::unique_lock<stdx::mutex> lk(_bgIndexStartingMutex);
     while (_bgIndexStarting == false) {
         _bgIndexStartingCondVar.wait(lk);
     }
@@ -135,14 +137,17 @@ Status IndexBuilder::_build(OperationContext* txn,
             } catch (const WriteConflictException& wce) {
                 LOG(2) << "WriteConflictException while creating collection in IndexBuilder"
                        << ", retrying.";
-                txn->recoveryUnit()->commitAndRestart();
+                txn->recoveryUnit()->abandonSnapshot();
                 continue;
             }
         }
     }
 
-    // Show which index we're building in the curop display.
-    txn->getCurOp()->setQuery(_index);
+    {
+        stdx::lock_guard<Client> lk(*txn->getClient());
+        // Show which index we're building in the curop display.
+        CurOp::get(txn)->setQuery_inlock(_index);
+    }
 
     bool haveSetBgIndexStarting = false;
     while (true) {
@@ -214,7 +219,7 @@ Status IndexBuilder::_build(OperationContext* txn,
 
 
         LOG(2) << "WriteConflictException while creating index in IndexBuilder, retrying.";
-        txn->recoveryUnit()->commitAndRestart();
+        txn->recoveryUnit()->abandonSnapshot();
     }
 }
-}  // namespace mongo
+}

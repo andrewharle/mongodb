@@ -39,7 +39,6 @@
 #include "mongo/db/storage/mmap_v1/catalog/namespace_details_rsv1_metadata.h"
 #include "mongo/db/storage/mmap_v1/mmap_v1_database_catalog_entry.h"
 #include "mongo/db/storage/record_store.h"
-#include "mongo/db/storage/recovery_unit.h"
 #include "mongo/util/log.h"
 #include "mongo/util/startup_test.h"
 
@@ -105,7 +104,7 @@ void NamespaceDetailsCollectionCatalogEntry::getAllIndexes(OperationContext* txn
 }
 
 bool NamespaceDetailsCollectionCatalogEntry::isIndexMultikey(OperationContext* txn,
-                                                             const StringData& idxName) const {
+                                                             StringData idxName) const {
     int idxNo = _findIndexNumber(txn, idxName);
     invariant(idxNo >= 0);
     return isIndexMultikey(idxNo);
@@ -116,7 +115,7 @@ bool NamespaceDetailsCollectionCatalogEntry::isIndexMultikey(int idxNo) const {
 }
 
 bool NamespaceDetailsCollectionCatalogEntry::setIndexIsMultikey(OperationContext* txn,
-                                                                const StringData& indexName,
+                                                                StringData indexName,
                                                                 bool multikey) {
     int idxNo = _findIndexNumber(txn, indexName);
     invariant(idxNo >= 0);
@@ -150,14 +149,14 @@ bool NamespaceDetailsCollectionCatalogEntry::setIndexIsMultikey(OperationContext
 }
 
 RecordId NamespaceDetailsCollectionCatalogEntry::getIndexHead(OperationContext* txn,
-                                                              const StringData& idxName) const {
+                                                              StringData idxName) const {
     int idxNo = _findIndexNumber(txn, idxName);
     invariant(idxNo >= 0);
     return _details->idx(idxNo).head.toRecordId();
 }
 
 BSONObj NamespaceDetailsCollectionCatalogEntry::getIndexSpec(OperationContext* txn,
-                                                             const StringData& idxName) const {
+                                                             StringData idxName) const {
     int idxNo = _findIndexNumber(txn, idxName);
     invariant(idxNo >= 0);
     const IndexDetails& id = _details->idx(idxNo);
@@ -165,7 +164,7 @@ BSONObj NamespaceDetailsCollectionCatalogEntry::getIndexSpec(OperationContext* t
 }
 
 void NamespaceDetailsCollectionCatalogEntry::setIndexHead(OperationContext* txn,
-                                                          const StringData& idxName,
+                                                          StringData idxName,
                                                           const RecordId& newHead) {
     int idxNo = _findIndexNumber(txn, idxName);
     invariant(idxNo >= 0);
@@ -173,14 +172,14 @@ void NamespaceDetailsCollectionCatalogEntry::setIndexHead(OperationContext* txn,
 }
 
 bool NamespaceDetailsCollectionCatalogEntry::isIndexReady(OperationContext* txn,
-                                                          const StringData& idxName) const {
+                                                          StringData idxName) const {
     int idxNo = _findIndexNumber(txn, idxName);
     invariant(idxNo >= 0);
     return idxNo < getCompletedIndexCount(txn);
 }
 
 int NamespaceDetailsCollectionCatalogEntry::_findIndexNumber(OperationContext* txn,
-                                                             const StringData& idxName) const {
+                                                             StringData idxName) const {
     NamespaceDetails::IndexIterator i = _details->ii(true);
     while (i.more()) {
         const IndexDetails& id = i.next();
@@ -215,7 +214,7 @@ public:
 } iu_unittest;
 
 Status NamespaceDetailsCollectionCatalogEntry::removeIndex(OperationContext* txn,
-                                                           const StringData& indexName) {
+                                                           StringData indexName) {
     int idxNo = _findIndexNumber(txn, indexName);
     if (idxNo < 0)
         return Status(ErrorCodes::NamespaceNotFound, "index not found to remove");
@@ -289,7 +288,7 @@ Status NamespaceDetailsCollectionCatalogEntry::prepareForIndexBuild(OperationCon
 }
 
 void NamespaceDetailsCollectionCatalogEntry::indexBuildSuccess(OperationContext* txn,
-                                                               const StringData& indexName) {
+                                                               StringData indexName) {
     int idxNo = _findIndexNumber(txn, indexName);
     fassert(17202, idxNo >= 0);
 
@@ -320,7 +319,7 @@ void NamespaceDetailsCollectionCatalogEntry::indexBuildSuccess(OperationContext*
 }
 
 void NamespaceDetailsCollectionCatalogEntry::updateTTLSetting(OperationContext* txn,
-                                                              const StringData& idxName,
+                                                              StringData idxName,
                                                               long long newExpireSeconds) {
     int idx = _findIndexNumber(txn, idxName);
     invariant(idx >= 0);
@@ -373,21 +372,15 @@ void NamespaceDetailsCollectionCatalogEntry::updateFlags(OperationContext* txn, 
     _updateSystemNamespaces(txn, BSON("$set" << BSON("options.flags" << newValue)));
 }
 
-namespace {
-class NamespacesRecordIdChange : public RecoveryUnit::Change {
-public:
-    NamespacesRecordIdChange(RecordId* namespacesRecordId, const RecordId& newId)
-        : _namespacesRecordId(namespacesRecordId), _oldId(*namespacesRecordId) {}
-
-    void commit() override {}
-    void rollback() override {
-        *_namespacesRecordId = _oldId;
-    }
-
-private:
-    RecordId* _namespacesRecordId;
-    const RecordId _oldId;
-};
+void NamespaceDetailsCollectionCatalogEntry::updateValidator(OperationContext* txn,
+                                                             const BSONObj& validator,
+                                                             StringData validationLevel,
+                                                             StringData validationAction) {
+    _updateSystemNamespaces(
+        txn,
+        BSON("$set" << BSON("options.validator" << validator << "options.validationLevel"
+                                                << validationLevel << "options.validationAction"
+                                                << validationAction)));
 }
 
 void NamespaceDetailsCollectionCatalogEntry::setNamespacesRecordId(OperationContext* txn,
@@ -401,8 +394,8 @@ void NamespaceDetailsCollectionCatalogEntry::setNamespacesRecordId(OperationCont
 
         // Register RecordId change for rollback if we're not initializing.
         if (txn && !_namespacesRecordId.isNull()) {
-            txn->recoveryUnit()->registerChange(
-                new NamespacesRecordIdChange(&_namespacesRecordId, newId));
+            auto oldNamespacesRecordId = _namespacesRecordId;
+            txn->recoveryUnit()->onRollback([=] { _namespacesRecordId = oldNamespacesRecordId; });
         }
         _namespacesRecordId = newId;
     }

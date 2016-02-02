@@ -34,16 +34,22 @@
 
 #include <limits>
 
+#include "mongo/db/audit.h"
+#include "mongo/db/client_basic.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/heartbeat_response_action.h"
 #include "mongo/db/repl/is_master_response.h"
 #include "mongo/db/repl/isself.h"
+#include "mongo/db/repl/repl_set_declare_election_winner_args.h"
 #include "mongo/db/repl/repl_set_heartbeat_args.h"
+#include "mongo/db/repl/repl_set_heartbeat_args_v1.h"
 #include "mongo/db/repl/repl_set_heartbeat_response.h"
 #include "mongo/db/repl/repl_set_html_summary.h"
+#include "mongo/db/repl/repl_set_request_votes_args.h"
 #include "mongo/db/repl/replication_executor.h"
 #include "mongo/db/repl/rslog.h"
-#include "mongo/db/server_parameters.h"
+#include "mongo/s/catalog/catalog_manager.h"
+#include "mongo/rpc/metadata/repl_set_metadata.h"
 #include "mongo/util/hex.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
@@ -54,7 +60,7 @@ namespace repl {
 
 using std::vector;
 
-const Seconds TopologyCoordinatorImpl::LastVote::leaseTime = Seconds(30);
+const Seconds TopologyCoordinatorImpl::VoteLease::leaseTime = Seconds(30);
 
 namespace {
 
@@ -62,10 +68,6 @@ template <typename T>
 int indexOfIterator(const std::vector<T>& vec, typename std::vector<T>::const_iterator& it) {
     return static_cast<int>(it - vec.begin());
 }
-
-// Interval between the time the last heartbeat from a node was received successfully, or
-// the time when we gave up retrying, and when the next heartbeat should be sent to a target.
-const Milliseconds kHeartbeatInterval(Seconds(2).total_milliseconds());
 
 // Maximum number of retries for a failed heartbeat.
 const int kMaxHeartbeatRetries = 2;
@@ -96,38 +98,30 @@ bool _hasOnlyAuthErrorUpHeartbeats(const std::vector<MemberHeartbeatData>& hbdat
 
 }  // namespace
 
-PingStats::PingStats()
-    : count(0),
-      value(std::numeric_limits<unsigned int>::max()),
-      _lastHeartbeatStartDate(0),
-      _numFailuresSinceLastStart(std::numeric_limits<int>::max()) {}
-
 void PingStats::start(Date_t now) {
     _lastHeartbeatStartDate = now;
     _numFailuresSinceLastStart = 0;
 }
 
-void PingStats::hit(int millis) {
+void PingStats::hit(Milliseconds millis) {
     _numFailuresSinceLastStart = std::numeric_limits<int>::max();
     ++count;
-    value = value == std::numeric_limits<unsigned int>::max()
-        ? millis
-        : static_cast<unsigned long>((value * .8) + (millis * .2));
+
+    value = value == UninitializedPing ? millis : Milliseconds((value * 4 + millis) / 5);
 }
 
 void PingStats::miss() {
     ++_numFailuresSinceLastStart;
 }
 
-TopologyCoordinatorImpl::TopologyCoordinatorImpl(Seconds maxSyncSourceLagSecs)
+TopologyCoordinatorImpl::TopologyCoordinatorImpl(Options options)
     : _role(Role::follower),
+      _term(OpTime::kUninitializedTerm),
       _currentPrimaryIndex(-1),
       _forceSyncSourceIndex(-1),
-      _maxSyncSourceLagSecs(maxSyncSourceLagSecs),
+      _options(std::move(options)),
       _selfIndex(-1),
       _stepDownPending(false),
-      _stepDownUntil(0),
-      _electionSleepUntil(0),
       _maintenanceModeCalls(0),
       _followerMode(MemberState::RS_STARTUP2) {
     invariant(getMemberState() == MemberState::RS_STARTUP);
@@ -146,7 +140,8 @@ HostAndPort TopologyCoordinatorImpl::getSyncSourceAddress() const {
     return _syncSource;
 }
 
-HostAndPort TopologyCoordinatorImpl::chooseNewSyncSource(Date_t now, const OpTime& lastOpApplied) {
+HostAndPort TopologyCoordinatorImpl::chooseNewSyncSource(Date_t now,
+                                                         const Timestamp& lastTimestampApplied) {
     // If we are primary, then we aren't syncing from anyone (else).
     if (_iAmPrimary()) {
         return HostAndPort();
@@ -203,31 +198,34 @@ HostAndPort TopologyCoordinatorImpl::chooseNewSyncSource(Date_t now, const OpTim
 
     // find the member with the lowest ping time that is ahead of me
 
+    // choose a time that will exclude no candidates by default, in case we don't see a primary
+    OpTime oldestSyncOpTime;
+
     // Find primary's oplog time. Reject sync candidates that are more than
-    // maxSyncSourceLagSecs seconds behind.
-    OpTime primaryOpTime;
+    // _options.maxSyncSourceLagSecs seconds behind.
     if (_currentPrimaryIndex != -1) {
-        primaryOpTime = _hbdata[_currentPrimaryIndex].getOpTime();
-    } else {
-        // choose a time that will exclude no candidates, since we don't see a primary
-        primaryOpTime = OpTime(_maxSyncSourceLagSecs.total_seconds(), 0);
-    }
+        OpTime primaryOpTime = _hbdata[_currentPrimaryIndex].getOpTime();
 
-    if (primaryOpTime.getSecs() <
-        static_cast<unsigned int>(_maxSyncSourceLagSecs.total_seconds())) {
-        // erh - I think this means there was just a new election
-        // and we don't yet know the new primary's optime
-        primaryOpTime = OpTime(_maxSyncSourceLagSecs.total_seconds(), 0);
+        // Check if primaryOpTime is still close to 0 because we haven't received
+        // our first heartbeat from a new primary yet.
+        unsigned int maxLag =
+            static_cast<unsigned int>(durationCount<Seconds>(_options.maxSyncSourceLagSecs));
+        if (primaryOpTime.getSecs() >= maxLag) {
+            oldestSyncOpTime =
+                OpTime(Timestamp(primaryOpTime.getSecs() - maxLag, 0), primaryOpTime.getTerm());
+        }
     }
-
-    OpTime oldestSyncOpTime(primaryOpTime.getSecs() - _maxSyncSourceLagSecs.total_seconds(), 0);
 
     int closestIndex = -1;
 
-    // Make two attempts.  The first attempt, we ignore those nodes with
-    // slave delay higher than our own, hidden nodes, and nodes that are excessively lagged.
-    // The second attempt includes such nodes, in case those are the only ones we can reach.
-    // This loop attempts to set 'closestIndex'.
+    // Make two attempts, with less restrictive rules the second time.
+    //
+    // During the first attempt, we ignore those nodes that have a larger slave
+    // delay, hidden nodes or non-voting, and nodes that are excessively behind.
+    //
+    // For the second attempt include those nodes, in case those are the only ones we can reach.
+    //
+    // This loop attempts to set 'closestIndex', to select a viable candidate.
     for (int attempts = 0; attempts < 2; ++attempts) {
         for (std::vector<MemberHeartbeatData>::const_iterator it = _hbdata.begin();
              it != _hbdata.end();
@@ -248,41 +246,45 @@ HostAndPort TopologyCoordinatorImpl::chooseNewSyncSource(Date_t now, const OpTim
 
             const MemberConfig& itMemberConfig(_rsConfig.getMemberAt(itIndex));
 
+            // Things to skip on the first attempt.
+            if (attempts == 0) {
+                // Candidate must be a voter if we are a voter.
+                if (_selfConfig().isVoter() && !itMemberConfig.isVoter()) {
+                    continue;
+                }
+                // Candidates must not be hidden.
+                if (itMemberConfig.isHidden()) {
+                    continue;
+                }
+                // Candidates cannot be excessively behind.
+                if (it->getOpTime() < oldestSyncOpTime) {
+                    continue;
+                }
+                // Candidate must not have a configured delay larger than ours.
+                if (_selfConfig().getSlaveDelay() < itMemberConfig.getSlaveDelay()) {
+                    continue;
+                }
+            }
             // Candidate must build indexes if we build indexes, to be considered.
             if (_selfConfig().shouldBuildIndexes()) {
                 if (!itMemberConfig.shouldBuildIndexes()) {
                     continue;
                 }
             }
-
             // only consider candidates that are ahead of where we are
-            if (it->getOpTime() <= lastOpApplied) {
+            if (it->getOpTime().getTimestamp() <= lastTimestampApplied) {
                 continue;
             }
-
-            // omit candidates that are excessively behind, on the first attempt at least.
-            if (attempts == 0 && it->getOpTime() < oldestSyncOpTime) {
-                continue;
-            }
-
-            // omit nodes that are more latent than anything we've already considered
+            // Candidate cannot be more latent than anything we've already considered.
             if ((closestIndex != -1) &&
                 (_getPing(itMemberConfig.getHostAndPort()) >
                  _getPing(_rsConfig.getMemberAt(closestIndex).getHostAndPort()))) {
                 continue;
             }
-
-            if (attempts == 0) {
-                if (_selfConfig().getSlaveDelay() < itMemberConfig.getSlaveDelay() ||
-                    itMemberConfig.isHidden()) {
-                    continue;  // skip this one in the first attempt
-                }
-            }
-
+            // Candidate cannot be blacklisted.
             if (_memberIsBlacklisted(itMemberConfig, now)) {
                 continue;
             }
-
             // This candidate has passed all tests; set 'closestIndex'
             closestIndex = itIndex;
         }
@@ -338,7 +340,7 @@ void TopologyCoordinatorImpl::clearSyncSourceBlacklist() {
     _syncSourceBlacklist.clear();
 }
 
-void TopologyCoordinatorImpl::prepareSyncFromResponse(const ReplicationExecutor::CallbackData& data,
+void TopologyCoordinatorImpl::prepareSyncFromResponse(const ReplicationExecutor::CallbackArgs& data,
                                                       const HostAndPort& target,
                                                       const OpTime& lastOpApplied,
                                                       BSONObjBuilder* response,
@@ -399,6 +401,13 @@ void TopologyCoordinatorImpl::prepareSyncFromResponse(const ReplicationExecutor:
         return;
     }
 
+    if (selfConfig.isVoter() && !targetConfig->isVoter()) {
+        *result = Status(ErrorCodes::InvalidOptions,
+                         str::stream() << "Cannot sync from \"" << target.toString()
+                                       << "\" because it is not a voter");
+        return;
+    }
+
     const MemberHeartbeatData& hbdata = _hbdata[targetIndex];
     if (hbdata.hasAuthIssue()) {
         *result =
@@ -434,9 +443,16 @@ void TopologyCoordinatorImpl::prepareSyncFromResponse(const ReplicationExecutor:
 void TopologyCoordinatorImpl::prepareFreshResponse(
     const ReplicationCoordinator::ReplSetFreshArgs& args,
     const Date_t now,
-    const OpTime lastOpApplied,
+    const OpTime& lastOpApplied,
     BSONObjBuilder* response,
     Status* result) {
+    if (_rsConfig.getProtocolVersion() != 0) {
+        *result = Status(ErrorCodes::BadValue,
+                         str::stream() << "replset: incompatible replset protocol version: "
+                                       << _rsConfig.getProtocolVersion());
+        return;
+    }
+
     if (_selfIndex == -1) {
         *result = Status(ErrorCodes::ReplicaSetNotFound,
                          "Cannot participate in elections because not initialized");
@@ -466,10 +482,11 @@ void TopologyCoordinatorImpl::prepareFreshResponse(
         weAreFresher = true;
     }
     // check not only our own optime, but any other member we can reach
-    else if (args.opTime < _latestKnownOpTime(lastOpApplied)) {
+    else if (OpTime(args.opTime, _term) < _latestKnownOpTime(lastOpApplied)) {
         weAreFresher = true;
     }
-    response->appendDate("opTime", lastOpApplied.asDate());
+    response->appendDate("opTime",
+                         Date_t::fromMillisSinceEpoch(lastOpApplied.getTimestamp().asLL()));
     response->append("fresher", weAreFresher);
 
     std::string errmsg;
@@ -551,9 +568,15 @@ bool TopologyCoordinatorImpl::_shouldVetoMember(
 void TopologyCoordinatorImpl::prepareElectResponse(
     const ReplicationCoordinator::ReplSetElectArgs& args,
     const Date_t now,
-    const OpTime lastOpApplied,
+    const OpTime& lastOpApplied,
     BSONObjBuilder* response,
     Status* result) {
+    if (_rsConfig.getProtocolVersion() != 0) {
+        *result = Status(ErrorCodes::BadValue,
+                         str::stream() << "replset: incompatible replset protocol version: "
+                                       << _rsConfig.getProtocolVersion());
+        return;
+    }
     if (_selfIndex == -1) {
         *result = Status(ErrorCodes::ReplicaSetNotFound,
                          "Cannot participate in election because not initialized");
@@ -597,15 +620,14 @@ void TopologyCoordinatorImpl::prepareElectResponse(
         log() << hopeful->getHostAndPort().toString() << " has lower priority than "
               << highestPriority->getHostAndPort().toString();
         vote = -10000;
-    } else if (_lastVote.when.millis + LastVote::leaseTime.total_milliseconds() >= now.millis &&
-               _lastVote.whoId != args.whoid) {
+    } else if (_voteLease.when + VoteLease::leaseTime >= now && _voteLease.whoId != args.whoid) {
         log() << "replSet voting no for " << hopeful->getHostAndPort().toString() << "; voted for "
-              << _lastVote.whoHostAndPort.toString() << ' '
-              << (now.millis - _lastVote.when.millis) / 1000 << " secs ago";
+              << _voteLease.whoHostAndPort.toString() << ' '
+              << durationCount<Seconds>(now - _voteLease.when) << " secs ago";
     } else {
-        _lastVote.when = now;
-        _lastVote.whoId = args.whoid;
-        _lastVote.whoHostAndPort = hopeful->getHostAndPort();
+        _voteLease.when = now;
+        _voteLease.whoId = args.whoid;
+        _voteLease.whoHostAndPort = hopeful->getHostAndPort();
         vote = _selfConfig().getNumVotes();
         invariant(hopeful->getId() == args.whoid);
         if (vote > 0) {
@@ -660,10 +682,7 @@ Status TopologyCoordinatorImpl::prepareHeartbeatResponse(Date_t now,
     // This is a replica set
     response->noteReplSet();
 
-    // For 2.6 compatibility
-    if (_rsConfig.isInitialized()) {
-        response->setSetName(ourSetName);
-    }
+    response->setSetName(ourSetName);
     response->setState(myState.s);
     if (myState.primary()) {
         response->setElectionTime(_electionTime);
@@ -674,20 +693,20 @@ Status TopologyCoordinatorImpl::prepareHeartbeatResponse(Date_t now,
 
     // Heartbeat status message
     response->setHbMsg(_getHbmsg(now));
-    response->setTime(Seconds(Milliseconds(now.asInt64()).total_seconds()));
-    response->setOpTime(lastOpApplied.asDate());
+    response->setTime(duration_cast<Seconds>(now - Date_t{}));
+    response->setOpTime(lastOpApplied);
 
     if (!_syncSource.empty()) {
-        response->setSyncingTo(_syncSource.toString());
+        response->setSyncingTo(_syncSource);
     }
 
     if (!_rsConfig.isInitialized()) {
-        response->setVersion(-2);
+        response->setConfigVersion(-2);
         return Status::OK();
     }
 
     const long long v = _rsConfig.getConfigVersion();
-    response->setVersion(v);
+    response->setConfigVersion(v);
     // Deliver new config if caller's version is older than ours
     if (v > args.getConfigVersion()) {
         response->setConfig(_rsConfig);
@@ -714,6 +733,77 @@ Status TopologyCoordinatorImpl::prepareHeartbeatResponse(Date_t now,
     return Status::OK();
 }
 
+Status TopologyCoordinatorImpl::prepareHeartbeatResponseV1(Date_t now,
+                                                           const ReplSetHeartbeatArgsV1& args,
+                                                           const std::string& ourSetName,
+                                                           const OpTime& lastOpApplied,
+                                                           ReplSetHeartbeatResponse* response) {
+    // Verify that replica set names match
+    const std::string rshb = args.getSetName();
+    if (ourSetName != rshb) {
+        log() << "replSet set names do not match, ours: " << ourSetName
+              << "; remote node's: " << rshb;
+        return Status(ErrorCodes::InconsistentReplicaSetNames,
+                      str::stream() << "Our set name of " << ourSetName << " does not match name "
+                                    << rshb << " reported by remote node");
+    }
+
+    const MemberState myState = getMemberState();
+    if (_selfIndex == -1) {
+        if (myState.removed()) {
+            return Status(ErrorCodes::InvalidReplicaSetConfig,
+                          "Our replica set configuration is invalid or does not include us");
+        }
+    } else {
+        if (args.getSenderId() == _selfConfig().getId()) {
+            return Status(ErrorCodes::BadValue,
+                          str::stream() << "Received heartbeat from member with the same "
+                                           "member ID as ourself: " << args.getSenderId());
+        }
+    }
+
+    response->setSetName(ourSetName);
+
+    response->setState(myState.s);
+
+    response->setOpTime(lastOpApplied);
+
+    if (_currentPrimaryIndex != -1) {
+        response->setPrimaryId(_rsConfig.getMemberAt(_currentPrimaryIndex).getId());
+    }
+
+    response->setTerm(_term);
+
+    if (!_syncSource.empty()) {
+        response->setSyncingTo(_syncSource);
+    }
+
+    if (!_rsConfig.isInitialized()) {
+        response->setConfigVersion(-2);
+        return Status::OK();
+    }
+
+    const long long v = _rsConfig.getConfigVersion();
+    response->setConfigVersion(v);
+    // Deliver new config if caller's version is older than ours
+    if (v > args.getConfigVersion()) {
+        response->setConfig(_rsConfig);
+    }
+
+    // Resolve the caller's id in our Member list
+    int from = -1;
+    if (v == args.getConfigVersion() && args.getSenderId() != -1) {
+        from = _getMemberIndex(args.getSenderId());
+    }
+    if (from == -1) {
+        return Status::OK();
+    }
+    invariant(from != _selfIndex);
+
+    // note that we got a heartbeat from this node
+    _hbdata[from].setLastHeartbeatRecv(now);
+    return Status::OK();
+}
 
 int TopologyCoordinatorImpl::_getMemberIndex(int id) const {
     int index = 0;
@@ -730,7 +820,7 @@ int TopologyCoordinatorImpl::_getMemberIndex(int id) const {
 std::pair<ReplSetHeartbeatArgs, Milliseconds> TopologyCoordinatorImpl::prepareHeartbeatRequest(
     Date_t now, const std::string& ourSetName, const HostAndPort& target) {
     PingStats& hbStats = _pings[target];
-    Milliseconds alreadyElapsed(now.asInt64() - hbStats.getLastHeartbeatStartDate().asInt64());
+    Milliseconds alreadyElapsed = now - hbStats.getLastHeartbeatStartDate();
     if (!_rsConfig.isInitialized() ||
         (hbStats.getNumFailuresSinceLastStart() > kMaxHeartbeatRetries) ||
         (alreadyElapsed >= _rsConfig.getHeartbeatTimeoutPeriodMillis())) {
@@ -755,12 +845,46 @@ std::pair<ReplSetHeartbeatArgs, Milliseconds> TopologyCoordinatorImpl::prepareHe
         hbArgs.setConfigVersion(-2);
     }
 
-    const Milliseconds timeoutPeriod(
-        _rsConfig.isInitialized()
-            ? _rsConfig.getHeartbeatTimeoutPeriodMillis()
-            : Milliseconds(ReplicaSetConfig::kDefaultHeartbeatTimeoutPeriod.total_milliseconds()));
-    const Milliseconds timeout(timeoutPeriod.total_milliseconds() -
-                               alreadyElapsed.total_milliseconds());
+    const Milliseconds timeoutPeriod(_rsConfig.isInitialized()
+                                         ? _rsConfig.getHeartbeatTimeoutPeriodMillis()
+                                         : ReplicaSetConfig::kDefaultHeartbeatTimeoutPeriod);
+    const Milliseconds timeout = timeoutPeriod - alreadyElapsed;
+    return std::make_pair(hbArgs, timeout);
+}
+
+std::pair<ReplSetHeartbeatArgsV1, Milliseconds> TopologyCoordinatorImpl::prepareHeartbeatRequestV1(
+    Date_t now, const std::string& ourSetName, const HostAndPort& target) {
+    PingStats& hbStats = _pings[target];
+    Milliseconds alreadyElapsed(now.asInt64() - hbStats.getLastHeartbeatStartDate().asInt64());
+    if (!_rsConfig.isInitialized() ||
+        (hbStats.getNumFailuresSinceLastStart() > kMaxHeartbeatRetries) ||
+        (alreadyElapsed >= _rsConfig.getHeartbeatTimeoutPeriodMillis())) {
+        // This is either the first request ever for "target", or the heartbeat timeout has
+        // passed, so we're starting a "new" heartbeat.
+        hbStats.start(now);
+        alreadyElapsed = Milliseconds(0);
+    }
+    ReplSetHeartbeatArgsV1 hbArgs;
+    if (_rsConfig.isInitialized()) {
+        hbArgs.setSetName(_rsConfig.getReplSetName());
+        hbArgs.setConfigVersion(_rsConfig.getConfigVersion());
+        if (_selfIndex >= 0) {
+            const MemberConfig& me = _selfConfig();
+            hbArgs.setSenderId(me.getId());
+            hbArgs.setSenderHost(me.getHostAndPort());
+        }
+        hbArgs.setTerm(_term);
+    } else {
+        hbArgs.setSetName(ourSetName);
+        // Config version -2 is for uninitialized config.
+        hbArgs.setConfigVersion(-2);
+        hbArgs.setTerm(OpTime::kInitialTerm);
+    }
+
+    const Milliseconds timeoutPeriod(_rsConfig.isInitialized()
+                                         ? _rsConfig.getHeartbeatTimeoutPeriodMillis()
+                                         : ReplicaSetConfig::kDefaultHeartbeatTimeoutPeriod);
+    const Milliseconds timeout(timeoutPeriod - alreadyElapsed);
     return std::make_pair(hbArgs, timeout);
 }
 
@@ -769,36 +893,50 @@ HeartbeatResponseAction TopologyCoordinatorImpl::processHeartbeatResponse(
     Milliseconds networkRoundTripTime,
     const HostAndPort& target,
     const StatusWith<ReplSetHeartbeatResponse>& hbResponse,
-    OpTime myLastOpApplied) {
+    const OpTime& myLastOpApplied) {
     const MemberState originalState = getMemberState();
     PingStats& hbStats = _pings[target];
-    invariant(hbStats.getLastHeartbeatStartDate() != Date_t(0));
+    invariant(hbStats.getLastHeartbeatStartDate() != Date_t());
+    const bool isUnauthorized = (hbResponse.getStatus().code() == ErrorCodes::Unauthorized) ||
+        (hbResponse.getStatus().code() == ErrorCodes::AuthenticationFailed);
     if (!hbResponse.isOK()) {
-        hbStats.miss();
+        if (isUnauthorized) {
+            hbStats.hit(networkRoundTripTime);
+        } else {
+            hbStats.miss();
+        }
     } else {
-        hbStats.hit(networkRoundTripTime.total_milliseconds());
+        hbStats.hit(networkRoundTripTime);
         // Log diagnostics.
         if (hbResponse.getValue().isStateDisagreement()) {
             LOG(1) << target << " thinks that we are down because they cannot send us heartbeats.";
         }
     }
 
-    const bool isUnauthorized = (hbResponse.getStatus().code() == ErrorCodes::Unauthorized) ||
-        (hbResponse.getStatus().code() == ErrorCodes::AuthenticationFailed);
-
-    Milliseconds alreadyElapsed(now.asInt64() - hbStats.getLastHeartbeatStartDate().asInt64());
-    Date_t nextHeartbeatStartDate;
-    // determine next start time
-    if (_rsConfig.isInitialized() &&
-        (hbStats.getNumFailuresSinceLastStart() <= kMaxHeartbeatRetries) &&
-        (alreadyElapsed < _rsConfig.getHeartbeatTimeoutPeriodMillis())) {
-        if (isUnauthorized) {
-            nextHeartbeatStartDate = now + kHeartbeatInterval.total_milliseconds();
-        } else {
-            nextHeartbeatStartDate = now;
-        }
+    // If a node is not PRIMARY and has no sync source,
+    // we increase the heartbeat rate in order
+    // to help it find a sync source more quickly,
+    // which helps ensure the PRIMARY will continue to
+    // see the majority of the cluster.
+    //
+    // Arbiters also use half the election timeout period for their heartbeat frequency
+    Milliseconds heartbeatInterval;
+    if (_rsConfig.getProtocolVersion() == 1 &&
+        (getMemberState().arbiter() || (getSyncSourceAddress().empty() && !_iAmPrimary()))) {
+        heartbeatInterval = _rsConfig.getElectionTimeoutPeriod() / 2;
     } else {
-        nextHeartbeatStartDate = now + kHeartbeatInterval.total_milliseconds();
+        heartbeatInterval = _rsConfig.getHeartbeatInterval();
+    }
+
+    const Milliseconds alreadyElapsed = now - hbStats.getLastHeartbeatStartDate();
+    Date_t nextHeartbeatStartDate;
+    // Determine next heartbeat start time.
+    if (hbStats.getNumFailuresSinceLastStart() <= kMaxHeartbeatRetries &&
+        alreadyElapsed < _rsConfig.getHeartbeatTimeoutPeriod()) {
+        // There are still retries left, let's use one.
+        nextHeartbeatStartDate = now;
+    } else {
+        nextHeartbeatStartDate = now + heartbeatInterval;
     }
 
     if (hbResponse.isOK() && hbResponse.getValue().hasConfig()) {
@@ -837,12 +975,13 @@ HeartbeatResponseAction TopologyCoordinatorImpl::processHeartbeatResponse(
     }
     const int memberIndex = _rsConfig.findMemberIndexByHostAndPort(target);
     if (memberIndex == -1) {
-        LOG(1) << "replset: Could not find " << target << " in current config so ignoring --"
-                                                          " current config: " << _rsConfig.toBSON();
+        LOG(1) << "Could not find " << target << " in current config so ignoring --"
+                                                 " current config: " << _rsConfig.toBSON();
         HeartbeatResponseAction nextAction = HeartbeatResponseAction::makeNoAction();
         nextAction.setNextHeartbeatStartDate(nextHeartbeatStartDate);
         return nextAction;
     }
+
     invariant(memberIndex != _selfIndex);
 
     MemberHeartbeatData& hbData = _hbdata[memberIndex];
@@ -853,7 +992,7 @@ HeartbeatResponseAction TopologyCoordinatorImpl::processHeartbeatResponse(
                       " issue for member _id:" << member.getId();
             hbData.setAuthIssue(now);
         } else if (hbStats.getNumFailuresSinceLastStart() > kMaxHeartbeatRetries ||
-                   alreadyElapsed >= _rsConfig.getHeartbeatTimeoutPeriodMillis()) {
+                   alreadyElapsed >= _rsConfig.getHeartbeatTimeoutPeriod()) {
             LOG(1) << "setDownValues: heartbeat response failed for member _id:" << member.getId()
                    << ", msg:  " << hbResponse.getStatus().reason();
 
@@ -861,22 +1000,106 @@ HeartbeatResponseAction TopologyCoordinatorImpl::processHeartbeatResponse(
         } else {
             LOG(3) << "Bad heartbeat response from " << target << "; trying again; Retries left: "
                    << (kMaxHeartbeatRetries - hbStats.getNumFailuresSinceLastStart()) << "; "
-                   << alreadyElapsed.total_milliseconds() << "ms have already elapsed";
+                   << alreadyElapsed << " have already elapsed";
         }
     } else {
-        ReplSetHeartbeatResponse hbr = hbResponse.getValue();
+        ReplSetHeartbeatResponse hbr = std::move(hbResponse.getValue());
         LOG(3) << "setUpValues: heartbeat response good for member _id:" << member.getId()
                << ", msg:  " << hbr.getHbMsg();
-        hbData.setUpValues(now, member.getHostAndPort(), hbr);
+        hbData.setUpValues(now, member.getHostAndPort(), std::move(hbr));
     }
-    HeartbeatResponseAction nextAction =
-        _updateHeartbeatDataImpl(memberIndex, originalState, now, myLastOpApplied);
+
+    HeartbeatResponseAction nextAction;
+    if (_rsConfig.getProtocolVersion() == 0) {
+        nextAction = _updatePrimaryFromHBData(memberIndex, originalState, now, myLastOpApplied);
+    } else {
+        nextAction = _updatePrimaryFromHBDataV1(memberIndex, originalState, now, myLastOpApplied);
+    }
 
     nextAction.setNextHeartbeatStartDate(nextHeartbeatStartDate);
     return nextAction;
 }
 
-HeartbeatResponseAction TopologyCoordinatorImpl::_updateHeartbeatDataImpl(
+HeartbeatResponseAction TopologyCoordinatorImpl::setMemberAsDown(Date_t now,
+                                                                 const int memberIndex,
+                                                                 const OpTime& myLastOpApplied) {
+    invariant(memberIndex != _selfIndex);
+    invariant(memberIndex != -1);
+    invariant(_currentPrimaryIndex == _selfIndex);
+    MemberHeartbeatData& hbData = _hbdata[memberIndex];
+    hbData.setDownValues(now, "no response within election timeout period");
+
+    if (CannotSeeMajority & _getMyUnelectableReason(now, myLastOpApplied)) {
+        if (_stepDownPending) {
+            return HeartbeatResponseAction::makeNoAction();
+        }
+        _stepDownPending = true;
+        log() << "can't see a majority of the set, relinquishing primary";
+        return HeartbeatResponseAction::makeStepDownSelfAction(_selfIndex);
+    }
+
+    return HeartbeatResponseAction::makeNoAction();
+}
+
+HeartbeatResponseAction TopologyCoordinatorImpl::_updatePrimaryFromHBDataV1(
+    int updatedConfigIndex,
+    const MemberState& originalState,
+    Date_t now,
+    const OpTime& lastOpApplied) {
+    //
+    // Updates the local notion of which remote node, if any is primary.
+    // Start the priority takeover process if we are eligible.
+    //
+
+    invariant(updatedConfigIndex != _selfIndex);
+
+    // If we are missing from the config, do not participate in primary maintenance or election.
+    if (_selfIndex == -1) {
+        return HeartbeatResponseAction::makeNoAction();
+    }
+    // If we are the primary, there must be no other primary, otherwise its higher term would
+    // have already made us step down.
+    if (_currentPrimaryIndex == _selfIndex) {
+        return HeartbeatResponseAction::makeNoAction();
+    }
+
+    // Scan the member list's heartbeat data for who is primary, and update _currentPrimaryIndex.
+    int primaryIndex = -1;
+    for (size_t i = 0; i < _hbdata.size(); i++) {
+        const MemberHeartbeatData& member = _hbdata[i];
+        if (member.getState().primary() && member.up()) {
+            if (primaryIndex == -1 || _hbdata[primaryIndex].getTerm() < member.getTerm()) {
+                primaryIndex = i;
+            }
+        }
+    }
+    _currentPrimaryIndex = primaryIndex;
+    if (_currentPrimaryIndex == -1) {
+        return HeartbeatResponseAction::makeNoAction();
+    }
+
+    // Clear last heartbeat message on ourselves.
+    setMyHeartbeatMessage(now, "");
+
+    // Priority takeover when the replset is stable.
+    //
+    // Take over the primary only if the remote primary is in the latest term I know.
+    // This is done only when we get a heartbeat response from the primary.
+    // Otherwise, there must be an outstanding election, which may succeed or not, but
+    // the remote primary will become aware of that election eventually and step down.
+    if (_hbdata[primaryIndex].getTerm() == _term && updatedConfigIndex == primaryIndex &&
+        _rsConfig.getMemberAt(primaryIndex).getPriority() <
+            _rsConfig.getMemberAt(_selfIndex).getPriority()) {
+        LOG(4) << "I can take over the primary due to higher priority."
+               << " Current primary index: " << primaryIndex << " in term "
+               << _hbdata[primaryIndex].getTerm();
+
+        return HeartbeatResponseAction::makePriorityTakeoverAction();
+    }
+    return HeartbeatResponseAction::makeNoAction();
+}
+
+HeartbeatResponseAction TopologyCoordinatorImpl::_updatePrimaryFromHBData(
     int updatedConfigIndex,
     const MemberState& originalState,
     Date_t now,
@@ -938,14 +1161,13 @@ HeartbeatResponseAction TopologyCoordinatorImpl::_updateHeartbeatDataImpl(
                           << " and is only "
                           << (latestOpTime.getSecs() - highestPriorityMemberOptime.getSecs())
                           << " seconds behind me";
-                    const Date_t until = now + LastVote::leaseTime.total_milliseconds() +
-                        kHeartbeatInterval.total_milliseconds();
+                    const Date_t until =
+                        now + VoteLease::leaseTime + _rsConfig.getHeartbeatInterval();
                     if (_electionSleepUntil < until) {
                         _electionSleepUntil = until;
                     }
                     return HeartbeatResponseAction::makeStepDownSelfAction(_selfIndex);
-                } else if ((highestPriorityMemberOptime == _selfIndex) &&
-                           (_electionSleepUntil <= now)) {
+                } else if ((highestPriorityIndex == _selfIndex) && (_electionSleepUntil <= now)) {
                     // If this node is the highest priority node, and it is not in
                     // an inter-election sleep period, ask the current primary to step down.
                     // This is an optimization, because the remote primary will almost certainly
@@ -980,7 +1202,7 @@ HeartbeatResponseAction TopologyCoordinatorImpl::_updateHeartbeatDataImpl(
                 if (remotePrimaryIndex != -1) {
                     // two other nodes think they are primary (asynchronously polled)
                     // -- wait for things to settle down.
-                    log() << "replSet info two remote primaries (transiently)";
+                    warning() << "two remote primaries (transiently)";
                     return HeartbeatResponseAction::makeNoAction();
                 }
                 remotePrimaryIndex = itIndex;
@@ -997,8 +1219,8 @@ HeartbeatResponseAction TopologyCoordinatorImpl::_updateHeartbeatDataImpl(
 
             // If we are also primary, this is a problem.  Determine who should step down.
             if (_iAmPrimary()) {
-                OpTime remoteElectionTime = _hbdata[remotePrimaryIndex].getElectionTime();
-                log() << "replset: another primary seen with election time " << remoteElectionTime
+                Timestamp remoteElectionTime = _hbdata[remotePrimaryIndex].getElectionTime();
+                log() << "another primary seen with election time " << remoteElectionTime
                       << " my election time is " << _electionTime;
 
                 // Step down whomever has the older election time.
@@ -1063,10 +1285,12 @@ HeartbeatResponseAction TopologyCoordinatorImpl::_updateHeartbeatDataImpl(
     if (!checkShouldStandForElection(now, lastOpApplied)) {
         return HeartbeatResponseAction::makeNoAction();
     }
+    fassert(28816, becomeCandidateIfElectable(now, lastOpApplied));
     return HeartbeatResponseAction::makeElectAction();
 }
 
-bool TopologyCoordinatorImpl::checkShouldStandForElection(Date_t now, const OpTime& lastOpApplied) {
+bool TopologyCoordinatorImpl::checkShouldStandForElection(Date_t now,
+                                                          const OpTime& lastOpApplied) const {
     if (_currentPrimaryIndex != -1) {
         return false;
     }
@@ -1090,12 +1314,17 @@ bool TopologyCoordinatorImpl::checkShouldStandForElection(Date_t now, const OpTi
         return false;
     }
     if (_electionSleepUntil > now) {
-        LOG(2) << "Not standing for election before " << dateToISOStringLocal(_electionSleepUntil)
-               << " because I stood too recently";
+        if (_rsConfig.getProtocolVersion() == 1) {
+            LOG(2) << "Not standing for election before "
+                   << dateToISOStringLocal(_electionSleepUntil)
+                   << " because I stood up or learned about a new term too recently";
+        } else {
+            LOG(2) << "Not standing for election before "
+                   << dateToISOStringLocal(_electionSleepUntil) << " because I stood too recently";
+        }
         return false;
     }
-    // All checks passed, become a candidate and start election proceedings.
-    _role = Role::candidate;
+    // All checks passed. Start election proceedings.
     return true;
 }
 
@@ -1127,7 +1356,7 @@ bool TopologyCoordinatorImpl::_iAmPrimary() const {
     return false;
 }
 
-OpTime TopologyCoordinatorImpl::_latestKnownOpTime(OpTime ourLastOpApplied) const {
+OpTime TopologyCoordinatorImpl::_latestKnownOpTime(const OpTime& ourLastOpApplied) const {
     OpTime latest = ourLastOpApplied;
 
     for (std::vector<MemberHeartbeatData>::const_iterator it = _hbdata.begin(); it != _hbdata.end();
@@ -1135,7 +1364,13 @@ OpTime TopologyCoordinatorImpl::_latestKnownOpTime(OpTime ourLastOpApplied) cons
         if (indexOfIterator(_hbdata, it) == _selfIndex) {
             continue;
         }
+
+        // Ignore down members
         if (!it->up()) {
+            continue;
+        }
+        // Ignore removed nodes (not in config, so not valid).
+        if (it->getState().removed()) {
             continue;
         }
 
@@ -1162,7 +1397,7 @@ bool TopologyCoordinatorImpl::_isMemberHigherPriority(int memberOneIndex,
 }
 
 int TopologyCoordinatorImpl::_getHighestPriorityElectableIndex(Date_t now,
-                                                               OpTime lastOpApplied) const {
+                                                               const OpTime& lastOpApplied) const {
     int maxIndex = -1;
     for (int currentIndex = 0; currentIndex < _rsConfig.getNumMembers(); currentIndex++) {
         UnelectableReasonMask reason = currentIndex == _selfIndex
@@ -1176,8 +1411,12 @@ int TopologyCoordinatorImpl::_getHighestPriorityElectableIndex(Date_t now,
     return maxIndex;
 }
 
+void TopologyCoordinatorImpl::prepareForStepDown() {
+    _stepDownPending = true;
+}
+
 void TopologyCoordinatorImpl::changeMemberState_forTest(const MemberState& newMemberState,
-                                                        OpTime electionTime) {
+                                                        const Timestamp& electionTime) {
     invariant(_selfIndex != -1);
     if (newMemberState == getMemberState())
         return;
@@ -1210,7 +1449,7 @@ void TopologyCoordinatorImpl::changeMemberState_forTest(const MemberState& newMe
                  << getMemberState();
         invariant(false);
     }
-    log() << "replSet " << newMemberState;
+    log() << newMemberState;
 }
 
 void TopologyCoordinatorImpl::_setCurrentPrimaryForTest(int primaryIndex) {
@@ -1223,13 +1462,13 @@ void TopologyCoordinatorImpl::_setCurrentPrimaryForTest(int primaryIndex) {
         if (primaryIndex != -1) {
             ReplSetHeartbeatResponse hbResponse;
             hbResponse.setState(MemberState::RS_PRIMARY);
-            hbResponse.setElectionTime(OpTime());
+            hbResponse.setElectionTime(Timestamp());
             hbResponse.setOpTime(_hbdata[primaryIndex].getOpTime());
-            hbResponse.setSyncingTo("");
+            hbResponse.setSyncingTo(HostAndPort());
             hbResponse.setHbMsg("");
             _hbdata[primaryIndex].setUpValues(_hbdata[primaryIndex].getLastHeartbeat(),
                                               _rsConfig.getMemberAt(primaryIndex).getHostAndPort(),
-                                              hbResponse);
+                                              std::move(hbResponse));
         }
         _currentPrimaryIndex = primaryIndex;
     }
@@ -1242,7 +1481,7 @@ const MemberConfig* TopologyCoordinatorImpl::_currentPrimaryMember() const {
     return &(_rsConfig.getMemberAt(_currentPrimaryIndex));
 }
 
-void TopologyCoordinatorImpl::prepareStatusResponse(const ReplicationExecutor::CallbackData& data,
+void TopologyCoordinatorImpl::prepareStatusResponse(const ReplicationExecutor::CallbackArgs& data,
                                                     Date_t now,
                                                     unsigned selfUptime,
                                                     const OpTime& lastOpApplied,
@@ -1262,8 +1501,18 @@ void TopologyCoordinatorImpl::prepareStatusResponse(const ReplicationExecutor::C
         response->append("state", static_cast<int>(myState.s));
         response->append("stateStr", myState.toString());
         response->append("uptime", selfUptime);
-        response->append("optime", lastOpApplied);
-        response->appendDate("optimeDate", Date_t(lastOpApplied.getSecs() * 1000ULL));
+
+        if (_rsConfig.getProtocolVersion() == 1) {
+            BSONObjBuilder opTime(response->subobjStart("optime"));
+            opTime.append("ts", lastOpApplied.getTimestamp());
+            opTime.append("t", lastOpApplied.getTerm());
+            opTime.done();
+        } else {
+            response->append("optime", lastOpApplied.getTimestamp());
+        }
+
+        response->appendDate("optimeDate",
+                             Date_t::fromDurationSinceEpoch(Seconds(lastOpApplied.getSecs())));
         if (_maintenanceModeCalls) {
             response->append("maintenanceMode", _maintenanceModeCalls);
         }
@@ -1288,8 +1537,17 @@ void TopologyCoordinatorImpl::prepareStatusResponse(const ReplicationExecutor::C
             bb.append("stateStr", myState.toString());
             bb.append("uptime", selfUptime);
             if (!_selfConfig().isArbiter()) {
-                bb.append("optime", lastOpApplied);
-                bb.appendDate("optimeDate", Date_t(lastOpApplied.getSecs() * 1000ULL));
+                if (_rsConfig.getProtocolVersion() == 1) {
+                    BSONObjBuilder opTime(bb.subobjStart("optime"));
+                    opTime.append("ts", lastOpApplied.getTimestamp());
+                    opTime.append("t", lastOpApplied.getTerm());
+                    opTime.done();
+                } else {
+                    bb.append("optime", lastOpApplied.getTimestamp());
+                }
+
+                bb.appendDate("optimeDate",
+                              Date_t::fromDurationSinceEpoch(Seconds(lastOpApplied.getSecs())));
             }
 
             if (!_syncSource.empty() && !_iAmPrimary()) {
@@ -1306,7 +1564,8 @@ void TopologyCoordinatorImpl::prepareStatusResponse(const ReplicationExecutor::C
 
             if (myState.primary()) {
                 bb.append("electionTime", _electionTime);
-                bb.appendDate("electionDate", Date_t(_electionTime.getSecs() * 1000ULL));
+                bb.appendDate("electionDate",
+                              Date_t::fromDurationSinceEpoch(Seconds(_electionTime.getSecs())));
             }
             bb.appendIntOrLL("configVersion", _rsConfig.getConfigVersion());
             bb.append("self", true);
@@ -1329,19 +1588,27 @@ void TopologyCoordinatorImpl::prepareStatusResponse(const ReplicationExecutor::C
                 bb.append("stateStr", it->getState().toString());
             }
 
-            const unsigned int uptime = static_cast<unsigned int>(
-                (it->getUpSince() ? (now - it->getUpSince()) / 1000 /* convert millis to secs */
-                                  : 0));
+            const unsigned int uptime = static_cast<unsigned int>((
+                it->getUpSince() != Date_t() ? durationCount<Seconds>(now - it->getUpSince()) : 0));
             bb.append("uptime", uptime);
             if (!itConfig.isArbiter()) {
-                bb.append("optime", it->getOpTime());
-                bb.appendDate("optimeDate", Date_t(it->getOpTime().getSecs() * 1000ULL));
+                if (_rsConfig.getProtocolVersion() == 1) {
+                    BSONObjBuilder opTime(bb.subobjStart("optime"));
+                    opTime.append("ts", it->getOpTime().getTimestamp());
+                    opTime.append("t", it->getOpTime().getTerm());
+                    opTime.done();
+                } else {
+                    bb.append("optime", it->getOpTime().getTimestamp());
+                }
+
+                bb.appendDate("optimeDate",
+                              Date_t::fromDurationSinceEpoch(Seconds(it->getOpTime().getSecs())));
             }
             bb.appendDate("lastHeartbeat", it->getLastHeartbeat());
             bb.appendDate("lastHeartbeatRecv", it->getLastHeartbeatRecv());
-            const int ping = _getPing(itConfig.getHostAndPort());
-            if (ping != -1) {
-                bb.append("pingMs", ping);
+            Milliseconds ping = _getPing(itConfig.getHostAndPort());
+            if (ping != UninitializedPing) {
+                bb.append("pingMs", durationCount<Milliseconds>(ping));
                 std::string s = it->getLastHeartbeatMsg();
                 if (!s.empty())
                     bb.append("lastHeartbeatMessage", s);
@@ -1349,14 +1616,16 @@ void TopologyCoordinatorImpl::prepareStatusResponse(const ReplicationExecutor::C
             if (it->hasAuthIssue()) {
                 bb.append("authenticated", false);
             }
-            const std::string syncSource = it->getSyncSource();
+            const HostAndPort& syncSource = it->getSyncSource();
             if (!syncSource.empty() && !state.primary()) {
-                bb.append("syncingTo", syncSource);
+                bb.append("syncingTo", syncSource.toString());
             }
 
             if (state == MemberState::RS_PRIMARY) {
                 bb.append("electionTime", it->getElectionTime());
-                bb.appendDate("electionDate", Date_t(it->getElectionTime().getSecs() * 1000ULL));
+                bb.appendDate(
+                    "electionDate",
+                    Date_t::fromDurationSinceEpoch(Seconds(it->getElectionTime().getSecs())));
             }
             bb.appendIntOrLL("configVersion", it->getConfigVersion());
             membersOut.push_back(bb.obj());
@@ -1369,11 +1638,19 @@ void TopologyCoordinatorImpl::prepareStatusResponse(const ReplicationExecutor::C
     response->append("set", _rsConfig.isInitialized() ? _rsConfig.getReplSetName() : "");
     response->append("date", now);
     response->append("myState", myState.s);
+    response->append("term", _term);
 
     // Add sync source info
     if (!_syncSource.empty() && !myState.primary() && !myState.removed()) {
         response->append("syncingTo", _syncSource.toString());
     }
+
+    if (_rsConfig.isConfigServer()) {
+        response->append("configsvr", true);
+    }
+
+    response->append("heartbeatIntervalMillis",
+                     durationCount<Milliseconds>(_rsConfig.getHeartbeatInterval()));
 
     response->append("members", membersOut);
     *result = Status::OK();
@@ -1381,33 +1658,36 @@ void TopologyCoordinatorImpl::prepareStatusResponse(const ReplicationExecutor::C
 
 void TopologyCoordinatorImpl::fillIsMasterForReplSet(IsMasterResponse* response) {
     const MemberState myState = getMemberState();
-    if (!_rsConfig.isInitialized() || myState.removed()) {
+    if (!_rsConfig.isInitialized()) {
         response->markAsNoConfig();
         return;
     }
 
+    for (ReplicaSetConfig::MemberIterator it = _rsConfig.membersBegin();
+         it != _rsConfig.membersEnd();
+         ++it) {
+        if (it->isHidden() || it->getSlaveDelay() > Seconds{0}) {
+            continue;
+        }
+
+        if (it->isElectable()) {
+            response->addHost(it->getHostAndPort());
+        } else if (it->isArbiter()) {
+            response->addArbiter(it->getHostAndPort());
+        } else {
+            response->addPassive(it->getHostAndPort());
+        }
+    }
+
     response->setReplSetName(_rsConfig.getReplSetName());
+    if (myState.removed()) {
+        response->markAsNoConfig();
+        return;
+    }
+
     response->setReplSetVersion(_rsConfig.getConfigVersion());
     response->setIsMaster(myState.primary());
     response->setIsSecondary(myState.secondary());
-
-    {
-        for (ReplicaSetConfig::MemberIterator it = _rsConfig.membersBegin();
-             it != _rsConfig.membersEnd();
-             ++it) {
-            if (it->isHidden() || it->getSlaveDelay().total_seconds() > 0) {
-                continue;
-            }
-
-            if (it->isElectable()) {
-                response->addHost(it->getHostAndPort());
-            } else if (it->isArbiter()) {
-                response->addArbiter(it->getHostAndPort());
-            } else {
-                response->addPassive(it->getHostAndPort());
-            }
-        }
-    }
 
     const MemberConfig* curPrimary = _currentPrimaryMember();
     if (curPrimary) {
@@ -1420,7 +1700,7 @@ void TopologyCoordinatorImpl::fillIsMasterForReplSet(IsMasterResponse* response)
     } else if (selfConfig.getPriority() == 0) {
         response->setIsPassive(true);
     }
-    if (selfConfig.getSlaveDelay().total_seconds()) {
+    if (selfConfig.getSlaveDelay() > Seconds(0)) {
         response->setSlaveDelay(selfConfig.getSlaveDelay());
     }
     if (selfConfig.isHidden()) {
@@ -1452,7 +1732,7 @@ void TopologyCoordinatorImpl::prepareFreezeResponse(Date_t now,
                                                     BSONObjBuilder* response) {
     if (secs == 0) {
         _stepDownUntil = now;
-        log() << "replSet info 'unfreezing'";
+        log() << "'unfreezing'";
         response->append("info", "unfreezing");
 
         if (_followerMode == MemberState::RS_SECONDARY && _rsConfig.getNumMembers() == 1 &&
@@ -1468,10 +1748,10 @@ void TopologyCoordinatorImpl::prepareFreezeResponse(Date_t now,
             response->append("warning", "you really want to freeze for only 1 second?");
 
         if (!_iAmPrimary()) {
-            _stepDownUntil = std::max(_stepDownUntil, Date_t(now + (secs * 1000)));
-            log() << "replSet info 'freezing' for " << secs << " seconds";
+            _stepDownUntil = std::max(_stepDownUntil, now + Seconds(secs));
+            log() << "'freezing' for " << secs << " seconds";
         } else {
-            log() << "replSet info received freeze command but we are primary";
+            log() << "received freeze command but we are primary";
         }
     }
 }
@@ -1498,7 +1778,7 @@ void TopologyCoordinatorImpl::setElectionSleepUntil(Date_t newTime) {
     }
 }
 
-OpTime TopologyCoordinatorImpl::getElectionTime() const {
+Timestamp TopologyCoordinatorImpl::getElectionTime() const {
     return _electionTime;
 }
 
@@ -1551,9 +1831,21 @@ void TopologyCoordinatorImpl::_updateHeartbeatDataForReconfig(const ReplicaSetCo
 void TopologyCoordinatorImpl::updateConfig(const ReplicaSetConfig& newConfig,
                                            int selfIndex,
                                            Date_t now,
-                                           OpTime lastOpApplied) {
+                                           const OpTime& lastOpApplied) {
     invariant(_role != Role::candidate);
     invariant(selfIndex < newConfig.getNumMembers());
+
+    // Reset term on startup and upgrade/downgrade of protocol version.
+    if (!_rsConfig.isInitialized() ||
+        _rsConfig.getProtocolVersion() != newConfig.getProtocolVersion()) {
+        if (newConfig.getProtocolVersion() == 1) {
+            _term = OpTime::kInitialTerm;
+        } else {
+            invariant(newConfig.getProtocolVersion() == 0);
+            _term = OpTime::kUninitializedTerm;
+        }
+        LOG(1) << "Updated term in topology coordinator to " << _term << " due to new config";
+    }
 
     _updateHeartbeatDataForReconfig(newConfig, selfIndex, now);
     _stepDownPending = false;
@@ -1587,7 +1879,7 @@ void TopologyCoordinatorImpl::updateConfig(const ReplicaSetConfig& newConfig,
 }
 std::string TopologyCoordinatorImpl::_getHbmsg(Date_t now) const {
     // ignore messages over 2 minutes old
-    if ((now - _hbmsgTime) > 120) {
+    if ((now - _hbmsgTime) > Seconds{120}) {
         return "";
     }
     return _hbmsg;
@@ -1617,7 +1909,8 @@ TopologyCoordinatorImpl::UnelectableReasonMask TopologyCoordinatorImpl::_getUnel
     if (hbData.getState() != MemberState::RS_SECONDARY) {
         result |= NotSecondary;
     }
-    if (!_isOpTimeCloseEnoughToLatestToElect(hbData.getOpTime(), lastOpApplied)) {
+    if (_rsConfig.getProtocolVersion() == 0 &&
+        !_isOpTimeCloseEnoughToLatestToElect(hbData.getOpTime(), lastOpApplied)) {
         result |= NotCloseEnoughToLatestOptime;
     }
     if (hbData.up() && hbData.isUnelectable()) {
@@ -1628,7 +1921,7 @@ TopologyCoordinatorImpl::UnelectableReasonMask TopologyCoordinatorImpl::_getUnel
 }
 
 TopologyCoordinatorImpl::UnelectableReasonMask TopologyCoordinatorImpl::_getMyUnelectableReason(
-    const Date_t now, const OpTime lastApplied) const {
+    const Date_t now, const OpTime& lastApplied) const {
     UnelectableReasonMask result = None;
     if (lastApplied.isNull()) {
         result |= NoData;
@@ -1649,17 +1942,22 @@ TopologyCoordinatorImpl::UnelectableReasonMask TopologyCoordinatorImpl::_getMyUn
     if (_stepDownUntil > now) {
         result |= StepDownPeriodActive;
     }
-    if (_lastVote.whoId != -1 && _lastVote.whoId != _rsConfig.getMemberAt(_selfIndex).getId() &&
-        _lastVote.when.millis + LastVote::leaseTime.total_milliseconds() >= now.millis) {
-        result |= VotedTooRecently;
-    }
 
     // Cannot be electable unless secondary or already primary
     if (!getMemberState().secondary() && !_iAmPrimary()) {
         result |= NotSecondary;
     }
-    if (!_isOpTimeCloseEnoughToLatestToElect(lastApplied, lastApplied)) {
-        result |= NotCloseEnoughToLatestOptime;
+
+    // Election rules only for protocol version 0.
+    if (_rsConfig.getProtocolVersion() == 0) {
+        if (_voteLease.whoId != -1 &&
+            _voteLease.whoId != _rsConfig.getMemberAt(_selfIndex).getId() &&
+            _voteLease.when + VoteLease::leaseTime >= now) {
+            result |= VotedTooRecently;
+        }
+        if (!_isOpTimeCloseEnoughToLatestToElect(lastApplied, lastApplied)) {
+            result |= NotCloseEnoughToLatestOptime;
+        }
     }
     return result;
 }
@@ -1678,7 +1976,7 @@ std::string TopologyCoordinatorImpl::_getUnelectableReasonString(
             ss << "; ";
         }
         hasWrittenToStream = true;
-        ss << "I recently voted for " << _lastVote.whoHostAndPort.toString();
+        ss << "I recently voted for " << _voteLease.whoHostAndPort.toString();
     }
     if (ur & CannotSeeMajority) {
         if (hasWrittenToStream) {
@@ -1745,11 +2043,11 @@ std::string TopologyCoordinatorImpl::_getUnelectableReasonString(
     return ss;
 }
 
-int TopologyCoordinatorImpl::_getPing(const HostAndPort& host) {
+Milliseconds TopologyCoordinatorImpl::_getPing(const HostAndPort& host) {
     return _pings[host].getMillis();
 }
 
-void TopologyCoordinatorImpl::_setElectionTime(const OpTime& newElectionTime) {
+void TopologyCoordinatorImpl::_setElectionTime(const Timestamp& newElectionTime) {
     _electionTime = newElectionTime;
 }
 
@@ -1786,16 +2084,15 @@ bool TopologyCoordinatorImpl::voteForMyself(Date_t now) {
         return false;
     }
     int selfId = _selfConfig().getId();
-    if ((_lastVote.when + LastVote::leaseTime.total_milliseconds() >= now) &&
-        (_lastVote.whoId != selfId)) {
-        log() << "replSet not voting yea for " << selfId << " voted for "
-              << _lastVote.whoHostAndPort.toString() << ' ' << (now - _lastVote.when) / 1000
-              << " secs ago";
+    if ((_voteLease.when + VoteLease::leaseTime >= now) && (_voteLease.whoId != selfId)) {
+        log() << "not voting yea for " << selfId << " voted for "
+              << _voteLease.whoHostAndPort.toString() << ' '
+              << durationCount<Seconds>(now - _voteLease.when) << " secs ago";
         return false;
     }
-    _lastVote.when = now;
-    _lastVote.whoId = selfId;
-    _lastVote.whoHostAndPort = _selfConfig().getHostAndPort();
+    _voteLease.when = now;
+    _voteLease.whoId = selfId;
+    _voteLease.whoHostAndPort = _selfConfig().getHostAndPort();
     return true;
 }
 
@@ -1806,6 +2103,23 @@ MemberState TopologyCoordinatorImpl::getMemberState() const {
         }
         return MemberState::RS_STARTUP;
     }
+
+    if (_rsConfig.isConfigServer()) {
+        if (_options.configServerMode == CatalogManager::ConfigServerMode::NONE) {
+            return MemberState::RS_REMOVED;
+        }
+        if (_options.configServerMode == CatalogManager::ConfigServerMode::CSRS) {
+            invariant(_storageEngineSupportsReadCommitted != ReadCommittedSupport::kUnknown);
+            if (_storageEngineSupportsReadCommitted == ReadCommittedSupport::kNo) {
+                return MemberState::RS_REMOVED;
+            }
+        }
+    } else {
+        if (_options.configServerMode != CatalogManager::ConfigServerMode::NONE) {
+            return MemberState::RS_REMOVED;
+        }
+    }
+
     if (_role == Role::leader) {
         invariant(_currentPrimaryIndex == _selfIndex);
         return MemberState::RS_PRIMARY;
@@ -1821,7 +2135,7 @@ MemberState TopologyCoordinatorImpl::getMemberState() const {
     return _followerMode;
 }
 
-void TopologyCoordinatorImpl::processWinElection(OID electionId, OpTime electionOpTime) {
+void TopologyCoordinatorImpl::processWinElection(OID electionId, Timestamp electionOpTime) {
     invariant(_role == Role::candidate);
     _electionTime = electionOpTime;
     _electionId = electionId;
@@ -1834,18 +2148,18 @@ void TopologyCoordinatorImpl::processWinElection(OID electionId, OpTime election
 void TopologyCoordinatorImpl::processLoseElection() {
     invariant(_role == Role::candidate);
     const HostAndPort syncSourceAddress = getSyncSourceAddress();
-    _electionTime = OpTime(0, 0);
+    _electionTime = Timestamp(0, 0);
     _electionId = OID();
     _role = Role::follower;
 
-    // Clear lastVote time, if we voted for ourselves in this election.
+    // Clear voteLease time, if we voted for ourselves in this election.
     // This will allow us to vote for others.
-    if (_lastVote.whoId == _selfConfig().getId()) {
-        _lastVote.when = 0;
+    if (_voteLease.whoId == _selfConfig().getId()) {
+        _voteLease.when = Date_t();
     }
 }
 
-bool TopologyCoordinatorImpl::stepDown(Date_t until, bool force, OpTime lastOpApplied) {
+bool TopologyCoordinatorImpl::stepDown(Date_t until, bool force, const OpTime& lastOpApplied) {
     bool canStepDown = force;
     for (int i = 0; !canStepDown && i < _rsConfig.getNumMembers(); ++i) {
         if (i == _selfIndex) {
@@ -1910,7 +2224,7 @@ bool TopologyCoordinatorImpl::stepDownIfPending() {
                 // two other nodes think they are primary (asynchronously polled)
                 // -- wait for things to settle down.
                 remotePrimaryIndex = -1;
-                log() << "replSet info two remote primaries (transiently)";
+                warning() << "two remote primaries (transiently)";
                 break;
             }
             remotePrimaryIndex = itIndex;
@@ -1940,46 +2254,82 @@ int TopologyCoordinatorImpl::getMaintenanceCount() const {
     return _maintenanceModeCalls;
 }
 
+TopologyCoordinator::UpdateTermResult TopologyCoordinatorImpl::updateTerm(long long term,
+                                                                          Date_t now) {
+    if (term <= _term) {
+        return TopologyCoordinator::UpdateTermResult::kAlreadyUpToDate;
+    }
+    // Don't run election if we just stood up or learned about a new term.
+    _electionSleepUntil = now + _rsConfig.getElectionTimeoutPeriod();
+
+    // Don't update the term just yet if we are going to step down, as we don't want to report
+    // that we are primary in the new term.
+    if (_iAmPrimary()) {
+        return TopologyCoordinator::UpdateTermResult::kTriggerStepDown;
+    }
+    _term = term;
+    return TopologyCoordinator::UpdateTermResult::kUpdatedTerm;
+}
+
+
+long long TopologyCoordinatorImpl::getTerm() {
+    return _term;
+}
+
 bool TopologyCoordinatorImpl::shouldChangeSyncSource(const HostAndPort& currentSource,
+                                                     const OpTime& myLastOpTime,
+                                                     const OpTime& syncSourceLastOpTime,
+                                                     bool syncSourceHasSyncSource,
                                                      Date_t now) const {
     // Methodology:
     // If there exists a viable sync source member other than currentSource, whose oplog has
-    // reached an optime greater than _maxSyncSourceLagSecs later than currentSource's, return
-    // true.
+    // reached an optime greater than _options.maxSyncSourceLagSecs later than currentSource's,
+    // return true.
+    // If the currentSource has the same replication progress as we do and has no source for further
+    // progress, return true.
 
     // If the user requested a sync source change, return true.
     if (_forceSyncSourceIndex != -1) {
         return true;
     }
 
-    const int currentMemberIndex = _rsConfig.findMemberIndexByHostAndPort(currentSource);
-    if (currentMemberIndex == -1) {
+    const int currentSourceIndex = _rsConfig.findMemberIndexByHostAndPort(currentSource);
+    if (currentSourceIndex == -1) {
         return true;
     }
-    invariant(currentMemberIndex != _selfIndex);
+    invariant(currentSourceIndex != _selfIndex);
 
-    OpTime currentOpTime = _hbdata[currentMemberIndex].getOpTime();
-    if (currentOpTime.isNull()) {
+    OpTime currentSourceOpTime =
+        std::max(syncSourceLastOpTime, _hbdata[currentSourceIndex].getOpTime());
+
+    if (currentSourceOpTime.isNull()) {
         // Haven't received a heartbeat from the sync source yet, so can't tell if we should
         // change.
         return false;
     }
-    unsigned int currentSecs = currentOpTime.getSecs();
-    unsigned int goalSecs = currentSecs + _maxSyncSourceLagSecs.total_seconds();
+
+    if (_rsConfig.getProtocolVersion() == 1 && !syncSourceHasSyncSource &&
+        currentSourceOpTime <= myLastOpTime &&
+        _hbdata[currentSourceIndex].getState() != MemberState::RS_PRIMARY) {
+        return true;
+    }
+
+    unsigned int currentSecs = currentSourceOpTime.getSecs();
+    unsigned int goalSecs = currentSecs + durationCount<Seconds>(_options.maxSyncSourceLagSecs);
 
     for (std::vector<MemberHeartbeatData>::const_iterator it = _hbdata.begin(); it != _hbdata.end();
          ++it) {
         const int itIndex = indexOfIterator(_hbdata, it);
         const MemberConfig& candidateConfig = _rsConfig.getMemberAt(itIndex);
-        if (it->up() &&
+        if (it->up() && (candidateConfig.isVoter() || !_selfConfig().isVoter()) &&
             (candidateConfig.shouldBuildIndexes() || !_selfConfig().shouldBuildIndexes()) &&
             it->getState().readable() && !_memberIsBlacklisted(candidateConfig, now) &&
             goalSecs < it->getOpTime().getSecs()) {
-            log() << "changing sync target because current sync target's most recent OpTime is "
-                  << currentOpTime.toStringLong() << " which is more than "
-                  << _maxSyncSourceLagSecs.total_seconds() << " seconds behind member "
+            log() << "re-evaluating sync source because our current sync source's most recent "
+                  << "OpTime is " << currentSourceOpTime.toString() << " which is more than "
+                  << _options.maxSyncSourceLagSecs << " behind member "
                   << candidateConfig.getHostAndPort().toString() << " whose most recent OpTime is "
-                  << it->getOpTime().toStringLong();
+                  << it->getOpTime().toString();
             invariant(itIndex != _selfIndex);
             return true;
         }
@@ -1987,6 +2337,17 @@ bool TopologyCoordinatorImpl::shouldChangeSyncSource(const HostAndPort& currentS
     return false;
 }
 
+void TopologyCoordinatorImpl::prepareReplResponseMetadata(rpc::ReplSetMetadata* metadata,
+                                                          const OpTime& lastVisibleOpTime,
+                                                          const OpTime& lastCommittedOpTime) const {
+    *metadata =
+        rpc::ReplSetMetadata(_term,
+                             lastCommittedOpTime,
+                             lastVisibleOpTime,
+                             _rsConfig.getConfigVersion(),
+                             _currentPrimaryIndex,
+                             _rsConfig.findMemberIndexByHostAndPort(getSyncSourceAddress()));
+}
 
 void TopologyCoordinatorImpl::summarizeAsHtml(ReplSetHtmlSummary* output) {
     output->setConfig(_rsConfig);
@@ -1995,6 +2356,94 @@ void TopologyCoordinatorImpl::summarizeAsHtml(ReplSetHtmlSummary* output) {
     output->setPrimaryIndex(_currentPrimaryIndex);
     output->setSelfState(getMemberState());
     output->setSelfHeartbeatMessage(_hbmsg);
+}
+
+void TopologyCoordinatorImpl::processReplSetRequestVotes(const ReplSetRequestVotesArgs& args,
+                                                         ReplSetRequestVotesResponse* response,
+                                                         const OpTime& lastAppliedOpTime) {
+    response->setTerm(_term);
+
+    if (args.getTerm() < _term) {
+        response->setVoteGranted(false);
+        response->setReason("candidate's term is lower than mine");
+    } else if (args.getConfigVersion() != _rsConfig.getConfigVersion()) {
+        response->setVoteGranted(false);
+        response->setReason("candidate's config version differs from mine");
+    } else if (args.getSetName() != _rsConfig.getReplSetName()) {
+        response->setVoteGranted(false);
+        response->setReason("candidate's set name differs from mine");
+    } else if (args.getLastCommittedOp() < lastAppliedOpTime) {
+        response->setVoteGranted(false);
+        response->setReason("candidate's data is staler than mine");
+    } else if (!args.isADryRun() && _lastVote.getTerm() == args.getTerm()) {
+        response->setVoteGranted(false);
+        response->setReason("already voted for another candidate this term");
+    } else {
+        if (!args.isADryRun()) {
+            _lastVote.setTerm(args.getTerm());
+            _lastVote.setCandidateIndex(args.getCandidateIndex());
+        }
+        response->setVoteGranted(true);
+    }
+}
+
+Status TopologyCoordinatorImpl::processReplSetDeclareElectionWinner(
+    const ReplSetDeclareElectionWinnerArgs& args, long long* responseTerm) {
+    *responseTerm = _term;
+    if (args.getReplSetName() != _rsConfig.getReplSetName()) {
+        return {ErrorCodes::BadValue, "replSet name does not match"};
+    } else if (args.getTerm() < _term) {
+        return {ErrorCodes::BadValue, "term has already passed"};
+    } else if (args.getTerm() == _term && _currentPrimaryIndex > -1 &&
+               args.getWinnerId() != _rsConfig.getMemberAt(_currentPrimaryIndex).getId()) {
+        return {ErrorCodes::BadValue, "term already has a primary"};
+    }
+
+    _currentPrimaryIndex = _rsConfig.findMemberIndexByConfigId(args.getWinnerId());
+    return Status::OK();
+}
+
+void TopologyCoordinatorImpl::loadLastVote(const LastVote& lastVote) {
+    _lastVote = lastVote;
+}
+
+void TopologyCoordinatorImpl::voteForMyselfV1() {
+    _lastVote.setTerm(_term);
+    _lastVote.setCandidateIndex(_selfIndex);
+}
+
+void TopologyCoordinatorImpl::setPrimaryIndex(long long primaryIndex) {
+    _currentPrimaryIndex = primaryIndex;
+}
+
+bool TopologyCoordinatorImpl::becomeCandidateIfElectable(const Date_t now,
+                                                         const OpTime& lastOpApplied) {
+    if (_role == Role::leader) {
+        LOG(2) << "Not standing for election again; already primary";
+        return false;
+    }
+
+    if (_role == Role::candidate) {
+        LOG(2) << "Not standing for election again; already candidate";
+        return false;
+    }
+
+    const UnelectableReasonMask unelectableReason = _getMyUnelectableReason(now, lastOpApplied);
+    if (unelectableReason) {
+        LOG(2) << "Not standing for election because "
+               << _getUnelectableReasonString(unelectableReason);
+        return false;
+    }
+
+    // All checks passed, become a candidate and start election proceedings.
+    _role = Role::candidate;
+
+    return true;
+}
+
+void TopologyCoordinatorImpl::setStorageEngineSupportsReadCommitted(bool supported) {
+    _storageEngineSupportsReadCommitted =
+        supported ? ReadCommittedSupport::kYes : ReadCommittedSupport::kNo;
 }
 
 }  // namespace repl

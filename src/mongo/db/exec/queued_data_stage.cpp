@@ -30,15 +30,18 @@
 
 #include "mongo/db/exec/scoped_timer.h"
 #include "mongo/db/exec/working_set_common.h"
+#include "mongo/stdx/memory.h"
 
 namespace mongo {
 
-using std::auto_ptr;
+using std::unique_ptr;
 using std::vector;
+using stdx::make_unique;
 
 const char* QueuedDataStage::kStageType = "QUEUED_DATA";
 
-QueuedDataStage::QueuedDataStage(WorkingSet* ws) : _ws(ws), _commonStats(kStageType) {}
+QueuedDataStage::QueuedDataStage(OperationContext* opCtx, WorkingSet* ws)
+    : PlanStage(kStageType, opCtx), _ws(ws) {}
 
 PlanStage::StageState QueuedDataStage::work(WorkingSetID* out) {
     ++_commonStats.works;
@@ -68,30 +71,15 @@ bool QueuedDataStage::isEOF() {
     return _results.empty();
 }
 
-void QueuedDataStage::saveState() {
-    ++_commonStats.yields;
-}
-
-void QueuedDataStage::restoreState(OperationContext* opCtx) {
-    ++_commonStats.unyields;
-}
-
-void QueuedDataStage::invalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) {
-    ++_commonStats.invalidates;
-}
-
-PlanStageStats* QueuedDataStage::getStats() {
+unique_ptr<PlanStageStats> QueuedDataStage::getStats() {
     _commonStats.isEOF = isEOF();
-    auto_ptr<PlanStageStats> ret(new PlanStageStats(_commonStats, STAGE_QUEUED_DATA));
-    ret->specific.reset(new MockStats(_specificStats));
-    return ret.release();
+    unique_ptr<PlanStageStats> ret = make_unique<PlanStageStats>(_commonStats, STAGE_QUEUED_DATA);
+    ret->specific = make_unique<MockStats>(_specificStats);
+    return ret;
 }
 
-const CommonStats* QueuedDataStage::getCommonStats() {
-    return &_commonStats;
-}
 
-const SpecificStats* QueuedDataStage::getSpecificStats() {
+const SpecificStats* QueuedDataStage::getSpecificStats() const {
     return &_specificStats;
 }
 
@@ -100,20 +88,11 @@ void QueuedDataStage::pushBack(const PlanStage::StageState state) {
     _results.push(state);
 }
 
-void QueuedDataStage::pushBack(const WorkingSetMember& member) {
+void QueuedDataStage::pushBack(const WorkingSetID& id) {
     _results.push(PlanStage::ADVANCED);
-
-    WorkingSetID id = _ws->allocate();
-    WorkingSetMember* ourMember = _ws->get(id);
-    WorkingSetCommon::initFrom(ourMember, member);
 
     // member lives in _ws.  We'll return it when _results hits ADVANCED.
     _members.push(id);
-}
-
-vector<PlanStage*> QueuedDataStage::getChildren() const {
-    vector<PlanStage*> empty;
-    return empty;
 }
 
 }  // namespace mongo

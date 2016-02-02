@@ -30,6 +30,9 @@
 
 #include "mongo/platform/basic.h"
 
+#include <numeric>
+
+#include "mongo/db/client.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/storage/mmap_v1/btree/btree_logic.h"
@@ -42,7 +45,7 @@
 
 namespace mongo {
 
-using std::auto_ptr;
+using std::unique_ptr;
 using std::dec;
 using std::endl;
 using std::hex;
@@ -110,7 +113,7 @@ public:
 
 template <class BtreeLayout>
 Status BtreeLogic<BtreeLayout>::Builder::addKey(const BSONObj& keyObj, const DiskLoc& loc) {
-    auto_ptr<KeyDataOwnedType> key(new KeyDataOwnedType(keyObj));
+    unique_ptr<KeyDataOwnedType> key(new KeyDataOwnedType(keyObj));
 
     if (key->dataSize() > BtreeLayout::KeyMax) {
         string msg = str::stream() << "Btree::insert: key too large to index, failing "
@@ -144,7 +147,7 @@ Status BtreeLogic<BtreeLayout>::Builder::addKey(const BSONObj& keyObj, const Dis
         invariant(_logic->pushBack(rightLeaf, loc, *key, DiskLoc()));
     }
 
-    _keyLast = key;
+    _keyLast = std::move(key);
     return Status::OK();
 }
 
@@ -663,25 +666,11 @@ template <class BtreeLayout>
 void BtreeLogic<BtreeLayout>::customLocate(OperationContext* txn,
                                            DiskLoc* locInOut,
                                            int* keyOfsInOut,
-                                           const BSONObj& keyBegin,
-                                           int keyBeginLen,
-                                           bool afterKey,
-                                           const vector<const BSONElement*>& keyEnd,
-                                           const vector<bool>& keyEndInclusive,
+                                           const IndexSeekPoint& seekPoint,
                                            int direction) const {
     pair<DiskLoc, int> unused;
 
-    customLocate(txn,
-                 locInOut,
-                 keyOfsInOut,
-                 keyBegin,
-                 keyBeginLen,
-                 afterKey,
-                 keyEnd,
-                 keyEndInclusive,
-                 direction,
-                 unused);
-
+    customLocate(txn, locInOut, keyOfsInOut, seekPoint, direction, unused);
     skipUnusedKeys(txn, locInOut, keyOfsInOut, direction);
 }
 
@@ -708,22 +697,9 @@ template <class BtreeLayout>
 void BtreeLogic<BtreeLayout>::advanceTo(OperationContext* txn,
                                         DiskLoc* thisLocInOut,
                                         int* keyOfsInOut,
-                                        const BSONObj& keyBegin,
-                                        int keyBeginLen,
-                                        bool afterKey,
-                                        const vector<const BSONElement*>& keyEnd,
-                                        const vector<bool>& keyEndInclusive,
+                                        const IndexSeekPoint& seekPoint,
                                         int direction) const {
-    advanceToImpl(txn,
-                  thisLocInOut,
-                  keyOfsInOut,
-                  keyBegin,
-                  keyBeginLen,
-                  afterKey,
-                  keyEnd,
-                  keyEndInclusive,
-                  direction);
-
+    advanceToImpl(txn, thisLocInOut, keyOfsInOut, seekPoint, direction);
     skipUnusedKeys(txn, thisLocInOut, keyOfsInOut, direction);
 }
 
@@ -740,11 +716,7 @@ template <class BtreeLayout>
 void BtreeLogic<BtreeLayout>::advanceToImpl(OperationContext* txn,
                                             DiskLoc* thisLocInOut,
                                             int* keyOfsInOut,
-                                            const BSONObj& keyBegin,
-                                            int keyBeginLen,
-                                            bool afterKey,
-                                            const vector<const BSONElement*>& keyEnd,
-                                            const vector<bool>& keyEndInclusive,
+                                            const IndexSeekPoint& seekPoint,
                                             int direction) const {
     BucketType* bucket = getBucket(txn, *thisLocInOut);
 
@@ -754,26 +726,12 @@ void BtreeLogic<BtreeLayout>::advanceToImpl(OperationContext* txn,
     if (direction > 0) {
         l = *keyOfsInOut;
         h = bucket->n - 1;
-        int cmpResult = customBSONCmp(getFullKey(bucket, h).data.toBson(),
-                                      keyBegin,
-                                      keyBeginLen,
-                                      afterKey,
-                                      keyEnd,
-                                      keyEndInclusive,
-                                      _ordering,
-                                      direction);
+        int cmpResult = customBSONCmp(getFullKey(bucket, h).data.toBson(), seekPoint, direction);
         dontGoUp = (cmpResult >= 0);
     } else {
         l = 0;
         h = *keyOfsInOut;
-        int cmpResult = customBSONCmp(getFullKey(bucket, l).data.toBson(),
-                                      keyBegin,
-                                      keyBeginLen,
-                                      afterKey,
-                                      keyEnd,
-                                      keyEndInclusive,
-                                      _ordering,
-                                      direction);
+        int cmpResult = customBSONCmp(getFullKey(bucket, l).data.toBson(), seekPoint, direction);
         dontGoUp = (cmpResult <= 0);
     }
 
@@ -781,19 +739,7 @@ void BtreeLogic<BtreeLayout>::advanceToImpl(OperationContext* txn,
 
     if (dontGoUp) {
         // this comparison result assures h > l
-        if (!customFind(txn,
-                        l,
-                        h,
-                        keyBegin,
-                        keyBeginLen,
-                        afterKey,
-                        keyEnd,
-                        keyEndInclusive,
-                        _ordering,
-                        direction,
-                        thisLocInOut,
-                        keyOfsInOut,
-                        bestParent)) {
+        if (!customFind(txn, l, h, seekPoint, direction, thisLocInOut, keyOfsInOut, bestParent)) {
             return;
         }
     } else {
@@ -804,51 +750,26 @@ void BtreeLogic<BtreeLayout>::advanceToImpl(OperationContext* txn,
 
             if (direction > 0) {
                 if (customBSONCmp(getFullKey(bucket, bucket->n - 1).data.toBson(),
-                                  keyBegin,
-                                  keyBeginLen,
-                                  afterKey,
-                                  keyEnd,
-                                  keyEndInclusive,
-                                  _ordering,
+                                  seekPoint,
                                   direction) >= 0) {
                     break;
                 }
             } else {
-                if (customBSONCmp(getFullKey(bucket, 0).data.toBson(),
-                                  keyBegin,
-                                  keyBeginLen,
-                                  afterKey,
-                                  keyEnd,
-                                  keyEndInclusive,
-                                  _ordering,
-                                  direction) <= 0) {
+                if (customBSONCmp(getFullKey(bucket, 0).data.toBson(), seekPoint, direction) <= 0) {
                     break;
                 }
             }
         }
     }
 
-    customLocate(txn,
-                 thisLocInOut,
-                 keyOfsInOut,
-                 keyBegin,
-                 keyBeginLen,
-                 afterKey,
-                 keyEnd,
-                 keyEndInclusive,
-                 direction,
-                 bestParent);
+    customLocate(txn, thisLocInOut, keyOfsInOut, seekPoint, direction, bestParent);
 }
 
 template <class BtreeLayout>
 void BtreeLogic<BtreeLayout>::customLocate(OperationContext* txn,
                                            DiskLoc* locInOut,
                                            int* keyOfsInOut,
-                                           const BSONObj& keyBegin,
-                                           int keyBeginLen,
-                                           bool afterKey,
-                                           const vector<const BSONElement*>& keyEnd,
-                                           const vector<bool>& keyEndInclusive,
+                                           const IndexSeekPoint& seekPoint,
                                            int direction,
                                            pair<DiskLoc, int>& bestParent) const {
     BucketType* bucket = getBucket(txn, *locInOut);
@@ -867,16 +788,7 @@ void BtreeLogic<BtreeLayout>::customLocate(OperationContext* txn,
         int z = (direction > 0) ? 0 : h;
 
         // leftmost/rightmost key may possibly be >=/<= search key
-        int res = customBSONCmp(getFullKey(bucket, z).data.toBson(),
-                                keyBegin,
-                                keyBeginLen,
-                                afterKey,
-                                keyEnd,
-                                keyEndInclusive,
-                                _ordering,
-                                direction);
-
-
+        int res = customBSONCmp(getFullKey(bucket, z).data.toBson(), seekPoint, direction);
         if (direction * res >= 0) {
             DiskLoc next;
             *keyOfsInOut = z;
@@ -898,15 +810,7 @@ void BtreeLogic<BtreeLayout>::customLocate(OperationContext* txn,
             }
         }
 
-        res = customBSONCmp(getFullKey(bucket, h - z).data.toBson(),
-                            keyBegin,
-                            keyBeginLen,
-                            afterKey,
-                            keyEnd,
-                            keyEndInclusive,
-                            _ordering,
-                            direction);
-
+        res = customBSONCmp(getFullKey(bucket, h - z).data.toBson(), seekPoint, direction);
         if (direction * res < 0) {
             DiskLoc next;
             if (direction > 0) {
@@ -927,19 +831,7 @@ void BtreeLogic<BtreeLayout>::customLocate(OperationContext* txn,
             }
         }
 
-        if (!customFind(txn,
-                        l,
-                        h,
-                        keyBegin,
-                        keyBeginLen,
-                        afterKey,
-                        keyEnd,
-                        keyEndInclusive,
-                        _ordering,
-                        direction,
-                        locInOut,
-                        keyOfsInOut,
-                        bestParent)) {
+        if (!customFind(txn, l, h, seekPoint, direction, locInOut, keyOfsInOut, bestParent)) {
             return;
         }
 
@@ -951,12 +843,7 @@ template <class BtreeLayout>
 bool BtreeLogic<BtreeLayout>::customFind(OperationContext* txn,
                                          int low,
                                          int high,
-                                         const BSONObj& keyBegin,
-                                         int keyBeginLen,
-                                         bool afterKey,
-                                         const vector<const BSONElement*>& keyEnd,
-                                         const vector<bool>& keyEndInclusive,
-                                         const Ordering& order,
+                                         const IndexSeekPoint& seekPoint,
                                          int direction,
                                          DiskLoc* thisLocInOut,
                                          int* keyOfsInOut,
@@ -978,15 +865,7 @@ bool BtreeLogic<BtreeLayout>::customFind(OperationContext* txn,
 
         int middle = low + (high - low) / 2;
 
-        int cmp = customBSONCmp(getFullKey(bucket, middle).data.toBson(),
-                                keyBegin,
-                                keyBeginLen,
-                                afterKey,
-                                keyEnd,
-                                keyEndInclusive,
-                                order,
-                                direction);
-
+        int cmp = customBSONCmp(getFullKey(bucket, middle).data.toBson(), seekPoint, direction);
         if (cmp < 0) {
             low = middle;
         } else if (cmp > 0) {
@@ -1015,50 +894,45 @@ bool BtreeLogic<BtreeLayout>::customFind(OperationContext* txn,
  */
 // static
 template <class BtreeLayout>
-int BtreeLogic<BtreeLayout>::customBSONCmp(const BSONObj& l,
-                                           const BSONObj& rBegin,
-                                           int rBeginLen,
-                                           bool rSup,
-                                           const vector<const BSONElement*>& rEnd,
-                                           const vector<bool>& rEndInclusive,
-                                           const Ordering& o,
+int BtreeLogic<BtreeLayout>::customBSONCmp(const BSONObj& left,
+                                           const IndexSeekPoint& right,
                                            int direction) const {
     // XXX: make this readable
-    BSONObjIterator ll(l);
-    BSONObjIterator rr(rBegin);
-    vector<const BSONElement*>::const_iterator rr2 = rEnd.begin();
-    vector<bool>::const_iterator inc = rEndInclusive.begin();
+    dassert(right.keySuffix.size() == right.suffixInclusive.size());
+
+    BSONObjIterator ll(left);
+    BSONObjIterator rr(right.keyPrefix);
     unsigned mask = 1;
-    for (int i = 0; i < rBeginLen; ++i, mask <<= 1) {
+    size_t i = 0;
+    for (; i < size_t(right.prefixLen); ++i, mask <<= 1) {
         BSONElement lll = ll.next();
         BSONElement rrr = rr.next();
-        ++rr2;
-        ++inc;
 
         int x = lll.woCompare(rrr, false);
-        if (o.descending(mask))
+        if (_ordering.descending(mask))
             x = -x;
         if (x != 0)
             return x;
     }
-    if (rSup) {
+    if (right.prefixExclusive) {
         return -direction;
     }
-    for (; ll.more(); mask <<= 1) {
+    for (; i < right.keySuffix.size(); ++i, mask <<= 1) {
+        if (!ll.more())
+            return -direction;
+
         BSONElement lll = ll.next();
-        BSONElement rrr = **rr2;
-        ++rr2;
+        BSONElement rrr = *right.keySuffix[i];
         int x = lll.woCompare(rrr, false);
-        if (o.descending(mask))
+        if (_ordering.descending(mask))
             x = -x;
         if (x != 0)
             return x;
-        if (!*inc) {
+        if (!right.suffixInclusive[i]) {
             return -direction;
         }
-        ++inc;
     }
-    return 0;
+    return ll.more() ? direction : 0;
 }
 
 template <class BtreeLayout>
@@ -2036,6 +1910,101 @@ BSONObj BtreeLogic<BtreeLayout>::getKey(OperationContext* txn,
         return BSONObj();
     } else {
         return getFullKey(bucket, keyOffset).data.toBson();
+    }
+}
+
+template <class BtreeLayout>
+IndexKeyEntry BtreeLogic<BtreeLayout>::getRandomEntry(OperationContext* txn) const {
+    // To ensure a uniform distribution, all keys must have an equal probability of being selected.
+    // Specifically, a key from the root should have the same probability of being selected as a key
+    // from a leaf.
+    //
+    // Here we do a random walk until we get to a leaf, storing a random key from each bucket along
+    // the way down. Because the root is always present in the random walk, but any given leaf would
+    // seldom be seen, we assign weights to each key such that the key from the leaf is much more
+    // likely to be selected than the key from the root. These weights attempt to ensure each entry
+    // is equally likely to be selected and avoid bias towards the entries closer to the root.
+    //
+    // As a simplification, we treat all buckets in a given level as having the same number of
+    // children. While this is inaccurate if the tree isn't perfectly balanced or if key-size
+    // greatly varies, it is assumed to be good enough for this purpose.
+    invariant(!isEmpty(txn));
+    BucketType* root = getRoot(txn);
+
+    vector<int64_t> nKeysInLevel;
+    vector<FullKey> selectedKeys;
+
+    auto& prng = txn->getClient()->getPrng();
+
+    int nRetries = 0;
+    const int kMaxRetries = 5;
+    do {
+        // See documentation below for description of parameters.
+        recordRandomWalk(txn, &prng, root, 1, &nKeysInLevel, &selectedKeys);
+    } while (selectedKeys.empty() && nRetries++ < kMaxRetries);
+    massert(28826,
+            str::stream() << "index " << _indexName << " may be corrupt, please repair",
+            !selectedKeys.empty());
+
+    invariant(nKeysInLevel.size() == selectedKeys.size());
+    // Select a key from the random walk such that each key from the B-tree has an equal probability
+    // of being selected.
+    //
+    // Let N be the sum of 'nKeysInLevel'. That is, the total number of keys in the B-tree.
+    //
+    // On our walk down the tree, we selected exactly one key from each level of the B-tree, where
+    // 'selectedKeys[i]' came from the ith level of the tree. On any given level, each key has an
+    // equal probability of being selected. Specifically, a key on level i has a probability of
+    // 1/'nKeysInLevel[i]' of being selected as 'selectedKeys[i]'. Then if, given our selected keys,
+    // we choose to return 'selectedKeys[i]' with a probability of 'nKeysInLevel[i]'/N, that key
+    // will be returned with a probability of 1/'nKeysInLevel[i]' * 'nKeysInLevel[i]'/N = 1/N.
+    //
+    // So 'selectedKeys[i]' should have a probability of 'nKeysInLevel[i]'/N of being returned. We
+    // will do so by picking a random number X in the range [0, N). Then, if X is in the first
+    // 'nKeysInLevel[0]' numbers, we will return 'selectedKeys[0]'. If X is in the next
+    // 'nKeysInLevel[1]' numbers, we will return 'selectedKeys[1]', and so on.
+    int64_t choice = prng.nextInt64(std::accumulate(nKeysInLevel.begin(), nKeysInLevel.end(), 0));
+    for (size_t i = 0; i < nKeysInLevel.size(); i++) {
+        if (choice < nKeysInLevel[i]) {
+            return {selectedKeys[i].data.toBson(), selectedKeys[i].header.recordLoc.toRecordId()};
+        }
+        choice -= nKeysInLevel[i];
+    }
+    MONGO_UNREACHABLE;
+}
+
+/**
+ * Does a random walk through the tree, recording information about the walk along the way.
+ *
+ * 'nKeysInLevel' will be filled in such that 'nKeysInLevel[i]' is an approximation of the number of
+ * keys in the ith level of the B-tree.
+ *
+ * 'selectedKeys' will be filled in such that 'selectedKeys[i]' will be a pseudo-random key selected
+ * from the bucket we went through on the ith level of the B-tree.
+ */
+template <class BtreeLayout>
+void BtreeLogic<BtreeLayout>::recordRandomWalk(OperationContext* txn,
+                                               PseudoRandom* prng,
+                                               BucketType* curBucket,
+                                               int64_t nBucketsInCurrentLevel,
+                                               vector<int64_t>* nKeysInLevel,
+                                               vector<FullKey>* selectedKeys) const {
+    // Select a random key from this bucket, and record it.
+    int nKeys = curBucket->n;
+    int keyToReturn = prng->nextInt32(nKeys);
+    auto fullKey = getFullKey(curBucket, keyToReturn);
+    // If the key is not used, just skip this level.
+    if (fullKey.header.isUsed()) {
+        selectedKeys->push_back(std::move(fullKey));
+        nKeysInLevel->push_back(nBucketsInCurrentLevel * nKeys);
+    }
+
+    // Select a random child and descend (if there are any).
+    int nChildren = nKeys + 1;
+    int nextChild = prng->nextInt32(nChildren);
+    if (auto child = childForPos(txn, curBucket, nextChild)) {
+        recordRandomWalk(
+            txn, prng, child, nBucketsInCurrentLevel * nChildren, nKeysInLevel, selectedKeys);
     }
 }
 

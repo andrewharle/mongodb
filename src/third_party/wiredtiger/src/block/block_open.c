@@ -102,11 +102,10 @@ __wt_block_manager_create(
 	WT_TRET(__wt_close(session, &fh));
 
 	/*
-	 * If checkpoint syncing is enabled, some filesystems require that we
-	 * sync the directory to be confident that the file will appear.
+	 * Some filesystems require that we sync the directory to be confident
+	 * that the file will appear.
 	 */
-	if (ret == 0 && F_ISSET(S2C(session), WT_CONN_CKPT_SYNC) &&
-	    (ret = __wt_filename(session, filename, &path)) == 0) {
+	if (ret == 0 && (ret = __wt_filename(session, filename, &path)) == 0) {
 		ret = __wt_directory_sync(session, path);
 		__wt_free(session, path);
 	}
@@ -181,10 +180,10 @@ __wt_block_open(WT_SESSION_IMPL *session,
 	WT_DECL_RET;
 	uint64_t bucket, hash;
 
-	WT_TRET(__wt_verbose(session, WT_VERB_BLOCK, "open: %s", filename));
+	WT_RET(__wt_verbose(session, WT_VERB_BLOCK, "open: %s", filename));
 
 	conn = S2C(session);
-	*blockp = NULL;
+	*blockp = block = NULL;
 	hash = __wt_hash_city64(filename, strlen(filename));
 	bucket = hash % WT_HASH_ARRAY_SIZE;
 	__wt_spin_lock(session, &conn->block_lock);
@@ -270,7 +269,8 @@ __wt_block_open(WT_SESSION_IMPL *session,
 	__wt_spin_unlock(session, &conn->block_lock);
 	return (0);
 
-err:	WT_TRET(__block_destroy(session, block));
+err:	if (block != NULL)
+		WT_TRET(__block_destroy(session, block));
 	__wt_spin_unlock(session, &conn->block_lock);
 	return (ret);
 }
@@ -399,21 +399,19 @@ err:	__wt_scr_free(session, &buf);
 void
 __wt_block_stat(WT_SESSION_IMPL *session, WT_BLOCK *block, WT_DSRC_STATS *stats)
 {
+	WT_UNUSED(session);
+
 	/*
-	 * We're looking inside the live system's structure, which normally
-	 * requires locking: the chances of a corrupted read are probably
-	 * non-existent, and it's statistics information regardless, but it
-	 * isn't like this is a common function for an application to call.
+	 * Reading from the live system's structure normally requires locking,
+	 * but it's an 8B statistics read, there's no need.
 	 */
-	__wt_spin_lock(session, &block->live_lock);
-	WT_STAT_SET(stats, allocation_size, block->allocsize);
-	WT_STAT_SET(stats, block_checkpoint_size, block->live.ckpt_size);
-	WT_STAT_SET(stats, block_magic, WT_BLOCK_MAGIC);
-	WT_STAT_SET(stats, block_major, WT_BLOCK_MAJOR_VERSION);
-	WT_STAT_SET(stats, block_minor, WT_BLOCK_MINOR_VERSION);
-	WT_STAT_SET(stats, block_reuse_bytes, block->live.avail.bytes);
-	WT_STAT_SET(stats, block_size, block->fh->size);
-	__wt_spin_unlock(session, &block->live_lock);
+	stats->allocation_size = block->allocsize;
+	stats->block_checkpoint_size = (int64_t)block->live.ckpt_size;
+	stats->block_magic = WT_BLOCK_MAGIC;
+	stats->block_major = WT_BLOCK_MAJOR_VERSION;
+	stats->block_minor = WT_BLOCK_MINOR_VERSION;
+	stats->block_reuse_bytes = (int64_t)block->live.avail.bytes;
+	stats->block_size = block->fh->size;
 }
 
 /*
@@ -427,7 +425,7 @@ __wt_block_manager_size(
 	wt_off_t filesize;
 
 	WT_RET(__wt_filesize_name(session, filename, false, &filesize));
-	WT_STAT_SET(stats, block_size, filesize);
+	stats->block_size = filesize;
 
 	return (0);
 }

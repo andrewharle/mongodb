@@ -28,11 +28,12 @@ function op( ev, where ) {
 }
 
 function doIt( ev, wait, where ) {
+    var awaitShell;
 
     if ( where ) {
-        s = startParallelShell( ev );
+        awaitShell = startParallelShell( ev );
     } else {
-        s = startParallelShell( "db.eval( '" + ev + "' )" );        
+        awaitShell = startParallelShell( "db.eval( '" + ev + "' )" );
     }
 
     o = null;
@@ -48,8 +49,9 @@ function doIt( ev, wait, where ) {
 
     debug( "sent kill" );
 
-    s();
-
+    var exitCode = awaitShell({checkExitSuccess: false});
+    assert.neq(0, exitCode,
+               "expected shell to exit abnormally due to JS execution being terminated");
 }
 
 // nested scope with nested invoke()
@@ -70,8 +72,7 @@ doIt("while(1) { for( var i = 0; i < 10000; ++i ) {;} db.jstests_evald.count({i:
 doIt("while(1) { for( var i = 0; i < 10000; ++i ) {;} db.jstests_evald.count(); }", true);
 doIt("while(1) { for( var i = 0; i < 10000; ++i ) {;} db.jstests_evald.count(); }", false);
 
-// try/catch with tight-loop kill tests.  Catch testing is important
-// due to v8::TerminateExecution internals.
+// try/catch with tight-loop kill tests.
 // native callback with nested invoke(), drop JS exceptions
 doIt("while(1) {                                  " +
      "   for(var i = 0; i < 10000; ++i) {;}       " +

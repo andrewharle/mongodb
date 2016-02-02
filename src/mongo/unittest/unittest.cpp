@@ -32,31 +32,39 @@
 
 #include "mongo/unittest/unittest.h"
 
-#include <boost/shared_ptr.hpp>
 #include <iostream>
 #include <map>
 
+#include "mongo/base/checked_cast.h"
 #include "mongo/base/init.h"
 #include "mongo/logger/console_appender.h"
 #include "mongo/logger/log_manager.h"
 #include "mongo/logger/logger.h"
 #include "mongo/logger/message_event_utf8_encoder.h"
 #include "mongo/logger/message_log_domain.h"
+#include "mongo/stdx/functional.h"
+#include "mongo/stdx/memory.h"
+#include "mongo/stdx/mutex.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/log.h"
 #include "mongo/util/timer.h"
 
 namespace mongo {
 
-using boost::shared_ptr;
+using std::shared_ptr;
 using std::string;
 
 namespace unittest {
 
 namespace {
+
+bool stringContains(const std::string& haystack, const std::string& needle) {
+    return haystack.find(needle) != std::string::npos;
+}
+
 logger::MessageLogDomain* unittestOutput = logger::globalLogManager()->getNamedDomain("unittest");
 
-typedef std::map<std::string, boost::shared_ptr<Suite>> SuiteMap;
+typedef std::map<std::string, std::shared_ptr<Suite>> SuiteMap;
 
 inline SuiteMap& _allSuites() {
     static SuiteMap allSuites;
@@ -161,11 +169,28 @@ public:
         if (!_encoder.encode(event, _os)) {
             return Status(ErrorCodes::LogWriteFailed, "Failed to append to LogTestAppender.");
         }
-        _lines->push_back(_os.str());
+        stdx::lock_guard<stdx::mutex> lk(_mutex);
+        if (_enabled) {
+            _lines->push_back(_os.str());
+        }
         return Status::OK();
     }
 
+    void enable() {
+        stdx::lock_guard<stdx::mutex> lk(_mutex);
+        invariant(!_enabled);
+        _enabled = true;
+    }
+
+    void disable() {
+        stdx::lock_guard<stdx::mutex> lk(_mutex);
+        invariant(_enabled);
+        _enabled = false;
+    }
+
 private:
+    stdx::mutex _mutex;
+    bool _enabled = false;
     logger::MessageEventDetailsEncoder _encoder;
     std::vector<std::string>* _lines;
 };
@@ -174,15 +199,26 @@ private:
 void Test::startCapturingLogMessages() {
     invariant(!_isCapturingLogMessages);
     _capturedLogMessages.clear();
-    _captureAppenderHandle = logger::globalLogDomain()->attachAppender(
-        logger::MessageLogDomain::AppenderAutoPtr(new StringVectorAppender(&_capturedLogMessages)));
+    if (!_captureAppender) {
+        _captureAppender = stdx::make_unique<StringVectorAppender>(&_capturedLogMessages);
+    }
+    checked_cast<StringVectorAppender*>(_captureAppender.get())->enable();
+    _captureAppenderHandle = logger::globalLogDomain()->attachAppender(std::move(_captureAppender));
     _isCapturingLogMessages = true;
 }
 
 void Test::stopCapturingLogMessages() {
     invariant(_isCapturingLogMessages);
-    logger::globalLogDomain()->detachAppender(_captureAppenderHandle);
+    invariant(!_captureAppender);
+    _captureAppender = logger::globalLogDomain()->detachAppender(_captureAppenderHandle);
+    checked_cast<StringVectorAppender*>(_captureAppender.get())->disable();
     _isCapturingLogMessages = false;
+}
+
+int64_t Test::countLogLinesContaining(const std::string& needle) {
+    return std::count_if(getCapturedLogMessages().begin(),
+                         getCapturedLogMessages().end(),
+                         stdx::bind(stringContains, stdx::placeholders::_1, needle));
 }
 
 Suite::Suite(const std::string& name) : _name(name) {
@@ -192,7 +228,7 @@ Suite::Suite(const std::string& name) : _name(name) {
 Suite::~Suite() {}
 
 void Suite::add(const std::string& name, const TestFunction& testFn) {
-    _tests.push_back(boost::shared_ptr<TestHolder>(new TestHolder(name, testFn)));
+    _tests.push_back(std::shared_ptr<TestHolder>(new TestHolder(name, testFn)));
 }
 
 Result* Suite::run(const std::string& filter, int runsPerTest) {
@@ -204,9 +240,9 @@ Result* Suite::run(const std::string& filter, int runsPerTest) {
     Result* r = new Result(_name);
     Result::cur = r;
 
-    for (std::vector<boost::shared_ptr<TestHolder>>::iterator i = _tests.begin(); i != _tests.end();
+    for (std::vector<std::shared_ptr<TestHolder>>::iterator i = _tests.begin(); i != _tests.end();
          i++) {
-        boost::shared_ptr<TestHolder>& tc = *i;
+        std::shared_ptr<TestHolder>& tc = *i;
         if (filter.size() && tc->getName().find(filter) == std::string::npos) {
             LOG(1) << "\t skipping test: " << tc->getName() << " because doesn't match filter"
                    << std::endl;
@@ -216,8 +252,6 @@ Result* Suite::run(const std::string& filter, int runsPerTest) {
         r->_tests++;
 
         bool passes = false;
-
-        onCurrentTestNameChange(tc->getName());
 
         log() << "\t going to run test: " << tc->getName() << std::endl;
 
@@ -248,8 +282,6 @@ Result* Suite::run(const std::string& filter, int runsPerTest) {
         r->_rc = 17;
 
     r->_millis = timer.millis();
-
-    onCurrentTestNameChange("");
 
     log() << "\t DONE running tests" << std::endl;
 
@@ -282,7 +314,7 @@ int Suite::run(const std::vector<std::string>& suites, const std::string& filter
 
     for (std::vector<std::string>::iterator i = torun.begin(); i != torun.end(); i++) {
         std::string name = *i;
-        boost::shared_ptr<Suite>& s = _allSuites()[name];
+        std::shared_ptr<Suite>& s = _allSuites()[name];
         fassert(16145, s != NULL);
 
         log() << "going to run suite: " << name << std::endl;
@@ -348,13 +380,13 @@ int Suite::run(const std::vector<std::string>& suites, const std::string& filter
 }
 
 void Suite::registerSuite(const std::string& name, Suite* s) {
-    boost::shared_ptr<Suite>& m = _allSuites()[name];
+    std::shared_ptr<Suite>& m = _allSuites()[name];
     fassert(10162, !m);
     m.reset(s);
 }
 
 Suite* Suite::getSuite(const std::string& name) {
-    boost::shared_ptr<Suite>& result = _allSuites()[name];
+    std::shared_ptr<Suite>& result = _allSuites()[name];
     if (!result) {
         // Suites are self-registering.
         new Suite(name);
@@ -392,11 +424,7 @@ TestAssertionFailure& TestAssertionFailure::operator=(const TestAssertionFailure
     return *this;
 }
 
-TestAssertionFailure::~TestAssertionFailure()
-#if __cplusplus >= 201103
-    noexcept(false)
-#endif
-{
+TestAssertionFailure::~TestAssertionFailure() BOOST_NOEXCEPT_IF(false) {
     if (!_enabled) {
         invariant(_stream.str().empty());
         return;

@@ -62,8 +62,8 @@ private:
     virtual void notify(ResourceId resId, LockResult result);
 
     // These two go together to implement the conditional variable pattern.
-    boost::mutex _mutex;
-    boost::condition_variable _cond;
+    stdx::mutex _mutex;
+    stdx::condition_variable _cond;
 
     // Result from the last call to notify
     LockResult _result;
@@ -122,8 +122,8 @@ public:
 
     virtual LockMode getLockMode(ResourceId resId) const;
     virtual bool isLockHeldForMode(ResourceId resId, LockMode mode) const;
-    virtual bool isDbLockedForMode(const StringData& dbName, LockMode mode) const;
-    virtual bool isCollectionLockedForMode(const StringData& ns, LockMode mode) const;
+    virtual bool isDbLockedForMode(StringData dbName, LockMode mode) const;
+    virtual bool isCollectionLockedForMode(StringData ns, LockMode mode) const;
 
     virtual ResourceId getWaitingResource() const;
 

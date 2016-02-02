@@ -88,7 +88,9 @@
 #include <conio.h>
 #include <windows.h>
 #include <io.h>
+#if _MSC_VER < 1900
 #define snprintf _snprintf  // Microsoft headers use underscores in some names
+#endif
 #define strcasecmp _stricmp
 #define strdup _strdup
 #define isatty _isatty
@@ -117,12 +119,11 @@
 #include "mk_wcwidth.h"
 #include <string>
 #include <vector>
-#include <boost/smart_ptr/scoped_array.hpp>
 
 using std::string;
 using std::vector;
 
-using boost::scoped_array;
+using std::unique_ptr;
 
 using linenoise_utf8::UChar8;
 using linenoise_utf8::UChar32;
@@ -1258,22 +1259,22 @@ static UChar32 linenoiseReadChar(void) {
                     char buf[1024];
                     sprintf(
                             buf,
-                            "Unicode character 0x%04X, repeat count %d, virtual keycode 0x%04X,"
+                            "Unicode character 0x%04X, repeat count %d, virtual keycode 0x%04X, "
                             "virtual scancode 0x%04X, key %s%s%s%s%s\n",
                             rec.Event.KeyEvent.uChar.UnicodeChar,
                             rec.Event.KeyEvent.wRepeatCount,
                             rec.Event.KeyEvent.wVirtualKeyCode,
                             rec.Event.KeyEvent.wVirtualScanCode,
                             rec.Event.KeyEvent.bKeyDown ? "down" : "up",
-                            (rec.Event.KeyEvent.dwControlKeyState & LEFT_CTRL_PRESSED)  ? "L-Ctrl"
-                                : "",
-                            (rec.Event.KeyEvent.dwControlKeyState & RIGHT_CTRL_PRESSED) ? "R-Ctrl"
-                                : "",
-                            (rec.Event.KeyEvent.dwControlKeyState & LEFT_ALT_PRESSED)   ? "L-Alt"
-                                : "",
-                            (rec.Event.KeyEvent.dwControlKeyState & RIGHT_ALT_PRESSED)  ? "R-Alt"
-                                : ""
-                    );
+                                (rec.Event.KeyEvent.dwControlKeyState & LEFT_CTRL_PRESSED)  ?
+                                    " L-Ctrl" : "",
+                                (rec.Event.KeyEvent.dwControlKeyState & RIGHT_CTRL_PRESSED) ?
+                                    " R-Ctrl" : "",
+                                (rec.Event.KeyEvent.dwControlKeyState & LEFT_ALT_PRESSED)   ?
+                                    " L-Alt"  : "",
+                                (rec.Event.KeyEvent.dwControlKeyState & RIGHT_ALT_PRESSED)  ?
+                                    " R-Alt"  : ""
+                           );
                     OutputDebugStringA( buf );
                 //}
             }
@@ -1714,7 +1715,7 @@ void InputBuffer::clearScreen(PromptBase& pi) {
 /**
  * Incremental history search -- take over the prompt and keyboard as the user types a search
  * string, deletes characters from it, changes direction, and either accepts the found line (for
- * execution or editing) or cancels.
+ * execution orediting) or cancels.
  * @param pi        PromptBase struct holding information about the (old, static) prompt and our
  *                  screen position
  * @param startChar the character that began the search, used to set the initial direction
@@ -1729,7 +1730,7 @@ int InputBuffer::incrementalHistorySearch(PromptBase& pi, int startChar) {
     if (historyIndex == historyLen - 1) {
         free(history[historyLen - 1]);
         bufferSize = sizeof(UChar32) * len + 1;
-        scoped_array<UChar8> tempBuffer(new UChar8[bufferSize]);
+        unique_ptr<UChar8[]> tempBuffer(new UChar8[bufferSize]);
         copyString32to8(tempBuffer.get(), buf32, bufferSize);
         history[historyLen - 1] =
             reinterpret_cast<UChar8*>(strdup(reinterpret_cast<const char*>(tempBuffer.get())));
@@ -1836,7 +1837,7 @@ int InputBuffer::incrementalHistorySearch(PromptBase& pi, int startChar) {
                 enableRawMode();   // Back from Linux shell, re-enter raw mode
                 {
                     bufferSize = historyLineLength + 1;
-                    scoped_array<UChar32> tempUnicode(new UChar32[bufferSize]);
+                    unique_ptr<UChar32[]> tempUnicode(new UChar32[bufferSize]);
                     copyString8to32(tempUnicode.get(),
                                     history[historyIndex],
                                     bufferSize,
@@ -1851,7 +1852,7 @@ int InputBuffer::incrementalHistorySearch(PromptBase& pi, int startChar) {
             // these characters update the search string, and hence the selected input line
             case ctrlChar('H'):  // backspace/ctrl-H, delete char to left of cursor
                 if (dp.searchTextLen > 0) {
-                    scoped_array<UChar32> tempUnicode(new UChar32[dp.searchTextLen]);
+                    unique_ptr<UChar32[]> tempUnicode(new UChar32[dp.searchTextLen]);
                     --dp.searchTextLen;
                     dp.searchText[dp.searchTextLen] = 0;
                     copyString32(tempUnicode.get(), dp.searchText.get(), dp.searchTextLen + 1);
@@ -1866,7 +1867,7 @@ int InputBuffer::incrementalHistorySearch(PromptBase& pi, int startChar) {
 
             default:
                 if (!isControlChar(c) && c <= 0x0010FFFF) {  // not an action character
-                    scoped_array<UChar32> tempUnicode(new UChar32[dp.searchTextLen + 2]);
+                    unique_ptr<UChar32[]> tempUnicode(new UChar32[dp.searchTextLen + 2]);
                     copyString32(tempUnicode.get(), dp.searchText.get(), dp.searchTextLen + 2);
                     tempUnicode[dp.searchTextLen] = c;
                     tempUnicode[dp.searchTextLen + 1] = 0;
@@ -1979,7 +1980,7 @@ int InputBuffer::getInputLine(PromptBase& pi) {
     // The latest history entry is always our current buffer
     if (len > 0) {
         size_t bufferSize = sizeof(UChar32) * len + 1;
-        scoped_array<char> tempBuffer(new char[bufferSize]);
+        unique_ptr<char[]> tempBuffer(new char[bufferSize]);
         copyString32to8(reinterpret_cast<UChar8*>(tempBuffer.get()), buf32, bufferSize);
         linenoiseHistoryAdd(tempBuffer.get());
     } else {
@@ -2286,7 +2287,7 @@ int InputBuffer::getInputLine(PromptBase& pi) {
                 if (historyIndex == historyLen - 1) {
                     free(history[historyLen - 1]);
                     size_t tempBufferSize = sizeof(UChar32) * len + 1;
-                    scoped_array<UChar8> tempBuffer(new UChar8[tempBufferSize]);
+                    unique_ptr<UChar8[]> tempBuffer(new UChar8[tempBufferSize]);
                     copyString32to8(tempBuffer.get(), buf32, tempBufferSize);
                     history[historyLen - 1] = reinterpret_cast<UChar8*>(
                         strdup(reinterpret_cast<const char*>(tempBuffer.get())));
@@ -2490,7 +2491,7 @@ int InputBuffer::getInputLine(PromptBase& pi) {
                 if (historyIndex == historyLen - 1) {
                     free(history[historyLen - 1]);
                     size_t tempBufferSize = sizeof(UChar32) * len + 1;
-                    scoped_array<UChar8> tempBuffer(new UChar8[tempBufferSize]);
+                    unique_ptr<UChar8[]> tempBuffer(new UChar8[tempBufferSize]);
                     copyString32to8(tempBuffer.get(), buf32, tempBufferSize);
                     history[historyLen - 1] = reinterpret_cast<UChar8*>(
                         strdup(reinterpret_cast<const char*>(tempBuffer.get())));
@@ -2569,7 +2570,7 @@ void linenoisePreloadBuffer(const char* preloadText) {
         return;
     }
     int bufferSize = strlen(preloadText) + 1;
-    scoped_array<char> tempBuffer(new char[bufferSize]);
+    unique_ptr<char[]> tempBuffer(new char[bufferSize]);
     strncpy(&tempBuffer[0], preloadText, bufferSize);
 
     // remove characters that won't display correctly
@@ -2623,7 +2624,7 @@ void linenoisePreloadBuffer(const char* preloadText) {
  *
  * @param prompt text of prompt to display to the user
  * @return       the returned string belongs to the caller on return and must be freed to prevent
- * memory leaks
+ *               memory leaks
  */
 char* linenoise(const char* prompt) {
     if (isatty(STDIN_FILENO)) {  // input is from a terminal
@@ -2640,7 +2641,7 @@ char* linenoise(const char* prompt) {
                 return 0;
             fflush(stdout);
             if (preloadedBufferContents.empty()) {
-                scoped_array<char> buf8(new char[LINENOISE_MAX_LINE]);
+                unique_ptr<char[]> buf8(new char[LINENOISE_MAX_LINE]);
                 if (fgets(buf8.get(), LINENOISE_MAX_LINE, stdin) == NULL) {
                     return NULL;
                 }
@@ -2671,12 +2672,12 @@ char* linenoise(const char* prompt) {
                 return NULL;
             }
             size_t bufferSize = sizeof(UChar32) * ib.length() + 1;
-            scoped_array<UChar8> buf8(new UChar8[bufferSize]);
+            unique_ptr<UChar8[]> buf8(new UChar8[bufferSize]);
             copyString32to8(buf8.get(), buf32, bufferSize);
             return strdup(reinterpret_cast<char*>(buf8.get()));  // caller must free buffer
         }
     } else {  // input not from a terminal, we should work with piped input, i.e. redirected stdin
-        scoped_array<char> buf8(new char[LINENOISE_MAX_LINE]);
+        unique_ptr<char[]> buf8(new char[LINENOISE_MAX_LINE]);
         if (fgets(buf8.get(), LINENOISE_MAX_LINE, stdin) == NULL) {
             return NULL;
         }

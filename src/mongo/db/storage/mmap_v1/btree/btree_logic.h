@@ -34,12 +34,14 @@
 #include "mongo/db/catalog/index_catalog_entry.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/storage/index_entry_comparison.h"
 #include "mongo/db/storage/mmap_v1/btree/btree_ondisk.h"
 #include "mongo/db/storage/mmap_v1/btree/key.h"
 #include "mongo/db/storage/mmap_v1/diskloc.h"
 
 namespace mongo {
 
+class PseudoRandom;
 class RecordStore;
 class SavedCursorRegistry;
 
@@ -81,12 +83,14 @@ public:
                RecordStore* store,
                SavedCursorRegistry* cursors,
                const Ordering& ordering,
-               const std::string& indexName)
+               const std::string& indexName,
+               bool isUnique)
         : _headManager(head),
           _recordStore(store),
           _cursorRegistry(cursors),
           _ordering(ordering),
-          _indexName(indexName) {}
+          _indexName(indexName),
+          _isUnique(isUnique) {}
 
     //
     // Public-facing
@@ -121,7 +125,7 @@ public:
 
         DiskLoc _rightLeafLoc;  // DiskLoc of right-most (highest) leaf bucket.
         bool _dupsAllowed;
-        std::auto_ptr<KeyDataOwnedType> _keyLast;
+        std::unique_ptr<KeyDataOwnedType> _keyLast;
 
         // Not owned.
         OperationContext* _txn;
@@ -176,6 +180,12 @@ public:
 
     BSONObj getKey(OperationContext* txn, const DiskLoc& bucketLoc, const int keyOffset) const;
 
+    /**
+     * Returns a pseudo-random element from the tree. It is an error to call this method if the tree
+     * is empty.
+     */
+    IndexKeyEntry getRandomEntry(OperationContext* txn) const;
+
     DiskLoc getHead(OperationContext* txn) const {
         return DiskLoc::fromRecordId(_headManager->getHead(txn));
     }
@@ -189,21 +199,13 @@ public:
     void customLocate(OperationContext* txn,
                       DiskLoc* locInOut,
                       int* keyOfsInOut,
-                      const BSONObj& keyBegin,
-                      int keyBeginLen,
-                      bool afterKey,
-                      const std::vector<const BSONElement*>& keyEnd,
-                      const std::vector<bool>& keyEndInclusive,
+                      const IndexSeekPoint& seekPoint,
                       int direction) const;
 
     void advanceTo(OperationContext*,
                    DiskLoc* thisLocInOut,
                    int* keyOfsInOut,
-                   const BSONObj& keyBegin,
-                   int keyBeginLen,
-                   bool afterKey,
-                   const std::vector<const BSONElement*>& keyEnd,
-                   const std::vector<bool>& keyEndInclusive,
+                   const IndexSeekPoint& seekPoint,
                    int direction) const;
 
     void restorePosition(OperationContext* txn,
@@ -235,6 +237,18 @@ public:
     }
 
     static int lowWaterMark();
+
+    Ordering ordering() const {
+        return _ordering;
+    }
+
+    int customBSONCmp(const BSONObj& inIndex_left,
+                      const IndexSeekPoint& seekPoint_right,
+                      int direction) const;
+
+    bool isUnique() const {
+        return _isUnique;
+    }
 
 private:
     friend class BtreeLogic::Builder;
@@ -345,11 +359,7 @@ private:
     void customLocate(OperationContext* txn,
                       DiskLoc* locInOut,
                       int* keyOfsInOut,
-                      const BSONObj& keyBegin,
-                      int keyBeginLen,
-                      bool afterKey,
-                      const std::vector<const BSONElement*>& keyEnd,
-                      const std::vector<bool>& keyEndInclusive,
+                      const IndexSeekPoint& seekPoint,
                       int direction,
                       std::pair<DiskLoc, int>& bestParent) const;
 
@@ -364,12 +374,7 @@ private:
     bool customFind(OperationContext* txn,
                     int low,
                     int high,
-                    const BSONObj& keyBegin,
-                    int keyBeginLen,
-                    bool afterKey,
-                    const std::vector<const BSONElement*>& keyEnd,
-                    const std::vector<bool>& keyEndInclusive,
-                    const Ordering& order,
+                    const IndexSeekPoint& seekPoint,
                     int direction,
                     DiskLoc* thisLocInOut,
                     int* keyOfsInOut,
@@ -378,11 +383,7 @@ private:
     void advanceToImpl(OperationContext* txn,
                        DiskLoc* thisLocInOut,
                        int* keyOfsInOut,
-                       const BSONObj& keyBegin,
-                       int keyBeginLen,
-                       bool afterKey,
-                       const std::vector<const BSONElement*>& keyEnd,
-                       const std::vector<bool>& keyEndInclusive,
+                       const IndexSeekPoint& seekPoint,
                        int direction) const;
 
     bool wouldCreateDup(OperationContext* txn, const KeyDataType& key, const DiskLoc self) const;
@@ -528,16 +529,6 @@ private:
                   BucketType* bucket,
                   int keyPos) const;
 
-    // TODO 'this' for _ordering(?)
-    int customBSONCmp(const BSONObj& l,
-                      const BSONObj& rBegin,
-                      int rBeginLen,
-                      bool rSup,
-                      const std::vector<const BSONElement*>& rEnd,
-                      const std::vector<bool>& rEndInclusive,
-                      const Ordering& o,
-                      int direction) const;
-
     /**
      * Tries to push key into bucket. Return false if it can't because key doesn't fit.
      *
@@ -563,6 +554,13 @@ private:
 
     DiskLoc getRootLoc(OperationContext* txn) const;
 
+    void recordRandomWalk(OperationContext* txn,
+                          PseudoRandom* prng,
+                          BucketType* curBucket,
+                          int64_t nBucketsInCurrentLevel,
+                          std::vector<int64_t>* nKeysInLevel,
+                          std::vector<FullKey>* selectedKeys) const;
+
     //
     // Data
     //
@@ -579,6 +577,9 @@ private:
     Ordering _ordering;
 
     std::string _indexName;
+
+    // True if this is a unique index, i.e. if duplicate key values are disallowed.
+    const bool _isUnique;
 };
 
 }  // namespace mongo

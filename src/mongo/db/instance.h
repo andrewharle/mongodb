@@ -35,7 +35,7 @@
 #include "mongo/db/curop.h"
 #include "mongo/db/dbmessage.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/storage_options.h"
+#include "mongo/db/storage/storage_options.h"
 
 namespace mongo {
 
@@ -50,7 +50,7 @@ class DiagLog {
                           7 = log a few reads, and all writes.
                        */
     int level;
-    mongo::mutex mutex;
+    stdx::mutex mutex;
     void openFile();
 
 public:

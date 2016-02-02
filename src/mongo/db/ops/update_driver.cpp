@@ -28,7 +28,6 @@
 
 #include "mongo/db/ops/update_driver.h"
 
-#include <boost/scoped_ptr.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
@@ -36,6 +35,7 @@
 #include "mongo/bson/mutable/document.h"
 #include "mongo/db/field_ref.h"
 #include "mongo/db/matcher/expression_leaf.h"
+#include "mongo/db/matcher/extensions_callback_noop.h"
 #include "mongo/db/ops/log_builder.h"
 #include "mongo/db/ops/modifier_object_replace.h"
 #include "mongo/db/ops/modifier_table.h"
@@ -48,8 +48,7 @@ namespace mongo {
 namespace str = mongoutils::str;
 namespace mb = mongo::mutablebson;
 
-using boost::scoped_ptr;
-using std::auto_ptr;
+using std::unique_ptr;
 using std::vector;
 
 using pathsupport::EqualityMatches;
@@ -79,7 +78,7 @@ Status UpdateDriver::parse(const BSONObj& updateExpr, const bool multi) {
         // definition, an object. We wrap the 'updateExpr' as the mod is expecting. Note
         // that the wrapper is temporary so the object replace mod should make a copy of
         // the object.
-        auto_ptr<ModifierObjectReplace> mod(new ModifierObjectReplace);
+        unique_ptr<ModifierObjectReplace> mod(new ModifierObjectReplace);
         BSONObj wrapper = BSON("dummy" << updateExpr);
         Status status = mod->init(wrapper.firstElement(), _modOptions);
         if (!status.isOK()) {
@@ -150,7 +149,7 @@ inline Status UpdateDriver::addAndParse(const modifiertable::ModifierType type,
                                     << " which is not allowed for any $" << type << " mod.");
     }
 
-    auto_ptr<ModifierInterface> mod(modifiertable::makeUpdateMod(type));
+    unique_ptr<ModifierInterface> mod(modifiertable::makeUpdateMod(type));
     dassert(mod.get());
 
     bool positional = false;
@@ -171,18 +170,20 @@ inline Status UpdateDriver::addAndParse(const modifiertable::ModifierType type,
 Status UpdateDriver::populateDocumentWithQueryFields(const BSONObj& query,
                                                      const vector<FieldRef*>* immutablePaths,
                                                      mutablebson::Document& doc) const {
-    CanonicalQuery* rawCG;
-    // We canonicalize the query to collapse $and/$or, and the first arg (ns) is not needed
-    // Also, because this is for the upsert case, where we insert a new document if one was
-    // not found, the $where clause does not make sense, hence empty WhereCallback.
-    Status s = CanonicalQuery::canonicalize("", query, &rawCG, WhereCallbackNoop());
-    if (!s.isOK())
-        return s;
-    scoped_ptr<CanonicalQuery> cq(rawCG);
-    return populateDocumentWithQueryFields(rawCG, immutablePaths, doc);
+    // We canonicalize the query to collapse $and/$or, and the first arg (ns) is not needed.  Also,
+    // because this is for the upsert case, where we insert a new document if one was not found, the
+    // $where/$text clauses do not make sense, hence empty ExtensionsCallback.
+    auto statusWithCQ =
+        CanonicalQuery::canonicalize(NamespaceString(""), query, ExtensionsCallbackNoop());
+    if (!statusWithCQ.isOK()) {
+        return statusWithCQ.getStatus();
+    }
+    unique_ptr<CanonicalQuery> cq = std::move(statusWithCQ.getValue());
+
+    return populateDocumentWithQueryFields(*cq, immutablePaths, doc);
 }
 
-Status UpdateDriver::populateDocumentWithQueryFields(const CanonicalQuery* query,
+Status UpdateDriver::populateDocumentWithQueryFields(const CanonicalQuery& query,
                                                      const vector<FieldRef*>* immutablePathsPtr,
                                                      mutablebson::Document& doc) const {
     EqualityMatches equalities;
@@ -202,10 +203,10 @@ Status UpdateDriver::populateDocumentWithQueryFields(const CanonicalQuery* query
 
         // Extract only immutable fields from replacement-style
         status =
-            pathsupport::extractFullEqualityMatches(*query->root(), pathsToExtract, &equalities);
+            pathsupport::extractFullEqualityMatches(*query.root(), pathsToExtract, &equalities);
     } else {
         // Extract all fields from op-style
-        status = pathsupport::extractEqualityMatches(*query->root(), &equalities);
+        status = pathsupport::extractEqualityMatches(*query.root(), &equalities);
     }
 
     if (!status.isOK())
@@ -215,7 +216,7 @@ Status UpdateDriver::populateDocumentWithQueryFields(const CanonicalQuery* query
     return status;
 }
 
-Status UpdateDriver::update(const StringData& matchedField,
+Status UpdateDriver::update(StringData matchedField,
                             mutablebson::Document* doc,
                             BSONObj* logOpRec,
                             FieldRefSet* updatedFields,
@@ -226,8 +227,8 @@ Status UpdateDriver::update(const StringData& matchedField,
     FieldRefSet* targetFields = updatedFields;
 
     // If we didn't get a FieldRefSet* from the caller, allocate storage and use
-    // the scoped_ptr for lifecycle management
-    scoped_ptr<FieldRefSet> targetFieldScopedPtr;
+    // the unique_ptr for lifecycle management
+    unique_ptr<FieldRefSet> targetFieldScopedPtr;
     if (!targetFields) {
         targetFieldScopedPtr.reset(new FieldRefSet());
         targetFields = targetFieldScopedPtr.get();

@@ -28,11 +28,11 @@
 *    it in the license file.
 */
 
-/* this module adds some of our layers atop memory mapped files - specifically our handling of
- * private views & such
-   if you don't care about journaling/durability (temp sort files & such) use MemoryMappedFile
-   class, not this.
-*/
+/**
+ * this module adds some of our layers atop memory mapped files - specifically our handling of
+ * private views & such if you don't care about journaling/durability (temp sort files & such) use
+ * MemoryMappedFile class, not this.
+ */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kStorage
 
@@ -43,10 +43,9 @@
 #include <utility>
 
 #include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/storage_options.h"
 #include "mongo/db/storage/mmap_v1/dur.h"
 #include "mongo/db/storage/mmap_v1/dur_journalformat.h"
-#include "mongo/db/storage_options.h"
+#include "mongo/db/storage/storage_options.h"
 #include "mongo/util/mongoutils/str.h"
 #include "mongo/util/log.h"
 #include "mongo/util/processinfo.h"
@@ -87,7 +86,7 @@ void PointerToDurableMappedFile::add_inlock(void* view, DurableMappedFile* f) {
 /** de-register view. threadsafe */
 void PointerToDurableMappedFile::remove(void* view, size_t len) {
     if (view) {
-        mutex::scoped_lock lk(_m);
+        stdx::lock_guard<stdx::mutex> lk(_m);
         clearWritableBits_inlock(view, len);
         _views.erase(view);
     }
@@ -95,7 +94,7 @@ void PointerToDurableMappedFile::remove(void* view, size_t len) {
 
 #ifdef _WIN32
 void PointerToDurableMappedFile::clearWritableBits(void* privateView, size_t len) {
-    mutex::scoped_lock lk(_m);
+    stdx::lock_guard<stdx::mutex> lk(_m);
     clearWritableBits_inlock(privateView, len);
 }
 
@@ -109,10 +108,10 @@ void PointerToDurableMappedFile::clearWritableBits_inlock(void* privateView, siz
     }
 }
 
-extern mutex mapViewMutex;
+extern stdx::mutex mapViewMutex;
 
 __declspec(noinline) void PointerToDurableMappedFile::makeChunkWritable(size_t chunkno) {
-    mutex::scoped_lock lkPrivateViews(_m);
+    stdx::lock_guard<stdx::mutex> lkPrivateViews(_m);
 
     if (writable.get(chunkno))  // double check lock
         return;
@@ -122,7 +121,7 @@ __declspec(noinline) void PointerToDurableMappedFile::makeChunkWritable(size_t c
     size_t chunkStart = chunkno * MemoryMappedCOWBitset::ChunkSize;
     size_t chunkNext = chunkStart + MemoryMappedCOWBitset::ChunkSize;
 
-    scoped_lock lkMapView(mapViewMutex);
+    stdx::lock_guard<stdx::mutex> lkMapView(mapViewMutex);
 
     map<void*, DurableMappedFile*>::iterator i = _views.upper_bound((void*)(chunkNext - 1));
     while (1) {
@@ -177,7 +176,7 @@ void PointerToDurableMappedFile::clearWritableBits(void* privateView, size_t len
 void PointerToDurableMappedFile::clearWritableBits_inlock(void* privateView, size_t len) {}
 #endif
 
-PointerToDurableMappedFile::PointerToDurableMappedFile() : _m("PointerToDurableMappedFile") {
+PointerToDurableMappedFile::PointerToDurableMappedFile() {
 #if defined(SIZE_MAX)
     size_t max = SIZE_MAX;
 #else
@@ -220,7 +219,7 @@ DurableMappedFile* PointerToDurableMappedFile::find_inlock(void* p, /*out*/ size
     @return the DurableMappedFile to which this pointer belongs. null if not found.
 */
 DurableMappedFile* PointerToDurableMappedFile::find(void* p, /*out*/ size_t& ofs) {
-    mutex::scoped_lock lk(_m);
+    stdx::lock_guard<stdx::mutex> lk(_m);
     return find_inlock(p, ofs);
 }
 
@@ -267,7 +266,7 @@ bool DurableMappedFile::finishOpening() {
            << " len:" << length();
     if (_view_write) {
         if (storageGlobalParams.dur) {
-            scoped_lock lk2(privateViews._mutex());
+            stdx::lock_guard<stdx::mutex> lk2(privateViews._mutex());
 
             _view_private = createPrivateMap();
             if (_view_private == 0) {

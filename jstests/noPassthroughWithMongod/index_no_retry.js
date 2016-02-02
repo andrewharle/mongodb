@@ -1,12 +1,14 @@
-// Check index rebuild is disabled with --noIndexBuildRetry when MongoDB is killed
+// Check index rebuild is disabled with --noIndexBuildRetry when MongoDB is killed.
+//
+// This test requires persistence beacuase it assumes data/indices will survive a restart.
+// @tags: [requires_persistence]
 (function() {
     'use strict';
     var baseName = 'index_retry';
     var dbpath = MongoRunner.dataPath + baseName;
-    var ports = allocatePorts(1);
+
     var conn = MongoRunner.runMongod({
         dbpath: dbpath,
-        port: ports[0],
         journal: ''});
 
     var test = conn.getDB("test");
@@ -42,7 +44,7 @@
                 // Identify the index build as a createIndexes command.
                 // It is assumed that no other clients are concurrently
                 // accessing the 'test' database.
-                if ( op.op == 'query' && 'createIndexes' in op.query ) {
+                if ( (op.op == 'query' || op.op == 'command') && 'createIndexes' in op.query ) {
                     debug(op.opid);
                     var idxSpec = op.query.indexes[0];
                     // SERVER-4295 Make sure the index details are there
@@ -64,7 +66,7 @@
     function abortDuringIndexBuild(options) {
         var createIdx = startParallelShell(
             'db.' + name + '.createIndex({ a: 1 }, { background: true });',
-            ports[0]);
+            conn.port);
 
         // Wait for the index build to start.
         var times = 0;
@@ -75,15 +77,16 @@
         );
 
         print("killing the mongod");
-        MongoRunner.stopMongod(ports[0], /* signal */ 9);
-        createIdx();
+        MongoRunner.stopMongod(conn.port, /* signal */ 9);
+
+        var exitCode = createIdx({checkExitSuccess: false});
+        assert.neq(0, exitCode, "expected shell to exit abnormally due to mongod being terminated");
     }
 
     abortDuringIndexBuild();
 
     conn = MongoRunner.runMongod({
         dbpath: dbpath,
-        port: ports[0],
         journal: '',
         noIndexBuildRetry: '',
         restart: true});
@@ -99,6 +102,6 @@
 
     print("Index rebuilding disabled successfully");
 
-    MongoRunner.stopMongod(ports[0]);
+    MongoRunner.stopMongod(conn.port);
     print("SUCCESS!");
 }());

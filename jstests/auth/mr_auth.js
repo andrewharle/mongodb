@@ -1,4 +1,7 @@
 // MapReduce executed by a read-only user when --auth enabled should only be able to use inline mode. Other modes require writing to an output collection which is not allowed. SERVER-3345
+//
+// This test requires users to persist across a restart.
+// @tags: [requires_persistence]
 
 baseName = "jstests_mr_auth";
 dbName = "test";
@@ -8,12 +11,9 @@ map = function(){ emit( this.x, this.y );}
 red = function( k, vs ){ var s=0; for (var i=0; i<vs.length; i++) s+=vs[i]; return s;}
 red2 = function( k, vs ){ return 42;}
 
-ports = allocatePorts( 2 );
-
 // make sure writing is allowed when started without --auth enabled
 
-port = ports[ 0 ];
-dbms = startMongod( "--port", port, "--dbpath", MongoRunner.dataPath + baseName, "--nohttpinterface", "--bind_ip", "127.0.0.1" );
+dbms = MongoRunner.runMongod({bind_ip: "127.0.0.1"});
 var d = dbms.getDB( dbName );
 var t = d[ baseName ];
 
@@ -35,13 +35,12 @@ t.mapReduce( map, red, {out: { merge: out }} )
 
 d[ out ].drop();
 
-stopMongod( port );
+MongoRunner.stopMongod(dbms);
 
 
 // In --auth mode, read-only user should not be able to write to existing or temporary collection, thus only can execute inline mode
 
-port = ports[ 1 ];
-dbms = startMongodNoReset( "--auth", "--port", port, "--dbpath", MongoRunner.dataPath + baseName, "--nohttpinterface", "--bind_ip", "127.0.0.1" );
+dbms = MongoRunner.runMongod({restart: true, cleanData: false, dbpath: dbms.dbpath, auth: "", bind_ip: "127.0.0.1"});
 d = dbms.getDB( dbName );
 t = d[ baseName ];
 
@@ -78,6 +77,6 @@ t.mapReduce( map, red, {out: { merge: out }} )
 // make sure it fails if output to a diff db
 assert.throws(function() { t.mapReduce( map, red, {out: { replace: out, db: "admin" }} ) })
 
-stopMongod( port );
+MongoRunner.stopMongod(dbms);
 
 print("\n\n\nmr_auth.js SUCCESS\n\n\n");

@@ -30,7 +30,6 @@
 
 #include "mongo/platform/basic.h"
 
-#include <boost/scoped_ptr.hpp>
 
 #include "mongo/base/init.h"
 #include "mongo/base/status.h"
@@ -40,7 +39,6 @@
 #include "mongo/bson/util/bson_extract.h"
 #include "mongo/client/sasl_client_authenticate.h"
 #include "mongo/db/audit.h"
-#include "mongo/db/auth/authorization_manager_global.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/authz_manager_external_state_mock.h"
 #include "mongo/db/auth/authz_session_external_state_mock.h"
@@ -80,8 +78,7 @@ public:
                      BSONObj& cmdObj,
                      int options,
                      std::string& ignored,
-                     BSONObjBuilder& result,
-                     bool fromRepl);
+                     BSONObjBuilder& result);
 
     virtual void help(stringstream& help) const;
     virtual bool isWriteCommandForConfigServer() const {
@@ -109,8 +106,7 @@ public:
                      BSONObj& cmdObj,
                      int options,
                      std::string& ignored,
-                     BSONObjBuilder& result,
-                     bool fromRepl);
+                     BSONObjBuilder& result);
 
     virtual void help(stringstream& help) const;
     virtual bool isWriteCommandForConfigServer() const {
@@ -191,13 +187,12 @@ Status doSaslStep(const ClientBasic* client,
     status = session->step(payload, &responsePayload);
 
     if (!status.isOK()) {
-        const SockAddr clientAddr = client->port()->remoteAddr();
+        const SockAddr clientAddr = client->port()->localAddr();
         log() << session->getMechanism() << " authentication failed for "
               << session->getPrincipalId() << " on " << session->getAuthenticationDatabase()
               << " from client " << clientAddr.getAddr() << " ; " << status.toString() << std::endl;
 
-        sleepmillis(
-            session->getAuthorizationSession()->getAuthorizationManager().getAuthFailedDelay());
+        sleepmillis(saslGlobalParams.authFailedDelay);
         // All the client needs to know is that authentication has failed.
         return Status(ErrorCodes::AuthenticationFailed, "Authentication failed.");
     }
@@ -289,10 +284,9 @@ bool CmdSaslStart::run(OperationContext* txn,
                        BSONObj& cmdObj,
                        int options,
                        std::string& ignored,
-                       BSONObjBuilder& result,
-                       bool fromRepl) {
+                       BSONObjBuilder& result) {
     ClientBasic* client = ClientBasic::getCurrent();
-    client->resetAuthenticationSession(NULL);
+    AuthenticationSession::set(client, std::unique_ptr<AuthenticationSession>());
 
     std::string mechanism;
     if (!extractMechanism(cmdObj, &mechanism).isOK()) {
@@ -300,9 +294,9 @@ bool CmdSaslStart::run(OperationContext* txn,
     }
 
     SaslAuthenticationSession* session =
-        SaslAuthenticationSession::create(client->getAuthorizationSession(), mechanism);
+        SaslAuthenticationSession::create(AuthorizationSession::get(client), mechanism);
 
-    boost::scoped_ptr<AuthenticationSession> sessionGuard(session);
+    std::unique_ptr<AuthenticationSession> sessionGuard(session);
 
     session->setOpCtxt(txn);
 
@@ -315,7 +309,7 @@ bool CmdSaslStart::run(OperationContext* txn,
                                  UserName(session->getPrincipalId(), db),
                                  status.code());
     } else {
-        client->swapAuthenticationSession(sessionGuard);
+        AuthenticationSession::swap(client, sessionGuard);
     }
     return status.isOK();
 }
@@ -332,11 +326,10 @@ bool CmdSaslContinue::run(OperationContext* txn,
                           BSONObj& cmdObj,
                           int options,
                           std::string& ignored,
-                          BSONObjBuilder& result,
-                          bool fromRepl) {
+                          BSONObjBuilder& result) {
     ClientBasic* client = ClientBasic::getCurrent();
-    boost::scoped_ptr<AuthenticationSession> sessionGuard(NULL);
-    client->swapAuthenticationSession(sessionGuard);
+    std::unique_ptr<AuthenticationSession> sessionGuard;
+    AuthenticationSession::swap(client, sessionGuard);
 
     if (!sessionGuard || sessionGuard->getType() != AuthenticationSession::SESSION_TYPE_SASL) {
         addStatus(Status(ErrorCodes::ProtocolError, "No SASL session state found"), &result);
@@ -366,7 +359,7 @@ bool CmdSaslContinue::run(OperationContext* txn,
                                  UserName(session->getPrincipalId(), db),
                                  status.code());
     } else {
-        client->swapAuthenticationSession(sessionGuard);
+        AuthenticationSession::swap(client, sessionGuard);
     }
 
     return status.isOK();

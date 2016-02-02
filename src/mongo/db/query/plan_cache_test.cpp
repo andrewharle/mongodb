@@ -33,13 +33,11 @@
 #include "mongo/db/query/plan_cache.h"
 
 #include <algorithm>
-#include <boost/scoped_ptr.hpp>
 #include <ostream>
 #include <memory>
 
 #include "mongo/db/jsobj.h"
 #include "mongo/db/json.h"
-#include "mongo/db/query/qlog.h"
 #include "mongo/db/query/plan_ranker.h"
 #include "mongo/db/query/query_knobs.h"
 #include "mongo/db/query/query_planner.h"
@@ -52,114 +50,101 @@ using namespace mongo;
 
 namespace {
 
-using boost::scoped_ptr;
-using std::auto_ptr;
 using std::string;
+using std::unique_ptr;
 using std::vector;
 
-static const char* ns = "somebogusns";
+static const NamespaceString nss("test.collection");
 
 /**
  * Utility functions to create a CanonicalQuery
  */
-CanonicalQuery* canonicalize(const BSONObj& queryObj) {
-    CanonicalQuery* cq;
-    Status result = CanonicalQuery::canonicalize(ns, queryObj, &cq);
-    ASSERT_OK(result);
-    return cq;
+unique_ptr<CanonicalQuery> canonicalize(const BSONObj& queryObj) {
+    auto statusWithCQ = CanonicalQuery::canonicalize(nss, queryObj);
+    ASSERT_OK(statusWithCQ.getStatus());
+    return std::move(statusWithCQ.getValue());
 }
 
-CanonicalQuery* canonicalize(const char* queryStr) {
+unique_ptr<CanonicalQuery> canonicalize(const char* queryStr) {
     BSONObj queryObj = fromjson(queryStr);
     return canonicalize(queryObj);
 }
 
-CanonicalQuery* canonicalize(const char* queryStr, const char* sortStr, const char* projStr) {
+unique_ptr<CanonicalQuery> canonicalize(const char* queryStr,
+                                        const char* sortStr,
+                                        const char* projStr) {
     BSONObj queryObj = fromjson(queryStr);
     BSONObj sortObj = fromjson(sortStr);
     BSONObj projObj = fromjson(projStr);
-    CanonicalQuery* cq;
-    Status result = CanonicalQuery::canonicalize(ns, queryObj, sortObj, projObj, &cq);
-    ASSERT_OK(result);
-    return cq;
+    auto statusWithCQ = CanonicalQuery::canonicalize(nss, queryObj, sortObj, projObj);
+    ASSERT_OK(statusWithCQ.getStatus());
+    return std::move(statusWithCQ.getValue());
 }
 
-CanonicalQuery* canonicalize(const char* queryStr,
-                             const char* sortStr,
-                             const char* projStr,
-                             long long skip,
-                             long long limit,
-                             const char* hintStr,
-                             const char* minStr,
-                             const char* maxStr) {
+unique_ptr<CanonicalQuery> canonicalize(const char* queryStr,
+                                        const char* sortStr,
+                                        const char* projStr,
+                                        long long skip,
+                                        long long limit,
+                                        const char* hintStr,
+                                        const char* minStr,
+                                        const char* maxStr) {
     BSONObj queryObj = fromjson(queryStr);
     BSONObj sortObj = fromjson(sortStr);
     BSONObj projObj = fromjson(projStr);
     BSONObj hintObj = fromjson(hintStr);
     BSONObj minObj = fromjson(minStr);
     BSONObj maxObj = fromjson(maxStr);
-    CanonicalQuery* cq;
-    Status result = CanonicalQuery::canonicalize(ns,
-                                                 queryObj,
-                                                 sortObj,
-                                                 projObj,
-                                                 skip,
-                                                 limit,
-                                                 hintObj,
-                                                 minObj,
-                                                 maxObj,
-                                                 false,  // snapshot
-                                                 false,  // explain
-                                                 &cq);
-    ASSERT_OK(result);
-    return cq;
+    auto statusWithCQ = CanonicalQuery::canonicalize(nss,
+                                                     queryObj,
+                                                     sortObj,
+                                                     projObj,
+                                                     skip,
+                                                     limit,
+                                                     hintObj,
+                                                     minObj,
+                                                     maxObj,
+                                                     false,   // snapshot
+                                                     false);  // explain
+    ASSERT_OK(statusWithCQ.getStatus());
+    return std::move(statusWithCQ.getValue());
 }
 
-CanonicalQuery* canonicalize(const char* queryStr,
-                             const char* sortStr,
-                             const char* projStr,
-                             long long skip,
-                             long long limit,
-                             const char* hintStr,
-                             const char* minStr,
-                             const char* maxStr,
-                             bool snapshot,
-                             bool explain) {
+unique_ptr<CanonicalQuery> canonicalize(const char* queryStr,
+                                        const char* sortStr,
+                                        const char* projStr,
+                                        long long skip,
+                                        long long limit,
+                                        const char* hintStr,
+                                        const char* minStr,
+                                        const char* maxStr,
+                                        bool snapshot,
+                                        bool explain) {
     BSONObj queryObj = fromjson(queryStr);
     BSONObj sortObj = fromjson(sortStr);
     BSONObj projObj = fromjson(projStr);
     BSONObj hintObj = fromjson(hintStr);
     BSONObj minObj = fromjson(minStr);
     BSONObj maxObj = fromjson(maxStr);
-    CanonicalQuery* cq;
-    Status result = CanonicalQuery::canonicalize(ns,
-                                                 queryObj,
-                                                 sortObj,
-                                                 projObj,
-                                                 skip,
-                                                 limit,
-                                                 hintObj,
-                                                 minObj,
-                                                 maxObj,
-                                                 snapshot,
-                                                 explain,
-                                                 &cq);
-    ASSERT_OK(result);
-    return cq;
+    auto statusWithCQ = CanonicalQuery::canonicalize(
+        nss, queryObj, sortObj, projObj, skip, limit, hintObj, minObj, maxObj, snapshot, explain);
+    ASSERT_OK(statusWithCQ.getStatus());
+    return std::move(statusWithCQ.getValue());
 }
 
 /**
  * Utility function to create MatchExpression
  */
-MatchExpression* parseMatchExpression(const BSONObj& obj) {
+unique_ptr<MatchExpression> parseMatchExpression(const BSONObj& obj) {
     StatusWithMatchExpression status = MatchExpressionParser::parse(obj);
     if (!status.isOK()) {
-        mongoutils::str::stream ss;
-        ss << "failed to parse query: " << obj.toString() << ". Reason: " << status.toString();
+        str::stream ss;
+        ss << "failed to parse query: " << obj.toString()
+           << ". Reason: " << status.getStatus().toString();
         FAIL(ss);
     }
-    MatchExpression* expr(status.getValue());
-    return expr;
+
+    return std::move(status.getValue());
 }
 
 void assertEquivalent(const char* queryStr,
@@ -168,7 +153,7 @@ void assertEquivalent(const char* queryStr,
     if (actual->equivalent(expected)) {
         return;
     }
-    mongoutils::str::stream ss;
+    str::stream ss;
     ss << "Match expressions are not equivalent."
        << "\nOriginal query: " << queryStr << "\nExpected: " << expected->toString()
        << "\nActual: " << actual->toString();
@@ -184,7 +169,7 @@ void assertEquivalent(const char* queryStr,
  */
 struct GenerateQuerySolution {
     QuerySolution* operator()() const {
-        auto_ptr<QuerySolution> qs(new QuerySolution());
+        unique_ptr<QuerySolution> qs(new QuerySolution());
         qs->cacheData.reset(new SolutionCacheData());
         qs->cacheData->solnType = SolutionCacheData::COLLSCAN_SOLN;
         qs->cacheData->tree.reset(new PlanCacheIndexTree());
@@ -196,10 +181,10 @@ struct GenerateQuerySolution {
  * Utility function to create a PlanRankingDecision
  */
 PlanRankingDecision* createDecision(size_t numPlans) {
-    auto_ptr<PlanRankingDecision> why(new PlanRankingDecision());
+    unique_ptr<PlanRankingDecision> why(new PlanRankingDecision());
     for (size_t i = 0; i < numPlans; ++i) {
         CommonStats common("COLLSCAN");
-        auto_ptr<PlanStageStats> stats(new PlanStageStats(common, STAGE_COLLSCAN));
+        unique_ptr<PlanStageStats> stats(new PlanStageStats(common, STAGE_COLLSCAN));
         stats->specific.reset(new CollectionScanStats());
         why->stats.mutableVector().push_back(stats.release());
         why->scores.push_back(0U);
@@ -218,7 +203,7 @@ void assertShouldCacheQuery(const CanonicalQuery& query) {
     if (PlanCache::shouldCacheQuery(query)) {
         return;
     }
-    mongoutils::str::stream ss;
+    str::stream ss;
     ss << "Canonical query should be cacheable: " << query.toString();
     FAIL(ss);
 }
@@ -227,18 +212,18 @@ void assertShouldNotCacheQuery(const CanonicalQuery& query) {
     if (!PlanCache::shouldCacheQuery(query)) {
         return;
     }
-    mongoutils::str::stream ss;
+    str::stream ss;
     ss << "Canonical query should not be cacheable: " << query.toString();
     FAIL(ss);
 }
 
 void assertShouldNotCacheQuery(const BSONObj& query) {
-    auto_ptr<CanonicalQuery> cq(canonicalize(query));
+    unique_ptr<CanonicalQuery> cq(canonicalize(query));
     assertShouldNotCacheQuery(*cq);
 }
 
 void assertShouldNotCacheQuery(const char* queryStr) {
-    auto_ptr<CanonicalQuery> cq(canonicalize(queryStr));
+    unique_ptr<CanonicalQuery> cq(canonicalize(queryStr));
     assertShouldNotCacheQuery(*cq);
 }
 
@@ -249,12 +234,12 @@ void assertShouldNotCacheQuery(const char* queryStr) {
  */
 
 TEST(PlanCacheTest, ShouldCacheQueryBasic) {
-    auto_ptr<CanonicalQuery> cq(canonicalize("{a: 1}"));
+    unique_ptr<CanonicalQuery> cq(canonicalize("{a: 1}"));
     assertShouldCacheQuery(*cq);
 }
 
 TEST(PlanCacheTest, ShouldCacheQuerySort) {
-    auto_ptr<CanonicalQuery> cq(canonicalize("{}", "{a: -1}", "{_id: 0, a: 1}"));
+    unique_ptr<CanonicalQuery> cq(canonicalize("{}", "{a: -1}", "{_id: 0, a: 1}"));
     assertShouldCacheQuery(*cq);
 }
 
@@ -268,7 +253,7 @@ TEST(PlanCacheTest, ShouldCacheQuerySort) {
  * This should normally be handled by the IDHack runner.
  */
 TEST(PlanCacheTest, ShouldNotCacheQueryCollectionScan) {
-    auto_ptr<CanonicalQuery> cq(canonicalize("{}"));
+    unique_ptr<CanonicalQuery> cq(canonicalize("{}"));
     assertShouldNotCacheQuery(*cq);
 }
 
@@ -278,7 +263,7 @@ TEST(PlanCacheTest, ShouldNotCacheQueryCollectionScan) {
  * Therefore, not much point in caching.
  */
 TEST(PlanCacheTest, ShouldNotCacheQueryWithHint) {
-    auto_ptr<CanonicalQuery> cq(
+    unique_ptr<CanonicalQuery> cq(
         canonicalize("{a: 1}", "{}", "{}", 0, 0, "{a: 1, b: 1}", "{}", "{}"));
     assertShouldNotCacheQuery(*cq);
 }
@@ -287,7 +272,7 @@ TEST(PlanCacheTest, ShouldNotCacheQueryWithHint) {
  * Min queries are a specialized case of hinted queries
  */
 TEST(PlanCacheTest, ShouldNotCacheQueryWithMin) {
-    auto_ptr<CanonicalQuery> cq(canonicalize("{a: 1}", "{}", "{}", 0, 0, "{}", "{a: 100}", "{}"));
+    unique_ptr<CanonicalQuery> cq(canonicalize("{a: 1}", "{}", "{}", 0, 0, "{}", "{a: 100}", "{}"));
     assertShouldNotCacheQuery(*cq);
 }
 
@@ -295,7 +280,7 @@ TEST(PlanCacheTest, ShouldNotCacheQueryWithMin) {
  *  Max queries are non-cacheable for the same reasons as min queries.
  */
 TEST(PlanCacheTest, ShouldNotCacheQueryWithMax) {
-    auto_ptr<CanonicalQuery> cq(canonicalize("{a: 1}", "{}", "{}", 0, 0, "{}", "{}", "{a: 100}"));
+    unique_ptr<CanonicalQuery> cq(canonicalize("{a: 1}", "{}", "{}", 0, 0, "{}", "{}", "{a: 100}"));
     assertShouldNotCacheQuery(*cq);
 }
 
@@ -304,7 +289,7 @@ TEST(PlanCacheTest, ShouldNotCacheQueryWithMax) {
  * the planner is able to come up with a cacheable solution.
  */
 TEST(PlanCacheTest, ShouldCacheQueryWithGeoWithinLegacyCoordinates) {
-    auto_ptr<CanonicalQuery> cq(canonicalize(
+    unique_ptr<CanonicalQuery> cq(canonicalize(
         "{a: {$geoWithin: "
         "{$box: [[-180, -90], [180, 90]]}}}"));
     assertShouldCacheQuery(*cq);
@@ -314,7 +299,7 @@ TEST(PlanCacheTest, ShouldCacheQueryWithGeoWithinLegacyCoordinates) {
  * $geoWithin queries with GeoJSON coordinates are supported by the index bounds builder.
  */
 TEST(PlanCacheTest, ShouldCacheQueryWithGeoWithinJSONCoordinates) {
-    auto_ptr<CanonicalQuery> cq(canonicalize(
+    unique_ptr<CanonicalQuery> cq(canonicalize(
         "{a: {$geoWithin: "
         "{$geometry: {type: 'Polygon', coordinates: "
         "[[[0, 0], [0, 90], [90, 0], [0, 0]]]}}}}"));
@@ -325,7 +310,7 @@ TEST(PlanCacheTest, ShouldCacheQueryWithGeoWithinJSONCoordinates) {
  * $geoWithin queries with both legacy and GeoJSON coordinates are cacheable.
  */
 TEST(PlanCacheTest, ShouldCacheQueryWithGeoWithinLegacyAndJSONCoordinates) {
-    auto_ptr<CanonicalQuery> cq(canonicalize(
+    unique_ptr<CanonicalQuery> cq(canonicalize(
         "{$or: [{a: {$geoWithin: {$geometry: {type: 'Polygon', "
         "coordinates: [[[0, 0], [0, 90], "
         "[90, 0], [0, 0]]]}}}},"
@@ -337,7 +322,7 @@ TEST(PlanCacheTest, ShouldCacheQueryWithGeoWithinLegacyAndJSONCoordinates) {
  * $geoIntersects queries are always cacheable because they support GeoJSON coordinates only.
  */
 TEST(PlanCacheTest, ShouldCacheQueryWithGeoIntersects) {
-    auto_ptr<CanonicalQuery> cq(canonicalize(
+    unique_ptr<CanonicalQuery> cq(canonicalize(
         "{a: {$geoIntersects: "
         "{$geometry: {type: 'Point', coordinates: "
         "[10.0, 10.0]}}}}"));
@@ -349,7 +334,7 @@ TEST(PlanCacheTest, ShouldCacheQueryWithGeoIntersects) {
  * between flat and spherical queries.
  */
 TEST(PlanCacheTest, ShouldNotCacheQueryWithGeoNear) {
-    auto_ptr<CanonicalQuery> cq(canonicalize(
+    unique_ptr<CanonicalQuery> cq(canonicalize(
         "{a: {$geoNear: {$geometry: {type: 'Point',"
         "coordinates: [0,0]}, $maxDistance:100}}}"));
     assertShouldCacheQuery(*cq);
@@ -361,17 +346,17 @@ TEST(PlanCacheTest, ShouldNotCacheQueryWithGeoNear) {
  * non-winning plans.
  */
 TEST(PlanCacheTest, ShouldNotCacheQueryExplain) {
-    auto_ptr<CanonicalQuery> cq(canonicalize("{a: 1}",
-                                             "{}",
-                                             "{}",
-                                             0,
-                                             0,
-                                             "{}",
-                                             "{}",
-                                             "{}",   // min, max
-                                             false,  // snapshot
-                                             true    // explain
-                                             ));
+    unique_ptr<CanonicalQuery> cq(canonicalize("{a: 1}",
+                                               "{}",
+                                               "{}",
+                                               0,
+                                               0,
+                                               "{}",
+                                               "{}",
+                                               "{}",   // min, max
+                                               false,  // snapshot
+                                               true    // explain
+                                               ));
     const LiteParsedQuery& pq = cq->getParsed();
     ASSERT_TRUE(pq.isExplain());
     assertShouldNotCacheQuery(*cq);
@@ -380,15 +365,15 @@ TEST(PlanCacheTest, ShouldNotCacheQueryExplain) {
 // Adding an empty vector of query solutions should fail.
 TEST(PlanCacheTest, AddEmptySolutions) {
     PlanCache planCache;
-    auto_ptr<CanonicalQuery> cq(canonicalize("{a: 1}"));
+    unique_ptr<CanonicalQuery> cq(canonicalize("{a: 1}"));
     std::vector<QuerySolution*> solns;
-    boost::scoped_ptr<PlanRankingDecision> decision(createDecision(1U));
+    unique_ptr<PlanRankingDecision> decision(createDecision(1U));
     ASSERT_NOT_OK(planCache.add(*cq, solns, decision.get()));
 }
 
 TEST(PlanCacheTest, AddValidSolution) {
     PlanCache planCache;
-    auto_ptr<CanonicalQuery> cq(canonicalize("{a: 1}"));
+    unique_ptr<CanonicalQuery> cq(canonicalize("{a: 1}"));
     QuerySolution qs;
     qs.cacheData.reset(new SolutionCacheData());
     qs.cacheData->tree.reset(new PlanCacheIndexTree());
@@ -429,14 +414,11 @@ TEST(PlanCacheTest, AddValidSolution) {
 class CachePlanSelectionTest : public mongo::unittest::Test {
 protected:
     void setUp() {
-        cq = NULL;
         params.options = QueryPlannerParams::INCLUDE_COLLSCAN;
         addIndex(BSON("_id" << 1));
     }
 
     void tearDown() {
-        delete cq;
-
         for (vector<QuerySolution*>::iterator it = solns.begin(); it != solns.end(); ++it) {
             delete *it;
         }
@@ -446,13 +428,14 @@ protected:
         // The first false means not multikey.
         // The second false means not sparse.
         // The third arg is the index name and I am egotistical.
-        params.indices.push_back(
-            IndexEntry(keyPattern, multikey, false, false, "hari_king_of_the_stove", BSONObj()));
+        // The NULL means no filter expression.
+        params.indices.push_back(IndexEntry(
+            keyPattern, multikey, false, false, "hari_king_of_the_stove", NULL, BSONObj()));
     }
 
     void addIndex(BSONObj keyPattern, bool multikey, bool sparse) {
         params.indices.push_back(IndexEntry(
-            keyPattern, multikey, sparse, false, "note_to_self_dont_break_build", BSONObj()));
+            keyPattern, multikey, sparse, false, "note_to_self_dont_break_build", NULL, BSONObj()));
     }
 
     //
@@ -517,9 +500,6 @@ protected:
                       const BSONObj& maxObj,
                       bool snapshot) {
         // Clean up any previous state from a call to runQueryFull
-        delete cq;
-        cq = NULL;
-
         for (vector<QuerySolution*>::iterator it = solns.begin(); it != solns.end(); ++it) {
             delete *it;
         }
@@ -527,23 +507,19 @@ protected:
         solns.clear();
 
 
-        Status s = CanonicalQuery::canonicalize(ns,
-                                                query,
-                                                sort,
-                                                proj,
-                                                skip,
-                                                limit,
-                                                hint,
-                                                minObj,
-                                                maxObj,
-                                                snapshot,
-                                                false,  // explain
-                                                &cq);
-        if (!s.isOK()) {
-            cq = NULL;
-        }
-        ASSERT_OK(s);
-        s = QueryPlanner::plan(*cq, params, &solns);
+        auto statusWithCQ = CanonicalQuery::canonicalize(nss,
+                                                         query,
+                                                         sort,
+                                                         proj,
+                                                         skip,
+                                                         limit,
+                                                         hint,
+                                                         minObj,
+                                                         maxObj,
+                                                         snapshot,
+                                                         false);  // explain
+        ASSERT_OK(statusWithCQ.getStatus());
+        Status s = QueryPlanner::plan(*statusWithCQ.getValue(), params, &solns);
         ASSERT_OK(s);
     }
 
@@ -551,7 +527,7 @@ protected:
     // Solution introspection.
     //
 
-    void dumpSolutions(mongoutils::str::stream& ost) const {
+    void dumpSolutions(str::stream& ost) const {
         for (vector<QuerySolution*>::const_iterator it = solns.begin(); it != solns.end(); ++it) {
             ost << (*it)->toString() << '\n';
         }
@@ -584,7 +560,7 @@ protected:
         if (numMatches == matches) {
             return;
         }
-        mongoutils::str::stream ss;
+        str::stream ss;
         ss << "expected " << numMatches << " matches for solution " << solnJson << " but got "
            << matches << " instead. all solutions generated: " << '\n';
         dumpSolutions(ss);
@@ -612,11 +588,9 @@ protected:
                                       const BSONObj& sort,
                                       const BSONObj& proj,
                                       const QuerySolution& soln) const {
-        CanonicalQuery* cq;
-        Status s = CanonicalQuery::canonicalize(ns, query, sort, proj, &cq);
-        ASSERT_OK(s);
-        scoped_ptr<CanonicalQuery> scopedCq(cq);
-        cq = NULL;
+        auto statusWithCQ = CanonicalQuery::canonicalize(nss, query, sort, proj);
+        ASSERT_OK(statusWithCQ.getStatus());
+        unique_ptr<CanonicalQuery> scopedCq = std::move(statusWithCQ.getValue());
 
         // Create a CachedSolution the long way..
         // QuerySolution -> PlanCacheEntry -> CachedSolution
@@ -627,10 +601,9 @@ protected:
         PlanCacheEntry entry(solutions, createDecision(1U));
         CachedSolution cachedSoln(ck, entry);
 
-        QuerySolution* out, *backupOut;
-        s = QueryPlanner::planFromCache(*scopedCq.get(), params, cachedSoln, &out, &backupOut);
+        QuerySolution* out;
+        Status s = QueryPlanner::planFromCache(*scopedCq, params, cachedSoln, &out);
         ASSERT_OK(s);
-        std::auto_ptr<QuerySolution> cleanBackup(backupOut);
 
         return out;
     }
@@ -650,7 +623,7 @@ protected:
             }
         }
 
-        mongoutils::str::stream ss;
+        str::stream ss;
         ss << "Could not find a match for solution " << solnJson
            << " All solutions generated: " << '\n';
         dumpSolutions(ss);
@@ -668,7 +641,7 @@ protected:
     void assertSolutionMatches(QuerySolution* trueSoln, const string& solnJson) const {
         BSONObj testSoln = fromjson(solnJson);
         if (!QueryPlannerTestLib::solutionMatches(testSoln, trueSoln->root.get())) {
-            mongoutils::str::stream ss;
+            str::stream ss;
             ss << "Expected solution " << solnJson
                << " did not match true solution: " << trueSoln->toString() << '\n';
             FAIL(ss);
@@ -718,7 +691,6 @@ protected:
     static const PlanCacheKey ck;
 
     BSONObj queryObj;
-    CanonicalQuery* cq;
     QueryPlannerParams params;
     vector<QuerySolution*> solns;
 };
@@ -968,8 +940,11 @@ TEST_F(CachePlanSelectionTest, CollscanMergeSort) {
     BSONObj sort = BSON("c" << 1);
     runQuerySortProj(query, sort, BSONObj());
 
-    assertPlanCacheRecoversSolution(
-        query, sort, BSONObj(), "{sort: {pattern: {c: 1}, limit: 0, node: {cscan: {dir: 1}}}}");
+    assertPlanCacheRecoversSolution(query,
+                                    sort,
+                                    BSONObj(),
+                                    "{sort: {pattern: {c: 1}, limit: 0, node: {sortKeyGen: "
+                                    "{node: {cscan: {dir: 1}}}}}}");
 }
 
 //
@@ -1004,8 +979,8 @@ TEST_F(CachePlanSelectionTest, NaturalHintNotCached) {
     addIndex(BSON("b" << 1));
     runQuerySortHint(BSON("a" << 1), BSON("b" << 1), BSON("$natural" << 1));
     assertNotCached(
-        "{sort: {pattern: {b: 1}, limit: 0, node: "
-        "{cscan: {filter: {a: 1}, dir: 1}}}}");
+        "{sort: {pattern: {b: 1}, limit: 0, node: {sortKeyGen: {node: "
+        "{cscan: {filter: {a: 1}, dir: 1}}}}}}");
 }
 
 TEST_F(CachePlanSelectionTest, HintValidNotCached) {
@@ -1059,6 +1034,171 @@ TEST_F(CachePlanSelectionTest, Or2DNonNearNotCached) {
     assertNotCached(
         "{or: {nodes: [{fetch: {node: {ixscan: {pattern: {a: '2d'}}}}},"
         "{fetch: {node: {ixscan: {pattern: {b: '2d'}}}}}]}}");
+}
+
+/**
+ * Test functions for computeKey.  Cache keys are intentionally obfuscated and are
+ * meaningful only within the current lifetime of the server process. Users should treat plan
+ * cache keys as opaque.
+ */
+void testComputeKey(const char* queryStr,
+                    const char* sortStr,
+                    const char* projStr,
+                    const char* expectedStr) {
+    PlanCache planCache;
+    unique_ptr<CanonicalQuery> cq(canonicalize(queryStr, sortStr, projStr));
+    PlanCacheKey key = planCache.computeKey(*cq);
+    PlanCacheKey expectedKey(expectedStr);
+    if (key == expectedKey) {
+        return;
+    }
+    str::stream ss;
+    ss << "Unexpected plan cache key. Expected: " << expectedKey << ". Actual: " << key
+       << ". Query: " << cq->toString();
+    FAIL(ss);
+}
+
+TEST(PlanCacheTest, ComputeKey) {
+    // Generated cache keys should be treated as opaque to the user.
+
+    // No sorts
+    testComputeKey("{}", "{}", "{}", "an");
+    testComputeKey("{$or: [{a: 1}, {b: 2}]}", "{}", "{}", "or[eqa,eqb]");
+    testComputeKey("{$or: [{a: 1}, {b: 1}, {c: 1}], d: 1}", "{}", "{}", "an[or[eqa,eqb,eqc],eqd]");
+    testComputeKey("{$or: [{a: 1}, {b: 1}], c: 1, d: 1}", "{}", "{}", "an[or[eqa,eqb],eqc,eqd]");
+    testComputeKey("{a: 1, b: 1, c: 1}", "{}", "{}", "an[eqa,eqb,eqc]");
+    testComputeKey("{a: 1, beqc: 1}", "{}", "{}", "an[eqa,eqbeqc]");
+    testComputeKey("{ap1a: 1}", "{}", "{}", "eqap1a");
+    testComputeKey("{aab: 1}", "{}", "{}", "eqaab");
+
+    // With sort
+    testComputeKey("{}", "{a: 1}", "{}", "an~aa");
+    testComputeKey("{}", "{a: -1}", "{}", "an~da");
+    testComputeKey("{}",
+                   "{a: {$meta: 'textScore'}}",
+                   "{a: {$meta: 'textScore'}}",
+                   "an~ta|{ $meta: \"textScore\" }a");
+    testComputeKey("{a: 1}", "{b: 1}", "{}", "eqa~ab");
+
+    // With projection
+    testComputeKey("{}", "{}", "{a: 1}", "an|ia");
+    testComputeKey("{}", "{}", "{a: -1}", "an|ia");
+    testComputeKey("{}", "{}", "{a: -1.0}", "an|ia");
+    testComputeKey("{}", "{}", "{a: true}", "an|ia");
+    testComputeKey("{}", "{}", "{a: 0}", "an|ea");
+    testComputeKey("{}", "{}", "{a: false}", "an|ea");
+    testComputeKey("{}", "{}", "{a: 99}", "an|ia");
+    testComputeKey("{}", "{}", "{a: 'foo'}", "an|ia");
+    testComputeKey("{}", "{}", "{a: {$slice: [3, 5]}}", "an|{ $slice: \\[ 3\\, 5 \\] }a");
+    testComputeKey("{}", "{}", "{a: {$elemMatch: {x: 2}}}", "an|{ $elemMatch: { x: 2 } }a");
+    testComputeKey("{}", "{}", "{a: ObjectId('507f191e810c19729de860ea')}", "an|ia");
+    testComputeKey("{a: 1}", "{}", "{'a.$': 1}", "eqa|ia.$");
+    testComputeKey("{a: 1}", "{}", "{a: 1}", "eqa|ia");
+
+    // Projection should be order-insensitive
+    testComputeKey("{}", "{}", "{a: 1, b: 1}", "an|iaib");
+    testComputeKey("{}", "{}", "{b: 1, a: 1}", "an|iaib");
+
+    // With or-elimination and projection
+    testComputeKey("{$or: [{a: 1}]}", "{}", "{_id: 0, a: 1}", "eqa|e_idia");
+    testComputeKey("{$or: [{a: 1}]}", "{}", "{'a.$': 1}", "eqa|ia.$");
+}
+
+// Delimiters found in user field names or non-standard projection field values
+// must be escaped.
+TEST(PlanCacheTest, ComputeKeyEscaped) {
+    // Field name in query.
+    testComputeKey("{'a,[]~|<>': 1}", "{}", "{}", "eqa\\,\\[\\]\\~\\|\\<\\>");
+
+    // Field name in sort.
+    testComputeKey("{}", "{'a,[]~|<>': 1}", "{}", "an~aa\\,\\[\\]\\~\\|\\<\\>");
+
+    // Field name in projection.
+    testComputeKey("{}", "{}", "{'a,[]~|<>': 1}", "an|ia\\,\\[\\]\\~\\|\\<\\>");
+
+    // Value in projection.
+    testComputeKey("{}", "{}", "{a: 'foo,[]~|<>'}", "an|ia");
+}
+
+// Cache keys for $geoWithin queries with legacy and GeoJSON coordinates should
+// not be the same.
+TEST(PlanCacheTest, ComputeKeyGeoWithin) {
+    PlanCache planCache;
+
+    // Legacy coordinates.
+    unique_ptr<CanonicalQuery> cqLegacy(canonicalize(
+        "{a: {$geoWithin: "
+        "{$box: [[-180, -90], [180, 90]]}}}"));
+    // GeoJSON coordinates.
+    unique_ptr<CanonicalQuery> cqNew(canonicalize(
+        "{a: {$geoWithin: "
+        "{$geometry: {type: 'Polygon', coordinates: "
+        "[[[0, 0], [0, 90], [90, 0], [0, 0]]]}}}}"));
+    ASSERT_NOT_EQUALS(planCache.computeKey(*cqLegacy), planCache.computeKey(*cqNew));
+}
+
+// GEO_NEAR cache keys should include information on geometry and CRS in addition
+// to the match type and field name.
+TEST(PlanCacheTest, ComputeKeyGeoNear) {
+    testComputeKey("{a: {$near: [0,0], $maxDistance:0.3 }}", "{}", "{}", "gnanrfl");
+    testComputeKey("{a: {$nearSphere: [0,0], $maxDistance: 0.31 }}", "{}", "{}", "gnanssp");
+    testComputeKey(
+        "{a: {$geoNear: {$geometry: {type: 'Point', coordinates: [0,0]},"
+        "$maxDistance:100}}}",
+        "{}",
+        "{}",
+        "gnanrsp");
+}
+
+// When a sparse index is present, computeKey() should generate different keys depending on
+// whether or not the predicates in the given query can use the index.
+TEST(PlanCacheTest, ComputeKeySparseIndex) {
+    PlanCache planCache;
+    planCache.notifyOfIndexEntries({IndexEntry(BSON("a" << 1),
+                                               false,    // multikey
+                                               true,     // sparse
+                                               false,    // unique
+                                               "",       // name
+                                               nullptr,  // filterExpr
+                                               BSONObj())});
+
+    unique_ptr<CanonicalQuery> cqEqNumber(canonicalize("{a: 0}}"));
+    unique_ptr<CanonicalQuery> cqEqString(canonicalize("{a: 'x'}}"));
+    unique_ptr<CanonicalQuery> cqEqNull(canonicalize("{a: null}}"));
+
+    // 'cqEqNumber' and 'cqEqString' get the same key, since both are compatible with this
+    // index.
+    ASSERT_EQ(planCache.computeKey(*cqEqNumber), planCache.computeKey(*cqEqString));
+
+    // 'cqEqNull' gets a different key, since it is not compatible with this index.
+    ASSERT_NOT_EQUALS(planCache.computeKey(*cqEqNull), planCache.computeKey(*cqEqNumber));
+}
+
+// When a partial index is present, computeKey() should generate different keys depending on
+// whether or not the predicates in the given query "match" the predicates in the partial index
+// filter.
+TEST(PlanCacheTest, ComputeKeyPartialIndex) {
+    BSONObj filterObj = BSON("f" << BSON("$gt" << 0));
+    unique_ptr<MatchExpression> filterExpr(parseMatchExpression(filterObj));
+
+    PlanCache planCache;
+    planCache.notifyOfIndexEntries({IndexEntry(BSON("a" << 1),
+                                               false,  // multikey
+                                               false,  // sparse
+                                               false,  // unique
+                                               "",     // name
+                                               filterExpr.get(),
+                                               BSONObj())});
+
+    unique_ptr<CanonicalQuery> cqGtNegativeFive(canonicalize("{f: {$gt: -5}}"));
+    unique_ptr<CanonicalQuery> cqGtZero(canonicalize("{f: {$gt: 0}}"));
+    unique_ptr<CanonicalQuery> cqGtFive(canonicalize("{f: {$gt: 5}}"));
+
+    // 'cqGtZero' and 'cqGtFive' get the same key, since both are compatible with this index.
+    ASSERT_EQ(planCache.computeKey(*cqGtZero), planCache.computeKey(*cqGtFive));
+
+    // 'cqGtNegativeFive' gets a different key, since it is not compatible with this index.
+    ASSERT_NOT_EQUALS(planCache.computeKey(*cqGtNegativeFive), planCache.computeKey(*cqGtZero));
 }
 
 }  // namespace

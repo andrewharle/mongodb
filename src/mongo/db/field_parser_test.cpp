@@ -30,7 +30,6 @@
 #include <vector>
 #include <map>
 
-#include "mongo/bson/bson_field.h"
 #include "mongo/db/field_parser.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/unittest/unittest.h"
@@ -73,7 +72,7 @@ protected:
         valBool = true;
         valArray = BSON_ARRAY(1 << 2 << 3);
         valObj = BSON("a" << 1);
-        valDate = 1ULL;
+        valDate = Date_t::fromMillisSinceEpoch(1);
         valString = "a string";
         valOID = OID::gen();
         valLong = 1LL;
@@ -131,13 +130,13 @@ TEST_F(ExtractionFixture, GetBSONObj) {
 }
 
 TEST_F(ExtractionFixture, GetDate) {
-    BSONField<Date_t> notThere("otherDate", 99ULL);
+    BSONField<Date_t> notThere("otherDate", Date_t::fromMillisSinceEpoch(99));
     BSONField<Date_t> wrongType(aString.name());
     Date_t val;
     ASSERT_TRUE(FieldParser::extract(doc, aDate, &val));
     ASSERT_EQUALS(val, valDate);
     ASSERT_TRUE(FieldParser::extract(doc, notThere, &val));
-    ASSERT_EQUALS(val, 99ULL);
+    ASSERT_EQUALS(val, Date_t::fromMillisSinceEpoch(99));
     ASSERT_FALSE(FieldParser::extract(doc, wrongType, &val));
 }
 

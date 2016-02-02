@@ -36,6 +36,7 @@
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/exec/delete.h"
 #include "mongo/db/ops/delete_request.h"
+#include "mongo/db/matcher/extensions_callback_real.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/get_executor.h"
 #include "mongo/db/query/query_planner_common.h"
@@ -51,6 +52,13 @@ ParsedDelete::ParsedDelete(OperationContext* txn, const DeleteRequest* request)
 
 Status ParsedDelete::parseRequest() {
     dassert(!_canonicalQuery.get());
+    // It is invalid to request that the DeleteStage return the deleted document during a
+    // multi-remove.
+    invariant(!(_request->shouldReturnDeleted() && _request->isMulti()));
+
+    // It is invalid to request that a ProjectionStage be applied to the DeleteStage if the
+    // DeleteStage would not return the deleted document.
+    invariant(_request->getProj().isEmpty() || _request->shouldReturnDeleted());
 
     if (CanonicalQuery::isSimpleIdQuery(_request->getQuery())) {
         return Status::OK();
@@ -62,20 +70,37 @@ Status ParsedDelete::parseRequest() {
 Status ParsedDelete::parseQueryToCQ() {
     dassert(!_canonicalQuery.get());
 
-    CanonicalQuery* cqRaw;
-    const WhereCallbackReal whereCallback(_txn, _request->getNamespaceString().db());
+    const ExtensionsCallbackReal extensionsCallback(_txn, &_request->getNamespaceString());
 
-    Status status = CanonicalQuery::canonicalize(_request->getNamespaceString().ns(),
-                                                 _request->getQuery(),
-                                                 _request->isExplain(),
-                                                 &cqRaw,
-                                                 whereCallback);
+    // Limit should only used for the findAndModify command when a sort is specified. If a sort
+    // is requested, we want to use a top-k sort for efficiency reasons, so should pass the
+    // limit through. Generally, a delete stage expects to be able to skip documents that were
+    // deleted out from under it, but a limit could inhibit that and give an EOF when the delete
+    // has not actually deleted a document. This behavior is fine for findAndModify, but should
+    // not apply to deletes in general.
+    long long limit = (!_request->isMulti() && !_request->getSort().isEmpty()) ? -1 : 0;
 
-    if (status.isOK()) {
-        _canonicalQuery.reset(cqRaw);
+    // The projection needs to be applied after the delete operation, so we specify an empty
+    // BSONObj as the projection during canonicalization.
+    const BSONObj emptyObj;
+    auto statusWithCQ = CanonicalQuery::canonicalize(_request->getNamespaceString(),
+                                                     _request->getQuery(),
+                                                     _request->getSort(),
+                                                     emptyObj,  // projection
+                                                     0,         // skip
+                                                     limit,
+                                                     emptyObj,  // hint
+                                                     emptyObj,  // min
+                                                     emptyObj,  // max
+                                                     false,     // snapshot
+                                                     _request->isExplain(),
+                                                     extensionsCallback);
+
+    if (statusWithCQ.isOK()) {
+        _canonicalQuery = std::move(statusWithCQ.getValue());
     }
 
-    return status;
+    return statusWithCQ.getStatus();
 }
 
 const DeleteRequest* ParsedDelete::getRequest() const {
@@ -97,9 +122,9 @@ bool ParsedDelete::hasParsedQuery() const {
     return _canonicalQuery.get() != NULL;
 }
 
-CanonicalQuery* ParsedDelete::releaseParsedQuery() {
+std::unique_ptr<CanonicalQuery> ParsedDelete::releaseParsedQuery() {
     invariant(_canonicalQuery.get() != NULL);
-    return _canonicalQuery.release();
+    return std::move(_canonicalQuery);
 }
 
 }  // namespace mongo

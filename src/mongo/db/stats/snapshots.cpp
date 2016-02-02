@@ -36,6 +36,7 @@
 
 #include "mongo/db/client.h"
 #include "mongo/db/clientcursor.h"
+#include "mongo/db/service_context.h"
 #include "mongo/util/exit.h"
 #include "mongo/util/log.h"
 
@@ -44,12 +45,12 @@
  */
 namespace mongo {
 
-using std::auto_ptr;
+using std::unique_ptr;
 using std::endl;
 
 void SnapshotData::takeSnapshot() {
     _created = curTimeMicros64();
-    Top::global.cloneMap(_usage);
+    Top::get(getGlobalServiceContext()).cloneMap(_usage);
 }
 
 SnapshotDelta::SnapshotDelta(const SnapshotData& older, const SnapshotData& newer)
@@ -72,56 +73,49 @@ Top::UsageMap SnapshotDelta::collectionUsageDiff() {
     return u;
 }
 
-Snapshots::Snapshots(int n)
-    : _lock("Snapshots"), _n(n), _snapshots(new SnapshotData[n]), _loc(0), _stored(0) {}
+Snapshots::Snapshots() : _loc(0), _stored(0) {}
 
 const SnapshotData* Snapshots::takeSnapshot() {
-    scoped_lock lk(_lock);
-    _loc = (_loc + 1) % _n;
+    stdx::lock_guard<stdx::mutex> lk(_lock);
+    _loc = (_loc + 1) % kNumSnapshots;
     _snapshots[_loc].takeSnapshot();
-    if (_stored < _n)
+    if (_stored < kNumSnapshots)
         _stored++;
     return &_snapshots[_loc];
 }
 
-auto_ptr<SnapshotDelta> Snapshots::computeDelta(int numBack) {
-    scoped_lock lk(_lock);
-    auto_ptr<SnapshotDelta> p;
-    if (numBack < numDeltas())
-        p.reset(new SnapshotDelta(getPrev(numBack + 1), getPrev(numBack)));
-    return p;
+StatusWith<SnapshotDiff> Snapshots::computeDelta() {
+    stdx::lock_guard<stdx::mutex> lk(_lock);
+
+    // We need 2 snapshots to calculate a delta
+    if (_stored < 2) {
+        return StatusWith<SnapshotDiff>(ErrorCodes::BadValue, "Less than 2 snapshots exist");
+    }
+
+    // The following logic depends on there being exactly 2 stored snapshots
+    static_assert(kNumSnapshots == 2, "kNumSnapshots == 2");
+
+    // Current and previous napshot alternates between indexes 0 and 1
+    int currIdx = _loc;
+    int prevIdx = _loc > 0 ? 0 : 1;
+    SnapshotDelta delta(_snapshots[prevIdx], _snapshots[currIdx]);
+
+    return SnapshotDiff(delta.collectionUsageDiff(), delta.elapsed());
 }
 
-const SnapshotData& Snapshots::getPrev(int numBack) {
-    int x = _loc - numBack;
-    if (x < 0)
-        x += _n;
-    return _snapshots[x];
-}
-
-void SnapshotThread::run() {
-    Client::initThread("snapshot");
-    Client& client = cc();
-
-    long long numLoops = 0;
-
-    const SnapshotData* prev = 0;
-
+void StatsSnapshotThread::run() {
+    Client::initThread("statsSnapshot");
     while (!inShutdown()) {
         try {
-            const SnapshotData* s = statsSnapshots.takeSnapshot();
-            prev = s;
+            statsSnapshots.takeSnapshot();
         } catch (std::exception& e) {
             log() << "ERROR in SnapshotThread: " << e.what() << endl;
         }
 
-        numLoops++;
         sleepsecs(4);
     }
-
-    client.shutdown();
 }
 
 Snapshots statsSnapshots;
-SnapshotThread snapshotThread;
+StatsSnapshotThread statsSnapshotThread;
 }

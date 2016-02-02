@@ -26,6 +26,8 @@
  *    it in the license file.
  */
 
+#include "mongo/platform/basic.h"
+
 #include "mongo/s/write_ops/write_op.h"
 
 #include "mongo/base/error_codes.h"
@@ -63,7 +65,8 @@ const WriteErrorDetail& WriteOp::getOpError() const {
     return *_error;
 }
 
-Status WriteOp::targetWrites(const NSTargeter& targeter,
+Status WriteOp::targetWrites(OperationContext* txn,
+                             const NSTargeter& targeter,
                              std::vector<TargetedWrite*>* targetedWrites) {
     bool isUpdate = _itemRef.getOpType() == BatchedCommandRequest::BatchType_Update;
     bool isDelete = _itemRef.getOpType() == BatchedCommandRequest::BatchType_Delete;
@@ -74,16 +77,16 @@ Status WriteOp::targetWrites(const NSTargeter& targeter,
     vector<ShardEndpoint*>& endpoints = endpointsOwned.mutableVector();
 
     if (isUpdate) {
-        targetStatus = targeter.targetUpdate(*_itemRef.getUpdate(), &endpoints);
+        targetStatus = targeter.targetUpdate(txn, *_itemRef.getUpdate(), &endpoints);
     } else if (isDelete) {
-        targetStatus = targeter.targetDelete(*_itemRef.getDelete(), &endpoints);
+        targetStatus = targeter.targetDelete(txn, *_itemRef.getDelete(), &endpoints);
     } else {
         dassert(_itemRef.getOpType() == BatchedCommandRequest::BatchType_Insert);
 
         ShardEndpoint* endpoint = NULL;
         // TODO: Remove the index targeting stuff once there is a command for it
         if (!isIndexInsert) {
-            targetStatus = targeter.targetInsert(_itemRef.getDocument(), &endpoint);
+            targetStatus = targeter.targetInsert(txn, _itemRef.getDocument(), &endpoint);
         } else {
             // TODO: Retry index writes with stale version?
             targetStatus = targeter.targetCollection(&endpoints);

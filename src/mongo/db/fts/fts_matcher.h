@@ -30,8 +30,9 @@
 
 #pragma once
 
-#include "mongo/db/fts/fts_query.h"
+#include "mongo/db/fts/fts_query_impl.h"
 #include "mongo/db/fts/fts_spec.h"
+#include "mongo/db/fts/fts_tokenizer.h"
 #include "mongo/db/fts/tokenizer.h"
 
 namespace mongo {
@@ -39,38 +40,77 @@ namespace mongo {
 namespace fts {
 
 class FTSMatcher {
+    MONGO_DISALLOW_COPYING(FTSMatcher);
+
 public:
-    FTSMatcher(const FTSQuery& query, const FTSSpec& spec);
+    FTSMatcher(const FTSQueryImpl& query, const FTSSpec& spec);
 
     /**
-     * @return true if obj has a negated term
+     * Returns whether 'obj' matches the query.  An object is considered to match the query
+     * if all four of the following conditions hold:
+     * 1) The object contains at least one positive term.
+     * 2) The object contains zero negative terms.
+     * 3) The object contains all positive phrases.
+     * 4) The object contains zero negative phrases.
+     */
+    bool matches(const BSONObj& obj) const;
+
+    /**
+     * Returns whether 'obj' contains at least one positive term.
+     */
+    bool hasPositiveTerm(const BSONObj& obj) const;
+
+    /**
+     * Returns whether 'obj' contains at least one negative term.
      */
     bool hasNegativeTerm(const BSONObj& obj) const;
 
     /**
-     * @return true if obj is ok by all phrases
-     *         so all full phrases and no negated
+     * Returns whether 'obj' contains all positive phrases.
      */
-    bool phrasesMatch(const BSONObj& obj) const;
-    bool phraseMatch(const std::string& phrase, const BSONObj& obj) const;
+    bool positivePhrasesMatch(const BSONObj& obj) const;
 
-    bool matchesNonTerm(const BSONObj& obj) const {
-        return !hasNegativeTerm(obj) && phrasesMatch(obj);
-    }
+    /**
+     * Returns whether 'obj' contains zero negative phrases.
+     */
+    bool negativePhrasesMatch(const BSONObj& obj) const;
 
 private:
     /**
-     * @return true if raw has a negated term
+     * For matching, can we skip the positive term check?  This is done as optimization when
+     * we have a-priori knowledge that all documents being matched pass the positive term
+     * check.
+     */
+    bool canSkipPositiveTermCheck() const {
+        return !_query.getCaseSensitive() && !_query.getDiacriticSensitive();
+    }
+
+    /**
+     * Returns whether the string 'raw' contains any positive terms from the query.
+     * 'language' specifies the language for 'raw'.
+     */
+    bool _hasPositiveTerm_string(const FTSLanguage* language, const std::string& raw) const;
+
+    /**
+     * Returns whether the string 'raw' contains any negative terms from the query.
+     * 'language' specifies the language for 'raw'.
      */
     bool _hasNegativeTerm_string(const FTSLanguage* language, const std::string& raw) const;
 
     /**
-     * @return true if raw has a phrase
+     * Returns whether 'obj' contains the exact string 'phrase' in any indexed fields.
      */
-    bool _phraseMatches(const std::string& phrase, const std::string& raw) const;
+    bool _phraseMatch(const std::string& phrase, const BSONObj& obj) const;
 
-    FTSQuery _query;
-    FTSSpec _spec;
+    /**
+     * Helper method that returns the tokenizer options that this matcher should use, based on the
+     * the query options.
+     */
+    FTSTokenizer::Options _getTokenizerOptions() const;
+
+    // TODO These should be unowned pointers instead of owned copies.
+    const FTSQueryImpl _query;
+    const FTSSpec _spec;
 };
 }
 }

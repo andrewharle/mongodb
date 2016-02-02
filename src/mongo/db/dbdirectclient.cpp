@@ -31,13 +31,16 @@
 #include "mongo/db/dbdirectclient.h"
 
 #include "mongo/db/client.h"
+#include "mongo/db/commands.h"
 #include "mongo/db/instance.h"
+#include "mongo/db/lasterror.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/wire_version.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
 
-using std::auto_ptr;
+using std::unique_ptr;
 using std::endl;
 using std::string;
 
@@ -87,9 +90,14 @@ std::string DBDirectClient::getServerAddress() const {
     return "localhost";  // TODO: should this have the port?
 }
 
-void DBDirectClient::sayPiggyBack(Message& toSend) {
-    // don't need to piggy back when connected locally
-    return say(toSend);
+// Returned version should match the incoming connections restrictions.
+int DBDirectClient::getMinWireVersion() {
+    return WireSpec::instance().minWireVersionIncoming;
+}
+
+// Returned version should match the incoming connections restrictions.
+int DBDirectClient::getMaxWireVersion() {
+    return WireSpec::instance().maxWireVersionIncoming;
 }
 
 bool DBDirectClient::callRead(Message& toSend, Message& response) {
@@ -119,71 +127,64 @@ QueryOptions DBDirectClient::_lookupAvailableOptions() {
 
 bool DBDirectClient::call(Message& toSend, Message& response, bool assertOk, string* actualServer) {
     DirectClientScope directClientScope(_txn);
-    if (lastError._get()) {
-        lastError.startRequest(toSend, lastError._get());
-    }
+    LastError::get(_txn->getClient()).startRequest();
 
     DbResponse dbResponse;
+    CurOp curOp(_txn);
     assembleResponse(_txn, toSend, dbResponse, dummyHost);
-    verify(dbResponse.response);
+    verify(!dbResponse.response.empty());
 
     // can get rid of this if we make response handling smarter
-    dbResponse.response->concat();
-    response = *dbResponse.response;
+    dbResponse.response.concat();
+    response = std::move(dbResponse.response);
 
     return true;
 }
 
 void DBDirectClient::say(Message& toSend, bool isRetry, string* actualServer) {
     DirectClientScope directClientScope(_txn);
-    if (lastError._get()) {
-        lastError.startRequest(toSend, lastError._get());
-    }
+    LastError::get(_txn->getClient()).startRequest();
 
     DbResponse dbResponse;
+    CurOp curOp(_txn);
     assembleResponse(_txn, toSend, dbResponse, dummyHost);
 }
 
-auto_ptr<DBClientCursor> DBDirectClient::query(const string& ns,
-                                               Query query,
-                                               int nToReturn,
-                                               int nToSkip,
-                                               const BSONObj* fieldsToReturn,
-                                               int queryOptions,
-                                               int batchSize) {
+unique_ptr<DBClientCursor> DBDirectClient::query(const string& ns,
+                                                 Query query,
+                                                 int nToReturn,
+                                                 int nToSkip,
+                                                 const BSONObj* fieldsToReturn,
+                                                 int queryOptions,
+                                                 int batchSize) {
     return DBClientBase::query(
         ns, query, nToReturn, nToSkip, fieldsToReturn, queryOptions, batchSize);
 }
 
-void DBDirectClient::killCursor(long long id) {
-    // The killCursor command on the DB client is only used by sharding,
-    // so no need to have it for MongoD.
-    verify(!"killCursor should not be used in MongoD");
-}
-
 const HostAndPort DBDirectClient::dummyHost("0.0.0.0", 0);
-
-extern long long runCount(
-    OperationContext* txn, const string& ns, const BSONObj& cmd, string& err, int& errCode);
 
 unsigned long long DBDirectClient::count(
     const string& ns, const BSONObj& query, int options, int limit, int skip) {
-    if (skip < 0) {
-        warning() << "setting negative skip value: " << skip << " to zero in query: " << query
-                  << endl;
-        skip = 0;
+    BSONObj cmdObj = _countCmd(ns, query, options, limit, skip);
+
+    NamespaceString nsString(ns);
+    std::string dbname = nsString.db().toString();
+
+    Command* countCmd = Command::findCommand("count");
+    invariant(countCmd);
+
+    std::string errmsg;
+    BSONObjBuilder result;
+    bool runRetval = countCmd->run(_txn, dbname, cmdObj, options, errmsg, result);
+    if (!runRetval) {
+        Command::appendCommandStatus(result, runRetval, errmsg);
+        Status commandStatus = Command::getStatusFromCommandResult(result.obj());
+        invariant(!commandStatus.isOK());
+        uassertStatusOK(commandStatus);
     }
 
-    string errmsg;
-    int errCode;
-    long long res = runCount(_txn, ns, _countCmd(ns, query, options, limit, skip), errmsg, errCode);
-
-    if (res == -1) {
-        // namespace doesn't exist
-        return 0;
-    }
-    massert(errCode, str::stream() << "count failed in DBDirectClient: " << errmsg, res >= 0);
-    return (unsigned long long)res;
+    BSONObj resultObj = result.obj();
+    return static_cast<unsigned long long>(resultObj["n"].numberLong());
 }
 
 }  // namespace mongo

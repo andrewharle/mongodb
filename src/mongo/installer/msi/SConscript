@@ -3,8 +3,6 @@
 import os
 
 Import("env")
-Import("windows")
-Import("s3push")
 Import("has_option")
 
 env = env.Clone()
@@ -26,13 +24,14 @@ sourcesList = [ "BinaryFragment.wxs",
             ]
 
 # Need to do this in order to get scons to translate path separators into native format
-buildDir = Dir(env["BUILD_DIR"]).path
+buildDir = env.Dir("$BUILD_DIR").path
 if has_option("use-new-tools"):
 	toolBuildDir = "src\mongo-tools"
 else:
 	toolBuildDir = buildDir + r'\mongo'
 
 enterprisebase = 'src\mongo\db\modules\enterprise'
+enterpriseToolBuildDir = buildDir + r'\mongo\db\modules\enterprise'
 
 # Set up parameters to pass to wix -
 #
@@ -49,11 +48,11 @@ if 'enterprise' in env['MONGO_MODULES']:
   upgrade_code = 'E7FE8DF3-00F1-4434-97DF-2721E7F712FA'
 # Community
 else:
-  if 'MONGO_SSL' in env['CPPDEFINES']:
+  if has_option('ssl'):
     msi_edition = 'SSL'
   else:
     msi_edition = 'Standard'
-  if env['PROCESSOR_ARCHITECTURE'] == 'i386':
+  if env['TARGET_ARCH'] == 'i386':
     msi_platform = 'x86'
     msi_flavor = ''
     upgrade_code = 'B2E70C13-483E-4E16-B6AA-FCCA7983B767'
@@ -108,6 +107,7 @@ env.Command(objects,
             r' -dEnterpriseBase=' + enterprisebase + '\\'
             ' -dBinarySource=' + buildDir + r'\mongo'
             ' -dToolBinarySource=' + toolBuildDir +
+            ' -dEnterpriseToolBinarySource=' + enterpriseToolBuildDir +
             ' -dMergeModulesBasePath="$MERGEMODULESBASEPATH"'
             ' -dEdition=' + msi_edition +
             ' -d"ProductId=*\"'
@@ -133,11 +133,14 @@ env.Command(objects,
 
 #light: link .objs into an msi
 pre_msi = "$BUILD_DIR/msi/${SERVER_DIST_BASENAME}.pre.msi"
-env.Command(pre_msi,
+pre_msi_cmd = env.Command(pre_msi,
             objects,
             '"$WIXLIGHT" -out ${TARGET} -wx -cultures:null -sice:ICE82 '
             ' -ext "$WIXUIEXT"'
             ' ${SOURCES}')
+
+if 'enterprise' in env['MONGO_MODULES']:
+    env.Depends(pre_msi_cmd, "#" + enterpriseToolBuildDir + "/mongodecrypt.exe")
 
 msi = "$BUILD_DIR/msi/${SERVER_DIST_BASENAME}.msi"
 env.Command(msi,
@@ -146,11 +149,4 @@ env.Command(msi,
 env.AlwaysBuild(msi)
 
 env.Alias( "msi" , msi )
-
-def s3msipush( env , target , source ):
-    s3push( source )
-
-env.Alias( "s3msi" , [ msi ] , [ s3msipush ] )
-env.AlwaysBuild( "s3msi" )
-
 

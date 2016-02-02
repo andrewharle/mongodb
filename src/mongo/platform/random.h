@@ -29,7 +29,7 @@
 
 #pragma once
 
-#include "mongo/platform/cstdint.h"
+#include <cstdint>
 
 namespace mongo {
 
@@ -47,6 +47,11 @@ public:
     int32_t nextInt32();
 
     int64_t nextInt64();
+
+    /**
+     * Returns a random number in the range [0, 1).
+     */
+    double nextCanonicalDouble();
 
     /**
      * @return a number between 0 and max

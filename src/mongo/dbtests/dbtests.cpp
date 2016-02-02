@@ -36,18 +36,20 @@
 #include "mongo/base/initializer.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authorization_manager_global.h"
-#include "mongo/db/auth/authz_manager_external_state_mock.h"
 #include "mongo/db/catalog/index_create.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/global_environment_d.h"
-#include "mongo/db/global_environment_experiment.h"
+#include "mongo/db/db_raii.h"
+#include "mongo/db/service_context_d.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/wire_version.h"
 #include "mongo/db/repl/replication_coordinator_global.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/dbtests/framework.h"
-#include "mongo/util/gcov.h"
+#include "mongo/stdx/memory.h"
 #include "mongo/util/quick_exit.h"
 #include "mongo/util/signal_handlers_synchronous.h"
 #include "mongo/util/startup_test.h"
+#include "mongo/util/static_observer.h"
 #include "mongo/util/text.h"
 
 namespace mongo {
@@ -55,7 +57,17 @@ namespace dbtests {
 // This specifies default dbpath for our testing framework
 const std::string default_test_dbpath = "/tmp/unittest";
 
-Status createIndex(OperationContext* txn, const StringData& ns, const BSONObj& keys, bool unique) {
+void initWireSpec() {
+    WireSpec& spec = WireSpec::instance();
+    // accept from any version
+    spec.minWireVersionIncoming = RELEASE_2_4_AND_BEFORE;
+    spec.maxWireVersionIncoming = FIND_COMMAND;
+    // connect to any version
+    spec.minWireVersionOutgoing = RELEASE_2_4_AND_BEFORE;
+    spec.maxWireVersionOutgoing = FIND_COMMAND;
+}
+
+Status createIndex(OperationContext* txn, StringData ns, const BSONObj& keys, bool unique) {
     BSONObjBuilder specBuilder;
     specBuilder << "name" << DBClientBase::genIndexName(keys) << "ns" << ns << "key" << keys;
     if (unique) {
@@ -64,7 +76,7 @@ Status createIndex(OperationContext* txn, const StringData& ns, const BSONObj& k
     return createIndexFromSpec(txn, ns, specBuilder.done());
 }
 
-Status createIndexFromSpec(OperationContext* txn, const StringData& ns, const BSONObj& spec) {
+Status createIndexFromSpec(OperationContext* txn, StringData ns, const BSONObj& spec) {
     AutoGetOrCreateDb autoDb(txn, nsToDatabaseSubstring(ns), MODE_X);
     Collection* coll;
     {
@@ -97,14 +109,14 @@ Status createIndexFromSpec(OperationContext* txn, const StringData& ns, const BS
 
 int dbtestsMain(int argc, char** argv, char** envp) {
     static StaticObserver StaticObserver;
+    Command::testCommandsEnabled = true;
     ::mongo::setupSynchronousSignalHandlers();
-    setGlobalEnvironment(new GlobalEnvironmentMongoD());
+    mongo::dbtests::initWireSpec();
+    mongo::runGlobalInitializersOrDie(argc, argv, envp);
     repl::ReplSettings replSettings;
     replSettings.oplogSize = 10 * 1024 * 1024;
     repl::setGlobalReplicationCoordinator(new repl::ReplicationCoordinatorMock(replSettings));
-    Command::testCommandsEnabled = 1;
-    mongo::runGlobalInitializersOrDie(argc, argv, envp);
-    setGlobalAuthorizationManager(new AuthorizationManager(new AuthzManagerExternalStateMock()));
+    getGlobalAuthorizationManager()->setAuthEnabled(false);
     StartupTest::runTests();
     return mongo::dbtests::runDbTests(argc, argv);
 }
@@ -123,7 +135,6 @@ int wmain(int argc, wchar_t* argvW[], wchar_t* envpW[]) {
 #else
 int main(int argc, char* argv[], char** envp) {
     int exitCode = dbtestsMain(argc, argv, envp);
-    flushForGcov();
     quickExit(exitCode);
 }
 #endif

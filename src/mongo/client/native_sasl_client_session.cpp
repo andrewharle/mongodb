@@ -50,7 +50,7 @@ MONGO_INITIALIZER(NativeSaslClientContext)(InitializerContext* context) {
 }  // namespace
 
 NativeSaslClientSession::NativeSaslClientSession()
-    : SaslClientSession(), _step(0), _done(false), _saslConversation(NULL) {}
+    : SaslClientSession(), _step(0), _done(false), _saslConversation(nullptr) {}
 
 NativeSaslClientSession::~NativeSaslClientSession() {}
 
@@ -73,7 +73,7 @@ Status NativeSaslClientSession::initialize() {
     return Status::OK();
 }
 
-Status NativeSaslClientSession::step(const StringData& inputData, std::string* outputData) {
+Status NativeSaslClientSession::step(StringData inputData, std::string* outputData) {
     if (!_saslConversation) {
         return Status(ErrorCodes::BadValue,
                       mongoutils::str::stream()

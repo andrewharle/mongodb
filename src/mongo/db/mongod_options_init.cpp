@@ -65,9 +65,7 @@ MONGO_STARTUP_OPTIONS_VALIDATE(MongodOptions)(InitializerContext* context) {
 }
 
 MONGO_INITIALIZER_GENERAL(MongodOptions_Store,
-                          ("BeginStartupOptionStorage",
-                           "CreateAuthorizationManager"),  // Requried to call
-                                                           // getGlobalAuthorizationManager().
+                          ("BeginStartupOptionStorage"),
                           ("EndStartupOptionStorage"))
 (InitializerContext* context) {
     Status ret = storeMongodOptions(moe::startupOptionsParsed, context->args());

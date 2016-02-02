@@ -40,11 +40,17 @@ using namespace std;
 #include <sys/file.h>
 #endif
 
+#include <boost/exception/diagnostic_information.hpp>
+#include <boost/exception/exception.hpp>
+#include <exception>
+
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/config.h"
 #include "mongo/util/debug_util.h"
 #include "mongo/util/debugger.h"
 #include "mongo/util/exit.h"
 #include "mongo/util/log.h"
+#include "mongo/util/mongoutils/str.h"
 #include "mongo/util/quick_exit.h"
 #include "mongo/util/stacktrace.h"
 
@@ -68,7 +74,7 @@ void AssertionCount::condrollover(int newvalue) {
         rollover();
 }
 
-bool DBException::traceExceptions = false;
+std::atomic<bool> DBException::traceExceptions(false);  // NOLINT
 
 string DBException::toString() const {
     stringstream ss;
@@ -77,7 +83,7 @@ string DBException::toString() const {
 }
 
 void DBException::traceIfNeeded(const DBException& e) {
-    if (traceExceptions && !inShutdown()) {
+    if (traceExceptions) {
         warning() << "DBException thrown" << causedBy(e) << endl;
         printStackTrace();
     }
@@ -117,7 +123,7 @@ NOINLINE_DECL void wasserted(const char* expr, const char* file, unsigned line) 
     log() << "warning assertion failure " << expr << ' ' << file << ' ' << dec << line << endl;
     logContext();
     assertionCount.condrollover(++assertionCount.warning);
-#if defined(_DEBUG) || defined(_DURABLEDEFAULTON) || defined(_DURABLEDEFAULTOFF)
+#if defined(MONGO_CONFIG_DEBUG_BUILD)
     // this is so we notice in buildbot
     log() << "\n\n***aborting after wassert() failure in a debug/test build\n\n" << endl;
     quickExit(EXIT_ABRUPT);
@@ -132,7 +138,7 @@ NOINLINE_DECL void verifyFailed(const char* expr, const char* file, unsigned lin
     temp << "assertion " << file << ":" << line;
     AssertionException e(temp.str(), 0);
     breakpoint();
-#if defined(_DEBUG) || defined(_DURABLEDEFAULTON) || defined(_DURABLEDEFAULTOFF)
+#if defined(MONGO_CONFIG_DEBUG_BUILD)
     // this is so we notice in buildbot
     log() << "\n\n***aborting after verify() failure as this is a debug/test build\n\n" << endl;
     quickExit(EXIT_ABRUPT);
@@ -142,10 +148,9 @@ NOINLINE_DECL void verifyFailed(const char* expr, const char* file, unsigned lin
 
 NOINLINE_DECL void invariantFailed(const char* expr, const char* file, unsigned line) {
     log() << "Invariant failure " << expr << ' ' << file << ' ' << dec << line << endl;
-    logContext();
     breakpoint();
     log() << "\n\n***aborting after invariant() failure\n\n" << endl;
-    quickExit(EXIT_ABRUPT);
+    std::abort();
 }
 
 NOINLINE_DECL void invariantOKFailed(const char* expr,
@@ -162,10 +167,9 @@ NOINLINE_DECL void invariantOKFailed(const char* expr,
 
 NOINLINE_DECL void fassertFailed(int msgid) {
     log() << "Fatal Assertion " << msgid << endl;
-    logContext();
     breakpoint();
     log() << "\n\n***aborting after fassert() failure\n\n" << endl;
-    quickExit(EXIT_ABRUPT);
+    std::abort();
 }
 
 NOINLINE_DECL void fassertFailedNoTrace(int msgid) {
@@ -245,19 +249,16 @@ std::string causedBy(const std::string& e) {
     return causedBy(e.c_str());
 }
 
-std::string causedBy(const std::string* e) {
-    return (e && *e != "") ? causedBy(*e) : "";
-}
-
 std::string causedBy(const Status& e) {
-    return causedBy(e.reason());
+    return causedBy(e.toString());
 }
 
-string errnoWithPrefix(const char* prefix) {
+string errnoWithPrefix(StringData prefix) {
+    const auto suffix = errnoWithDescription();
     stringstream ss;
-    if (prefix)
+    if (!prefix.empty())
         ss << prefix << ": ";
-    ss << errnoWithDescription();
+    ss << suffix;
     return ss.str();
 }
 
@@ -277,26 +278,30 @@ string demangleName(const type_info& typeinfo) {
 #endif
 }
 
+Status exceptionToStatus() {
+    try {
+        throw;
+    } catch (const DBException& ex) {
+        return ex.toStatus();
+    } catch (const std::exception& ex) {
+        return Status(ErrorCodes::UnknownError,
+                      str::stream() << "Caught std::exception of type " << demangleName(typeid(ex))
+                                    << ": " << ex.what());
+    } catch (const boost::exception& ex) {
+        return Status(ErrorCodes::UnknownError,
+                      str::stream() << "Caught boost::exception of type "
+                                    << demangleName(typeid(ex)) << ": "
+                                    << boost::diagnostic_information(ex));
+
+    } catch (...) {
+        severe() << "Caught unknown exception in exceptionToStatus()";
+        std::terminate();
+    }
+}
+
 string ExceptionInfo::toString() const {
     stringstream ss;
     ss << "exception: " << code << " " << msg;
     return ss.str();
-}
-
-NOINLINE_DECL ErrorMsg::ErrorMsg(const char* msg, char ch) {
-    int l = strlen(msg);
-    verify(l < 128);
-    memcpy(buf, msg, l);
-    char* p = buf + l;
-    p[0] = ch;
-    p[1] = 0;
-}
-
-NOINLINE_DECL ErrorMsg::ErrorMsg(const char* msg, unsigned val) {
-    int l = strlen(msg);
-    verify(l < 128);
-    memcpy(buf, msg, l);
-    char* p = buf + l;
-    sprintf(p, "%u", val);
 }
 }

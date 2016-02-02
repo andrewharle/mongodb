@@ -32,7 +32,7 @@
 
 #include <string>
 
-#include "mongo/db/global_environment_experiment.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/server_parameters.h"
 #include "mongo/util/assert_util.h"
@@ -62,17 +62,24 @@ Lock::GlobalLock::GlobalLock(Locker* locker)
     : _locker(locker), _result(LOCK_INVALID), _pbwm(locker, resourceIdParallelBatchWriterMode) {}
 
 Lock::GlobalLock::GlobalLock(Locker* locker, LockMode lockMode, unsigned timeoutMs)
-    : _locker(locker), _result(LOCK_INVALID), _pbwm(locker, resourceIdParallelBatchWriterMode) {
-    _lock(lockMode, timeoutMs);
+    : GlobalLock(locker, lockMode, EnqueueOnly()) {
+    waitForLock(timeoutMs);
 }
 
+Lock::GlobalLock::GlobalLock(Locker* locker, LockMode lockMode, EnqueueOnly enqueueOnly)
+    : _locker(locker), _result(LOCK_INVALID), _pbwm(locker, resourceIdParallelBatchWriterMode) {
+    _enqueue(lockMode);
+}
 
-void Lock::GlobalLock::_lock(LockMode lockMode, unsigned timeoutMs) {
+void Lock::GlobalLock::_enqueue(LockMode lockMode) {
     if (!_locker->isBatchWriter()) {
         _pbwm.lock(MODE_IS);
     }
 
     _result = _locker->lockGlobalBegin(lockMode);
+}
+
+void Lock::GlobalLock::waitForLock(unsigned timeoutMs) {
     if (_result == LOCK_WAITING) {
         _result = _locker->lockGlobalComplete(timeoutMs);
     }
@@ -90,7 +97,7 @@ void Lock::GlobalLock::_unlock() {
 }
 
 
-Lock::DBLock::DBLock(Locker* locker, const StringData& db, LockMode mode)
+Lock::DBLock::DBLock(Locker* locker, StringData db, LockMode mode)
     : _id(RESOURCE_DATABASE, db),
       _locker(locker),
       _mode(mode),
@@ -135,7 +142,7 @@ void Lock::DBLock::relockWithMode(LockMode newMode) {
 }
 
 
-Lock::CollectionLock::CollectionLock(Locker* lockState, const StringData& ns, LockMode mode)
+Lock::CollectionLock::CollectionLock(Locker* lockState, StringData ns, LockMode mode)
     : _id(RESOURCE_COLLECTION, ns), _lockState(lockState) {
     massert(28538, "need a non-empty collection name", nsIsFull(ns));
 
@@ -154,24 +161,40 @@ Lock::CollectionLock::~CollectionLock() {
     }
 }
 
-void Lock::CollectionLock::relockWithMode(LockMode mode, Lock::DBLock& dbLock) {
+void Lock::CollectionLock::relockAsDatabaseExclusive(Lock::DBLock& dbLock) {
     if (supportsDocLocking() || enableCollectionLocking) {
         _lockState->unlock(_id);
     }
 
-    dbLock.relockWithMode(mode);
+    dbLock.relockWithMode(MODE_X);
 
     if (supportsDocLocking() || enableCollectionLocking) {
-        _lockState->lock(_id, mode);
+        // don't need the lock, but need something to unlock in the destructor
+        _lockState->lock(_id, MODE_IX);
     }
 }
 
-Lock::OplogIntentWriteLock::OplogIntentWriteLock(Locker* lockState) : _lockState(lockState) {
+namespace {
+stdx::mutex oplogSerialization;  // for OplogIntentWriteLock
+}  // namespace
+
+Lock::OplogIntentWriteLock::OplogIntentWriteLock(Locker* lockState)
+    : _lockState(lockState), _serialized(false) {
     _lockState->lock(resourceIdOplog, MODE_IX);
 }
 
 Lock::OplogIntentWriteLock::~OplogIntentWriteLock() {
+    if (_serialized) {
+        oplogSerialization.unlock();
+    }
     _lockState->unlock(resourceIdOplog);
+}
+
+void Lock::OplogIntentWriteLock::serializeIfNeeded() {
+    if (!supportsDocLocking() && !_serialized) {
+        oplogSerialization.lock();
+        _serialized = true;
+    }
 }
 
 Lock::ParallelBatchWriterMode::ParallelBatchWriterMode(Locker* lockState)
@@ -188,6 +211,22 @@ void Lock::ResourceLock::unlock() {
         _locker->unlock(_rid);
         _result = LOCK_INVALID;
     }
+}
+
+void synchronizeOnCappedInFlightResource(Locker* lockState, const NamespaceString& cappedNs) {
+    dassert(lockState->inAWriteUnitOfWork());
+    const ResourceId resource = cappedNs.db() == "local" ? resourceCappedInFlightForLocalDb
+                                                         : resourceCappedInFlightForOtherDb;
+
+    // It is illegal to acquire the capped in-flight lock for non-local dbs while holding the
+    // capped in-flight lock for the local db. (Unless we already hold the otherDb lock since
+    // reacquiring a lock in the same mode never blocks.)
+    if (resource == resourceCappedInFlightForOtherDb) {
+        dassert(!lockState->isLockHeldForMode(resourceCappedInFlightForLocalDb, MODE_IX) ||
+                lockState->isLockHeldForMode(resourceCappedInFlightForOtherDb, MODE_IX));
+    }
+
+    Lock::ResourceLock{lockState, resource, MODE_IX};  // held until end of WUOW.
 }
 
 }  // namespace mongo

@@ -29,7 +29,6 @@
 
 #include "mongo/logger/log_component.h"
 
-#include <boost/static_assert.hpp>
 
 #include "mongo/base/init.h"
 #include "mongo/util/assert_util.h"
@@ -70,11 +69,11 @@ MONGO_INITIALIZER_WITH_PREREQUISITES(SetupDottedNames,
 // Children always come after parent component.
 // This makes it unnecessary to compute children of each component
 // when setting/clearing log severities in LogComponentSettings.
-#define DECLARE_LOG_COMPONENT_PARENT(CHILD, PARENT)        \
-    case (CHILD):                                          \
-        do {                                               \
-            BOOST_STATIC_ASSERT(int(CHILD) > int(PARENT)); \
-            return (PARENT);                               \
+#define DECLARE_LOG_COMPONENT_PARENT(CHILD, PARENT)                              \
+    case (CHILD):                                                                \
+        do {                                                                     \
+            static_assert(int(CHILD) > int(PARENT), "int(CHILD) > int(PARENT)"); \
+            return (PARENT);                                                     \
         } while (0)
 
 LogComponent LogComponent::parent() const {
@@ -82,6 +81,8 @@ LogComponent LogComponent::parent() const {
         case kDefault:
             return kNumLogComponents;
             DECLARE_LOG_COMPONENT_PARENT(kJournal, kStorage);
+            DECLARE_LOG_COMPONENT_PARENT(kASIO, kNetwork);
+            DECLARE_LOG_COMPONENT_PARENT(kBridge, kNetwork);
         case kNumLogComponents:
             return kNumLogComponents;
         default:
@@ -100,6 +101,8 @@ StringData LogComponent::toStringData() const {
             return createStringData("command");
         case kControl:
             return createStringData("control");
+        case kExecutor:
+            return createStringData("executor");
         case kGeo:
             return createStringData("geo");
         case kIndex:
@@ -118,6 +121,12 @@ StringData LogComponent::toStringData() const {
             return createStringData("journal");
         case kWrite:
             return createStringData("write");
+        case kFTDC:
+            return createStringData("ftdc");
+        case kASIO:
+            return createStringData("asio");
+        case kBridge:
+            return createStringData("bridge");
         case kNumLogComponents:
             return createStringData("total");
             // No default. Compiler should complain if there's a log component that's not handled.
@@ -162,6 +171,8 @@ StringData LogComponent::getNameForLog() const {
             return createStringData("COMMAND ");
         case kControl:
             return createStringData("CONTROL ");
+        case kExecutor:
+            return createStringData("EXECUTOR");
         case kGeo:
             return createStringData("GEO     ");
         case kIndex:
@@ -180,6 +191,12 @@ StringData LogComponent::getNameForLog() const {
             return createStringData("JOURNAL ");
         case kWrite:
             return createStringData("WRITE   ");
+        case kFTDC:
+            return createStringData("FTDC    ");
+        case kASIO:
+            return createStringData("ASIO    ");
+        case kBridge:
+            return createStringData("BRIDGE  ");
         case kNumLogComponents:
             return createStringData("TOTAL   ");
             // No default. Compiler should complain if there's a log component that's not handled.

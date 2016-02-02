@@ -1,5 +1,16 @@
+// Tests that we can restart a replica set completely. Also tests that the config is saved properly
+// between restarts.
+//
+// If all data-bearing nodes in a replica set are using an ephemeral storage engine, the set will
+// not be able to survive a scenario where all data-bearing nodes are down simultaneously. In such a
+// scenario, none of the members will have any replica set configuration document after a restart,
+// so cannot elect a primary. This test induces such a scenario, so cannot be run on ephemeral
+// storage engines.
+// @tags: [requires_persistence]
 
 (function() {
+    'use strict';
+
     var compare_configs = function(c1, c2) {
         assert.eq(c1.version, c2.version, 'version same');
         assert.eq(c1._id, c2._id, '_id same');
@@ -10,9 +21,6 @@
             assert.eq(c1.members[i].host, c2.members[i].host, 'host is equal in both configs');
         }
     };
-
-    // Make sure that we can restart a replica set completely
-    // Also, ensure config is saved properly between restarts.
 
     // Create a new replica set test. Specify set name and the number of nodes you want.
     var replTest = new ReplSetTest( {name: 'testSet', nodes: 3} );
@@ -29,9 +37,9 @@
     // DOWN, later.
     replTest.awaitSecondaryNodes();
 
-    // Call getMaster to return a reference to the node that's been
+    // Call getPrimary to return a reference to the node that's been
     // elected master.
-    var master = replTest.getMaster();
+    var master = replTest.getPrimary();
     var config1 = master.getDB("local").system.replset.findOne();
 
     // Now we're going to shut down all nodes
@@ -43,9 +51,9 @@
 
     replTest.stop( s1Id );
     replTest.stop( s2Id );
-    replTest.waitForState(s1, replTest.DOWN);
-    replTest.waitForState(s2, replTest.DOWN);
-    
+    replTest.waitForState(s1, ReplSetTest.State.DOWN);
+    replTest.waitForState(s2, ReplSetTest.State.DOWN);
+
     replTest.stop( mId );
 
     // Now let's restart these nodes
@@ -54,7 +62,7 @@
     replTest.restart( s2Id );
 
     // Make sure that a new master comes up
-    master = replTest.getMaster();
+    master = replTest.getPrimary();
     replTest.awaitSecondaryNodes();
     var config2 = master.getDB("local").system.replset.findOne();
     compare_configs(config1, config2);

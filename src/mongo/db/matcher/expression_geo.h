@@ -31,7 +31,6 @@
 
 #pragma once
 
-#include <boost/shared_ptr.hpp>
 
 #include "mongo/db/geo/geometry_container.h"
 #include "mongo/db/matcher/expression.h"
@@ -73,19 +72,20 @@ private:
 
     // Name of the field in the query.
     std::string field;
-    boost::scoped_ptr<GeometryContainer> geoContainer;
+    std::unique_ptr<GeometryContainer> geoContainer;
     Predicate predicate;
 };
 
 class GeoMatchExpression : public LeafMatchExpression {
 public:
-    GeoMatchExpression() : LeafMatchExpression(GEO) {}
+    GeoMatchExpression() : LeafMatchExpression(GEO), _canSkipValidation(false) {}
+
     virtual ~GeoMatchExpression() {}
 
     /**
      * Takes ownership of the passed-in GeoExpression.
      */
-    Status init(const StringData& path, const GeoExpression* query, const BSONObj& rawObj);
+    Status init(StringData path, const GeoExpression* query, const BSONObj& rawObj);
 
     virtual bool matchesSingleElement(const BSONElement& e) const;
 
@@ -95,7 +95,15 @@ public:
 
     virtual bool equivalent(const MatchExpression* other) const;
 
-    virtual LeafMatchExpression* shallowClone() const;
+    virtual std::unique_ptr<MatchExpression> shallowClone() const;
+
+    void setCanSkipValidation(bool val) {
+        _canSkipValidation = val;
+    }
+
+    bool getCanSkipValidation() const {
+        return _canSkipValidation;
+    }
 
     const GeoExpression& getGeoExpression() const {
         return *_query;
@@ -107,7 +115,8 @@ public:
 private:
     BSONObj _rawObj;
     // Share ownership of our query with all of our clones
-    boost::shared_ptr<const GeoExpression> _query;
+    std::shared_ptr<const GeoExpression> _query;
+    bool _canSkipValidation;
 };
 
 
@@ -126,7 +135,7 @@ public:
     std::string field;
 
     // The starting point of the near search. Use forward declaration of geometries.
-    boost::scoped_ptr<PointWithCRS> centroid;
+    std::unique_ptr<PointWithCRS> centroid;
 
     // Min and max distance from centroid that we're willing to search.
     // Distance is in units of the geometry's CRS, except SPHERE and isNearSphere => radians
@@ -158,7 +167,7 @@ public:
     GeoNearMatchExpression() : LeafMatchExpression(GEO_NEAR) {}
     virtual ~GeoNearMatchExpression() {}
 
-    Status init(const StringData& path, const GeoNearExpression* query, const BSONObj& rawObj);
+    Status init(StringData path, const GeoNearExpression* query, const BSONObj& rawObj);
 
     // This shouldn't be called and as such will crash.  GeoNear always requires an index.
     virtual bool matchesSingleElement(const BSONElement& e) const;
@@ -169,7 +178,7 @@ public:
 
     virtual bool equivalent(const MatchExpression* other) const;
 
-    virtual LeafMatchExpression* shallowClone() const;
+    virtual std::unique_ptr<MatchExpression> shallowClone() const;
 
     const GeoNearExpression& getData() const {
         return *_query;
@@ -181,7 +190,7 @@ public:
 private:
     BSONObj _rawObj;
     // Share ownership of our query with all of our clones
-    boost::shared_ptr<const GeoNearExpression> _query;
+    std::shared_ptr<const GeoNearExpression> _query;
 };
 
 }  // namespace mongo

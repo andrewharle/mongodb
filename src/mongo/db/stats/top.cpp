@@ -33,13 +33,9 @@
 
 #include "mongo/db/stats/top.h"
 
-#include "mongo/db/auth/action_set.h"
-#include "mongo/db/auth/action_type.h"
-#include "mongo/db/auth/authorization_manager.h"
-#include "mongo/db/auth/privilege.h"
+#include "mongo/db/jsobj.h"
+#include "mongo/db/service_context.h"
 #include "mongo/util/log.h"
-#include "mongo/util/net/message.h"
-#include "mongo/db/commands.h"
 
 namespace mongo {
 
@@ -47,6 +43,12 @@ using std::endl;
 using std::string;
 using std::stringstream;
 using std::vector;
+
+namespace {
+
+const auto getTop = ServiceContext::declareDecoration<Top>();
+
+}  // namespace
 
 Top::UsageData::UsageData(const UsageData& older, const UsageData& newer) {
     // this won't be 100% accurate on rollovers and drop(), but at least it won't be negative
@@ -65,23 +67,30 @@ Top::CollectionData::CollectionData(const CollectionData& older, const Collectio
       remove(older.remove, newer.remove),
       commands(older.commands, newer.commands) {}
 
-void Top::record(const StringData& ns, int op, int lockType, long long micros, bool command) {
+// static
+Top& Top::get(ServiceContext* service) {
+    return getTop(service);
+}
+
+void Top::record(StringData ns, LogicalOp logicalOp, int lockType, long long micros, bool command) {
     if (ns[0] == '?')
         return;
 
-    // cout << "record: " << ns << "\t" << op << "\t" << command << endl;
-    SimpleMutex::scoped_lock lk(_lock);
+    auto hashedNs = UsageMap::HashedKey(ns);
 
-    if ((command || op == dbQuery) && ns == _lastDropped) {
+    // cout << "record: " << ns << "\t" << op << "\t" << command << endl;
+    stdx::lock_guard<SimpleMutex> lk(_lock);
+
+    if ((command || logicalOp == LogicalOp::opQuery) && ns == _lastDropped) {
         _lastDropped = "";
         return;
     }
 
-    CollectionData& coll = _usage[ns];
-    _record(coll, op, lockType, micros, command);
+    CollectionData& coll = _usage[hashedNs];
+    _record(coll, logicalOp, lockType, micros);
 }
 
-void Top::_record(CollectionData& c, int op, int lockType, long long micros, bool command) {
+void Top::_record(CollectionData& c, LogicalOp logicalOp, int lockType, long long micros) {
     c.total.inc(micros);
 
     if (lockType > 0)
@@ -89,52 +98,48 @@ void Top::_record(CollectionData& c, int op, int lockType, long long micros, boo
     else if (lockType < 0)
         c.readLock.inc(micros);
 
-    switch (op) {
-        case 0:
+    switch (logicalOp) {
+        case LogicalOp::opInvalid:
             // use 0 for unknown, non-specific
             break;
-        case dbUpdate:
+        case LogicalOp::opUpdate:
             c.update.inc(micros);
             break;
-        case dbInsert:
+        case LogicalOp::opInsert:
             c.insert.inc(micros);
             break;
-        case dbQuery:
-            if (command)
-                c.commands.inc(micros);
-            else
-                c.queries.inc(micros);
+        case LogicalOp::opQuery:
+            c.queries.inc(micros);
             break;
-        case dbGetMore:
+        case LogicalOp::opGetMore:
             c.getmore.inc(micros);
             break;
-        case dbDelete:
+        case LogicalOp::opDelete:
             c.remove.inc(micros);
             break;
-        case dbKillCursors:
+        case LogicalOp::opKillCursors:
             break;
-        case opReply:
-        case dbMsg:
-            log() << "unexpected op in Top::record: " << op << endl;
+        case LogicalOp::opCommand:
+            c.commands.inc(micros);
             break;
         default:
-            log() << "unknown op in Top::record: " << op << endl;
+            MONGO_UNREACHABLE;
     }
 }
 
-void Top::collectionDropped(const StringData& ns) {
-    SimpleMutex::scoped_lock lk(_lock);
+void Top::collectionDropped(StringData ns) {
+    stdx::lock_guard<SimpleMutex> lk(_lock);
     _usage.erase(ns);
     _lastDropped = ns.toString();
 }
 
 void Top::cloneMap(Top::UsageMap& out) const {
-    SimpleMutex::scoped_lock lk(_lock);
+    stdx::lock_guard<SimpleMutex> lk(_lock);
     out = _usage;
 }
 
 void Top::append(BSONObjBuilder& b) {
-    SimpleMutex::scoped_lock lk(_lock);
+    stdx::lock_guard<SimpleMutex> lk(_lock);
     _appendToUsageMap(b, _usage);
 }
 
@@ -175,47 +180,4 @@ void Top::_appendStatsEntry(BSONObjBuilder& b, const char* statsName, const Usag
     bb.appendNumber("count", map.count);
     bb.done();
 }
-
-class TopCmd : public Command {
-public:
-    TopCmd() : Command("top", true) {}
-
-    virtual bool slaveOk() const {
-        return true;
-    }
-    virtual bool adminOnly() const {
-        return true;
-    }
-    virtual bool isWriteCommandForConfigServer() const {
-        return false;
-    }
-    virtual void help(stringstream& help) const {
-        help << "usage by collection, in micros ";
-    }
-    virtual void addRequiredPrivileges(const std::string& dbname,
-                                       const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
-        ActionSet actions;
-        actions.addAction(ActionType::top);
-        out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
-    }
-    virtual bool run(OperationContext* txn,
-                     const string&,
-                     BSONObj& cmdObj,
-                     int,
-                     string& errmsg,
-                     BSONObjBuilder& result,
-                     bool fromRepl) {
-        {
-            BSONObjBuilder b(result.subobjStart("totals"));
-            b.append("note", "all times in microseconds");
-            Top::global.append(b);
-            b.done();
-        }
-        return true;
-    }
-
-} topCmd;
-
-Top Top::global;
 }

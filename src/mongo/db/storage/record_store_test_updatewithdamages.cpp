@@ -30,28 +30,27 @@
 
 #include "mongo/db/storage/record_store_test_harness.h"
 
-#include <boost/scoped_ptr.hpp>
 
 #include "mongo/db/record_id.h"
 #include "mongo/db/storage/record_data.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/unittest/unittest.h"
 
-using boost::scoped_ptr;
+using std::unique_ptr;
 using std::string;
 
 namespace mongo {
 
 // Insert a record and try to perform an in-place update on it.
 TEST(RecordStoreTestHarness, UpdateWithDamages) {
-    scoped_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
-    scoped_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
+    unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    unique_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
 
     if (!rs->updateWithDamagesSupported())
         return;
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(0, rs->numRecords(opCtx.get()));
     }
 
@@ -59,7 +58,7 @@ TEST(RecordStoreTestHarness, UpdateWithDamages) {
     RecordId loc;
     const RecordData rec(data.c_str(), data.size() + 1);
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             StatusWith<RecordId> res = rs->insertRecord(opCtx.get(), rec.data(), rec.size(), false);
@@ -70,12 +69,13 @@ TEST(RecordStoreTestHarness, UpdateWithDamages) {
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(1, rs->numRecords(opCtx.get()));
     }
 
+    string modifiedData = "11101000";
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             mutablebson::DamageVector dv(3);
             dv[0].sourceOffset = 5;
@@ -89,17 +89,18 @@ TEST(RecordStoreTestHarness, UpdateWithDamages) {
             dv[2].size = 3;
 
             WriteUnitOfWork uow(opCtx.get());
-            ASSERT_OK(rs->updateWithDamages(opCtx.get(), loc, rec, data.c_str(), dv));
+            auto newRecStatus = rs->updateWithDamages(opCtx.get(), loc, rec, data.c_str(), dv);
+            ASSERT_OK(newRecStatus.getStatus());
+            ASSERT_EQUALS(modifiedData, newRecStatus.getValue().data());
             uow.commit();
         }
     }
 
-    data = "11101000";
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             RecordData record = rs->dataFor(opCtx.get(), loc);
-            ASSERT_EQUALS(data, record.data());
+            ASSERT_EQUALS(modifiedData, record.data());
         }
     }
 }
@@ -107,14 +108,14 @@ TEST(RecordStoreTestHarness, UpdateWithDamages) {
 // Insert a record and try to perform an in-place update on it with a DamageVector
 // containing overlapping DamageEvents.
 TEST(RecordStoreTestHarness, UpdateWithOverlappingDamageEvents) {
-    scoped_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
-    scoped_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
+    unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    unique_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
 
     if (!rs->updateWithDamagesSupported())
         return;
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(0, rs->numRecords(opCtx.get()));
     }
 
@@ -122,7 +123,7 @@ TEST(RecordStoreTestHarness, UpdateWithOverlappingDamageEvents) {
     RecordId loc;
     const RecordData rec(data.c_str(), data.size() + 1);
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             StatusWith<RecordId> res = rs->insertRecord(opCtx.get(), rec.data(), rec.size(), false);
@@ -133,12 +134,13 @@ TEST(RecordStoreTestHarness, UpdateWithOverlappingDamageEvents) {
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(1, rs->numRecords(opCtx.get()));
     }
 
+    string modifiedData = "10100010";
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             mutablebson::DamageVector dv(2);
             dv[0].sourceOffset = 3;
@@ -149,17 +151,18 @@ TEST(RecordStoreTestHarness, UpdateWithOverlappingDamageEvents) {
             dv[1].size = 5;
 
             WriteUnitOfWork uow(opCtx.get());
-            ASSERT_OK(rs->updateWithDamages(opCtx.get(), loc, rec, data.c_str(), dv));
+            auto newRecStatus = rs->updateWithDamages(opCtx.get(), loc, rec, data.c_str(), dv);
+            ASSERT_OK(newRecStatus.getStatus());
+            ASSERT_EQUALS(modifiedData, newRecStatus.getValue().data());
             uow.commit();
         }
     }
 
-    data = "10100010";
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             RecordData record = rs->dataFor(opCtx.get(), loc);
-            ASSERT_EQUALS(data, record.data());
+            ASSERT_EQUALS(modifiedData, record.data());
         }
     }
 }
@@ -168,14 +171,14 @@ TEST(RecordStoreTestHarness, UpdateWithOverlappingDamageEvents) {
 // containing overlapping DamageEvents. The changes should be applied in the order
 // specified by the DamageVector, and not -- for instance -- by the targetOffset.
 TEST(RecordStoreTestHarness, UpdateWithOverlappingDamageEventsReversed) {
-    scoped_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
-    scoped_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
+    unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    unique_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
 
     if (!rs->updateWithDamagesSupported())
         return;
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(0, rs->numRecords(opCtx.get()));
     }
 
@@ -183,7 +186,7 @@ TEST(RecordStoreTestHarness, UpdateWithOverlappingDamageEventsReversed) {
     RecordId loc;
     const RecordData rec(data.c_str(), data.size() + 1);
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             StatusWith<RecordId> res = rs->insertRecord(opCtx.get(), rec.data(), rec.size(), false);
@@ -194,12 +197,13 @@ TEST(RecordStoreTestHarness, UpdateWithOverlappingDamageEventsReversed) {
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(1, rs->numRecords(opCtx.get()));
     }
 
+    string modifiedData = "10111010";
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             mutablebson::DamageVector dv(2);
             dv[0].sourceOffset = 0;
@@ -210,31 +214,32 @@ TEST(RecordStoreTestHarness, UpdateWithOverlappingDamageEventsReversed) {
             dv[1].size = 5;
 
             WriteUnitOfWork uow(opCtx.get());
-            ASSERT_OK(rs->updateWithDamages(opCtx.get(), loc, rec, data.c_str(), dv));
+            auto newRecStatus = rs->updateWithDamages(opCtx.get(), loc, rec, data.c_str(), dv);
+            ASSERT_OK(newRecStatus.getStatus());
+            ASSERT_EQUALS(modifiedData, newRecStatus.getValue().data());
             uow.commit();
         }
     }
 
-    data = "10111010";
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             RecordData record = rs->dataFor(opCtx.get(), loc);
-            ASSERT_EQUALS(data, record.data());
+            ASSERT_EQUALS(modifiedData, record.data());
         }
     }
 }
 
 // Insert a record and try to call updateWithDamages() with an empty DamageVector.
 TEST(RecordStoreTestHarness, UpdateWithNoDamages) {
-    scoped_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
-    scoped_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
+    unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    unique_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
 
     if (!rs->updateWithDamagesSupported())
         return;
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(0, rs->numRecords(opCtx.get()));
     }
 
@@ -242,7 +247,7 @@ TEST(RecordStoreTestHarness, UpdateWithNoDamages) {
     RecordId loc;
     const RecordData rec(data.c_str(), data.size() + 1);
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             StatusWith<RecordId> res = rs->insertRecord(opCtx.get(), rec.data(), rec.size(), false);
@@ -253,23 +258,25 @@ TEST(RecordStoreTestHarness, UpdateWithNoDamages) {
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(1, rs->numRecords(opCtx.get()));
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             mutablebson::DamageVector dv;
 
             WriteUnitOfWork uow(opCtx.get());
-            ASSERT_OK(rs->updateWithDamages(opCtx.get(), loc, rec, "", dv));
+            auto newRecStatus = rs->updateWithDamages(opCtx.get(), loc, rec, "", dv);
+            ASSERT_OK(newRecStatus.getStatus());
+            ASSERT_EQUALS(data, newRecStatus.getValue().data());
             uow.commit();
         }
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             RecordData record = rs->dataFor(opCtx.get(), loc);
             ASSERT_EQUALS(data, record.data());

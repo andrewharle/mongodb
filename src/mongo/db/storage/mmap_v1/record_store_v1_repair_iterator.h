@@ -40,25 +40,30 @@ namespace mongo {
  * extent) and once backwards in an attempt to salvage potentially corrupted or unreachable
  * records. It is used by the mongodump --repair option.
  */
-class RecordStoreV1RepairIterator : public RecordIterator {
+class RecordStoreV1RepairCursor final : public RecordCursor {
 public:
-    RecordStoreV1RepairIterator(OperationContext* txn, const RecordStoreV1Base* recordStore);
-    virtual ~RecordStoreV1RepairIterator() {}
+    RecordStoreV1RepairCursor(OperationContext* txn, const RecordStoreV1Base* recordStore);
 
-    virtual bool isEOF();
-    virtual RecordId getNext();
-    virtual RecordId curr();
-
-    virtual void invalidate(const RecordId& dl);
-    virtual void saveState() {}
-    virtual bool restoreState(OperationContext* txn) {
-        _txn = txn;
+    boost::optional<Record> next() final;
+    void invalidate(OperationContext* txn, const RecordId& dl);
+    void save() final {}
+    bool restore() final {
         return true;
     }
+    void detachFromOperationContext() final {
+        _txn = nullptr;
+    }
+    void reattachToOperationContext(OperationContext* txn) final {
+        _txn = txn;
+    }
 
-    virtual RecordData dataFor(const RecordId& loc) const;
+    // Explicitly not supporting fetcherForNext(). The expected use case for this class is a
+    // special offline operation where there are no concurrent operations, so it would be better
+    // to take the pagefault inline with the operation.
 
 private:
+    void advance();
+
     /**
      * Based on the direction of scan, finds the next valid (un-corrupted) extent in the chain
      * and sets _currExtent to point to that.

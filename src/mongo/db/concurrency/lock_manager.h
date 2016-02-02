@@ -28,17 +28,17 @@
 
 #pragma once
 
-#include <boost/thread/condition_variable.hpp>
-#include <boost/thread/mutex.hpp>
-
+#include <cstdint>
 #include <deque>
 
+#include "mongo/config.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/concurrency/lock_request_list.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/compiler.h"
-#include "mongo/platform/cstdint.h"
 #include "mongo/platform/unordered_map.h"
+#include "mongo/stdx/condition_variable.h"
+#include "mongo/stdx/mutex.h"
 #include "mongo/util/concurrency/mutex.h"
 
 namespace mongo {
@@ -131,7 +131,6 @@ private:
     // These types describe the locks hash table
 
     struct LockBucket {
-        LockBucket() : mutex("LockManager") {}
         SimpleMutex mutex;
         typedef unordered_map<ResourceId, LockHead*> Map;
         Map data;
@@ -142,7 +141,6 @@ private:
     // modes and potentially other modes that don't conflict with themselves. This avoids
     // contention on the regular LockHead in the lock manager.
     struct Partition {
-        Partition() : mutex("LockManager") {}
         PartitionedLockHead* find(ResourceId resId);
         PartitionedLockHead* findOrInsert(ResourceId resId);
         typedef unordered_map<ResourceId, PartitionedLockHead*> Map;

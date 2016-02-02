@@ -1,9 +1,8 @@
 # This file is a python script that describes the WiredTiger API.
 
 class Method:
-    def __init__(self, config, **flags):
+    def __init__(self, config):
         self.config = config
-        self.flags = flags
 
 class Config:
     def __init__(self, name, default, desc, subconfig=None, **flags):
@@ -21,10 +20,8 @@ common_meta = [
     Config('app_metadata', '', r'''
         application-owned metadata for this object'''),
     Config('collator', 'none', r'''
-        configure custom collation for keys.  Permitted values are
-        \c "none" or a custom collator name created with
-        WT_CONNECTION::add_collator''',
-        func='__wt_collator_confchk'),
+        configure custom collation for keys.  Permitted values are \c "none"
+        or a custom collator name created with WT_CONNECTION::add_collator'''),
     Config('columns', '', r'''
         list of the column names.  Comma-separated list of the form
         <code>(column[,...])</code>.  For tables, the number of entries
@@ -140,11 +137,10 @@ file_config = format_meta + [
         or custom compression engine name created with
         WT_CONNECTION::add_compressor.  If WiredTiger has builtin support for
         \c "bzip2", \c "snappy", \c "lz4" or \c "zlib" compression, these names
-        are also available.  See @ref compression for more information''',
-        func='__wt_compressor_confchk'),
+        are also available.  See @ref compression for more information'''),
     Config('cache_resident', 'false', r'''
-        do not ever evict the object's pages; see @ref
-        tuning_cache_resident for more information''',
+        do not ever evict the object's pages from cache. Not compatible with
+        LSM tables; see @ref tuning_cache_resident for more information''',
         type='boolean'),
     Config('checksum', 'uncompressed', r'''
         configure block checksums; permitted values are <code>on</code>
@@ -159,19 +155,34 @@ file_config = format_meta + [
         row-store leaf page value dictionary; see
         @ref file_formats_compression for more information''',
         min='0'),
+    Config('encryption', '', r'''
+        configure an encryptor for file blocks. When a table is created,
+        its encryptor is not implicitly used for any related indices
+        or column groups''',
+        type='category', subconfig=[
+        Config('name', 'none', r'''
+            Permitted values are \c "none"
+            or custom encryption engine name created with
+            WT_CONNECTION::add_encryptor.
+            See @ref encryption for more information'''),
+        Config('keyid', '', r'''
+            An identifier that identifies a unique instance of the encryptor.
+            It is stored in clear text, and thus is available when
+            the wiredtiger database is reopened.  On the first use
+            of a (name, keyid) combination, the WT_ENCRYPTOR::customize
+            function is called with the keyid as an argument.'''),
+        ]),
     Config('format', 'btree', r'''
         the file format''',
         choices=['btree']),
     Config('huffman_key', 'none', r'''
         configure Huffman encoding for keys.  Permitted values are
         \c "none", \c "english", \c "utf8<file>" or \c "utf16<file>".
-        See @ref huffman for more information''',
-        func='__wt_huffman_confchk'),
+        See @ref huffman for more information'''),
     Config('huffman_value', 'none', r'''
         configure Huffman encoding for values.  Permitted values are
         \c "none", \c "english", \c "utf8<file>" or \c "utf16<file>".
-        See @ref huffman for more information''',
-        func='__wt_huffman_confchk'),
+        See @ref huffman for more information'''),
     Config('internal_key_truncate', 'true', r'''
         configure internal key truncation, discarding unnecessary
         trailing bytes on internal keys (ignored for custom
@@ -225,6 +236,14 @@ file_config = format_meta + [
     Config('leaf_item_max', '0', r'''
         historic term for leaf_key_max and leaf_value_max''',
         min=0, undoc=True),
+    Config('log', '', r'''
+        the transaction log configuration for this object.  Only valid if
+        log is enabled in ::wiredtiger_open.''',
+        type='category', subconfig=[
+        Config('enabled', 'true', r'''
+            if false, this object has checkpoint-level durability.''',
+            type='boolean'),
+        ]),
     Config('memory_page_max', '5MB', r'''
         the maximum size a page can grow to in memory before being
         reconciled to disk.  The specified size will be adjusted to a lower
@@ -252,7 +271,10 @@ file_config = format_meta + [
         leaf pages''',
         min=0),
     Config('split_deepen_min_child', '0', r'''
-        minimum entries in a page to consider deepening the tree''',
+        minimum entries in a page to consider deepening the tree. Pages
+        will be considered for splitting and deepening the search tree
+        as soon as there are more than the configured number of children
+        ''',
         type='int', undoc=True),
     Config('split_deepen_per_child', '0', r'''
         entries allocated per child when deepening the tree''',
@@ -292,8 +314,7 @@ index_only_config = [
     Config('extractor', 'none', r'''
         configure custom extractor for indices.  Permitted values are
         \c "none" or an extractor name created with
-        WT_CONNECTION::add_extractor''',
-        func='__wt_extractor_confchk'),
+        WT_CONNECTION::add_extractor'''),
     Config('immutable', 'false', r'''
         configure the index to be immutable - that is an index is not changed
         by any update to a record in the table''', type='boolean'),
@@ -320,8 +341,9 @@ connection_runtime_config = [
             maximum number of expected simultaneous asynchronous
                 operations''', min='1', max='4096'),
         Config('threads', '2', r'''
-            the number of worker threads to service asynchronous
-                requests''',
+            the number of worker threads to service asynchronous requests.
+            Each worker thread uses a session from the configured
+            session_max.''',
                 min='1', max='20'), # !!! Must match WT_ASYNC_MAX_WORKERS
             ]),
     Config('cache_size', '100MB', r'''
@@ -339,7 +361,8 @@ connection_runtime_config = [
         workloads''',
         min='0', max='30'),
     Config('checkpoint', '', r'''
-        periodically checkpoint the database''',
+        periodically checkpoint the database. Enabling the checkpoint server
+        uses a session from the configured session_max''',
         type='category', subconfig=[
         Config('name', '"WiredTigerCheckpoint"', r'''
             the checkpoint name'''),
@@ -360,7 +383,12 @@ connection_runtime_config = [
         continue evicting until the cache has less dirty memory than the
         value, as a percentage of the total cache size. Dirty pages will
         only be evicted if the cache is full enough to trigger eviction''',
-        min=10, max=99),
+        min=5, max=99),
+    Config('eviction_dirty_trigger', '95', r'''
+        trigger eviction when the cache is using this much memory for dirty
+        content, as a percentage of the total cache size. This setting only
+        alters behavior if it is lower than eviction_trigger''',
+        min=5, max=99),
     Config('eviction_target', '80', r'''
         continue evicting until the cache has less total memory than the
         value, as a percentage of the total cache size. Must be less than
@@ -372,23 +400,61 @@ connection_runtime_config = [
     Config('file_manager', '', r'''
         control how file handles are managed''',
         type='category', subconfig=[
+        Config('close_handle_minimum', '250', r'''
+            number of handles open before the file manager will look for handles
+            to close''', min=0),
         Config('close_idle_time', '30', r'''
             amount of time in seconds a file handle needs to be idle
             before attempting to close it. A setting of 0 means that idle
             handles are not closed''', min=0, max=100000),
-        Config('close_handle_minimum', '250', r'''
-            number of handles open before the file manager will look for handles
-            to close'''),
         Config('close_scan_interval', '10', r'''
             interval in seconds at which to check for files that are
             inactive and close them''', min=1, max=100000),
         ]),
+    Config('log', '', r'''
+        enable logging. Enabling logging uses three sessions from the
+        configured session_max''',
+        type='category', subconfig=[
+        Config('archive', 'true', r'''
+            automatically archive unneeded log files''',
+            type='boolean'),
+        Config('compressor', 'none', r'''
+            configure a compressor for log records.  Permitted values are
+            \c "none" or custom compression engine name created with
+            WT_CONNECTION::add_compressor.  If WiredTiger has builtin support
+            for \c "bzip2", \c "snappy", \c "lz4" or \c "zlib" compression,
+            these names are also available. See @ref compression for more
+            information'''),
+        Config('enabled', 'false', r'''
+            enable logging subsystem''',
+            type='boolean'),
+        Config('file_max', '100MB', r'''
+            the maximum size of log files''',
+            min='100KB', max='2GB'),
+        Config('path', '', r'''
+            the path to a directory into which the log files are written.
+            If the value is not an absolute path name, the files are created
+            relative to the database home'''),
+        Config('prealloc', 'true', r'''
+            pre-allocate log files.''',
+            type='boolean'),
+        Config('recover', 'on', r'''
+            run recovery or error if recovery needs to run after an
+            unclean shutdown.''',
+            choices=['error','on']),
+        Config('zero_fill', 'false', r'''
+            manually write zeroes into log files''',
+            type='boolean'),
+        ]),
     Config('lsm_manager', '', r'''
-        configure database wide options for LSM tree management''',
+        configure database wide options for LSM tree management. The LSM
+        manager is started automatically the first time an LSM tree is opened.
+        The LSM manager uses a session from the configured session_max.''',
         type='category', subconfig=[
         Config('worker_thread_max', '4', r'''
             Configure a set of threads to manage merging LSM trees in
-            the database.''',
+            the database. Each worker thread uses a session handle from
+            the configured session_max''',
             min='3',     # !!! Must match WT_LSM_MIN_WORKERS
             max='20'),     # !!! Must match WT_LSM_MAX_WORKERS
         Config('merge', 'true', r'''
@@ -404,7 +470,8 @@ connection_runtime_config = [
             Config('threads_max', '1', r'''
                 maximum number of threads WiredTiger will start to help evict
                 pages from cache. The number of threads started will vary
-                depending on the current eviction load''',
+                depending on the current eviction load. Each eviction worker
+                thread uses a session from the configured session_max''',
                 min=1, max=20),
             Config('threads_min', '1', r'''
                 minimum number of threads WiredTiger will start to help evict
@@ -414,18 +481,23 @@ connection_runtime_config = [
             ]),
     Config('shared_cache', '', r'''
         shared cache configuration options. A database should configure
-        either a cache_size or a shared_cache not both''',
+        either a cache_size or a shared_cache not both. Enabling a
+        shared cache uses a session from the configured session_max''',
         type='category', subconfig=[
         Config('chunk', '10MB', r'''
             the granularity that a shared cache is redistributed''',
             min='1MB', max='10TB'),
+        Config('name', 'none', r'''
+            the name of a cache that is shared between databases or
+            \c "none" when no shared cache is configured'''),
+        Config('quota', '0', r'''
+            maximum size of cache this database can be allocated from the
+            shared cache. Defaults to the entire shared cache size''',
+            type='int'),
         Config('reserve', '0', r'''
             amount of cache this database is guaranteed to have
             available from the shared cache. This setting is per
             database. Defaults to the chunk size''', type='int'),
-        Config('name', 'none', r'''
-            the name of a cache that is shared between databases or
-            \c "none" when no shared cache is configured'''),
         Config('size', '500MB', r'''
             maximum memory to allocate for the shared cache. Setting
             this will update the value if one is already set''',
@@ -447,7 +519,9 @@ connection_runtime_config = [
         type='list', choices=['all', 'fast', 'none', 'clear']),
     Config('statistics_log', '', r'''
         log any statistics the database is configured to maintain,
-        to a file.  See @ref statistics for more information''',
+        to a file.  See @ref statistics for more information. Enabling
+        the statistics log server uses a session from the configured
+        session_max''',
         type='category', subconfig=[
         Config('on_close', 'false', r'''log statistics on database close''',
             type='boolean'),
@@ -485,6 +559,7 @@ connection_runtime_config = [
             'fileops',
             'log',
             'lsm',
+            'lsm_manager',
             'metadata',
             'mutex',
             'overflow',
@@ -507,7 +582,7 @@ session_config = [
         choices=['read-uncommitted', 'read-committed', 'snapshot']),
 ]
 
-common_wiredtiger_open = [
+wiredtiger_open_common = connection_runtime_config + [
     Config('buffer_alignment', '-1', r'''
         in-memory alignment (in bytes) for buffers used for I/O.  The
         default value of -1 indicates a platform-specific alignment value
@@ -519,16 +594,42 @@ common_wiredtiger_open = [
         checkpoints''',
         type='boolean'),
     Config('direct_io', '', r'''
-        Use \c O_DIRECT to access files.  Options are given as a list,
-        such as <code>"direct_io=[data]"</code>.  Configuring
-        \c direct_io requires care, see @ref
-        tuning_system_buffer_cache_direct_io for important warnings.
-        Including \c "data" will cause WiredTiger data files to use
-        \c O_DIRECT, including \c "log" will cause WiredTiger log files
-        to use \c O_DIRECT, and including \c "checkpoint" will cause
-        WiredTiger data files opened at a checkpoint (i.e: read only) to
-        use \c O_DIRECT''',
+        Use \c O_DIRECT on POSIX systems, and \c FILE_FLAG_NO_BUFFERING on
+        Windows to access files.  Options are given as a list, such as
+        <code>"direct_io=[data]"</code>.  Configuring \c direct_io requires
+        care, see @ref tuning_system_buffer_cache_direct_io for important
+        warnings.  Including \c "data" will cause WiredTiger data files to use
+        direct I/O, including \c "log" will cause WiredTiger log files to use
+        direct I/O, and including \c "checkpoint" will cause WiredTiger data
+        files opened at a checkpoint (i.e: read only) to use direct I/O.
+        \c direct_io should be combined with \c write_through to get the
+        equivalent of \c O_DIRECT on Windows.''',
         type='list', choices=['checkpoint', 'data', 'log']),
+    Config('encryption', '', r'''
+        configure an encryptor for system wide metadata and logs.
+        If a system wide encryptor is set, it is also used for
+        encrypting data files and tables, unless encryption configuration
+        is explicitly set for them when they are created with
+        WT_SESSION::create''',
+        type='category', subconfig=[
+        Config('name', 'none', r'''
+            Permitted values are \c "none"
+            or custom encryption engine name created with
+            WT_CONNECTION::add_encryptor.
+            See @ref encryption for more information'''),
+        Config('keyid', '', r'''
+            An identifier that identifies a unique instance of the encryptor.
+            It is stored in clear text, and thus is available when
+            the wiredtiger database is reopened.  On the first use
+            of a (name, keyid) combination, the WT_ENCRYPTOR::customize
+            function is called with the keyid as an argument.'''),
+        Config('secretkey', '', r'''
+            A string that is passed to the WT_ENCRYPTOR::customize function.
+            It is never stored in clear text, so must be given to any
+            subsequent ::wiredtiger_open calls to reopen the database.
+            It must also be provided to any "wt" commands used with
+            this database.'''),
+        ]),
     Config('extensions', '', r'''
         list of shared library extensions to load (using dlopen).
         Any values specified to an library extension are passed to
@@ -546,37 +647,6 @@ common_wiredtiger_open = [
         maximum number of simultaneous hazard pointers per session
         handle''',
         min='15'),
-    Config('log', '', r'''
-        enable logging''',
-        type='category', subconfig=[
-        Config('archive', 'true', r'''
-            automatically archive unneeded log files''',
-            type='boolean'),
-        Config('compressor', 'none', r'''
-            configure a compressor for log records.  Permitted values are
-            \c "none" or custom compression engine name created with
-            WT_CONNECTION::add_compressor.  If WiredTiger has builtin support
-            for \c "bzip2", \c "snappy", \c "lz4" or \c "zlib" compression,
-            these names are also available. See @ref compression for more
-            information'''),
-        Config('enabled', 'false', r'''
-            enable logging subsystem''',
-            type='boolean'),
-        Config('file_max', '100MB', r'''
-            the maximum size of log files''',
-            min='100KB', max='2GB'),
-        Config('path', '', r'''
-            the path to a directory into which the log files are written.
-            If the value is not an absolute path name, the files are created
-            relative to the database home'''),
-        Config('prealloc', 'true', r'''
-            pre-allocate log files.''',
-            type='boolean'),
-        Config('recover', 'on', r'''
-            run recovery or error if recovery needs to run after an
-            unclean shutdown.''',
-            choices=['error','on']),
-        ]),
     Config('mmap', 'true', r'''
         Use memory mapping to access files when possible''',
         type='boolean'),
@@ -598,13 +668,53 @@ common_wiredtiger_open = [
         Config('enabled', 'false', r'''
             whether to sync the log on every commit by default, can be
             overridden by the \c sync setting to
-            WT_SESSION::begin_transaction''',
+            WT_SESSION::commit_transaction''',
             type='boolean'),
         Config('method', 'fsync', r'''
             the method used to ensure log records are stable on disk, see
             @ref tune_durability for more information''',
             choices=['dsync', 'fsync', 'none']),
         ]),
+    Config('write_through', '', r'''
+        Use \c FILE_FLAG_WRITE_THROUGH on Windows to write to files.  Ignored
+        on non-Windows systems.  Options are given as a list, such as
+        <code>"write_through=[data]"</code>.  Configuring \c write_through
+        requires care, see @ref tuning_system_buffer_cache_direct_io for
+        important warnings.  Including \c "data" will cause WiredTiger data
+        files to write through cache, including \c "log" will cause WiredTiger
+        log files to write through cache. \c write_through should be combined
+        with \c direct_io to get the equivalent of POSIX \c O_DIRECT on
+        Windows.''',
+        type='list', choices=['data', 'log']),
+]
+
+wiredtiger_open = wiredtiger_open_common + [
+   Config('config_base', 'true', r'''
+        write the base configuration file if creating the database.  If
+        \c false in the config passed directly to ::wiredtiger_open, will
+        ignore any existing base configuration file in addition to not creating
+        one.  See @ref config_base for more information''',
+        type='boolean'),
+    Config('create', 'false', r'''
+        create the database if it does not exist''',
+        type='boolean'),
+    Config('exclusive', 'false', r'''
+        fail if the database already exists, generally used with the
+        \c create option''',
+        type='boolean'),
+    Config('in_memory', 'false', r'''
+        keep data in-memory only, minimize disk I/O''',
+        type='boolean', undoc=True),
+    Config('use_environment', 'true', r'''
+        use the \c WIREDTIGER_CONFIG and \c WIREDTIGER_HOME environment
+        variables if the process is not running with special privileges.
+        See @ref home for more information''',
+        type='boolean'),
+    Config('use_environment_priv', 'false', r'''
+        use the \c WIREDTIGER_CONFIG and \c WIREDTIGER_HOME environment
+        variables even if the process is running with special privileges.
+        See @ref home for more information''',
+        type='boolean'),
 ]
 
 cursor_runtime_config = [
@@ -630,13 +740,13 @@ methods = {
 
 'table.meta' : Method(table_meta),
 
-'cursor.close' : Method([]),
+'WT_CURSOR.close' : Method([]),
 
-'cursor.reconfigure' : Method(cursor_runtime_config),
+'WT_CURSOR.reconfigure' : Method(cursor_runtime_config),
 
-'session.close' : Method([]),
+'WT_SESSION.close' : Method([]),
 
-'session.compact' : Method([
+'WT_SESSION.compact' : Method([
     Config('timeout', '1200', r'''
         maximum amount of time to allow for compact in seconds. The
         actual amount of time spent in compact may exceed the configured
@@ -644,7 +754,7 @@ methods = {
         type='int'),
 ]),
 
-'session.create' : Method(file_config + lsm_config + source_meta + 
+'WT_SESSION.create' : Method(file_config + lsm_config + source_meta + 
         index_only_config + table_only_config + [
     Config('exclusive', 'false', r'''
         fail if the object exists.  When false (the default), if the
@@ -653,7 +763,7 @@ methods = {
         type='boolean'),
 ]),
 
-'session.drop' : Method([
+'WT_SESSION.drop' : Method([
     Config('force', 'false', r'''
         return success if the object does not exist''',
         type='boolean'),
@@ -662,34 +772,61 @@ methods = {
         type='boolean'),
 ]),
 
-'session.log_flush' : Method([
-    Config('sync', 'on', r'''
-        forcibly flush the log and wait for it to synchronize.  If
-        using \c off, then wait for the log to be written to the file
-        system.  If using \c on, wait for the log to be synchronized
-        to the backing store.''',
-        choices=['off', 'on']),
+'WT_SESSION.join' : Method([
+    Config('compare', '"eq"', r'''
+        modifies the set of items to be returned so that the index key
+        satisfies the given comparison relative to the key set in this
+        cursor''',
+        choices=['eq', 'ge', 'gt', 'le', 'lt']),
+    Config('count', '', r'''
+        set an approximate count of the elements that would be included in
+        the join.  This is used in sizing the bloom filter, and also influences
+        evaluation order for cursors in the join. When the count is equal
+        for multiple bloom filters in a composition of joins, the bloom
+        filter may be shared''',
+        type='int'),
+    Config('bloom_bit_count', '16', r'''
+        the number of bits used per item for the bloom filter''',
+        min='2', max='1000'),
+    Config('bloom_hash_count', '8', r'''
+        the number of hash values per item for the bloom filter''',
+        min='2', max='100'),
+    Config('strategy', '', r'''
+        when set to bloom, a bloom filter is created and populated for
+        this index. This has an up front cost but may reduce the number
+        of accesses to the main table when iterating the joined cursor.
+        The bloom setting requires that count be set''',
+        choices=['bloom', 'default']),
 ]),
 
-'session.log_printf' : Method([]),
+'WT_SESSION.log_flush' : Method([
+    Config('sync', 'on', r'''
+        forcibly flush the log and wait for it to achieve the synchronization
+        level specified.  The \c background setting initiates a background
+        synchronization intended to be used with a later call to
+        WT_SESSION::transaction_sync.  The \c off setting forces any
+        buffered log records to be written to the file system.  The
+        \c on setting forces log records to be written to the storage device''',
+        choices=['background', 'off', 'on']),
+]),
 
-'session.open_cursor' : Method(cursor_runtime_config + [
+'WT_SESSION.log_printf' : Method([]),
+
+'WT_SESSION.open_cursor' : Method(cursor_runtime_config + [
     Config('bulk', 'false', r'''
-        configure the cursor for bulk-loading, a fast, initial load
-        path (see @ref tune_bulk_load for more information).  Bulk-load
-        may only be used for newly created objects and cursors
-        configured for bulk-load only support the WT_CURSOR::insert
-        and WT_CURSOR::close methods.  When bulk-loading row-store
-        objects, keys must be loaded in sorted order.  The value is
-        usually a true/false flag; when bulk-loading fixed-length
-        column store objects, the special value \c bitmap allows
-        chunks of a memory resident bitmap to be loaded directly into
-        a file by passing a \c WT_ITEM to WT_CURSOR::set_value where
-        the \c size field indicates the number of records in the
-        bitmap (as specified by the object's \c value_format
-        configuration). Bulk-loaded bitmap values must end on a byte
-        boundary relative to the bit count (except for the last set
-        of values loaded)'''),
+        configure the cursor for bulk-loading, a fast, initial load path
+        (see @ref tune_bulk_load for more information).  Bulk-load may
+        only be used for newly created objects and applications should
+        use the WT_CURSOR::insert method to insert rows.  When
+        bulk-loading, rows must be loaded in sorted order.  The value
+        is usually a true/false flag; when bulk-loading fixed-length
+        column store objects, the special value \c bitmap allows chunks
+        of a memory resident bitmap to be loaded directly into a file
+        by passing a \c WT_ITEM to WT_CURSOR::set_value where the \c
+        size field indicates the number of records in the bitmap (as
+        specified by the object's \c value_format configuration).
+        Bulk-loaded bitmap values must end on a byte boundary relative
+        to the bit count (except for the last set of values loaded)'''),
     Config('checkpoint', '', r'''
         the name of a checkpoint to open (the reserved name
         "WiredTigerCheckpoint" opens the most recent internal
@@ -704,12 +841,20 @@ methods = {
         with the @ref util_dump and @ref util_load commands''',
         choices=['hex', 'json', 'print']),
     Config('next_random', 'false', r'''
-        configure the cursor to return a pseudo-random record from
-        the object; valid only for row-store cursors.  Cursors
-        configured with \c next_random=true only support the
-        WT_CURSOR::next and WT_CURSOR::close methods.  See @ref
-        cursor_random for details''',
+        configure the cursor to return a pseudo-random record from the
+        object when the WT_CURSOR::next method is called; valid only for
+        row-store cursors. See @ref cursor_random for details''',
         type='boolean'),
+    Config('next_random_sample_size', '0', r'''
+        cursors configured by \c next_random to return pseudo-random
+        records from the object randomly select from the entire object,
+        by default. Setting \c next_random_sample_size to a non-zero
+        value sets the number of samples the application expects to take
+        using the \c next_random cursor. A cursor configured with both
+        \c next_random and \c next_random_sample_size attempts to divide
+        the object into \c next_random_sample_size equal-sized pieces,
+        and each retrieval returns a record from one of those pieces. See
+        @ref cursor_random for details'''),
     Config('raw', 'false', r'''
         ignore the encodings for the key and value, manage data as if
         the formats were \c "u".  See @ref cursor_raw for details''',
@@ -747,17 +892,26 @@ methods = {
         type='list'),
 ]),
 
-'session.rename' : Method([]),
-'session.salvage' : Method([
+'WT_SESSION.rename' : Method([]),
+'WT_SESSION.reset' : Method([]),
+'WT_SESSION.salvage' : Method([
     Config('force', 'false', r'''
         force salvage even of files that do not appear to be WiredTiger
         files''',
         type='boolean'),
 ]),
-'session.strerror' : Method([]),
-'session.truncate' : Method([]),
-'session.upgrade' : Method([]),
-'session.verify' : Method([
+'WT_SESSION.strerror' : Method([]),
+'WT_SESSION.transaction_sync' : Method([
+    Config('timeout_ms', '1200000', r'''
+        maximum amount of time to wait for background sync to complete in
+        milliseconds.  A value of zero disables the timeout and returns
+        immediately.''',
+        type='int'),
+]),
+
+'WT_SESSION.truncate' : Method([]),
+'WT_SESSION.upgrade' : Method([]),
+'WT_SESSION.verify' : Method([
     Config('dump_address', 'false', r'''
         Display addresses and page types as pages are verified,
         using the application's message handler, intended for debugging''',
@@ -785,7 +939,7 @@ methods = {
         type='boolean')
 ]),
 
-'session.begin_transaction' : Method([
+'WT_SESSION.begin_transaction' : Method([
     Config('isolation', '', r'''
         the isolation level for this transaction; defaults to the
         session's isolation level''',
@@ -796,16 +950,29 @@ methods = {
         priority of the transaction for resolving conflicts.
         Transactions with higher values are less likely to abort''',
         min='-100', max='100'),
+    Config('snapshot', '', r'''
+        use a named, in-memory snapshot, see
+        @ref transaction_named_snapshots'''),
     Config('sync', '', r'''
         whether to sync log records when the transaction commits,
         inherited from ::wiredtiger_open \c transaction_sync''',
         type='boolean'),
 ]),
 
-'session.commit_transaction' : Method([]),
-'session.rollback_transaction' : Method([]),
+'WT_SESSION.commit_transaction' : Method([
+    Config('sync', '', r'''
+        override whether to sync log records when the transaction commits,
+        inherited from ::wiredtiger_open \c transaction_sync.
+        The \c background setting initiates a background
+        synchronization intended to be used with a later call to
+        WT_SESSION::transaction_sync.  The \c off setting does not
+        wait for record to be written or synchronized.  The
+        \c on setting forces log records to be written to the storage device''',
+        choices=['background', 'off', 'on']),
+]),
+'WT_SESSION.rollback_transaction' : Method([]),
 
-'session.checkpoint' : Method([
+'WT_SESSION.checkpoint' : Method([
     Config('drop', '', r'''
         specify a list of checkpoints to drop.
         The list may additionally contain one of the following keys:
@@ -827,11 +994,30 @@ methods = {
         if non-empty, checkpoint the list of objects''', type='list'),
 ]),
 
-'connection.add_collator' : Method([]),
-'connection.add_compressor' : Method([]),
-'connection.add_data_source' : Method([]),
-'connection.add_extractor' : Method([]),
-'connection.async_new_op' : Method([
+'WT_SESSION.snapshot' : Method([
+    Config('drop', '', r'''
+            if non-empty, specifies which snapshots to drop. Where a group
+            of snapshots are being dropped, the order is based on snapshot
+            creation order not alphanumeric name order''',
+        type='category', subconfig=[
+        Config('all', 'false', r'''
+            drop all named snapshots''', type='boolean'),
+        Config('before', '', r'''
+            drop all snapshots up to but not including the specified name'''),
+        Config('names', '', r'''
+            drop specific named snapshots''', type='list'),
+        Config('to', '', r'''
+            drop all snapshots up to and including the specified name.'''),
+    ]),
+    Config('name', '', r'''specify a name for the snapshot'''),
+]),
+
+'WT_CONNECTION.add_collator' : Method([]),
+'WT_CONNECTION.add_compressor' : Method([]),
+'WT_CONNECTION.add_data_source' : Method([]),
+'WT_CONNECTION.add_encryptor' : Method([]),
+'WT_CONNECTION.add_extractor' : Method([]),
+'WT_CONNECTION.async_new_op' : Method([
     Config('append', 'false', r'''
         append the value as a new record, creating a new record
         number key; valid only for operations with record number keys''',
@@ -853,14 +1039,14 @@ methods = {
         value. A value of zero disables the timeout''',
         type='int'),
 ]),
-'connection.close' : Method([
+'WT_CONNECTION.close' : Method([
     Config('leak_memory', 'false', r'''
         don't free memory during close''',
         type='boolean'),
 ]),
-'connection.reconfigure' : Method(connection_runtime_config),
+'WT_CONNECTION.reconfigure' : Method(connection_runtime_config),
 
-'connection.load_extension' : Method([
+'WT_CONNECTION.load_extension' : Method([
     Config('config', '', r'''
         configuration string passed to the entry point of the
         extension as its WT_CONFIG_ARG argument'''),
@@ -875,9 +1061,9 @@ methods = {
         ::wiredtiger_extension_terminate'''),
 ]),
 
-'connection.open_session' : Method(session_config),
+'WT_CONNECTION.open_session' : Method(session_config),
 
-'session.reconfigure' : Method(session_config),
+'WT_SESSION.reconfigure' : Method(session_config),
 
 # There are 4 variants of the wiredtiger_open configurations.
 # wiredtiger_open:
@@ -891,55 +1077,13 @@ methods = {
 # creation-specific configuration strings).
 # wiredtiger_open_all:
 #    All of the above configuration values combined
-'wiredtiger_open' : Method(
-    connection_runtime_config +
-    common_wiredtiger_open + [
-    Config('config_base', 'true', r'''
-        write the base configuration file if creating the database,
-        see @ref config_base for more information''',
-        type='boolean'),
-    Config('create', 'false', r'''
-        create the database if it does not exist''',
-        type='boolean'),
-    Config('exclusive', 'false', r'''
-        fail if the database already exists, generally used with the
-        \c create option''',
-        type='boolean'),
-    Config('use_environment_priv', 'false', r'''
-        use the \c WIREDTIGER_CONFIG and \c WIREDTIGER_HOME environment
-        variables regardless of whether or not the process is running
-        with special privileges.  See @ref home for more information''',
-        type='boolean'),
-]),
-'wiredtiger_open_basecfg' : Method(
-    connection_runtime_config +
-    common_wiredtiger_open + [
+'wiredtiger_open' : Method(wiredtiger_open),
+'wiredtiger_open_basecfg' : Method(wiredtiger_open_common + [
     Config('version', '(major=0,minor=0)', r'''
         the file version'''),
 ]),
-'wiredtiger_open_usercfg' : Method(
-    connection_runtime_config +
-    common_wiredtiger_open
-),
-'wiredtiger_open_all' : Method(
-    connection_runtime_config +
-    common_wiredtiger_open + [
-    Config('config_base', 'true', r'''
-        write the base configuration file if creating the database,
-        see @ref config_base for more information''',
-        type='boolean'),
-    Config('create', 'false', r'''
-        create the database if it does not exist''',
-        type='boolean'),
-    Config('exclusive', 'false', r'''
-        fail if the database already exists, generally used with the
-        \c create option''',
-        type='boolean'),
-    Config('use_environment_priv', 'false', r'''
-        use the \c WIREDTIGER_CONFIG and \c WIREDTIGER_HOME environment
-        variables regardless of whether or not the process is running
-        with special privileges.  See @ref home for more information''',
-        type='boolean'),
+'wiredtiger_open_usercfg' : Method(wiredtiger_open_common),
+'wiredtiger_open_all' : Method(wiredtiger_open + [
     Config('version', '(major=0,minor=0)', r'''
         the file version'''),
 ]),

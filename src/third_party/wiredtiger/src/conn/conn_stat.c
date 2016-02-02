@@ -42,13 +42,25 @@ __stat_sources_free(WT_SESSION_IMPL *session, char ***sources)
 void
 __wt_conn_stat_init(WT_SESSION_IMPL *session)
 {
+	WT_CONNECTION_IMPL *conn;
+	WT_CONNECTION_STATS **stats;
+
+	conn = S2C(session);
+	stats = conn->stats;
+
 	__wt_async_stats_update(session);
 	__wt_cache_stats_update(session);
+	__wt_las_stats_update(session);
 	__wt_txn_stats_update(session);
 
-	WT_CONN_STAT(session, dh_conn_handle_count) =
-	    S2C(session)->dhandle_count;
-	WT_CONN_STAT(session, file_open) = S2C(session)->open_file_count;
+	WT_STAT_SET(session, stats, file_open, conn->open_file_count);
+	WT_STAT_SET(session,
+	    stats, session_cursor_open, conn->open_cursor_count);
+	WT_STAT_SET(session, stats, dh_conn_handle_count, conn->dhandle_count);
+	WT_STAT_SET(session,
+	    stats, rec_split_stashed_objects, conn->split_stashed_objects);
+	WT_STAT_SET(session,
+	    stats, rec_split_stashed_bytes, conn->split_stashed_bytes);
 }
 
 /*
@@ -71,7 +83,7 @@ __statlog_config(WT_SESSION_IMPL *session, const char **cfg, bool *runp)
 	WT_RET(__wt_config_gets(session, cfg, "statistics_log.wait", &cval));
 	/* Only start the server if wait time is non-zero */
 	*runp = cval.val != 0;
-	conn->stat_usecs = (uint64_t)cval.val * 1000000;
+	conn->stat_usecs = (uint64_t)cval.val * WT_MILLION;
 
 	WT_RET(__wt_config_gets(
 	    session, cfg, "statistics_log.on_close", &cval));
@@ -137,14 +149,14 @@ __statlog_dump(WT_SESSION_IMPL *session, const char *name, bool conn_stats)
 {
 	WT_CONNECTION_IMPL *conn;
 	WT_CURSOR *cursor;
+	WT_CURSOR_STAT *cst;
 	WT_DECL_ITEM(tmp);
 	WT_DECL_RET;
-	WT_STATS *stats;
-	u_int i;
-	uint64_t max;
-	const char *uri;
+	int64_t *stats;
+	int i;
+	const char *desc, *uri;
 	const char *cfg[] = {
-	    WT_CONFIG_BASE(session, session_open_cursor), NULL };
+	    WT_CONFIG_BASE(session, WT_SESSION_open_cursor), NULL };
 
 	conn = S2C(session);
 
@@ -163,17 +175,19 @@ __statlog_dump(WT_SESSION_IMPL *session, const char *name, bool conn_stats)
 	 * If we don't find an underlying object, silently ignore it, the object
 	 * may exist only intermittently.
 	 */
-	switch (ret = __wt_curstat_open(session, uri, cfg, &cursor)) {
+	switch (ret = __wt_curstat_open(session, uri, NULL, cfg, &cursor)) {
 	case 0:
-		max = conn_stats ?
-		    sizeof(WT_CONNECTION_STATS) / sizeof(WT_STATS) :
-		    sizeof(WT_DSRC_STATS) / sizeof(WT_STATS);
-		for (i = 0,
-		    stats = WT_CURSOR_STATS(cursor); i <  max; ++i, ++stats)
-			WT_ERR(__wt_fprintf(session, conn->stat_fp,
-			    "%s %" PRIu64 " %s %s\n",
-			    conn->stat_stamp,
-			    stats->v, name, stats->desc));
+		cst = (WT_CURSOR_STAT *)cursor;
+		for (stats = cst->stats, i = 0; i <  cst->stats_count; ++i) {
+			if (conn_stats)
+				WT_ERR(__wt_stat_connection_desc(cst, i,
+				    &desc));
+			else
+				WT_ERR(__wt_stat_dsrc_desc(cst, i, &desc));
+			WT_ERR(__wt_fprintf(conn->stat_fp,
+			    "%s %" PRId64 " %s %s\n",
+			    conn->stat_stamp, stats[i], name, desc));
+		}
 		WT_ERR(cursor->close(cursor));
 		break;
 	case EBUSY:
@@ -305,7 +319,7 @@ __statlog_log_one(WT_SESSION_IMPL *session, WT_ITEM *path, WT_ITEM *tmp)
 	if ((log_file = conn->stat_fp) == NULL ||
 	    path == NULL || strcmp(tmp->mem, path->mem) != 0) {
 		conn->stat_fp = NULL;
-		WT_RET(__wt_fclose(session, &log_file, WT_FHANDLE_APPEND));
+		WT_RET(__wt_fclose(&log_file, WT_FHANDLE_APPEND));
 		if (path != NULL)
 			(void)strcpy(path->mem, tmp->mem);
 		WT_RET(__wt_fopen(session,
@@ -320,11 +334,6 @@ __statlog_log_one(WT_SESSION_IMPL *session, WT_ITEM *path, WT_ITEM *tmp)
 
 	/* Dump the connection statistics. */
 	WT_RET(__statlog_dump(session, conn->home, true));
-
-#if SPINLOCK_TYPE == SPINLOCK_PTHREAD_MUTEX_LOGGING
-	/* Dump the spinlock statistics. */
-	WT_RET(__wt_statlog_dump_spinlock(conn, conn->home));
-#endif
 
 	/*
 	 * Lock the schema and walk the list of open handles, dumping
@@ -349,7 +358,7 @@ __statlog_log_one(WT_SESSION_IMPL *session, WT_ITEM *path, WT_ITEM *tmp)
 		WT_RET(__statlog_lsm_apply(session));
 
 	/* Flush. */
-	return (__wt_fflush(session, conn->stat_fp));
+	return (__wt_fflush(conn->stat_fp));
 }
 
 /*
@@ -441,9 +450,10 @@ __statlog_start(WT_CONNECTION_IMPL *conn)
 		return (0);
 
 	F_SET(conn, WT_CONN_SERVER_STATISTICS);
+
 	/* The statistics log server gets its own session. */
 	WT_RET(__wt_open_internal_session(
-	    conn, "statlog-server", true, true, &conn->stat_session));
+	    conn, "statlog-server", true, 0, &conn->stat_session));
 	session = conn->stat_session;
 
 	WT_RET(__wt_cond_alloc(
@@ -453,7 +463,7 @@ __statlog_start(WT_CONNECTION_IMPL *conn)
 	 * Start the thread.
 	 *
 	 * Statistics logging creates a thread per database, rather than using
-	 * a single thread to do logging for all of the databases.   If we ever
+	 * a single thread to do logging for all of the databases. If we ever
 	 * see lots of databases at a time, doing statistics logging, and we
 	 * want to reduce the number of threads, there's no reason we have to
 	 * have more than one thread, I just didn't feel like writing the code
@@ -534,7 +544,7 @@ __wt_statlog_destroy(WT_SESSION_IMPL *session, bool is_close)
 	conn->stat_session = NULL;
 	conn->stat_tid_set = false;
 	conn->stat_format = NULL;
-	WT_TRET(__wt_fclose(session, &conn->stat_fp, WT_FHANDLE_APPEND));
+	WT_TRET(__wt_fclose(&conn->stat_fp, WT_FHANDLE_APPEND));
 	conn->stat_path = NULL;
 	conn->stat_sources = NULL;
 	conn->stat_stamp = NULL;

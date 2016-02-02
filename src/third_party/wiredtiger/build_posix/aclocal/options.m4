@@ -197,15 +197,15 @@ if test "$wt_cv_enable_lz4" = "yes"; then
 	AC_CHECK_HEADER(lz4.h,,
 	    [AC_MSG_ERROR([--enable-lz4 requires lz4.h])])
 	AC_LANG_POP([C++])
-	AC_CHECK_LIB(lz4, LZ4_compress,,
-	    [AC_MSG_ERROR([--enable-lz4 requires lz4 library])])
+	AC_CHECK_LIB(lz4, LZ4_compress_destSize,,
+	    [AC_MSG_ERROR([--enable-lz4 requires lz4 library with LZ4_compress_destSize support])])
 fi
 AM_CONDITIONAL([LZ4], [test "$wt_cv_enable_lz4" = "yes"])
 
 AC_MSG_CHECKING(if --enable-tcmalloc option specified)
 AC_ARG_ENABLE(tcmalloc,
 	[AS_HELP_STRING([--enable-tcmalloc],
-	    [Build the WT with tcmalloc.])], r=$enableval, r=no)
+	    [Build WiredTiger with tcmalloc.])], r=$enableval, r=no)
 case "$r" in
 no)	wt_cv_enable_tcmalloc=no;;
 *)	wt_cv_enable_tcmalloc=yes;;
@@ -213,8 +213,8 @@ esac
 AC_MSG_RESULT($wt_cv_enable_tcmalloc)
 if test "$wt_cv_enable_tcmalloc" = "yes"; then
 	AC_LANG_PUSH([C++])
-	AC_CHECK_HEADER(google/tcmalloc.h,,
-	    [AC_MSG_ERROR([--enable-tcmalloc requires tcmalloc.h])])
+	AC_CHECK_HEADER(gperftools/tcmalloc.h,,
+	    [AC_MSG_ERROR([--enable-tcmalloc requires gperftools/tcmalloc.h])])
 	AC_LANG_POP([C++])
 	AC_CHECK_LIB(tcmalloc, tc_calloc,,
 	    [AC_MSG_ERROR([--enable-tcmalloc requires tcmalloc library])])
@@ -234,8 +234,6 @@ pthread|pthreads)
 	AC_DEFINE(SPINLOCK_TYPE, SPINLOCK_PTHREAD_MUTEX);;
 pthread_adaptive|pthreads_adaptive)
 	AC_DEFINE(SPINLOCK_TYPE, SPINLOCK_PTHREAD_MUTEX_ADAPTIVE);;
-pthread_logging|pthreads_logging)
-	AC_DEFINE(SPINLOCK_TYPE, SPINLOCK_PTHREAD_MUTEX_LOGGING);;
 *)	AC_MSG_ERROR([Unknown spinlock type "$with_spinlock"]);;
 esac
 AC_MSG_RESULT($with_spinlock)

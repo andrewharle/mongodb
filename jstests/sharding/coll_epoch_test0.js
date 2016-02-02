@@ -1,6 +1,6 @@
 // Tests whether a split and a migrate in a sharded cluster preserve the epoch
 
-var st = new ShardingTest( { shards : 2, mongos : 1, separateConfig : 1  } )
+var st = new ShardingTest( { shards : 2, mongos : 1 } )
 // Stop balancer, it'll interfere
 st.stopBalancer()
 
@@ -10,6 +10,7 @@ var coll = st.s.getCollection( "foo.bar" )
 
 // First enable sharding
 admin.runCommand({ enableSharding : coll.getDB() + "" })
+st.ensurePrimaryShard(coll.getDB().getName(), 'shard0001');
 admin.runCommand({ shardCollection : coll  + "", key : { _id : 1 } })
 
 var primary = config.databases.find({ _id : coll.getDB() + "" }).primary

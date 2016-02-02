@@ -28,11 +28,12 @@
 #pragma once
 
 #include <climits>
+#include <cstdint>
 #include <cstring>
-#include <boost/static_assert.hpp>
-#include <boost/mpl/if.hpp>
-#include <boost/type_traits/is_signed.hpp>
-#include "mongo/platform/cstdint.h"
+#include <type_traits>
+
+#include "mongo/config.h"
+#include "mongo/platform/decimal128.h"
 
 #pragma push_macro("MONGO_UINT16_SWAB")
 #pragma push_macro("MONGO_UINT32_SWAB")
@@ -116,7 +117,7 @@
 #define MONGO_UINT64_SWAB(v) endian::bswap_slow64(v)
 #endif
 
-#if MONGO_BYTE_ORDER == MONGO_LITTLE_ENDIAN
+#if MONGO_CONFIG_BYTE_ORDER == MONGO_LITTLE_ENDIAN
 #define htobe16(v) MONGO_UINT16_SWAB(v)
 #define htobe32(v) MONGO_UINT32_SWAB(v)
 #define htobe64(v) MONGO_UINT64_SWAB(v)
@@ -129,7 +130,7 @@
 #define le16toh(v) (v)
 #define le32toh(v) (v)
 #define le64toh(v) (v)
-#elif MONGO_BYTE_ORDER == MONGO_BIG_ENDIAN
+#elif MONGO_CONFIG_BYTE_ORDER == MONGO_BIG_ENDIAN
 #define htobe16(v) (v)
 #define htobe32(v) (v)
 #define htobe64(v) (v)
@@ -145,7 +146,7 @@
 #else
 #error \
     "The endianness of target architecture is unknown. " \
-        "Please define MONGO_BYTE_ORDER"
+        "Please define MONGO_CONFIG_BYTE_ORDER"
 #endif
 
 namespace mongo {
@@ -343,7 +344,7 @@ struct ByteOrderConverter<float> {
     typedef float T;
 
     inline static T nativeToBig(T t) {
-        BOOST_STATIC_ASSERT(sizeof(T) == sizeof(uint32_t));
+        static_assert(sizeof(T) == sizeof(uint32_t), "sizeof(T) == sizeof(uint32_t)");
 
         uint32_t temp;
         std::memcpy(&temp, &t, sizeof(t));
@@ -382,7 +383,7 @@ struct ByteOrderConverter<double> {
     typedef double T;
 
     inline static T nativeToBig(T t) {
-        BOOST_STATIC_ASSERT(sizeof(T) == sizeof(uint64_t));
+        static_assert(sizeof(T) == sizeof(uint64_t), "sizeof(T) == sizeof(uint64_t)");
 
         uint64_t temp;
         std::memcpy(&temp, &t, sizeof(t));
@@ -416,6 +417,35 @@ struct ByteOrderConverter<double> {
     }
 };
 
+template <>
+struct ByteOrderConverter<Decimal128::Value> {
+    typedef Decimal128::Value T;
+
+    inline static T nativeToBig(T t) {
+        ByteOrderConverter<uint64_t>::nativeToBig(t.low64);
+        ByteOrderConverter<uint64_t>::nativeToBig(t.high64);
+        return t;
+    }
+
+    inline static T bigToNative(T t) {
+        ByteOrderConverter<uint64_t>::bigToNative(t.low64);
+        ByteOrderConverter<uint64_t>::bigToNative(t.high64);
+        return t;
+    }
+
+    inline static T nativeToLittle(T t) {
+        ByteOrderConverter<uint64_t>::nativeToLittle(t.low64);
+        ByteOrderConverter<uint64_t>::nativeToLittle(t.high64);
+        return t;
+    }
+
+    inline static T littleToNative(T t) {
+        ByteOrderConverter<uint64_t>::littleToNative(t.low64);
+        ByteOrderConverter<uint64_t>::littleToNative(t.high64);
+        return t;
+    }
+};
+
 // Use a typemape to normalize non-fixed-width integral types to the associated fixed width
 // types.
 
@@ -426,31 +456,32 @@ struct IntegralTypeMap {
 
 template <>
 struct IntegralTypeMap<signed char> {
-    BOOST_STATIC_ASSERT(CHAR_BIT == 8);
+    static_assert(CHAR_BIT == 8, "CHAR_BIT == 8");
     typedef int8_t type;
 };
 
 template <>
 struct IntegralTypeMap<unsigned char> {
-    BOOST_STATIC_ASSERT(CHAR_BIT == 8);
+    static_assert(CHAR_BIT == 8, "CHAR_BIT == 8");
     typedef uint8_t type;
 };
 
 template <>
 struct IntegralTypeMap<char> {
-    BOOST_STATIC_ASSERT(CHAR_BIT == 8);
-    typedef boost::mpl::if_c<boost::is_signed<char>::value, int8_t, uint8_t>::type type;
+    static_assert(CHAR_BIT == 8, "CHAR_BIT == 8");
+    typedef std::conditional<std::is_signed<char>::value, int8_t, uint8_t>::type type;
 };
 
 template <>
 struct IntegralTypeMap<long long> {
-    BOOST_STATIC_ASSERT(sizeof(long long) == sizeof(int64_t));
+    static_assert(sizeof(long long) == sizeof(int64_t), "sizeof(long long) == sizeof(int64_t)");
     typedef int64_t type;
 };
 
 template <>
 struct IntegralTypeMap<unsigned long long> {
-    BOOST_STATIC_ASSERT(sizeof(unsigned long long) == sizeof(uint64_t));
+    static_assert(sizeof(unsigned long long) == sizeof(uint64_t),
+                  "sizeof(unsigned long long) == sizeof(uint64_t)");
     typedef uint64_t type;
 };
 

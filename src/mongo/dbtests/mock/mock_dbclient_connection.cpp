@@ -72,13 +72,30 @@ bool MockDBClientConnection::runCommand(const string& dbname,
     return false;
 }
 
-std::auto_ptr<mongo::DBClientCursor> MockDBClientConnection::query(const string& ns,
-                                                                   mongo::Query query,
-                                                                   int nToReturn,
-                                                                   int nToSkip,
-                                                                   const BSONObj* fieldsToReturn,
-                                                                   int queryOptions,
-                                                                   int batchSize) {
+rpc::UniqueReply MockDBClientConnection::runCommandWithMetadata(StringData database,
+                                                                StringData command,
+                                                                const BSONObj& metadata,
+                                                                const BSONObj& commandArgs) {
+    checkConnection();
+
+    try {
+        return _remoteServer->runCommandWithMetadata(
+            _remoteServerInstanceID, database, command, metadata, commandArgs);
+    } catch (const mongo::SocketException&) {
+        _isFailed = true;
+        throw;
+    }
+
+    MONGO_UNREACHABLE;
+}
+
+std::unique_ptr<mongo::DBClientCursor> MockDBClientConnection::query(const string& ns,
+                                                                     mongo::Query query,
+                                                                     int nToReturn,
+                                                                     int nToSkip,
+                                                                     const BSONObj* fieldsToReturn,
+                                                                     int queryOptions,
+                                                                     int batchSize) {
     checkConnection();
 
     try {
@@ -91,7 +108,7 @@ std::auto_ptr<mongo::DBClientCursor> MockDBClientConnection::query(const string&
                                                      queryOptions,
                                                      batchSize));
 
-        std::auto_ptr<mongo::DBClientCursor> cursor;
+        std::unique_ptr<mongo::DBClientCursor> cursor;
         cursor.reset(new MockDBClientCursor(this, result));
         return cursor;
     } catch (const mongo::SocketException&) {
@@ -99,7 +116,7 @@ std::auto_ptr<mongo::DBClientCursor> MockDBClientConnection::query(const string&
         throw;
     }
 
-    std::auto_ptr<mongo::DBClientCursor> nullPtr;
+    std::unique_ptr<mongo::DBClientCursor> nullPtr;
     return nullPtr;
 }
 
@@ -178,10 +195,6 @@ bool MockDBClientConnection::call(mongo::Message& toSend,
 }
 
 void MockDBClientConnection::say(mongo::Message& toSend, bool isRetry, string* actualServer) {
-    verify(false);  // unimplemented
-}
-
-void MockDBClientConnection::sayPiggyBack(mongo::Message& toSend) {
     verify(false);  // unimplemented
 }
 

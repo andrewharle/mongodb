@@ -46,13 +46,6 @@ ReplSetHtmlSummary::ReplSetHtmlSummary() : _selfIndex(-1), _primaryIndex(-1), _s
 
 namespace {
 
-template <class T>
-std::string ToString(const T& t) {
-    str::stream s;
-    s << t;
-    return s;
-}
-
 /**
  * Turns an unsigned int representing a duration of time in milliseconds and turns it into
  * a human readable time string representation.
@@ -74,7 +67,7 @@ std::string ago(unsigned int duration) {
 }
 
 unsigned int timeDifference(Date_t now, Date_t past) {
-    return static_cast<unsigned int>((past ? (now - past) / 1000 /* convert millis to secs */ : 0));
+    return static_cast<unsigned int>(past != Date_t() ? durationCount<Seconds>(now - past) : 0);
 }
 
 std::string stateAsHtml(const MemberState& s) {
@@ -161,8 +154,8 @@ const std::string ReplSetHtmlSummary::toHtmlString() const {
             memberTable << td("1");  // up
             memberTable << td(ago(_selfUptime));
             memberTable << td("");  // last heartbeat
-            memberTable << td(ToString(memberConfig.getNumVotes()));
-            memberTable << td(ToString(memberConfig.getPriority()));
+            memberTable << td(std::to_string(memberConfig.getNumVotes()));
+            memberTable << td(std::to_string(memberConfig.getPriority()));
             memberTable << td(stateAsHtml(_selfState) +
                               (memberConfig.isHidden() ? " (hidden)" : ""));
             memberTable << td(_selfHeartbeatMessage);
@@ -176,13 +169,13 @@ const std::string ReplSetHtmlSummary::toHtmlString() const {
             memberTable << td(red(str::stream() << memberHB.getHealth(), !up));
             const unsigned int uptime = timeDifference(_now, memberHB.getUpSince());
             memberTable << td(ago(uptime));
-            if (memberHB.getLastHeartbeat() == 0) {
+            if (memberHB.getLastHeartbeat() == Date_t()) {
                 memberTable << td("never");
             } else {
                 memberTable << td(ago(timeDifference(_now, memberHB.getLastHeartbeat())));
             }
-            memberTable << td(ToString(memberConfig.getNumVotes()));
-            memberTable << td(ToString(memberConfig.getPriority()));
+            memberTable << td(std::to_string(memberConfig.getNumVotes()));
+            memberTable << td(std::to_string(memberConfig.getPriority()));
             std::string state =
                 memberHB.getState().toString() + (memberConfig.isHidden() ? " (hidden)" : "");
             if (up) {
@@ -191,8 +184,9 @@ const std::string ReplSetHtmlSummary::toHtmlString() const {
                 memberTable << td(grey(str::stream() << "(was " << state << ')', true));
             }
             memberTable << td(grey(memberHB.getLastHeartbeatMsg(), !up));
-            memberTable << td(memberHB.getLastHeartbeat() == 0 ? "?"
-                                                               : memberHB.getOpTime().toString());
+            // TODO(dannenberg): change timestamp to optime in V1
+            memberTable << td(
+                memberHB.getLastHeartbeat() == Date_t() ? "?" : memberHB.getOpTime().toString());
         }
         memberTable << _tr();
     }
@@ -206,7 +200,8 @@ const std::string ReplSetHtmlSummary::toHtmlString() const {
     const MemberConfig& selfConfig = _config.getMemberAt(_selfIndex);
 
     if (_primaryIndex >= 0 && _primaryIndex != _selfIndex && !selfConfig.isArbiter()) {
-        int lag = _hbData[_primaryIndex].getOpTime().getSecs() - _selfOptime.getSecs();
+        int lag = _hbData[_primaryIndex].getOpTime().getTimestamp().getSecs() -
+            _selfOptime.getTimestamp().getSecs();
         s << tr("Lag: ", str::stream() << lag << " secs");
     }
 

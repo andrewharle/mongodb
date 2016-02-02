@@ -28,79 +28,51 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
-
 #include "mongo/s/write_ops/batch_write_exec.h"
-#include "mongo/s/write_ops/batched_command_request.h"
-#include "mongo/s/write_ops/batched_command_response.h"
 
 namespace mongo {
 
+class ClusterWriterStats;
+class BatchedCommandRequest;
+class BatchedCommandResponse;
 class BatchWriteExecStats;
+class OperationContext;
 
 class ClusterWriter {
 public:
     ClusterWriter(bool autoSplit, int timeoutMillis);
 
-    void write(const BatchedCommandRequest& request, BatchedCommandResponse* response);
+    void write(OperationContext* txn,
+               const BatchedCommandRequest& request,
+               BatchedCommandResponse* response);
 
-    const BatchWriteExecStats& getStats();
+    const ClusterWriterStats& getStats();
 
 private:
-    void configWrite(const BatchedCommandRequest& request,
-                     BatchedCommandResponse* response,
-                     bool fsyncCheck);
+    const bool _autoSplit;
+    const int _timeoutMillis;
 
-    void shardWrite(const BatchedCommandRequest& request, BatchedCommandResponse* response);
+    std::unique_ptr<ClusterWriterStats> _stats;
+};
 
-    bool _autoSplit;
-    int _timeoutMillis;
+class ClusterWriterStats {
+public:
+    // Transfers ownership to the cluster write stats
+    void setShardStats(BatchWriteExecStats* _shardStats);
 
-    BatchWriteExecStats _stats;
+    bool hasShardStats() const;
+
+    const BatchWriteExecStats& getShardStats() const;
+
+    // TODO: When we have ConfigCoordinator stats, put these here too.
+
+private:
+    std::unique_ptr<BatchWriteExecStats> _shardStats;
 };
 
 /**
- * Note: response can NEVER be NULL.
+ * Used only for writes to the config server, config and admin databases.
  */
-void clusterWrite(const BatchedCommandRequest& request,
-                  BatchedCommandResponse* response,
-                  bool autoSplit);
-
-/**
- * Note: response can be NULL if you don't care about the write statistics.
- */
-Status clusterInsert(const std::string& ns,
-                     const BSONObj& doc,
-                     const BSONObj& writeConcern,
-                     BatchedCommandResponse* response);
-
-/**
- * Note: response can be NULL if you don't care about the write statistics.
- */
-Status clusterUpdate(const std::string& ns,
-                     const BSONObj& query,
-                     const BSONObj& update,
-                     bool upsert,
-                     bool multi,
-                     const BSONObj& writeConcern,
-                     BatchedCommandResponse* response);
-
-/**
- * Note: response can be NULL if you don't care about the write statistics.
- */
-Status clusterDelete(const std::string& ns,
-                     const BSONObj& query,
-                     int limit,
-                     const BSONObj& writeConcern,
-                     BatchedCommandResponse* response);
-
-/**
- * Note: response can be NULL if you don't care about the write statistics.
- */
-Status clusterCreateIndex(const std::string& ns,
-                          BSONObj keys,
-                          bool unique,
-                          const BSONObj& writeConcern,
-                          BatchedCommandResponse* response);
+Status clusterCreateIndex(OperationContext* txn, const std::string& ns, BSONObj keys, bool unique);
 
 }  // namespace mongo

@@ -9,7 +9,6 @@ var options = {
     mongosOptions : { verbose : 1, useLogFiles : true },
     configOptions : {  },
     shardOptions : { binVersion : [ "latest", "last-stable" ] },
-    separateConfig : true,
     sync : false,
     enableBalancer : true
 }
@@ -21,6 +20,7 @@ var admin = mongos.getDB("admin");
 var coll = mongos.getCollection("foo.bar");
 
 printjson(admin.runCommand({ enableSharding : coll.getDB() + "" }));
+st.ensurePrimaryShard(coll.getDB().getName(), 'shard0001');
 printjson(admin.runCommand({ shardCollection : coll + "", key : { _id : 1 } }));
 
 assert.soon( function() {

@@ -30,14 +30,15 @@
 
 #pragma once
 
+#include <cstdint>
+
 #include "mongo/base/string_data.h"
 #include "mongo/db/field_ref.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/platform/cstdint.h"
 
 namespace mongo {
 
-bool isAllDigits(const StringData& str);
+bool isAllDigits(StringData str);
 
 // XXX document me
 // Replaces getFieldDottedOrArray without recursion nor std::string manipulation

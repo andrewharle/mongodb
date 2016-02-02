@@ -28,7 +28,6 @@
 #include "mongo/util/options_parser/option_section.h"
 
 #include <algorithm>
-#include <boost/shared_ptr.hpp>
 #include <iostream>
 #include <sstream>
 
@@ -39,7 +38,7 @@
 namespace mongo {
 namespace optionenvironment {
 
-using boost::shared_ptr;
+using std::shared_ptr;
 
 // Registration interface
 
@@ -140,10 +139,10 @@ namespace {
  * those conversions are inconsistent with our own.  See SERVER-14110 For an example.
  */
 template <typename Type>
-Status typeToBoostStringType(std::auto_ptr<po::value_semantic>* boostType,
+Status typeToBoostStringType(std::unique_ptr<po::value_semantic>* boostType,
                              const Value defaultValue = Value(),
                              const Value implicitValue = Value()) {
-    std::auto_ptr<po::typed_value<std::string>> boostTypeBuilder(po::value<std::string>());
+    std::unique_ptr<po::typed_value<std::string>> boostTypeBuilder(po::value<std::string>());
 
     if (!implicitValue.isEmpty()) {
         Type implicitValueType;
@@ -171,7 +170,7 @@ Status typeToBoostStringType(std::auto_ptr<po::value_semantic>* boostType,
         boostTypeBuilder->default_value(sb.str());
     }
 
-    *boostType = boostTypeBuilder;
+    *boostType = std::move(boostTypeBuilder);
 
     return Status::OK();
 }
@@ -179,14 +178,14 @@ Status typeToBoostStringType(std::auto_ptr<po::value_semantic>* boostType,
 /** Helper function to convert the values of our OptionType enum into the classes that
  *  boost::program_option uses to pass around this information
  */
-Status typeToBoostType(std::auto_ptr<po::value_semantic>* boostType,
+Status typeToBoostType(std::unique_ptr<po::value_semantic>* boostType,
                        OptionType type,
                        const Value defaultValue = Value(),
                        const Value implicitValue = Value(),
                        bool getSwitchAsBool = false) {
     switch (type) {
         case StringVector: {
-            *boostType = std::auto_ptr<po::value_semantic>(po::value<std::vector<std::string>>());
+            *boostType = std::unique_ptr<po::value_semantic>(po::value<std::vector<std::string>>());
 
             if (!implicitValue.isEmpty()) {
                 StringBuilder sb;
@@ -205,7 +204,7 @@ Status typeToBoostType(std::auto_ptr<po::value_semantic>* boostType,
         case StringMap: {
             // Boost doesn't support maps, so we just register a vector parameter and
             // parse it as "key=value" strings
-            *boostType = std::auto_ptr<po::value_semantic>(po::value<std::vector<std::string>>());
+            *boostType = std::unique_ptr<po::value_semantic>(po::value<std::vector<std::string>>());
 
             if (!implicitValue.isEmpty()) {
                 StringBuilder sb;
@@ -230,17 +229,17 @@ Status typeToBoostType(std::auto_ptr<po::value_semantic>* boostType,
             // whether we are telling boost that an option is a switch type or that an
             // option is a bool type.
             if (!getSwitchAsBool) {
-                *boostType = std::auto_ptr<po::value_semantic>(po::bool_switch());
+                *boostType = std::unique_ptr<po::value_semantic>(po::bool_switch());
                 return Status::OK();
             } else {
                 // Switches should be true if they are present with no explicit value.
                 *boostType =
-                    std::auto_ptr<po::typed_value<bool>>(po::value<bool>()->implicit_value(true));
+                    std::unique_ptr<po::typed_value<bool>>(po::value<bool>()->implicit_value(true));
                 return Status::OK();
             }
         }
         case Bool: {
-            std::auto_ptr<po::typed_value<bool>> boostTypeBuilder(po::value<bool>());
+            std::unique_ptr<po::typed_value<bool>> boostTypeBuilder(po::value<bool>());
 
             if (!implicitValue.isEmpty()) {
                 bool implicitValueType;
@@ -264,7 +263,7 @@ Status typeToBoostType(std::auto_ptr<po::value_semantic>* boostType,
                 boostTypeBuilder->default_value(defaultValueType);
             }
 
-            *boostType = boostTypeBuilder;
+            *boostType = std::move(boostTypeBuilder);
 
             return Status::OK();
         }
@@ -300,7 +299,7 @@ Status OptionSection::getBoostOptions(po::options_description* boostOptions,
         // Only include this option if it matches the sources we specified and the option is
         // either visible or we are requesting hidden options
         if ((!visibleOnly || (oditerator->_isVisible)) && (oditerator->_sources & sources)) {
-            std::auto_ptr<po::value_semantic> boostType;
+            std::unique_ptr<po::value_semantic> boostType;
             Status ret = typeToBoostType(&boostType,
                                          oditerator->_type,
                                          includeDefaults ? oditerator->_default : Value(),
@@ -519,11 +518,10 @@ Status OptionSection::countOptions(int* numOptions, bool visibleOnly, OptionSour
     return Status::OK();
 }
 
-Status OptionSection::getConstraints(
-    std::vector<boost::shared_ptr<Constraint>>* constraints) const {
+Status OptionSection::getConstraints(std::vector<std::shared_ptr<Constraint>>* constraints) const {
     std::list<OptionDescription>::const_iterator oditerator;
     for (oditerator = _options.begin(); oditerator != _options.end(); oditerator++) {
-        std::vector<boost::shared_ptr<Constraint>>::const_iterator citerator;
+        std::vector<std::shared_ptr<Constraint>>::const_iterator citerator;
         for (citerator = oditerator->_constraints.begin();
              citerator != oditerator->_constraints.end();
              citerator++) {

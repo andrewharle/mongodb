@@ -34,11 +34,36 @@
 namespace mongo {
 
 class OperationContext;
+template <typename T>
+class StatusWith;
+
+namespace repl {
+class OpTime;
+}
+
+/**
+ * If txn->getWriteConcern() indicates a durable commit level,
+ * marks the RecoveryUnit associated with "txn" appropriately.
+ * Provides a hint to the storage engine that
+ * particular operations will be waiting for their changes to become durable.
+ */
+void setupSynchronousCommit(OperationContext* txn);
+
+/**
+ * Attempts to extract a writeConcern from cmdObj.
+ * Verifies that the writeConcern is of type Object (BSON type) and
+ * that the resulting writeConcern is valid for this particular host.
+ */
+StatusWith<WriteConcernOptions> extractWriteConcern(OperationContext* txn,
+                                                    const BSONObj& cmdObj,
+                                                    const std::string& dbName);
 
 /**
  * Verifies that a WriteConcern is valid for this particular host.
  */
-Status validateWriteConcern(const WriteConcernOptions& writeConcern);
+Status validateWriteConcern(OperationContext* txn,
+                            const WriteConcernOptions& writeConcern,
+                            const std::string& dbName);
 
 struct WriteConcernResult {
     WriteConcernResult() {
@@ -78,8 +103,8 @@ struct WriteConcernResult {
  * Returns UnknownReplWriteConcern if the wMode specified was not enforceable
  */
 Status waitForWriteConcern(OperationContext* txn,
+                           const repl::OpTime& replOpTime,
                            const WriteConcernOptions& writeConcern,
-                           const OpTime& replOpTime,
                            WriteConcernResult* result);
 
 

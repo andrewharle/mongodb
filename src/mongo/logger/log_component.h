@@ -47,6 +47,7 @@ public:
         kAccessControl,
         kCommand,
         kControl,
+        kExecutor,
         kGeo,
         kIndex,
         kNetwork,
@@ -56,6 +57,9 @@ public:
         kStorage,
         kJournal,
         kWrite,
+        kFTDC,
+        kASIO,
+        kBridge,
         kNumLogComponents
     };
 

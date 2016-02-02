@@ -1,6 +1,13 @@
 // test that a rollback directory is created during a replica set rollback
 // this also tests that updates are recorded in the rollback file
 //  (this test does no delete rollbacks)
+//
+// If all data-bearing nodes in a replica set are using an ephemeral storage engine, the set will
+// not be able to survive a scenario where all data-bearing nodes are down simultaneously. In such a
+// scenario, none of the members will have any data, and upon restart will each look for a member to
+// inital sync from, so no primary will be elected. This test induces such a scenario, so cannot be
+// run on ephemeral storage engines.
+// @tags: [requires_persistence]
 
 var replTest = new ReplSetTest({ name: 'rollback5', nodes: 3 });
 var nodes = replTest.nodeList();
@@ -14,8 +21,8 @@ var r = replTest.initiate({ "_id": "rollback5",
                           });
 
 // Make sure we have a master
-replTest.waitForState(replTest.nodes[0], replTest.PRIMARY, 60 * 1000);
-var master = replTest.getMaster();
+replTest.waitForState(replTest.nodes[0], ReplSetTest.State.PRIMARY, 60 * 1000);
+var master = replTest.getPrimary();
 var a_conn = conns[0];
 var b_conn = conns[1];
 a_conn.setSlaveOk();
@@ -39,13 +46,13 @@ var options = { writeConcern: { w: 2, wtimeout: 60000 }, upsert: true };
 assert.writeOK(A.foo.update({ key: 'value1' }, { $set: { req: 'req' }}, options));
 replTest.stop(AID);
 
-master = replTest.getMaster();
+master = replTest.getPrimary();
 assert(b_conn.host == master.host);
 options = { writeConcern: { w: 1, wtimeout: 60000 }, upsert: true };
 assert.writeOK(B.foo.update({key:'value1'}, {$set: {res: 'res'}}, options));
 replTest.stop(BID);
 replTest.restart(AID);
-master = replTest.getMaster();
+master = replTest.getPrimary();
 assert(a_conn.host == master.host);
 options = { writeConcern: { w: 1, wtimeout: 60000 }, upsert: true };
 assert.writeOK(A.foo.update({ key: 'value2' }, { $set: { req: 'req' }}, options));
@@ -64,6 +71,7 @@ printjson(A.foo.find().toArray());
 assert.eq(2, A.foo.count());
 assert.eq('req', A.foo.findOne({key:'value1'}).req);
 assert.eq(null, A.foo.findOne({key:'value1'}).res);
+reconnect(B);
 assert.eq(2, B.foo.count());
 assert.eq('req', B.foo.findOne({key:'value1'}).req);
 assert.eq(null, B.foo.findOne({key:'value1'}).res);

@@ -27,15 +27,16 @@
  */
 
 #include "mongo/dbtests/config_server_fixture.h"
+#include "mongo/s/catalog/config_server_version.h"
+#include "mongo/s/catalog/legacy/cluster_client_internal.h"
+#include "mongo/s/catalog/legacy/config_upgrade.h"
+#include "mongo/s/catalog/type_chunk.h"
+#include "mongo/s/catalog/type_config_version.h"
+#include "mongo/s/catalog/type_mongos.h"
+#include "mongo/s/catalog/type_settings.h"
+#include "mongo/s/catalog/type_shard.h"
 #include "mongo/s/chunk_version.h"
-#include "mongo/s/cluster_client_internal.h"
-#include "mongo/s/config_upgrade.h"
-#include "mongo/s/type_mongos.h"
-#include "mongo/s/type_collection.h"
-#include "mongo/s/type_chunk.h"
-#include "mongo/s/type_shard.h"
-#include "mongo/s/type_settings.h"
-#include "mongo/s/type_config_version.h"
+#include "mongo/s/grid.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/version.h"
 
@@ -43,20 +44,21 @@ namespace mongo {
 
 using std::string;
 
+namespace {
+
 /**
  * Specialization of the config server fixture with helpers for the tests below.
  */
 class ConfigUpgradeFixture : public ConfigServerFixture {
 public:
-    ConfigUpgradeFixture() : ConfigServerFixture() {}
-
     void stopBalancer() {
         // Note: The balancer key is needed in the update portion, for some reason related to
         // DBDirectClient
         DBDirectClient client(&_txn);
         client.update(SettingsType::ConfigNS,
-                      BSON(SettingsType::key("balancer")),
-                      BSON(SettingsType::key("balancer") << SettingsType::balancerStopped(true)),
+                      BSON(SettingsType::key(SettingsType::BalancerDocKey)),
+                      BSON(SettingsType::key(SettingsType::BalancerDocKey)
+                           << SettingsType::balancerStopped(true)),
                       true,
                       false);
     }
@@ -79,6 +81,12 @@ public:
         }
 
         client.insert(VersionType::ConfigNS, BSON("_id" << 1 << "version" << version));
+    }
+
+    VersionType loadLegacyConfigVersion() {
+        DBDirectClient client(&_txn);
+        return unittest::assertGet(
+            VersionType::fromBSON(client.findOne(VersionType::ConfigNS, BSONObj())));
     }
 
     /**
@@ -126,15 +134,18 @@ public:
             client.insert(ShardType::ConfigNS, shard.toBSON());
         }
 
+        time_t started = time(0);
         for (int i = 0; i < numPings; i++) {
             MongosType ping;
             ping.setName((string)(str::stream() << "$dummyMongos:" << (i + 1) << "0000"));
             ping.setPing(jsTime());
+            ping.setUptime(time(0) - started);
+            ping.setWaiting(false);
             ping.setMongoVersion(versionString);
             ping.setConfigVersion(CURRENT_CONFIG_VERSION);
 
             if (i % 2 == 0) {
-                ping.setPing(ping.getPing() - 10 * 60 * 1000);
+                ping.setPing(ping.getPing() - Minutes(10));
             }
 
             client.insert(MongosType::ConfigNS, ping.toBSON());
@@ -160,7 +171,7 @@ TEST_F(ConfigUpgradeTests, EmptyVersion) {
 
     // Zero version (no version doc)
     VersionType oldVersion;
-    Status status = getConfigVersion(configSvr(), &oldVersion);
+    Status status = getConfigVersion(grid.catalogManager(&_txn), &oldVersion);
     ASSERT(status.isOK());
 
     ASSERT_EQUALS(oldVersion.getMinCompatibleVersion(), 0);
@@ -180,7 +191,7 @@ TEST_F(ConfigUpgradeTests, ClusterIDVersion) {
     newVersion.clear();
 
     // Current Version w/o clusterId (invalid!)
-    Status status = getConfigVersion(configSvr(), &newVersion);
+    Status status = getConfigVersion(grid.catalogManager(&_txn), &newVersion);
     ASSERT(!status.isOK());
 
     newVersion.clear();
@@ -196,7 +207,7 @@ TEST_F(ConfigUpgradeTests, ClusterIDVersion) {
     newVersion.clear();
 
     // Current version w/ clusterId (valid!)
-    status = getConfigVersion(configSvr(), &newVersion);
+    status = getConfigVersion(grid.catalogManager(&_txn), &newVersion);
     ASSERT(status.isOK());
 
     ASSERT_EQUALS(newVersion.getMinCompatibleVersion(), MIN_COMPATIBLE_CONFIG_VERSION);
@@ -209,17 +220,15 @@ TEST_F(ConfigUpgradeTests, InitialUpgrade) {
     // Tests initializing the config server to the initial version
     //
 
-    // Empty version
-    VersionType versionOld;
-    VersionType version;
     string errMsg;
-    bool result = checkAndUpgradeConfigVersion(configSvr(), false, &versionOld, &version, &errMsg);
+    ASSERT_OK(grid.catalogManager(&_txn)->initConfigVersion(&_txn));
 
-    ASSERT(result);
-    ASSERT_EQUALS(versionOld.getCurrentVersion(), 0);
-    ASSERT_EQUALS(version.getMinCompatibleVersion(), MIN_COMPATIBLE_CONFIG_VERSION);
-    ASSERT_EQUALS(version.getCurrentVersion(), CURRENT_CONFIG_VERSION);
-    ASSERT_NOT_EQUALS(version.getClusterId(), OID());
+    VersionType version;
+    ASSERT_OK(getConfigVersion(grid.catalogManager(&_txn), &version));
+
+    ASSERT_EQUALS(MIN_COMPATIBLE_CONFIG_VERSION, version.getMinCompatibleVersion());
+    ASSERT_EQUALS(CURRENT_CONFIG_VERSION, version.getCurrentVersion());
+    ASSERT_TRUE(version.getClusterId().isSet());
 }
 
 TEST_F(ConfigUpgradeTests, BadVersionUpgrade) {
@@ -232,30 +241,9 @@ TEST_F(ConfigUpgradeTests, BadVersionUpgrade) {
     storeLegacyConfigVersion(1);
 
     // Default version (not upgradeable)
-    VersionType versionOld;
-    VersionType version;
-    string errMsg;
-    bool result = checkAndUpgradeConfigVersion(configSvr(), false, &versionOld, &version, &errMsg);
-
-    ASSERT(!result);
+    ASSERT_EQ(ErrorCodes::IncompatibleShardingMetadata,
+              grid.catalogManager(&_txn)->initConfigVersion(&_txn));
 }
 
-TEST_F(ConfigUpgradeTests, CheckMongoVersion) {
-    //
-    // Tests basic detection of existing mongos and mongod versions from mongos ping
-    // and shard info.  Fuller tests require conns to multiple version mongos processes, not
-    // done here.
-    //
-
-    storeShardsAndPings(5, 10);  // 5 shards, 10 pings
-
-    // Our version is >= 2.2, so this works
-    Status status = checkClusterMongoVersions(configSvr(), "2.2");
-    ASSERT(status.isOK());
-
-    // Our version is < 9.9, so this doesn't work (until we hit v99.99)
-    status = checkClusterMongoVersions(configSvr(), "99.99");
-    ASSERT(status.code() == ErrorCodes::RemoteValidationError);
-}
-
-}  // end namespace
+}  // namespace
+}  // namespace mongo

@@ -46,10 +46,9 @@
      REMAPPRIVATEVIEW
        we could in a write lock quickly flip readers back to the main view, then stay in read lock
        and do our real remapping. with many files (e.g., 1000), remapping could be time consuming
-       (several ms), so we don't want to be too frequent.
-
-       there could be a slow down immediately after remapping as fresh copy-on-writes for commonly
-       written pages will be required.  so doing these remaps fractionally is helpful.
+       (several ms), so we don't want to be too frequent. there could be a slow down immediately
+       after remapping as fresh copy-on-writes for commonly written pages will
+       be required.  so doing these remaps fractionally is helpful.
 
    mutexes:
 
@@ -76,25 +75,25 @@
 
 #include "mongo/db/storage/mmap_v1/dur.h"
 
-#include <boost/thread/condition_variable.hpp>
-#include <boost/thread/mutex.hpp>
-#include <boost/shared_ptr.hpp>
-#include <boost/thread/thread.hpp>
 #include <iomanip>
+#include <utility>
 
 #include "mongo/db/client.h"
 #include "mongo/db/commands/server_status.h"
 #include "mongo/db/concurrency/lock_state.h"
 #include "mongo/db/operation_context_impl.h"
 #include "mongo/db/storage/mmap_v1/aligned_builder.h"
-#include "mongo/db/storage/mmap_v1/durable_mapped_file.h"
 #include "mongo/db/storage/mmap_v1/dur_commitjob.h"
 #include "mongo/db/storage/mmap_v1/dur_journal.h"
 #include "mongo/db/storage/mmap_v1/dur_journal_writer.h"
 #include "mongo/db/storage/mmap_v1/dur_recover.h"
 #include "mongo/db/storage/mmap_v1/dur_stats.h"
+#include "mongo/db/storage/mmap_v1/durable_mapped_file.h"
 #include "mongo/db/storage/mmap_v1/mmap_v1_options.h"
-#include "mongo/db/storage_options.h"
+#include "mongo/db/storage/storage_options.h"
+#include "mongo/stdx/condition_variable.h"
+#include "mongo/stdx/mutex.h"
+#include "mongo/stdx/thread.h"
 #include "mongo/util/concurrency/synchronization.h"
 #include "mongo/util/exit.h"
 #include "mongo/util/log.h"
@@ -116,8 +115,8 @@ namespace dur {
 namespace {
 
 // Used to activate the flush thread
-boost::mutex flushMutex;
-boost::condition_variable flushRequested;
+stdx::mutex flushMutex;
+stdx::condition_variable flushRequested;
 
 // This is waited on for getlasterror acknowledgements. It means that data has been written to
 // the journal, but not necessarily applied to the shared view, so it is all right to
@@ -149,8 +148,10 @@ unsigned remapFileToStartAt;
 enum { DurStatsResetIntervalMillis = 3 * 1000 };
 
 // Size sanity checks
-BOOST_STATIC_ASSERT(UncommittedBytesLimit > BSONObjMaxInternalSize * 3);
-BOOST_STATIC_ASSERT(sizeof(void*) == 4 || UncommittedBytesLimit > BSONObjMaxInternalSize * 6);
+static_assert(UncommittedBytesLimit > BSONObjMaxInternalSize * 3,
+              "UncommittedBytesLimit > BSONObjMaxInternalSize * 3");
+static_assert(sizeof(void*) == 4 || UncommittedBytesLimit > BSONObjMaxInternalSize * 6,
+              "sizeof(void*) == 4 || UncommittedBytesLimit > BSONObjMaxInternalSize * 6");
 
 
 /**
@@ -189,7 +190,7 @@ public:
     virtual void declareWriteIntent(void*, unsigned) {}
     virtual void declareWriteIntents(const std::vector<std::pair<void*, unsigned>>& intents) {}
     virtual void createdFile(const std::string& filename, unsigned long long len) {}
-    virtual bool awaitCommit() {
+    virtual bool waitUntilDurable() {
         return false;
     }
     virtual bool commitNow(OperationContext* txn) {
@@ -215,11 +216,9 @@ public:
     DurableImpl() {}
 
     // DurableInterface virtual methods
-    virtual void* writingPtr(void* x, unsigned len);
-    virtual void declareWriteIntent(void*, unsigned);
     virtual void declareWriteIntents(const std::vector<std::pair<void*, unsigned>>& intents);
     virtual void createdFile(const std::string& filename, unsigned long long len);
-    virtual bool awaitCommit();
+    virtual bool waitUntilDurable();
     virtual bool commitNow(OperationContext* txn);
     virtual bool commitIfNeeded();
     virtual void syncDataAndTruncateJournal(OperationContext* txn);
@@ -232,7 +231,7 @@ public:
     void start();
 
 private:
-    boost::thread _durThreadHandle;
+    stdx::thread _durThreadHandle;
 };
 
 
@@ -335,7 +334,7 @@ void remapPrivateViewImpl(double fraction) {
 // See SERVER-5723 for performance improvement.
 // See SERVER-5680 to see why this code is necessary on Windows.
 // See SERVER-8795 to see why this code is necessary on Solaris.
-#if defined(_WIN32) || defined(__sunos__)
+#if defined(_WIN32) || defined(__sun)
     LockMongoFilesExclusive lk;
 #else
     LockMongoFilesShared lk;
@@ -486,8 +485,8 @@ void Stats::S::_asObj(BSONObjBuilder* builder) const {
                    << (unsigned)(_commitsMicros / 1000) << "commitsInWriteLock"
                    << (unsigned)(_commitsInWriteLockMicros / 1000));
 
-    if (mmapv1GlobalOptions.journalCommitInterval != 0) {
-        b << "journalCommitIntervalMs" << mmapv1GlobalOptions.journalCommitInterval;
+    if (storageGlobalParams.journalCommitIntervalMs != 0) {
+        b << "journalCommitIntervalMs" << storageGlobalParams.journalCommitIntervalMs.load();
     }
 }
 
@@ -521,30 +520,20 @@ bool DurableImpl::commitNow(OperationContext* txn) {
     return true;
 }
 
-bool DurableImpl::awaitCommit() {
+bool DurableImpl::waitUntilDurable() {
     commitNotify.awaitBeyondNow();
     return true;
 }
 
 void DurableImpl::createdFile(const std::string& filename, unsigned long long len) {
-    boost::shared_ptr<DurOp> op(new FileCreatedOp(filename, len));
+    std::shared_ptr<DurOp> op(new FileCreatedOp(filename, len));
     commitJob.noteOp(op);
 }
 
-void* DurableImpl::writingPtr(void* x, unsigned len) {
-    declareWriteIntent(x, len);
-    return x;
-}
-
-void DurableImpl::declareWriteIntent(void* p, unsigned len) {
-    privateViews.makeWritable(p, len);
-    SimpleMutex::scoped_lock lk(commitJob.groupCommitMutex);
-    commitJob.note(p, len);
-}
 
 void DurableImpl::declareWriteIntents(const std::vector<std::pair<void*, unsigned>>& intents) {
     typedef std::vector<std::pair<void*, unsigned>> Intents;
-    SimpleMutex::scoped_lock lk(commitJob.groupCommitMutex);
+    stdx::lock_guard<SimpleMutex> lk(commitJob.groupCommitMutex);
     for (Intents::const_iterator it(intents.begin()), end(intents.end()); it != end; ++it) {
         commitJob.note(it->first, it->second);
     }
@@ -615,7 +604,7 @@ void DurableImpl::commitAndStopDurThread() {
 
 void DurableImpl::start() {
     // Start the durability thread
-    boost::thread t(durThread);
+    stdx::thread t(durThread);
     _durThreadHandle.swap(t);
 }
 
@@ -683,7 +672,7 @@ static void durThread() {
     uint64_t remapLastTimestamp(0);
 
     while (shutdownRequested.loadRelaxed() == 0) {
-        unsigned ms = mmapv1GlobalOptions.journalCommitInterval;
+        unsigned ms = storageGlobalParams.journalCommitIntervalMs;
         if (ms == 0) {
             ms = samePartition ? 100 : 30;
         }
@@ -697,10 +686,11 @@ static void durThread() {
         }
 
         try {
-            boost::mutex::scoped_lock lock(flushMutex);
+            stdx::unique_lock<stdx::mutex> lock(flushMutex);
 
             for (unsigned i = 0; i <= 2; i++) {
-                if (flushRequested.timed_wait(lock, Milliseconds(oneThird))) {
+                if (stdx::cv_status::no_timeout ==
+                    flushRequested.wait_for(lock, Milliseconds(oneThird))) {
                     // Someone forced a flush
                     break;
                 }
@@ -863,8 +853,6 @@ static void durThread() {
     journalWriter.shutdown();
 
     log() << "Durability thread stopped";
-
-    cc().shutdown();
 }
 
 

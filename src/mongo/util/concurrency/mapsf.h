@@ -28,8 +28,6 @@
 *    then also delete it in the license file.
 */
 
-#include <boost/noncopyable.hpp>
-
 #include "mongo/platform/unordered_map.h"
 
 namespace mongo {
@@ -53,7 +51,9 @@ namespace mongo {
     }
 */
 template <class M>
-struct mapsf : boost::noncopyable {
+struct mapsf {
+    MONGO_DISALLOW_COPYING(mapsf);
+
     SimpleMutex m;
     M val;
     friend struct ref;
@@ -65,16 +65,16 @@ public:
 
     mapsf() : m("mapsf") {}
     void swap(M& rhs) {
-        SimpleMutex::scoped_lock lk(m);
+        stdx::lock_guard<SimpleMutex> lk(m);
         val.swap(rhs);
     }
     bool empty() {
-        SimpleMutex::scoped_lock lk(m);
+        stdx::lock_guard<SimpleMutex> lk(m);
         return val.empty();
     }
     // safe as we pass by value:
     mapped_type get(key_type k) {
-        SimpleMutex::scoped_lock lk(m);
+        stdx::lock_guard<SimpleMutex> lk(m);
         const_iterator i = val.find(k);
         if (i == val.end())
             return mapped_type();
@@ -83,7 +83,7 @@ public:
     // think about deadlocks when using ref.  the other methods
     // above will always be safe as they are "leaf" operations.
     struct ref {
-        SimpleMutex::scoped_lock lk;
+        stdx::lock_guard<SimpleMutex> lk;
 
     public:
         M& r;

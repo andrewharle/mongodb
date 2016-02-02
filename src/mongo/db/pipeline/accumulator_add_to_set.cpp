@@ -37,6 +37,12 @@ namespace mongo {
 using boost::intrusive_ptr;
 using std::vector;
 
+REGISTER_ACCUMULATOR(addToSet, AccumulatorAddToSet::create);
+
+const char* AccumulatorAddToSet::getOpName() const {
+    return "$addToSet";
+}
+
 void AccumulatorAddToSet::processInternal(const Value& input, bool merging) {
     if (!merging) {
         if (!input.missing()) {
@@ -63,8 +69,7 @@ void AccumulatorAddToSet::processInternal(const Value& input, bool merging) {
 }
 
 Value AccumulatorAddToSet::getValue(bool toBeMerged) const {
-    vector<Value> valVec(set.begin(), set.end());
-    return Value::consume(valVec);
+    return Value(vector<Value>(set.begin(), set.end()));
 }
 
 AccumulatorAddToSet::AccumulatorAddToSet() {
@@ -78,9 +83,5 @@ void AccumulatorAddToSet::reset() {
 
 intrusive_ptr<Accumulator> AccumulatorAddToSet::create() {
     return new AccumulatorAddToSet();
-}
-
-const char* AccumulatorAddToSet::getOpName() const {
-    return "$addToSet";
 }
 }

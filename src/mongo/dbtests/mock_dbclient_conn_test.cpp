@@ -35,7 +35,6 @@
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/timer.h"
 
-#include <boost/scoped_ptr.hpp>
 #include <ctime>
 #include <string>
 #include <vector>
@@ -84,7 +83,7 @@ TEST(MockDBClientConnTest, InsertAndQuery) {
 
     {
         MockDBClientConnection conn(&server);
-        std::auto_ptr<mongo::DBClientCursor> cursor = conn.query(ns);
+        std::unique_ptr<mongo::DBClientCursor> cursor = conn.query(ns);
         ASSERT(!cursor->more());
 
         server.insert(ns, BSON("x" << 1));
@@ -93,7 +92,7 @@ TEST(MockDBClientConnTest, InsertAndQuery) {
 
     {
         MockDBClientConnection conn(&server);
-        std::auto_ptr<mongo::DBClientCursor> cursor = conn.query(ns);
+        std::unique_ptr<mongo::DBClientCursor> cursor = conn.query(ns);
 
         ASSERT(cursor->more());
         BSONObj firstDoc = cursor->next();
@@ -109,7 +108,7 @@ TEST(MockDBClientConnTest, InsertAndQuery) {
     // Make sure that repeated calls will still give you the same result
     {
         MockDBClientConnection conn(&server);
-        std::auto_ptr<mongo::DBClientCursor> cursor = conn.query(ns);
+        std::unique_ptr<mongo::DBClientCursor> cursor = conn.query(ns);
 
         ASSERT(cursor->more());
         BSONObj firstDoc = cursor->next();
@@ -131,7 +130,7 @@ TEST(MockDBClientConnTest, InsertAndQueryTwice) {
 
     {
         MockDBClientConnection conn(&server);
-        std::auto_ptr<mongo::DBClientCursor> cursor = conn.query(ns);
+        std::unique_ptr<mongo::DBClientCursor> cursor = conn.query(ns);
 
         ASSERT(cursor->more());
         BSONObj firstDoc = cursor->next();
@@ -142,7 +141,7 @@ TEST(MockDBClientConnTest, InsertAndQueryTwice) {
 
     {
         MockDBClientConnection conn(&server);
-        std::auto_ptr<mongo::DBClientCursor> cursor = conn.query(ns);
+        std::unique_ptr<mongo::DBClientCursor> cursor = conn.query(ns);
 
         ASSERT(cursor->more());
         BSONObj firstDoc = cursor->next();
@@ -162,7 +161,7 @@ TEST(MockDBClientConnTest, QueryWithNoResults) {
 
     server.insert(ns, BSON("x" << 1));
     MockDBClientConnection conn(&server);
-    std::auto_ptr<mongo::DBClientCursor> cursor = conn.query("other.ns");
+    std::unique_ptr<mongo::DBClientCursor> cursor = conn.query("other.ns");
 
     ASSERT(!cursor->more());
 }
@@ -193,7 +192,7 @@ TEST(MockDBClientConnTest, MultiNSInsertAndQuery) {
 
     {
         MockDBClientConnection conn(&server);
-        std::auto_ptr<mongo::DBClientCursor> cursor = conn.query(ns1);
+        std::unique_ptr<mongo::DBClientCursor> cursor = conn.query(ns1);
 
         ASSERT(cursor->more());
         BSONObj firstDoc = cursor->next();
@@ -208,7 +207,7 @@ TEST(MockDBClientConnTest, MultiNSInsertAndQuery) {
 
     {
         MockDBClientConnection conn(&server);
-        std::auto_ptr<mongo::DBClientCursor> cursor = conn.query(ns2);
+        std::unique_ptr<mongo::DBClientCursor> cursor = conn.query(ns2);
 
         ASSERT(cursor->more());
         BSONObj firstDoc = cursor->next();
@@ -227,7 +226,7 @@ TEST(MockDBClientConnTest, MultiNSInsertAndQuery) {
 
     {
         MockDBClientConnection conn(&server);
-        std::auto_ptr<mongo::DBClientCursor> cursor = conn.query(ns3);
+        std::unique_ptr<mongo::DBClientCursor> cursor = conn.query(ns3);
 
         ASSERT(cursor->more());
         BSONObj firstDoc = cursor->next();
@@ -243,7 +242,7 @@ TEST(MockDBClientConnTest, SimpleRemove) {
 
     {
         MockDBClientConnection conn(&server);
-        std::auto_ptr<mongo::DBClientCursor> cursor = conn.query(ns);
+        std::unique_ptr<mongo::DBClientCursor> cursor = conn.query(ns);
         ASSERT(!cursor->more());
 
         conn.insert(ns, BSON("x" << 1));
@@ -257,7 +256,7 @@ TEST(MockDBClientConnTest, SimpleRemove) {
 
     {
         MockDBClientConnection conn(&server);
-        std::auto_ptr<mongo::DBClientCursor> cursor = conn.query(ns);
+        std::unique_ptr<mongo::DBClientCursor> cursor = conn.query(ns);
 
         ASSERT(!cursor->more());
     }
@@ -265,7 +264,7 @@ TEST(MockDBClientConnTest, SimpleRemove) {
     // Make sure that repeated calls will still give you the same result
     {
         MockDBClientConnection conn(&server);
-        std::auto_ptr<mongo::DBClientCursor> cursor = conn.query(ns);
+        std::unique_ptr<mongo::DBClientCursor> cursor = conn.query(ns);
 
         ASSERT(!cursor->more());
     }
@@ -299,13 +298,13 @@ TEST(MockDBClientConnTest, MultiNSRemove) {
         MockDBClientConnection conn(&server);
         conn.remove(ns2, Query(), false);
 
-        std::auto_ptr<mongo::DBClientCursor> cursor = conn.query(ns2);
+        std::unique_ptr<mongo::DBClientCursor> cursor = conn.query(ns2);
         ASSERT(!cursor->more());
     }
 
     {
         MockDBClientConnection conn(&server);
-        std::auto_ptr<mongo::DBClientCursor> cursor = conn.query(ns1);
+        std::unique_ptr<mongo::DBClientCursor> cursor = conn.query(ns1);
 
         ASSERT(cursor->more());
         BSONObj firstDoc = cursor->next();
@@ -320,7 +319,7 @@ TEST(MockDBClientConnTest, MultiNSRemove) {
 
     {
         MockDBClientConnection conn(&server);
-        std::auto_ptr<mongo::DBClientCursor> cursor = conn.query(ns3);
+        std::unique_ptr<mongo::DBClientCursor> cursor = conn.query(ns3);
 
         ASSERT(cursor->more());
         BSONObj firstDoc = cursor->next();
@@ -355,7 +354,7 @@ TEST(MockDBClientConnTest, InsertAfterRemove) {
 
     {
         MockDBClientConnection conn(&server);
-        std::auto_ptr<mongo::DBClientCursor> cursor = conn.query(ns);
+        std::unique_ptr<mongo::DBClientCursor> cursor = conn.query(ns);
 
         ASSERT(cursor->more());
         BSONObj firstDoc = cursor->next();

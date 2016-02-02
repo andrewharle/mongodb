@@ -30,26 +30,27 @@
 
 #include "mongo/platform/basic.h"
 
-#include <boost/scoped_ptr.hpp>
 #include <string>
 #include <sstream>
 
 #include "mongo/base/init.h"
 #include "mongo/base/status.h"
-#include "mongo/db/client.h"
-#include "mongo/db/catalog/database.h"
-#include "mongo/db/jsobj.h"
 #include "mongo/db/auth/authorization_session.h"
-#include "mongo/db/commands/plan_cache_commands.h"
 #include "mongo/db/catalog/collection.h"
+#include "mongo/db/catalog/database.h"
+#include "mongo/db/client.h"
+#include "mongo/db/commands/plan_cache_commands.h"
+#include "mongo/db/db_raii.h"
+#include "mongo/db/jsobj.h"
+#include "mongo/db/matcher/extensions_callback_real.h"
 #include "mongo/db/query/explain.h"
 #include "mongo/db/query/plan_ranker.h"
 #include "mongo/util/log.h"
 
 namespace {
 
-using boost::scoped_ptr;
 using std::string;
+using std::unique_ptr;
 using namespace mongo;
 
 /**
@@ -114,7 +115,7 @@ namespace mongo {
 using std::string;
 using std::stringstream;
 using std::vector;
-using boost::scoped_ptr;
+using std::unique_ptr;
 
 PlanCacheCommand::PlanCacheCommand(const string& name,
                                    const string& helpText,
@@ -126,8 +127,7 @@ bool PlanCacheCommand::run(OperationContext* txn,
                            BSONObj& cmdObj,
                            int options,
                            string& errmsg,
-                           BSONObjBuilder& result,
-                           bool fromRepl) {
+                           BSONObjBuilder& result) {
     string ns = parseNs(dbname, cmdObj);
 
     Status status = runPlanCacheCommand(txn, ns, cmdObj, &result);
@@ -159,7 +159,7 @@ void PlanCacheCommand::help(stringstream& ss) const {
 Status PlanCacheCommand::checkAuthForCommand(ClientBasic* client,
                                              const std::string& dbname,
                                              const BSONObj& cmdObj) {
-    AuthorizationSession* authzSession = client->getAuthorizationSession();
+    AuthorizationSession* authzSession = AuthorizationSession::get(client);
     ResourcePattern pattern = parseResourcePattern(dbname, cmdObj);
 
     if (authzSession->isAuthorizedForActionsOnResource(pattern, actionType)) {
@@ -170,10 +170,9 @@ Status PlanCacheCommand::checkAuthForCommand(ClientBasic* client,
 }
 
 // static
-Status PlanCacheCommand::canonicalize(OperationContext* txn,
-                                      const string& ns,
-                                      const BSONObj& cmdObj,
-                                      CanonicalQuery** canonicalQueryOut) {
+StatusWith<unique_ptr<CanonicalQuery>> PlanCacheCommand::canonicalize(OperationContext* txn,
+                                                                      const string& ns,
+                                                                      const BSONObj& cmdObj) {
     // query - required
     BSONElement queryElt = cmdObj.getField("query");
     if (queryElt.eoo()) {
@@ -208,19 +207,16 @@ Status PlanCacheCommand::canonicalize(OperationContext* txn,
     }
 
     // Create canonical query
-    CanonicalQuery* cqRaw;
-
     const NamespaceString nss(ns);
-    const WhereCallbackReal whereCallback(txn, nss.db());
+    const ExtensionsCallbackReal extensionsCallback(txn, &nss);
 
-    Status result =
-        CanonicalQuery::canonicalize(ns, queryObj, sortObj, projObj, &cqRaw, whereCallback);
-    if (!result.isOK()) {
-        return result;
+    auto statusWithCQ = CanonicalQuery::canonicalize(
+        std::move(nss), queryObj, sortObj, projObj, extensionsCallback);
+    if (!statusWithCQ.isOK()) {
+        return statusWithCQ.getStatus();
     }
 
-    *canonicalQueryOut = cqRaw;
-    return Status::OK();
+    return std::move(statusWithCQ.getValue());
 }
 
 PlanCacheListQueryShapes::PlanCacheListQueryShapes()
@@ -305,13 +301,12 @@ Status PlanCacheClear::clear(OperationContext* txn,
     // - clear plans for single query shape when a query shape is described in the
     //   command arguments.
     if (cmdObj.hasField("query")) {
-        CanonicalQuery* cqRaw;
-        Status status = PlanCacheCommand::canonicalize(txn, ns, cmdObj, &cqRaw);
-        if (!status.isOK()) {
-            return status;
+        auto statusWithCQ = PlanCacheCommand::canonicalize(txn, ns, cmdObj);
+        if (!statusWithCQ.isOK()) {
+            return statusWithCQ.getStatus();
         }
 
-        scoped_ptr<CanonicalQuery> cq(cqRaw);
+        unique_ptr<CanonicalQuery> cq = std::move(statusWithCQ.getValue());
 
         if (!planCache->contains(*cq)) {
             // Log if asked to clear non-existent query shape.
@@ -375,13 +370,11 @@ Status PlanCacheListPlans::list(OperationContext* txn,
                                 const std::string& ns,
                                 const BSONObj& cmdObj,
                                 BSONObjBuilder* bob) {
-    CanonicalQuery* cqRaw;
-    Status status = canonicalize(txn, ns, cmdObj, &cqRaw);
-    if (!status.isOK()) {
-        return status;
+    auto statusWithCQ = canonicalize(txn, ns, cmdObj);
+    if (!statusWithCQ.isOK()) {
+        return statusWithCQ.getStatus();
     }
-
-    scoped_ptr<CanonicalQuery> cq(cqRaw);
+    unique_ptr<CanonicalQuery> cq = std::move(statusWithCQ.getValue());
 
     if (!planCache.contains(*cq)) {
         // Return empty plans in results if query shape does not
@@ -396,7 +389,7 @@ Status PlanCacheListPlans::list(OperationContext* txn,
     if (!result.isOK()) {
         return result;
     }
-    scoped_ptr<PlanCacheEntry> entry(entryRaw);
+    unique_ptr<PlanCacheEntry> entry(entryRaw);
 
     BSONArrayBuilder plansBuilder(bob->subarrayStart("plans"));
     size_t numPlans = entry->plannerData.size();
@@ -426,14 +419,10 @@ Status PlanCacheListPlans::list(OperationContext* txn,
         statsBob.doneFast();
         reasonBob.doneFast();
 
-        // BSON object for 'feedback' field is created from query executions
-        // and shows number of executions since this cached solution was
-        // created as well as score data (average and standard deviation).
+        // BSON object for 'feedback' field shows scores from historical executions of the plan.
         BSONObjBuilder feedbackBob(planBob.subobjStart("feedback"));
         if (i == 0U) {
             feedbackBob.append("nfeedback", int(entry->feedback.size()));
-            feedbackBob.append("averageScore", entry->averageScore.get_value_or(0));
-            feedbackBob.append("stdDevScore", entry->stddevScore.get_value_or(0));
             BSONArrayBuilder scoresBob(feedbackBob.subarrayStart("scores"));
             for (size_t i = 0; i < entry->feedback.size(); ++i) {
                 BSONObjBuilder scoreBob(scoresBob.subobjStart());

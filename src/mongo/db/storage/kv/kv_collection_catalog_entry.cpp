@@ -40,7 +40,7 @@ using std::string;
 
 class KVCollectionCatalogEntry::AddIndexChange : public RecoveryUnit::Change {
 public:
-    AddIndexChange(OperationContext* opCtx, KVCollectionCatalogEntry* cce, const StringData& ident)
+    AddIndexChange(OperationContext* opCtx, KVCollectionCatalogEntry* cce, StringData ident)
         : _opCtx(opCtx), _cce(cce), _ident(ident.toString()) {}
 
     virtual void commit() {}
@@ -56,9 +56,7 @@ public:
 
 class KVCollectionCatalogEntry::RemoveIndexChange : public RecoveryUnit::Change {
 public:
-    RemoveIndexChange(OperationContext* opCtx,
-                      KVCollectionCatalogEntry* cce,
-                      const StringData& ident)
+    RemoveIndexChange(OperationContext* opCtx, KVCollectionCatalogEntry* cce, StringData ident)
         : _opCtx(opCtx), _cce(cce), _ident(ident.toString()) {}
 
     virtual void rollback() {}
@@ -74,11 +72,8 @@ public:
 };
 
 
-KVCollectionCatalogEntry::KVCollectionCatalogEntry(KVEngine* engine,
-                                                   KVCatalog* catalog,
-                                                   const StringData& ns,
-                                                   const StringData& ident,
-                                                   RecordStore* rs)
+KVCollectionCatalogEntry::KVCollectionCatalogEntry(
+    KVEngine* engine, KVCatalog* catalog, StringData ns, StringData ident, RecordStore* rs)
     : BSONCollectionCatalogEntry(ns),
       _engine(engine),
       _catalog(catalog),
@@ -88,7 +83,7 @@ KVCollectionCatalogEntry::KVCollectionCatalogEntry(KVEngine* engine,
 KVCollectionCatalogEntry::~KVCollectionCatalogEntry() {}
 
 bool KVCollectionCatalogEntry::setIndexIsMultikey(OperationContext* txn,
-                                                  const StringData& indexName,
+                                                  StringData indexName,
                                                   bool multikey) {
     MetaData md = _getMetaData(txn);
 
@@ -102,7 +97,7 @@ bool KVCollectionCatalogEntry::setIndexIsMultikey(OperationContext* txn,
 }
 
 void KVCollectionCatalogEntry::setIndexHead(OperationContext* txn,
-                                            const StringData& indexName,
+                                            StringData indexName,
                                             const RecordId& newHead) {
     MetaData md = _getMetaData(txn);
     int offset = md.findIndexOffset(indexName);
@@ -111,7 +106,7 @@ void KVCollectionCatalogEntry::setIndexHead(OperationContext* txn,
     _catalog->putMetaData(txn, ns().toString(), md);
 }
 
-Status KVCollectionCatalogEntry::removeIndex(OperationContext* txn, const StringData& indexName) {
+Status KVCollectionCatalogEntry::removeIndex(OperationContext* txn, StringData indexName) {
     MetaData md = _getMetaData(txn);
 
     if (md.findIndexOffset(indexName) < 0)
@@ -143,8 +138,7 @@ Status KVCollectionCatalogEntry::prepareForIndexBuild(OperationContext* txn,
     return status;
 }
 
-void KVCollectionCatalogEntry::indexBuildSuccess(OperationContext* txn,
-                                                 const StringData& indexName) {
+void KVCollectionCatalogEntry::indexBuildSuccess(OperationContext* txn, StringData indexName) {
     MetaData md = _getMetaData(txn);
     int offset = md.findIndexOffset(indexName);
     invariant(offset >= 0);
@@ -153,7 +147,7 @@ void KVCollectionCatalogEntry::indexBuildSuccess(OperationContext* txn,
 }
 
 void KVCollectionCatalogEntry::updateTTLSetting(OperationContext* txn,
-                                                const StringData& idxName,
+                                                StringData idxName,
                                                 long long newExpireSeconds) {
     MetaData md = _getMetaData(txn);
     int offset = md.findIndexOffset(idxName);
@@ -166,6 +160,17 @@ void KVCollectionCatalogEntry::updateFlags(OperationContext* txn, int newValue) 
     MetaData md = _getMetaData(txn);
     md.options.flags = newValue;
     md.options.flagsSet = true;
+    _catalog->putMetaData(txn, ns().toString(), md);
+}
+
+void KVCollectionCatalogEntry::updateValidator(OperationContext* txn,
+                                               const BSONObj& validator,
+                                               StringData validationLevel,
+                                               StringData validationAction) {
+    MetaData md = _getMetaData(txn);
+    md.options.validator = validator;
+    md.options.validationLevel = validationLevel.toString();
+    md.options.validationAction = validationAction.toString();
     _catalog->putMetaData(txn, ns().toString(), md);
 }
 

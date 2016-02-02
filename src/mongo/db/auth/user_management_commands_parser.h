@@ -62,7 +62,7 @@ struct CreateOrUpdateUserArgs {
  * the arguments into the "parsedArgs" output param.
  */
 Status parseCreateOrUpdateUserCommands(const BSONObj& cmdObj,
-                                       const StringData& cmdName,
+                                       StringData cmdName,
                                        const std::string& dbname,
                                        CreateOrUpdateUserArgs* parsedArgs);
 
@@ -75,7 +75,7 @@ Status parseCreateOrUpdateUserCommands(const BSONObj& cmdObj,
  * use.
  */
 Status parseRolePossessionManipulationCommands(const BSONObj& cmdObj,
-                                               const StringData& cmdName,
+                                               StringData cmdName,
                                                const std::string& dbname,
                                                std::string* parsedName,
                                                std::vector<RoleName>* parsedRoleNames,
@@ -112,9 +112,7 @@ struct UsersInfoArgs {
  * Takes a command object describing an invocation of the "usersInfo" command  and parses out
  * all the arguments into the "parsedArgs" output param.
  */
-Status parseUsersInfoCommand(const BSONObj& cmdObj,
-                             const StringData& dbname,
-                             UsersInfoArgs* parsedArgs);
+Status parseUsersInfoCommand(const BSONObj& cmdObj, StringData dbname, UsersInfoArgs* parsedArgs);
 
 struct RolesInfoArgs {
     std::vector<RoleName> roleNames;
@@ -128,9 +126,7 @@ struct RolesInfoArgs {
  * Takes a command object describing an invocation of the "rolesInfo" command  and parses out
  * the arguments into the "parsedArgs" output param.
  */
-Status parseRolesInfoCommand(const BSONObj& cmdObj,
-                             const StringData& dbname,
-                             RolesInfoArgs* parsedArgs);
+Status parseRolesInfoCommand(const BSONObj& cmdObj, StringData dbname, RolesInfoArgs* parsedArgs);
 
 struct CreateOrUpdateRoleArgs {
     RoleName roleName;
@@ -148,7 +144,7 @@ struct CreateOrUpdateRoleArgs {
  * the arguments into the "parsedArgs" output param.
  */
 Status parseCreateOrUpdateRoleCommands(const BSONObj& cmdObj,
-                                       const StringData& cmdName,
+                                       StringData cmdName,
                                        const std::string& dbname,
                                        CreateOrUpdateRoleArgs* parsedArgs);
 
@@ -158,7 +154,7 @@ Status parseCreateOrUpdateRoleCommands(const BSONObj& cmdObj,
  * role being modified, the privileges being granted or revoked, and the write concern to use.
  */
 Status parseAndValidateRolePrivilegeManipulationCommands(const BSONObj& cmdObj,
-                                                         const StringData& cmdName,
+                                                         StringData cmdName,
                                                          const std::string& dbname,
                                                          RoleName* parsedRoleName,
                                                          PrivilegeVector* parsedPrivileges,
@@ -182,16 +178,6 @@ Status parseDropAllRolesFromDatabaseCommand(const BSONObj& cmdObj,
                                             BSONObj* parsedWriteConcern);
 
 /**
- * Takes a command object describing an invocation of the "authSchemaUpgrade" command and
- * parses out the write concern, maximum steps to take and whether or not shard servers should
- * also be upgraded, in the sharded deployment case.
- */
-Status parseAuthSchemaUpgradeStepCommand(const BSONObj& cmdObj,
-                                         const std::string& dbname,
-                                         int* maxSteps,
-                                         bool* shouldUpgradeShards,
-                                         BSONObj* parsedWriteConcern);
-/**
  * Parses the privileges described in "privileges" into a vector of Privilege objects.
  * Returns Status::OK() upon successfully parsing all the elements of "privileges".
  */
@@ -204,7 +190,7 @@ Status parseAndValidatePrivilegeArray(const BSONArray& privileges,
  * Performs syntactic validation of "rolesArray", only.
  */
 Status parseRoleNamesFromBSONArray(const BSONArray& rolesArray,
-                                   const StringData& dbname,
+                                   StringData dbname,
                                    std::vector<RoleName>* parsedRoleNames);
 
 /**
@@ -213,7 +199,7 @@ Status parseRoleNamesFromBSONArray(const BSONArray& rolesArray,
  * Performs syntactic validation of "usersArray", only.
  */
 Status parseUserNamesFromBSONArray(const BSONArray& usersArray,
-                                   const StringData& dbname,
+                                   StringData dbname,
                                    std::vector<UserName>* parsedUserNames);
 
 struct MergeAuthzCollectionsArgs {
@@ -237,5 +223,19 @@ struct MergeAuthzCollectionsArgs {
 Status parseMergeAuthzCollectionsCommand(const BSONObj& cmdObj,
                                          MergeAuthzCollectionsArgs* parsedArgs);
 
+struct AuthSchemaUpgradeArgs {
+    int maxSteps = 3;
+    bool shouldUpgradeShards = true;
+    BSONObj writeConcern;
+};
+
+/**
+ * Takes a command object describing an invocation of the "authSchemaUpgrade" command and
+ * parses out the write concern, maximum steps to take and whether or not shard servers should
+ * also be upgraded, in the sharded deployment case.
+ */
+Status parseAuthSchemaUpgradeCommand(const BSONObj& cmdObj,
+                                     const std::string& dbname,
+                                     AuthSchemaUpgradeArgs* parsedArgs);
 }  // namespace auth
 }  // namespace mongo

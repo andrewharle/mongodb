@@ -31,14 +31,73 @@
 #include <string>
 
 #include "mongo/db/clientcursor.h"
-#include "mongo/db/curop.h"
 #include "mongo/db/dbmessage.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/util/net/message.h"
 
 namespace mongo {
 
+class NamespaceString;
 class OperationContext;
+
+/**
+ * Whether or not the ClientCursor* is tailable.
+ */
+bool isCursorTailable(const ClientCursor* cursor);
+
+/**
+ * Whether or not the ClientCursor* has the awaitData flag set.
+ */
+bool isCursorAwaitData(const ClientCursor* cursor);
+
+/**
+ * Returns true if we should keep a cursor around because we're expecting to return more query
+ * results.
+ *
+ * If false, the caller should close the cursor and indicate this to the client by sending back
+ * a cursor ID of 0.
+ */
+bool shouldSaveCursor(OperationContext* txn,
+                      const Collection* collection,
+                      PlanExecutor::ExecState finalState,
+                      PlanExecutor* exec);
+
+/**
+ * Similar to shouldSaveCursor(), but used in getMore to determine whether we should keep
+ * the cursor around for additional getMores().
+ *
+ * If false, the caller should close the cursor and indicate this to the client by sending back
+ * a cursor ID of 0.
+ */
+bool shouldSaveCursorGetMore(PlanExecutor::ExecState finalState,
+                             PlanExecutor* exec,
+                             bool isTailable);
+
+/**
+ * Fills out the CurOp for "txn" with information about this query.
+ */
+void beginQueryOp(OperationContext* txn,
+                  const NamespaceString& nss,
+                  const BSONObj& queryObj,
+                  long long ntoreturn,
+                  long long ntoskip);
+
+/**
+ * 1) Fills out CurOp for "txn" with information regarding this query's execution.
+ * 2) Reports index usage to the CollectionInfoCache.
+ *
+ * Uses explain functionality to extract stats from 'exec'.
+ *
+ * The database profiling level, 'dbProfilingLevel', is used to conditionalize whether or not we
+ * do expensive stats gathering.
+ */
+void endQueryOp(OperationContext* txn,
+                Collection* collection,
+                const PlanExecutor& exec,
+                int dbProfilingLevel,
+                long long numResults,
+                CursorId cursorId);
 
 /**
  * Constructs a PlanExecutor for a query with the oplogReplay option set to true,
@@ -47,13 +106,10 @@ class OperationContext;
  *
  * The oplog start finding hack requires that 'cq' has a $gt or $gte predicate over
  * a field named 'ts'.
- *
- * On success, caller takes ownership of *execOut.
  */
-Status getOplogStartHack(OperationContext* txn,
-                         Collection* collection,
-                         CanonicalQuery* cq,
-                         PlanExecutor** execOut);
+StatusWith<std::unique_ptr<PlanExecutor>> getOplogStartHack(OperationContext* txn,
+                                                            Collection* collection,
+                                                            std::unique_ptr<CanonicalQuery> cq);
 
 /**
  * Called from the getMore entry point in ops/query.cpp.
@@ -62,19 +118,15 @@ QueryResult::View getMore(OperationContext* txn,
                           const char* ns,
                           int ntoreturn,
                           long long cursorid,
-                          CurOp& curop,
-                          int pass,
-                          bool& exhaust,
+                          bool* exhaust,
                           bool* isCursorAuthorized);
 
 /**
  * Run the query 'q' and place the result in 'result'.
  */
 std::string runQuery(OperationContext* txn,
-                     Message& m,
                      QueryMessage& q,
                      const NamespaceString& ns,
-                     CurOp& curop,
                      Message& result);
 
 }  // namespace mongo

@@ -110,7 +110,7 @@ Status V1UserDocumentParser::initializeUserCredentialsFromUserDocument(
 
 static void _initializeUserRolesFromV0UserDocument(User* user,
                                                    const BSONObj& privDoc,
-                                                   const StringData& dbname) {
+                                                   StringData dbname) {
     bool readOnly = privDoc["readOnly"].trueValue();
     if (dbname == "admin") {
         if (readOnly) {
@@ -129,7 +129,7 @@ static void _initializeUserRolesFromV0UserDocument(User* user,
 
 Status _initializeUserRolesFromV1RolesArray(User* user,
                                             const BSONElement& rolesElement,
-                                            const StringData& dbname) {
+                                            StringData dbname) {
     static const char privilegesTypeMismatchMessage[] =
         "Roles in V1 user documents must be enumerated in an array of strings.";
 
@@ -148,7 +148,7 @@ Status _initializeUserRolesFromV1RolesArray(User* user,
 
 static Status _initializeUserRolesFromV1UserDocument(User* user,
                                                      const BSONObj& privDoc,
-                                                     const StringData& dbname) {
+                                                     StringData dbname) {
     if (!privDoc[READONLY_FIELD_NAME].eoo()) {
         return Status(ErrorCodes::UnsupportedFormat,
                       "User documents may not contain both \"readonly\" and "
@@ -192,7 +192,7 @@ static Status _initializeUserRolesFromV1UserDocument(User* user,
 
 Status V1UserDocumentParser::initializeUserRolesFromUserDocument(User* user,
                                                                  const BSONObj& privDoc,
-                                                                 const StringData& dbname) const {
+                                                                 StringData dbname) const {
     if (!privDoc.hasField("roles")) {
         _initializeUserRolesFromV0UserDocument(user, privDoc, dbname);
     } else {

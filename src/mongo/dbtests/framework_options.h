@@ -55,7 +55,7 @@ extern FrameworkGlobalParams frameworkGlobalParams;
 
 Status addTestFrameworkOptions(moe::OptionSection* options);
 
-std::string getTestFrameworkHelp(const StringData& name, const moe::OptionSection& options);
+std::string getTestFrameworkHelp(StringData name, const moe::OptionSection& options);
 
 /**
  * Handle options that should come before validation, such as "help".

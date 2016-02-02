@@ -28,32 +28,22 @@
 
 #include "mongo/platform/basic.h"
 
-#include "mongo/base/init.h"
 #include "mongo/base/status.h"
-#include "mongo/bson/util/bson_extract.h"
-#include "mongo/bson/util/builder.h"
-#include "mongo/client/dbclientinterface.h"
 #include "mongo/client/sasl_client_authenticate.h"
 #include "mongo/db/auth/action_set.h"
 #include "mongo/db/auth/resource_pattern.h"
 #include "mongo/db/auth/authorization_session.h"
-#include "mongo/db/catalog/collection.h"
+#include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/cloner.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/copydb.h"
 #include "mongo/db/commands/copydb_start_commands.h"
-#include "mongo/db/commands/rename_collection.h"
-#include "mongo/db/db.h"
-#include "mongo/db/dbhelpers.h"
-#include "mongo/db/index_builder.h"
-#include "mongo/db/instance.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/repl/oplog.h"
-#include "mongo/db/operation_context_impl.h"
-#include "mongo/db/storage_options.h"
 
-namespace mongo {
+namespace {
+
+using namespace mongo;
 
 using std::string;
 using std::stringstream;
@@ -129,8 +119,11 @@ public:
                      BSONObj& cmdObj,
                      int,
                      string& errmsg,
-                     BSONObjBuilder& result,
-                     bool fromRepl) {
+                     BSONObjBuilder& result) {
+        boost::optional<DisableDocumentValidation> maybeDisableValidation;
+        if (shouldBypassDocumentValidationForCommand(cmdObj))
+            maybeDisableValidation.emplace(txn);
+
         string fromhost = cmdObj.getStringField("fromhost");
         bool fromSelf = fromhost.empty();
         if (fromSelf) {
@@ -142,12 +135,11 @@ public:
 
         CloneOptions cloneOptions;
         cloneOptions.fromDB = cmdObj.getStringField("fromdb");
-        cloneOptions.logForRepl = !fromRepl;
         cloneOptions.slaveOk = cmdObj["slaveOk"].trueValue();
         cloneOptions.useReplAuth = false;
         cloneOptions.snapshot = true;
         cloneOptions.mayYield = true;
-        cloneOptions.mayBeInterrupted = false;
+        cloneOptions.mayBeInterrupted = true;
 
         string todb = cmdObj.getStringField("todb");
         if (fromhost.empty() || todb.empty() || cloneOptions.fromDB.empty()) {
@@ -169,29 +161,33 @@ public:
         string nonce = cmdObj.getStringField("nonce");
         string key = cmdObj.getStringField("key");
 
+        auto& authConn = CopyDbAuthConnection::forClient(txn->getClient());
+
         if (!username.empty() && !nonce.empty() && !key.empty()) {
-            uassert(13008, "must call copydbgetnonce first", authConn_.get());
+            uassert(13008, "must call copydbgetnonce first", authConn.get());
             BSONObj ret;
             {
-                if (!authConn_->runCommand(cloneOptions.fromDB,
-                                           BSON("authenticate" << 1 << "user" << username << "nonce"
-                                                               << nonce << "key" << key),
-                                           ret)) {
+                if (!authConn->runCommand(cloneOptions.fromDB,
+                                          BSON("authenticate" << 1 << "user" << username << "nonce"
+                                                              << nonce << "key" << key),
+                                          ret)) {
                     errmsg = "unable to login " + ret.toString();
+                    authConn.reset();
                     return false;
                 }
             }
-            cloner.setConnection(authConn_.release());
+            cloner.setConnection(authConn.release());
         } else if (cmdObj.hasField(saslCommandConversationIdFieldName) &&
                    cmdObj.hasField(saslCommandPayloadFieldName)) {
-            uassert(25487, "must call copydbsaslstart first", authConn_.get());
+            uassert(25487, "must call copydbsaslstart first", authConn.get());
             BSONObj ret;
-            if (!authConn_->runCommand(cloneOptions.fromDB,
-                                       BSON("saslContinue"
-                                            << 1 << cmdObj[saslCommandConversationIdFieldName]
-                                            << cmdObj[saslCommandPayloadFieldName]),
-                                       ret)) {
+            if (!authConn->runCommand(cloneOptions.fromDB,
+                                      BSON("saslContinue"
+                                           << 1 << cmdObj[saslCommandConversationIdFieldName]
+                                           << cmdObj[saslCommandPayloadFieldName]),
+                                      ret)) {
                 errmsg = "unable to login " + ret.toString();
+                authConn.reset();
                 return false;
             }
 
@@ -201,14 +197,10 @@ public:
             }
 
             result.append("done", true);
-            cloner.setConnection(authConn_.release());
+            cloner.setConnection(authConn.release());
         } else if (!fromSelf) {
             // If fromSelf leave the cloner's conn empty, it will use a DBDirectClient instead.
-
-            ConnectionString cs = ConnectionString::parse(fromhost, errmsg);
-            if (!cs.isValid()) {
-                return false;
-            }
+            const ConnectionString cs(uassertStatusOK(ConnectionString::parse(fromhost)));
 
             DBClientBase* conn = cs.connect(errmsg);
             if (!conn) {
@@ -217,18 +209,24 @@ public:
             cloner.setConnection(conn);
         }
 
+        // Either we didn't need the authConn (if we even had one), or we already moved it
+        // into the cloner so just make sure we don't keep it around if we don't need it.
+        authConn.reset();
+
         if (fromSelf) {
             // SERVER-4328 todo lock just the two db's not everything for the fromself case
             ScopedTransaction transaction(txn, MODE_X);
             Lock::GlobalWrite lk(txn->lockState());
-            return cloner.go(txn, todb, fromhost, cloneOptions, NULL, errmsg);
+            uassertStatusOK(cloner.copyDb(txn, todb, fromhost, cloneOptions, NULL));
+        } else {
+            ScopedTransaction transaction(txn, MODE_IX);
+            Lock::DBLock lk(txn->lockState(), todb, MODE_X);
+            uassertStatusOK(cloner.copyDb(txn, todb, fromhost, cloneOptions, NULL));
         }
 
-        ScopedTransaction transaction(txn, MODE_IX);
-        Lock::DBLock lk(txn->lockState(), todb, MODE_X);
-        return cloner.go(txn, todb, fromhost, cloneOptions, NULL, errmsg);
+        return true;
     }
 
 } cmdCopyDB;
 
-}  // namespace mongo
+}  // namespace

@@ -35,21 +35,20 @@
 #include "mongo/db/storage/mmap_v1/durop.h"
 
 #include <boost/filesystem/operations.hpp>
-#include <boost/shared_ptr.hpp>
 
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/storage/mmap_v1/aligned_builder.h"
 #include "mongo/db/storage/mmap_v1/durable_mapped_file.h"
 #include "mongo/db/storage/mmap_v1/mmap_v1_engine.h"
 #include "mongo/util/file.h"
-#include "mongo/util/file_allocator.h"
+#include "mongo/db/storage/mmap_v1/file_allocator.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
 
-using boost::scoped_array;
-using boost::shared_ptr;
+using std::unique_ptr;
+using std::shared_ptr;
 using std::endl;
 using std::string;
 
@@ -163,7 +162,7 @@ void FileCreatedOp::replay() {
     massert(13547, str::stream() << "recover couldn't create file " << full, f.is_open());
     unsigned long long left = _len;
     const unsigned blksz = 64 * 1024;
-    scoped_array<char> v(new char[blksz]);
+    unique_ptr<char[]> v(new char[blksz]);
     memset(v.get(), 0, blksz);
     fileofs ofs = 0;
     while (left) {

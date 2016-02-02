@@ -29,10 +29,10 @@
 #pragma once
 
 #include "mongo/base/owned_pointer_vector.h"
+#include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/bson/bsonobjiterator.h"
+#include "mongo/db/range_arithmetic.h"
 #include "mongo/s/ns_targeter.h"
-#include "mongo/s/range_arithmetic.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo {
@@ -46,7 +46,7 @@ struct MockRange {
               const NamespaceString nss,
               const BSONObj& minKey,
               const BSONObj& maxKey)
-        : endpoint(endpoint), range(nss, minKey, maxKey, getKeyPattern(minKey)) {}
+        : endpoint(endpoint), range(nss.ns(), minKey, maxKey, getKeyPattern(minKey)) {}
 
     MockRange(const ShardEndpoint& endpoint, const KeyRange& range)
         : endpoint(endpoint), range(range) {}
@@ -85,7 +85,7 @@ public:
     /**
      * Returns a ShardEndpoint for the doc from the mock ranges
      */
-    Status targetInsert(const BSONObj& doc, ShardEndpoint** endpoint) const {
+    Status targetInsert(OperationContext* txn, const BSONObj& doc, ShardEndpoint** endpoint) const {
         std::vector<ShardEndpoint*> endpoints;
         Status status = targetQuery(doc, &endpoints);
         if (!status.isOK())
@@ -99,7 +99,8 @@ public:
      * Returns the first ShardEndpoint for the query from the mock ranges.  Only can handle
      * queries of the form { field : { $gte : <value>, $lt : <value> } }.
      */
-    Status targetUpdate(const BatchedUpdateDocument& updateDoc,
+    Status targetUpdate(OperationContext* txn,
+                        const BatchedUpdateDocument& updateDoc,
                         std::vector<ShardEndpoint*>* endpoints) const {
         return targetQuery(updateDoc.getQuery(), endpoints);
     }
@@ -108,7 +109,8 @@ public:
      * Returns the first ShardEndpoint for the query from the mock ranges.  Only can handle
      * queries of the form { field : { $gte : <value>, $lt : <value> } }.
      */
-    Status targetDelete(const BatchedDeleteDocument& deleteDoc,
+    Status targetDelete(OperationContext* txn,
+                        const BatchedDeleteDocument& deleteDoc,
                         std::vector<ShardEndpoint*>* endpoints) const {
         return targetQuery(deleteDoc.getQuery(), endpoints);
     }
@@ -138,7 +140,7 @@ public:
         // No-op
     }
 
-    Status refreshIfNeeded(bool* wasChanged) {
+    Status refreshIfNeeded(OperationContext* txn, bool* wasChanged) {
         // No-op
         if (wasChanged)
             *wasChanged = false;

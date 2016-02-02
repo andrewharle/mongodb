@@ -28,7 +28,7 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
+#include <memory>
 
 #include "mongo/db/exec/plan_stage.h"
 #include "mongo/db/jsobj.h"
@@ -36,6 +36,8 @@
 #include "mongo/db/record_id.h"
 
 namespace mongo {
+
+class SeekableRecordCursor;
 
 /**
  * This stage turns a RecordId into a BSONObj.
@@ -53,26 +55,24 @@ public:
                const MatchExpression* filter,
                const Collection* collection);
 
-    virtual ~FetchStage();
+    ~FetchStage();
 
-    virtual bool isEOF();
-    virtual StageState work(WorkingSetID* out);
+    bool isEOF() final;
+    StageState work(WorkingSetID* out) final;
 
-    virtual void saveState();
-    virtual void restoreState(OperationContext* opCtx);
-    virtual void invalidate(OperationContext* txn, const RecordId& dl, InvalidationType type);
+    void doSaveState() final;
+    void doRestoreState() final;
+    void doDetachFromOperationContext() final;
+    void doReattachToOperationContext() final;
+    void doInvalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) final;
 
-    virtual std::vector<PlanStage*> getChildren() const;
-
-    virtual StageType stageType() const {
+    StageType stageType() const final {
         return STAGE_FETCH;
     }
 
-    PlanStageStats* getStats();
+    std::unique_ptr<PlanStageStats> getStats();
 
-    virtual const CommonStats* getCommonStats();
-
-    virtual const SpecificStats* getSpecificStats();
+    const SpecificStats* getSpecificStats() const final;
 
     static const char* kStageType;
 
@@ -83,35 +83,22 @@ private:
      */
     StageState returnIfMatches(WorkingSetMember* member, WorkingSetID memberID, WorkingSetID* out);
 
-    OperationContext* _txn;
-
     // Collection which is used by this stage. Used to resolve record ids retrieved by child
     // stages. The lifetime of the collection must supersede that of the stage.
     const Collection* _collection;
+    // Used to fetch Records from _collection.
+    std::unique_ptr<SeekableRecordCursor> _cursor;
 
     // _ws is not owned by us.
     WorkingSet* _ws;
-    boost::scoped_ptr<PlanStage> _child;
 
     // The filter is not owned by us.
     const MatchExpression* _filter;
 
-    // If we want to return a RecordId and it points to something that's not in memory,
-    // we return a "please page this in" result. We add a RecordFetcher given back to us by the
-    // storage engine to the WSM. The RecordFetcher is used by the PlanExecutor when it handles
-    // the fetch request.
-    //
-    // Some stages which request fetches don't need to use '_idBeingPagedIn' (e.g.,
-    // CollectionScan) because they are implemented with an underlying iterator which keeps
-    // track of the next WSM to be returned. A FetchStage has no such iterator, but rather
-    // streams its results from the child. Therefore, when it requests a yield via NEED_FETCH,
-    // the current WSM must be saved so that the fetched result can be returned on the next
-    // call to work(). This also requires special invalidation handling not found in stages like
-    // CollectionScan for when '_idBeingPagedIn' is invalidated before it can be returned.
-    WorkingSetID _idBeingPagedIn;
+    // If not Null, we use this rather than asking our child what to do next.
+    WorkingSetID _idRetrying;
 
     // Stats
-    CommonStats _commonStats;
     FetchStats _specificStats;
 };
 

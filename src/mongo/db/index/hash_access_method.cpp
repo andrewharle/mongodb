@@ -34,7 +34,7 @@
 namespace mongo {
 
 HashAccessMethod::HashAccessMethod(IndexCatalogEntry* btreeState, SortedDataInterface* btree)
-    : BtreeBasedAccessMethod(btreeState, btree) {
+    : IndexAccessMethod(btreeState, btree) {
     const IndexDescriptor* descriptor = btreeState->descriptor();
 
     // We can change these if the single-field limitation is lifted later.
@@ -49,7 +49,7 @@ HashAccessMethod::HashAccessMethod(IndexCatalogEntry* btreeState, SortedDataInte
     ExpressionParams::parseHashParams(descriptor->infoObj(), &_seed, &_hashVersion, &_hashedField);
 }
 
-void HashAccessMethod::getKeys(const BSONObj& obj, BSONObjSet* keys) {
+void HashAccessMethod::getKeys(const BSONObj& obj, BSONObjSet* keys) const {
     ExpressionKeysPrivate::getHashKeys(
         obj, _hashedField, _seed, _hashVersion, _descriptor->isSparse(), keys);
 }

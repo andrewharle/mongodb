@@ -27,12 +27,13 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
-#include <boost/thread/mutex.hpp>
+#include <memory>
+#include <ostream>
 #include <string>
 
 #include "mongo/base/disallow_copying.h"
 #include "mongo/base/status.h"
+#include "mongo/stdx/mutex.h"
 
 namespace mongo {
 namespace logger {
@@ -114,7 +115,7 @@ public:
         Status _openFileStream(bool append);
 
         RotatableFileWriter* _writer;
-        boost::unique_lock<boost::mutex> _lock;
+        stdx::unique_lock<stdx::mutex> _lock;
     };
 
     /**
@@ -124,9 +125,9 @@ public:
 
 private:
     friend class RotatableFileWriter::Use;
-    boost::mutex _mutex;
+    stdx::mutex _mutex;
     std::string _fileName;
-    boost::scoped_ptr<std::ostream> _stream;
+    std::unique_ptr<std::ostream> _stream;
 };
 
 }  // namespace logger

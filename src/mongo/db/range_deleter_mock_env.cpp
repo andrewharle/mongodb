@@ -28,8 +28,9 @@
 
 #include "mongo/db/range_deleter_mock_env.h"
 
-#include "mongo/db/global_environment_experiment.h"
-#include "mongo/db/global_environment_noop.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/service_context_noop.h"
+#include "mongo/stdx/memory.h"
 
 namespace mongo {
 
@@ -51,58 +52,52 @@ bool DeletedRangeCmp::operator()(const DeletedRange& lhs, const DeletedRange& rh
 }
 
 RangeDeleterMockEnv::RangeDeleterMockEnv()
-    : _deleteListMutex("delList"),
-      _cursorMapMutex("cursorMap"),
-      _pauseDeleteMutex("pauseDelete"),
-      _pauseDelete(false),
-      _pausedCount(0),
-      _envStatMutex("envStat"),
-      _getCursorsCallCount(0) {
-    setGlobalEnvironment(new GlobalEnvironmentNoop());
+    : _pauseDelete(false), _pausedCount(0), _getCursorsCallCount(0) {
+    setGlobalServiceContext(stdx::make_unique<ServiceContextNoop>());
 }
 
-void RangeDeleterMockEnv::addCursorId(const StringData& ns, CursorId id) {
-    scoped_lock sl(_cursorMapMutex);
+void RangeDeleterMockEnv::addCursorId(StringData ns, CursorId id) {
+    stdx::lock_guard<stdx::mutex> sl(_cursorMapMutex);
     _cursorMap[ns.toString()].insert(id);
 }
 
-void RangeDeleterMockEnv::removeCursorId(const StringData& ns, CursorId id) {
-    scoped_lock sl(_cursorMapMutex);
+void RangeDeleterMockEnv::removeCursorId(StringData ns, CursorId id) {
+    stdx::lock_guard<stdx::mutex> sl(_cursorMapMutex);
     _cursorMap[ns.toString()].erase(id);
 }
 
 void RangeDeleterMockEnv::pauseDeletes() {
-    scoped_lock sl(_pauseDeleteMutex);
+    stdx::lock_guard<stdx::mutex> sl(_pauseDeleteMutex);
     _pauseDelete = true;
 }
 
 void RangeDeleterMockEnv::resumeOneDelete() {
-    scoped_lock sl(_pauseDeleteMutex);
+    stdx::lock_guard<stdx::mutex> sl(_pauseDeleteMutex);
     _pauseDelete = false;
     _pausedCV.notify_one();
 }
 
 void RangeDeleterMockEnv::waitForNthGetCursor(uint64_t nthCall) {
-    scoped_lock sl(_envStatMutex);
+    stdx::unique_lock<stdx::mutex> sl(_envStatMutex);
     while (_getCursorsCallCount < nthCall) {
-        _cursorsCallCountUpdatedCV.wait(sl.boost());
+        _cursorsCallCountUpdatedCV.wait(sl);
     }
 }
 
 void RangeDeleterMockEnv::waitForNthPausedDelete(uint64_t nthPause) {
-    scoped_lock sl(_pauseDeleteMutex);
+    stdx::unique_lock<stdx::mutex> sl(_pauseDeleteMutex);
     while (_pausedCount < nthPause) {
-        _pausedDeleteChangeCV.wait(sl.boost());
+        _pausedDeleteChangeCV.wait(sl);
     }
 }
 
 bool RangeDeleterMockEnv::deleteOccured() const {
-    scoped_lock sl(_deleteListMutex);
+    stdx::lock_guard<stdx::mutex> sl(_deleteListMutex);
     return !_deleteList.empty();
 }
 
 DeletedRange RangeDeleterMockEnv::getLastDelete() const {
-    scoped_lock sl(_deleteListMutex);
+    stdx::lock_guard<stdx::mutex> sl(_deleteListMutex);
     return _deleteList.back();
 }
 
@@ -111,7 +106,7 @@ bool RangeDeleterMockEnv::deleteRange(OperationContext* txn,
                                       long long int* deletedDocs,
                                       string* errMsg) {
     {
-        scoped_lock sl(_pauseDeleteMutex);
+        stdx::unique_lock<stdx::mutex> sl(_pauseDeleteMutex);
         bool wasInitiallyPaused = _pauseDelete;
 
         if (_pauseDelete) {
@@ -120,14 +115,14 @@ bool RangeDeleterMockEnv::deleteRange(OperationContext* txn,
         }
 
         while (_pauseDelete) {
-            _pausedCV.wait(sl.boost());
+            _pausedCV.wait(sl);
         }
 
         _pauseDelete = wasInitiallyPaused;
     }
 
     {
-        scoped_lock sl(_deleteListMutex);
+        stdx::lock_guard<stdx::mutex> sl(_deleteListMutex);
 
         DeletedRange entry;
         entry.ns = taskDetails.options.range.ns;
@@ -141,17 +136,15 @@ bool RangeDeleterMockEnv::deleteRange(OperationContext* txn,
     return true;
 }
 
-void RangeDeleterMockEnv::getCursorIds(OperationContext* txn,
-                                       const StringData& ns,
-                                       set<CursorId>* in) {
+void RangeDeleterMockEnv::getCursorIds(OperationContext* txn, StringData ns, set<CursorId>* in) {
     {
-        scoped_lock sl(_cursorMapMutex);
+        stdx::lock_guard<stdx::mutex> sl(_cursorMapMutex);
         const set<CursorId>& _cursors = _cursorMap[ns.toString()];
         std::copy(_cursors.begin(), _cursors.end(), inserter(*in, in->begin()));
     }
 
     {
-        scoped_lock sl(_envStatMutex);
+        stdx::lock_guard<stdx::mutex> sl(_envStatMutex);
         _getCursorsCallCount++;
         _cursorsCallCountUpdatedCV.notify_one();
     }

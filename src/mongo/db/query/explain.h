@@ -71,6 +71,9 @@ struct PlanSummaryStats {
 
     // Did this plan use an in-memory sort stage?
     bool hasSortStage;
+
+    // The names of each index used by the plan.
+    std::set<std::string> indexesUsed;
 };
 
 /**
@@ -121,8 +124,8 @@ public:
     /**
      * Returns a short plan summary std::string describing the leaves of the query plan.
      */
-    static std::string getPlanSummary(PlanExecutor* exec);
-    static std::string getPlanSummary(PlanStage* root);
+    static std::string getPlanSummary(const PlanExecutor* exec);
+    static std::string getPlanSummary(const PlanStage* root);
 
     /**
      * Fills out 'statsOut' with summary stats using the execution tree contained
@@ -137,7 +140,7 @@ public:
      *
      * Does not take ownership of its arguments.
      */
-    static void getSummaryStats(PlanExecutor* exec, PlanSummaryStats* statsOut);
+    static void getSummaryStats(const PlanExecutor& exec, PlanSummaryStats* statsOut);
 
 private:
     /**
@@ -161,10 +164,11 @@ private:
      * @param winnerStats -- the stats tree for the winning plan.
      * @param rejectedStats -- an array of stats trees, one per rejected plan
      */
-    static void generatePlannerInfo(PlanExecutor* exec,
-                                    PlanStageStats* winnerStats,
-                                    const std::vector<PlanStageStats*>& rejectedStats,
-                                    BSONObjBuilder* out);
+    static void generatePlannerInfo(
+        PlanExecutor* exec,
+        PlanStageStats* winnerStats,
+        const std::vector<std::unique_ptr<PlanStageStats>>& rejectedStats,
+        BSONObjBuilder* out);
 
     /**
      * Generates the execution stats section for the stats tree 'stats',
@@ -172,9 +176,8 @@ private:
      *
      * The 'totalTimeMillis' value passed here will be added to the top level of
      * the execution stats section, but will not affect the reporting of timing for
-     * individual stages. If 'totalTimeMillis' is not specified, then the default
-     * value of -1 indicates that we should only use the approximate timing information
-     * collected by the stages.
+     * individual stages. If 'totalTimeMillis' is not set, we use the approximate timing
+     * information collected by the stages.
      *
      * Stats are generated at the verbosity specified by 'verbosity'.
      *
@@ -183,7 +186,7 @@ private:
     static void generateExecStats(PlanStageStats* stats,
                                   ExplainCommon::Verbosity verbosity,
                                   BSONObjBuilder* out,
-                                  long long totalTimeMillis = -1);
+                                  boost::optional<long long> totalTimeMillis);
 
     /**
      * Adds the 'serverInfo' explain section to the BSON object being build

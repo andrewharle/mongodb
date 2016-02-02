@@ -31,12 +31,12 @@
 #include <boost/functional/hash.hpp>
 #include <boost/optional.hpp>
 #include <climits>
+#include <cstdint>
 #include <ostream>
 
 #include "mongo/bson/util/builder.h"
 #include "mongo/logger/logstream_builder.h"
 #include "mongo/util/bufreader.h"
-#include "mongo/platform/cstdint.h"
 
 namespace mongo {
 
@@ -128,23 +128,23 @@ private:
     int64_t _repr;
 };
 
-inline bool operator==(RecordId rhs, RecordId lhs) {
-    return rhs.repr() == lhs.repr();
+inline bool operator==(RecordId lhs, RecordId rhs) {
+    return lhs.repr() == rhs.repr();
 }
-inline bool operator!=(RecordId rhs, RecordId lhs) {
-    return rhs.repr() != lhs.repr();
+inline bool operator!=(RecordId lhs, RecordId rhs) {
+    return lhs.repr() != rhs.repr();
 }
-inline bool operator<(RecordId rhs, RecordId lhs) {
-    return rhs.repr() < lhs.repr();
+inline bool operator<(RecordId lhs, RecordId rhs) {
+    return lhs.repr() < rhs.repr();
 }
-inline bool operator<=(RecordId rhs, RecordId lhs) {
-    return rhs.repr() <= lhs.repr();
+inline bool operator<=(RecordId lhs, RecordId rhs) {
+    return lhs.repr() <= rhs.repr();
 }
-inline bool operator>(RecordId rhs, RecordId lhs) {
-    return rhs.repr() > lhs.repr();
+inline bool operator>(RecordId lhs, RecordId rhs) {
+    return lhs.repr() > rhs.repr();
 }
-inline bool operator>=(RecordId rhs, RecordId lhs) {
-    return rhs.repr() >= lhs.repr();
+inline bool operator>=(RecordId lhs, RecordId rhs) {
+    return lhs.repr() >= rhs.repr();
 }
 
 inline StringBuilder& operator<<(StringBuilder& stream, const RecordId& id) {

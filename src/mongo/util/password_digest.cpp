@@ -32,7 +32,7 @@
 
 namespace mongo {
 
-std::string createPasswordDigest(const StringData& username, const StringData& clearTextPassword) {
+std::string createPasswordDigest(StringData username, StringData clearTextPassword) {
     md5digest d;
     {
         md5_state_t st;

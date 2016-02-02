@@ -46,62 +46,37 @@
 namespace mongo {
 
 DurRecoveryUnit::DurRecoveryUnit()
-    : _writeCount(0), _writeBytes(0), _mustRollback(false), _rollbackWritesDisabled(false) {}
+    : _writeCount(0), _writeBytes(0), _inUnitOfWork(false), _rollbackWritesDisabled(false) {}
 
 void DurRecoveryUnit::beginUnitOfWork(OperationContext* opCtx) {
-    _startOfUncommittedChangesForLevel.push_back(Indexes(_changes.size(), _writeCount));
+    invariant(!_inUnitOfWork);
+    _inUnitOfWork = true;
 }
 
 void DurRecoveryUnit::commitUnitOfWork() {
-    invariant(inAUnitOfWork());
-    invariant(!_mustRollback);
-
-    if (!inOutermostUnitOfWork()) {
-        // If we are nested, make all changes for this level part of the containing UnitOfWork.
-        // They will be added to the global damages list once the outermost UnitOfWork commits,
-        // which it must now do.
-        if (haveUncommittedChangesAtCurrentLevel()) {
-            _startOfUncommittedChangesForLevel.back() = Indexes(_changes.size(), _writeCount);
-        }
-        return;
-    }
+    invariant(_inUnitOfWork);
 
     commitChanges();
 
     // global journal flush opportunity
     getDur().commitIfNeeded();
+
+    resetChanges();
 }
 
-void DurRecoveryUnit::endUnitOfWork() {
-    invariant(inAUnitOfWork());
+void DurRecoveryUnit::abortUnitOfWork() {
+    invariant(_inUnitOfWork);
 
-    if (haveUncommittedChangesAtCurrentLevel()) {
-        _mustRollback = true;
-    }
-
-    // Reset back to default if this is the last unwind of the recovery unit. That way, it can
-    // be reused for new operations.
-    if (inOutermostUnitOfWork()) {
-        rollbackChanges();
-        _rollbackWritesDisabled = false;
-        dassert(_changes.empty() && _initialWrites.empty() && _mergedWrites.empty());
-        dassert(_preimageBuffer.empty() && !_writeCount && !_writeBytes && !_mustRollback);
-    }
-
-    _startOfUncommittedChangesForLevel.pop_back();
+    rollbackChanges();
+    resetChanges();
 }
 
-void DurRecoveryUnit::commitAndRestart() {
-    invariant(!inAUnitOfWork());
+void DurRecoveryUnit::abandonSnapshot() {
+    invariant(!_inUnitOfWork);
     // no-op since we have no transaction
 }
 
 void DurRecoveryUnit::commitChanges() {
-    invariant(!_mustRollback);
-    invariant(inOutermostUnitOfWork());
-    invariant(_startOfUncommittedChangesForLevel.front().changeIndex == 0);
-    invariant(_startOfUncommittedChangesForLevel.front().writeCount == 0);
-
     if (getDur().isDurable())
         markWritesForJournaling();
 
@@ -112,8 +87,6 @@ void DurRecoveryUnit::commitChanges() {
     } catch (...) {
         std::terminate();
     }
-
-    resetChanges();
 }
 
 void DurRecoveryUnit::markWritesForJournaling() {
@@ -184,13 +157,11 @@ void DurRecoveryUnit::resetChanges() {
     _mergedWrites.clear();
     _changes.clear();
     _preimageBuffer.clear();
+    _rollbackWritesDisabled = false;
+    _inUnitOfWork = false;
 }
 
 void DurRecoveryUnit::rollbackChanges() {
-    invariant(inOutermostUnitOfWork());
-    invariant(!_startOfUncommittedChangesForLevel.back().changeIndex);
-    invariant(!_startOfUncommittedChangesForLevel.back().writeCount);
-
     // First rollback disk writes, then Changes. This matches behavior in other storage engines
     // that either rollback a transaction or don't write a writebatch.
 
@@ -223,14 +194,11 @@ void DurRecoveryUnit::rollbackChanges() {
     } catch (...) {
         std::terminate();
     }
-
-    resetChanges();
-    _mustRollback = false;
 }
 
-bool DurRecoveryUnit::awaitCommit() {
-    invariant(!inAUnitOfWork());
-    return getDur().awaitCommit();
+bool DurRecoveryUnit::waitUntilDurable() {
+    invariant(!_inUnitOfWork);
+    return getDur().waitUntilDurable();
 }
 
 void DurRecoveryUnit::mergingWritingPtr(char* addr, size_t len) {
@@ -290,7 +258,7 @@ void DurRecoveryUnit::mergingWritingPtr(char* addr, size_t len) {
 }
 
 void* DurRecoveryUnit::writingPtr(void* addr, size_t len) {
-    invariant(inAUnitOfWork());
+    invariant(_inUnitOfWork);
 
     if (len == 0) {
         return addr;  // Don't need to do anything for empty ranges.
@@ -302,18 +270,14 @@ void* DurRecoveryUnit::writingPtr(void* addr, size_t len) {
     _writeBytes += len;
     char* const data = static_cast<char*>(addr);
 
-//  The initial writes are stored in a faster, but less memory-efficient way. This will
-//  typically be enough for simple operations, where the extra cost of incremental
-//  coalescing and merging would be too much. For larger writes, more redundancy is
-//  is expected, so the cost of checking for duplicates is offset by savings in copying
-//  and allocating preimage buffers. Total memory use of the preimage buffer may be up to
-//  kMaxUnmergedPreimageBytes larger than the amount memory covered by the write intents.
+    //  The initial writes are stored in a faster, but less memory-efficient way. This will
+    //  typically be enough for simple operations, where the extra cost of incremental
+    //  coalescing and merging would be too much. For larger writes, more redundancy is
+    //  is expected, so the cost of checking for duplicates is offset by savings in copying
+    //  and allocating preimage buffers. Total memory use of the preimage buffer may be up to
+    //  kMaxUnmergedPreimageBytes larger than the amount memory covered by the write intents.
 
-#ifdef _DEBUG
-    const size_t kMaxUnmergedPreimageBytes = 16 * 1024;
-#else
-    const size_t kMaxUnmergedPreimageBytes = 10 * 1024 * 1024;
-#endif
+    const size_t kMaxUnmergedPreimageBytes = kDebugBuild ? 16 * 1024 : 10 * 1024 * 1024;
 
     if (_preimageBuffer.size() + len > kMaxUnmergedPreimageBytes) {
         mergingWritingPtr(data, len);
@@ -340,12 +304,12 @@ void* DurRecoveryUnit::writingPtr(void* addr, size_t len) {
 }
 
 void DurRecoveryUnit::setRollbackWritesDisabled() {
-    invariant(inOutermostUnitOfWork());
+    invariant(_inUnitOfWork);
     _rollbackWritesDisabled = true;
 }
 
 void DurRecoveryUnit::registerChange(Change* change) {
-    invariant(inAUnitOfWork());
+    invariant(_inUnitOfWork);
     _changes.push_back(change);
 }
 

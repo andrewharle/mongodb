@@ -32,6 +32,7 @@ no_scale_per_second_list = [
     'transaction: transaction checkpoint total time (msecs)',
     'transaction: transaction range of IDs currently pinned',
     'transaction: transaction range of IDs currently pinned by a checkpoint',
+    'transaction: transaction range of IDs currently pinned by named snapshots',
     'block-manager: checkpoint size',
     'block-manager: file allocation unit size',
     'block-manager: file magic number',
@@ -43,6 +44,7 @@ no_scale_per_second_list = [
     'btree: column-store internal pages',
     'btree: column-store variable-size deleted values',
     'btree: column-store variable-size leaf pages',
+    'btree: column-store variable-size RLE encoded values',
     'btree: fixed-record size',
     'btree: maximum internal page key size',
     'btree: maximum internal page size',
@@ -63,8 +65,10 @@ no_scale_per_second_list = [
     'session: open cursor count',
 ]
 no_clear_list = [
+    'async: maximum work queue length',
     'cache: bytes currently in the cache',
     'cache: maximum bytes configured',
+    'cache: maximum page size at eviction',
     'cache: pages currently held in the cache',
     'cache: percentage overhead',
     'cache: tracked bytes belonging to internal pages in the cache',
@@ -92,6 +96,7 @@ no_clear_list = [
     'transaction: transaction checkpoint total time (msecs)',
     'transaction: transaction range of IDs currently pinned',
     'transaction: transaction range of IDs currently pinned by a checkpoint',
+    'transaction: transaction range of IDs currently pinned by named snapshots',
     'btree: btree checkpoint generation',
     'session: open cursor count',
 ]

@@ -31,56 +31,55 @@
  * the DBClientReplicaSet talks to, so the tests only covers the client side logic.
  */
 
-#include "mongo/bson/bson_field.h"
-#include "mongo/client/connpool.h"
-#include "mongo/client/dbclientinterface.h"
-#include "mongo/client/dbclient_rs.h"
-#include "mongo/client/replica_set_monitor.h"
-#include "mongo/dbtests/mock/mock_conn_registry.h"
-#include "mongo/dbtests/mock/mock_replica_set.h"
-#include "mongo/unittest/unittest.h"
-#include "mongo/util/assert_util.h"
-
-#include <boost/scoped_ptr.hpp>
 #include <map>
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
+#include "mongo/base/string_data.h"
+#include "mongo/client/connpool.h"
+#include "mongo/client/dbclient_rs.h"
+#include "mongo/client/dbclientinterface.h"
+#include "mongo/client/replica_set_monitor.h"
+#include "mongo/db/jsobj.h"
+#include "mongo/dbtests/mock/mock_conn_registry.h"
+#include "mongo/dbtests/mock/mock_replica_set.h"
+#include "mongo/rpc/metadata/server_selection_metadata.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/assert_util.h"
+
+namespace mongo {
 namespace {
-using boost::scoped_ptr;
-using std::auto_ptr;
-using std::map;
+
 using std::make_pair;
+using std::map;
 using std::pair;
 using std::string;
+using std::unique_ptr;
 using std::vector;
 
-using mongo::AssertionException;
-using mongo::BSONArray;
-using mongo::BSONElement;
-using mongo::BSONField;
-using mongo::BSONObj;
-using mongo::ConnectionString;
-using mongo::DBClientCursor;
-using mongo::DBClientReplicaSet;
-using mongo::HostAndPort;
-using mongo::HostField;
-using mongo::IdentityNS;
-using mongo::MockReplicaSet;
-using mongo::Query;
-using mongo::ReadPreference;
-using mongo::ReplicaSetMonitor;
-using mongo::ScopedDbConnection;
-using mongo::TagSet;
+/**
+ * Constructs a metadata object containing the passed server selection metadata.
+ */
+BSONObj makeMetadata(ReadPreference rp, TagSet tagSet, bool secondaryOk) {
+    BSONObjBuilder metadataBob;
+    rpc::ServerSelectionMetadata ssm(secondaryOk, ReadPreferenceSetting(rp, tagSet));
+    uassertStatusOK(ssm.writeToMetadata(&metadataBob));
+    return metadataBob.obj();
+}
 
 /**
  * Basic fixture with one primary and one secondary.
  */
-class BasicRS : public mongo::unittest::Test {
+class BasicRS : public unittest::Test {
 protected:
     void setUp() {
         ReplicaSetMonitor::cleanup();
+
+        // Set the number of consecutive failed checks to 2 so the test doesn't run too long
+        ReplicaSetMonitor::maxConsecutiveFailedChecks = 2;
+
         _replSet.reset(new MockReplicaSet("test", 2));
         ConnectionString::setConnectionHook(mongo::MockConnRegistry::get()->getConnStrHook());
     }
@@ -97,36 +96,66 @@ protected:
     }
 
 private:
-    boost::scoped_ptr<MockReplicaSet> _replSet;
+    std::unique_ptr<MockReplicaSet> _replSet;
 };
 
-TEST_F(BasicRS, ReadFromPrimary) {
+void assertOneOfNodesSelected(MockReplicaSet* replSet,
+                              ReadPreference rp,
+                              const std::vector<std::string> hostNames) {
+    DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts());
+    ReplicaSetMonitor::get(replSet->getSetName())->startOrContinueRefresh().refreshAll();
+    bool secondaryOk = (rp != ReadPreference::PrimaryOnly);
+    auto tagSet = secondaryOk ? TagSet() : TagSet::primaryOnly();
+    // We need the command to be a "SecOk command"
+    auto res = replConn.runCommandWithMetadata(
+        "foo", "dbStats", makeMetadata(rp, tagSet, secondaryOk), BSON("dbStats" << 1));
+    std::unordered_set<HostAndPort> hostSet;
+    for (const auto& hostName : hostNames) {
+        hostSet.emplace(hostName);
+    }
+    ASSERT_EQ(hostSet.count(HostAndPort{res->getCommandReply()["host"].str()}), 1u);
+}
+
+void assertNodeSelected(MockReplicaSet* replSet, ReadPreference rp, StringData host) {
+    assertOneOfNodesSelected(replSet, rp, std::vector<std::string>{host.toString()});
+}
+
+TEST_F(BasicRS, QueryPrimary) {
     MockReplicaSet* replSet = getReplSet();
     DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts());
 
     Query query;
-    query.readPref(mongo::ReadPreference_PrimaryOnly, BSONArray());
+    query.readPref(mongo::ReadPreference::PrimaryOnly, BSONArray());
 
     // Note: IdentityNS contains the name of the server.
-    auto_ptr<DBClientCursor> cursor = replConn.query(IdentityNS, query);
+    unique_ptr<DBClientCursor> cursor = replConn.query(IdentityNS, query);
     BSONObj doc = cursor->next();
     ASSERT_EQUALS(replSet->getPrimary(), doc[HostField.name()].str());
 }
 
-TEST_F(BasicRS, SecondaryOnly) {
+TEST_F(BasicRS, CommandPrimary) {
+    assertNodeSelected(getReplSet(), ReadPreference::PrimaryOnly, getReplSet()->getPrimary());
+}
+
+TEST_F(BasicRS, QuerySecondaryOnly) {
     MockReplicaSet* replSet = getReplSet();
     DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts());
 
     Query query;
-    query.readPref(mongo::ReadPreference_SecondaryOnly, BSONArray());
+    query.readPref(mongo::ReadPreference::SecondaryOnly, BSONArray());
 
     // Note: IdentityNS contains the name of the server.
-    auto_ptr<DBClientCursor> cursor = replConn.query(IdentityNS, query);
+    unique_ptr<DBClientCursor> cursor = replConn.query(IdentityNS, query);
     BSONObj doc = cursor->next();
     ASSERT_EQUALS(replSet->getSecondaries().front(), doc[HostField.name()].str());
 }
 
-TEST_F(BasicRS, PrimaryPreferred) {
+TEST_F(BasicRS, CommandSecondaryOnly) {
+    assertOneOfNodesSelected(
+        getReplSet(), ReadPreference::SecondaryOnly, getReplSet()->getSecondaries());
+}
+
+TEST_F(BasicRS, QueryPrimaryPreferred) {
     MockReplicaSet* replSet = getReplSet();
     DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts());
 
@@ -134,15 +163,19 @@ TEST_F(BasicRS, PrimaryPreferred) {
     ReplicaSetMonitor::get(replSet->getSetName())->startOrContinueRefresh().refreshAll();
 
     Query query;
-    query.readPref(mongo::ReadPreference_PrimaryPreferred, BSONArray());
+    query.readPref(mongo::ReadPreference::PrimaryPreferred, BSONArray());
 
     // Note: IdentityNS contains the name of the server.
-    auto_ptr<DBClientCursor> cursor = replConn.query(IdentityNS, query);
+    unique_ptr<DBClientCursor> cursor = replConn.query(IdentityNS, query);
     BSONObj doc = cursor->next();
     ASSERT_EQUALS(replSet->getPrimary(), doc[HostField.name()].str());
 }
 
-TEST_F(BasicRS, SecondaryPreferred) {
+TEST_F(BasicRS, CommandPrimaryPreferred) {
+    assertNodeSelected(getReplSet(), ReadPreference::PrimaryPreferred, getReplSet()->getPrimary());
+}
+
+TEST_F(BasicRS, QuerySecondaryPreferred) {
     MockReplicaSet* replSet = getReplSet();
     DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts());
 
@@ -150,21 +183,30 @@ TEST_F(BasicRS, SecondaryPreferred) {
     ReplicaSetMonitor::get(replSet->getSetName())->startOrContinueRefresh().refreshAll();
 
     Query query;
-    query.readPref(mongo::ReadPreference_SecondaryPreferred, BSONArray());
+    query.readPref(mongo::ReadPreference::SecondaryPreferred, BSONArray());
 
     // Note: IdentityNS contains the name of the server.
-    auto_ptr<DBClientCursor> cursor = replConn.query(IdentityNS, query);
+    unique_ptr<DBClientCursor> cursor = replConn.query(IdentityNS, query);
     BSONObj doc = cursor->next();
     ASSERT_EQUALS(replSet->getSecondaries().front(), doc[HostField.name()].str());
+}
+
+TEST_F(BasicRS, CommandSecondaryPreferred) {
+    assertOneOfNodesSelected(
+        getReplSet(), ReadPreference::SecondaryPreferred, getReplSet()->getSecondaries());
 }
 
 /**
  * Setup for 2 member replica set will all of the nodes down.
  */
-class AllNodesDown : public mongo::unittest::Test {
+class AllNodesDown : public unittest::Test {
 protected:
     void setUp() {
         ReplicaSetMonitor::cleanup();
+
+        // Set the number of consecutive failed checks to 2 so the test doesn't run too long
+        ReplicaSetMonitor::maxConsecutiveFailedChecks = 2;
+
         _replSet.reset(new MockReplicaSet("test", 2));
         ConnectionString::setConnectionHook(mongo::MockConnRegistry::get()->getConnStrHook());
 
@@ -187,61 +229,97 @@ protected:
     }
 
 private:
-    boost::scoped_ptr<MockReplicaSet> _replSet;
+    std::unique_ptr<MockReplicaSet> _replSet;
 };
 
-TEST_F(AllNodesDown, ReadFromPrimary) {
+void assertRunCommandWithReadPrefThrows(MockReplicaSet* replSet, ReadPreference rp) {
+    bool isPrimaryOnly = (rp == ReadPreference::PrimaryOnly);
+
+    bool secondaryOk = !isPrimaryOnly;
+    TagSet ts = isPrimaryOnly ? TagSet::primaryOnly() : TagSet();
+
+    DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts());
+    ASSERT_THROWS(replConn.runCommandWithMetadata(
+                      "foo", "whoami", makeMetadata(rp, ts, secondaryOk), BSON("dbStats" << 1)),
+                  AssertionException);
+}
+
+TEST_F(AllNodesDown, QueryPrimary) {
     MockReplicaSet* replSet = getReplSet();
     DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts());
 
     Query query;
-    query.readPref(mongo::ReadPreference_PrimaryOnly, BSONArray());
+    query.readPref(mongo::ReadPreference::PrimaryOnly, BSONArray());
     ASSERT_THROWS(replConn.query(IdentityNS, query), AssertionException);
 }
 
-TEST_F(AllNodesDown, SecondaryOnly) {
+TEST_F(AllNodesDown, CommandPrimary) {
+    assertRunCommandWithReadPrefThrows(getReplSet(), ReadPreference::PrimaryOnly);
+}
+
+TEST_F(AllNodesDown, QuerySecondaryOnly) {
     MockReplicaSet* replSet = getReplSet();
     DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts());
 
     Query query;
-    query.readPref(mongo::ReadPreference_SecondaryOnly, BSONArray());
+    query.readPref(mongo::ReadPreference::SecondaryOnly, BSONArray());
     ASSERT_THROWS(replConn.query(IdentityNS, query), AssertionException);
 }
 
-TEST_F(AllNodesDown, PrimaryPreferred) {
+TEST_F(AllNodesDown, CommandSecondaryOnly) {
+    assertRunCommandWithReadPrefThrows(getReplSet(), ReadPreference::SecondaryOnly);
+}
+
+TEST_F(AllNodesDown, QueryPrimaryPreferred) {
     MockReplicaSet* replSet = getReplSet();
     DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts());
 
     Query query;
-    query.readPref(mongo::ReadPreference_PrimaryPreferred, BSONArray());
+    query.readPref(mongo::ReadPreference::PrimaryPreferred, BSONArray());
     ASSERT_THROWS(replConn.query(IdentityNS, query), AssertionException);
 }
 
-TEST_F(AllNodesDown, SecondaryPreferred) {
+TEST_F(AllNodesDown, CommandPrimaryPreferred) {
+    assertRunCommandWithReadPrefThrows(getReplSet(), ReadPreference::PrimaryPreferred);
+}
+
+TEST_F(AllNodesDown, QuerySecondaryPreferred) {
     MockReplicaSet* replSet = getReplSet();
     DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts());
 
     Query query;
-    query.readPref(mongo::ReadPreference_SecondaryPreferred, BSONArray());
+    query.readPref(mongo::ReadPreference::SecondaryPreferred, BSONArray());
     ASSERT_THROWS(replConn.query(IdentityNS, query), AssertionException);
 }
 
-TEST_F(AllNodesDown, Nearest) {
+TEST_F(AllNodesDown, CommandSecondaryPreferred) {
+    assertRunCommandWithReadPrefThrows(getReplSet(), ReadPreference::SecondaryPreferred);
+}
+
+TEST_F(AllNodesDown, QueryNearest) {
     MockReplicaSet* replSet = getReplSet();
     DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts());
 
     Query query;
-    query.readPref(mongo::ReadPreference_Nearest, BSONArray());
+    query.readPref(mongo::ReadPreference::Nearest, BSONArray());
     ASSERT_THROWS(replConn.query(IdentityNS, query), AssertionException);
+}
+
+TEST_F(AllNodesDown, CommandNearest) {
+    assertRunCommandWithReadPrefThrows(getReplSet(), ReadPreference::Nearest);
 }
 
 /**
  * Setup for 2 member replica set with the primary down.
  */
-class PrimaryDown : public mongo::unittest::Test {
+class PrimaryDown : public unittest::Test {
 protected:
     void setUp() {
         ReplicaSetMonitor::cleanup();
+
+        // Set the number of consecutive failed checks to 2 so the test doesn't run too long
+        ReplicaSetMonitor::maxConsecutiveFailedChecks = 2;
+
         _replSet.reset(new MockReplicaSet("test", 2));
         ConnectionString::setConnectionHook(mongo::MockConnRegistry::get()->getConnStrHook());
         _replSet->kill(_replSet->getPrimary());
@@ -259,55 +337,74 @@ protected:
     }
 
 private:
-    boost::scoped_ptr<MockReplicaSet> _replSet;
+    std::unique_ptr<MockReplicaSet> _replSet;
 };
 
-TEST_F(PrimaryDown, ReadFromPrimary) {
+TEST_F(PrimaryDown, QueryPrimary) {
     MockReplicaSet* replSet = getReplSet();
     DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts());
 
     Query query;
-    query.readPref(mongo::ReadPreference_PrimaryOnly, BSONArray());
+    query.readPref(mongo::ReadPreference::PrimaryOnly, BSONArray());
     ASSERT_THROWS(replConn.query(IdentityNS, query), AssertionException);
 }
 
-TEST_F(PrimaryDown, SecondaryOnly) {
+TEST_F(PrimaryDown, CommandPrimary) {
+    assertRunCommandWithReadPrefThrows(getReplSet(), ReadPreference::PrimaryOnly);
+}
+
+TEST_F(PrimaryDown, QuerySecondaryOnly) {
     MockReplicaSet* replSet = getReplSet();
     DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts());
 
     Query query;
-    query.readPref(mongo::ReadPreference_SecondaryOnly, BSONArray());
+    query.readPref(mongo::ReadPreference::SecondaryOnly, BSONArray());
 
     // Note: IdentityNS contains the name of the server.
-    auto_ptr<DBClientCursor> cursor = replConn.query(IdentityNS, query);
+    unique_ptr<DBClientCursor> cursor = replConn.query(IdentityNS, query);
     BSONObj doc = cursor->next();
     ASSERT_EQUALS(replSet->getSecondaries().front(), doc[HostField.name()].str());
 }
 
-TEST_F(PrimaryDown, PrimaryPreferred) {
+TEST_F(PrimaryDown, CommandSecondaryOnly) {
+    assertOneOfNodesSelected(
+        getReplSet(), ReadPreference::SecondaryOnly, getReplSet()->getSecondaries());
+}
+
+TEST_F(PrimaryDown, QueryPrimaryPreferred) {
     MockReplicaSet* replSet = getReplSet();
     DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts());
 
     Query query;
-    query.readPref(mongo::ReadPreference_PrimaryPreferred, BSONArray());
+    query.readPref(mongo::ReadPreference::PrimaryPreferred, BSONArray());
 
     // Note: IdentityNS contains the name of the server.
-    auto_ptr<DBClientCursor> cursor = replConn.query(IdentityNS, query);
+    unique_ptr<DBClientCursor> cursor = replConn.query(IdentityNS, query);
     BSONObj doc = cursor->next();
     ASSERT_EQUALS(replSet->getSecondaries().front(), doc[HostField.name()].str());
 }
 
-TEST_F(PrimaryDown, SecondaryPreferred) {
+TEST_F(PrimaryDown, CommandPrimaryPreferred) {
+    assertOneOfNodesSelected(
+        getReplSet(), ReadPreference::PrimaryPreferred, getReplSet()->getSecondaries());
+}
+
+TEST_F(PrimaryDown, QuerySecondaryPreferred) {
     MockReplicaSet* replSet = getReplSet();
     DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts());
 
     Query query;
-    query.readPref(mongo::ReadPreference_SecondaryPreferred, BSONArray());
+    query.readPref(mongo::ReadPreference::SecondaryPreferred, BSONArray());
 
     // Note: IdentityNS contains the name of the server.
-    auto_ptr<DBClientCursor> cursor = replConn.query(IdentityNS, query);
+    unique_ptr<DBClientCursor> cursor = replConn.query(IdentityNS, query);
     BSONObj doc = cursor->next();
     ASSERT_EQUALS(replSet->getSecondaries().front(), doc[HostField.name()].str());
+}
+
+TEST_F(PrimaryDown, CommandSecondaryPreferred) {
+    assertOneOfNodesSelected(
+        getReplSet(), ReadPreference::SecondaryPreferred, getReplSet()->getSecondaries());
 }
 
 TEST_F(PrimaryDown, Nearest) {
@@ -315,8 +412,8 @@ TEST_F(PrimaryDown, Nearest) {
     DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts());
 
     Query query;
-    query.readPref(mongo::ReadPreference_Nearest, BSONArray());
-    auto_ptr<DBClientCursor> cursor = replConn.query(IdentityNS, query);
+    query.readPref(mongo::ReadPreference::Nearest, BSONArray());
+    unique_ptr<DBClientCursor> cursor = replConn.query(IdentityNS, query);
     BSONObj doc = cursor->next();
     ASSERT_EQUALS(replSet->getSecondaries().front(), doc[HostField.name()].str());
 }
@@ -324,10 +421,14 @@ TEST_F(PrimaryDown, Nearest) {
 /**
  * Setup for 2 member replica set with the secondary down.
  */
-class SecondaryDown : public mongo::unittest::Test {
+class SecondaryDown : public unittest::Test {
 protected:
     void setUp() {
         ReplicaSetMonitor::cleanup();
+
+        // Set the number of consecutive failed checks to 2 so the test doesn't run too long
+        ReplicaSetMonitor::maxConsecutiveFailedChecks = 2;
+
         _replSet.reset(new MockReplicaSet("test", 2));
         ConnectionString::setConnectionHook(mongo::MockConnRegistry::get()->getConnStrHook());
 
@@ -346,75 +447,95 @@ protected:
     }
 
 private:
-    boost::scoped_ptr<MockReplicaSet> _replSet;
+    std::unique_ptr<MockReplicaSet> _replSet;
 };
 
-TEST_F(SecondaryDown, ReadFromPrimary) {
+TEST_F(SecondaryDown, QueryPrimary) {
     MockReplicaSet* replSet = getReplSet();
     DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts());
 
     Query query;
-    query.readPref(mongo::ReadPreference_PrimaryOnly, BSONArray());
+    query.readPref(mongo::ReadPreference::PrimaryOnly, BSONArray());
 
     // Note: IdentityNS contains the name of the server.
-    auto_ptr<DBClientCursor> cursor = replConn.query(IdentityNS, query);
+    unique_ptr<DBClientCursor> cursor = replConn.query(IdentityNS, query);
     BSONObj doc = cursor->next();
     ASSERT_EQUALS(replSet->getPrimary(), doc[HostField.name()].str());
 }
 
-TEST_F(SecondaryDown, SecondaryOnly) {
+TEST_F(SecondaryDown, CommandPrimary) {
+    assertNodeSelected(getReplSet(), ReadPreference::PrimaryOnly, getReplSet()->getPrimary());
+}
+
+TEST_F(SecondaryDown, QuerySecondaryOnly) {
     MockReplicaSet* replSet = getReplSet();
     DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts());
 
     Query query;
-    query.readPref(mongo::ReadPreference_SecondaryOnly, BSONArray());
+    query.readPref(mongo::ReadPreference::SecondaryOnly, BSONArray());
     ASSERT_THROWS(replConn.query(IdentityNS, query), AssertionException);
 }
 
-TEST_F(SecondaryDown, PrimaryPreferred) {
+TEST_F(SecondaryDown, CommandSecondaryOnly) {
+    assertRunCommandWithReadPrefThrows(getReplSet(), ReadPreference::SecondaryOnly);
+}
+
+TEST_F(SecondaryDown, QueryPrimaryPreferred) {
     MockReplicaSet* replSet = getReplSet();
     DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts());
 
     Query query;
-    query.readPref(mongo::ReadPreference_PrimaryPreferred, BSONArray());
+    query.readPref(mongo::ReadPreference::PrimaryPreferred, BSONArray());
 
     // Note: IdentityNS contains the name of the server.
-    auto_ptr<DBClientCursor> cursor = replConn.query(IdentityNS, query);
+    unique_ptr<DBClientCursor> cursor = replConn.query(IdentityNS, query);
     BSONObj doc = cursor->next();
     ASSERT_EQUALS(replSet->getPrimary(), doc[HostField.name()].str());
 }
 
-TEST_F(SecondaryDown, SecondaryPreferred) {
+TEST_F(SecondaryDown, CommandPrimaryPreferred) {
+    assertNodeSelected(getReplSet(), ReadPreference::PrimaryPreferred, getReplSet()->getPrimary());
+}
+
+TEST_F(SecondaryDown, QuerySecondaryPreferred) {
     MockReplicaSet* replSet = getReplSet();
     DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts());
 
     Query query;
-    query.readPref(mongo::ReadPreference_SecondaryPreferred, BSONArray());
+    query.readPref(mongo::ReadPreference::SecondaryPreferred, BSONArray());
 
     // Note: IdentityNS contains the name of the server.
-    auto_ptr<DBClientCursor> cursor = replConn.query(IdentityNS, query);
+    unique_ptr<DBClientCursor> cursor = replConn.query(IdentityNS, query);
     BSONObj doc = cursor->next();
     ASSERT_EQUALS(replSet->getPrimary(), doc[HostField.name()].str());
 }
 
-TEST_F(SecondaryDown, Nearest) {
+TEST_F(SecondaryDown, CommandSecondaryPreferred) {
+    assertNodeSelected(getReplSet(), ReadPreference::PrimaryPreferred, getReplSet()->getPrimary());
+}
+
+TEST_F(SecondaryDown, QueryNearest) {
     MockReplicaSet* replSet = getReplSet();
     DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts());
 
     Query query;
-    query.readPref(mongo::ReadPreference_Nearest, BSONArray());
+    query.readPref(mongo::ReadPreference::Nearest, BSONArray());
 
     // Note: IdentityNS contains the name of the server.
-    auto_ptr<DBClientCursor> cursor = replConn.query(IdentityNS, query);
+    unique_ptr<DBClientCursor> cursor = replConn.query(IdentityNS, query);
     BSONObj doc = cursor->next();
     ASSERT_EQUALS(replSet->getPrimary(), doc[HostField.name()].str());
+}
+
+TEST_F(SecondaryDown, CommandNearest) {
+    assertNodeSelected(getReplSet(), ReadPreference::Nearest, getReplSet()->getPrimary());
 }
 
 /**
  * Warning: Tests running this fixture cannot be run in parallel with other tests
  * that uses ConnectionString::setConnectionHook
  */
-class TaggedFiveMemberRS : public mongo::unittest::Test {
+class TaggedFiveMemberRS : public unittest::Test {
 protected:
     void setUp() {
         // Tests for pinning behavior require this.
@@ -423,6 +544,9 @@ protected:
         // This shuts down the background RSMWatcher thread and prevents it from running. These
         // tests depend on controlling when the RSMs are updated.
         ReplicaSetMonitor::cleanup();
+
+        // Set the number of consecutive failed checks to 2 so the test doesn't run too long
+        ReplicaSetMonitor::maxConsecutiveFailedChecks = 2;
 
         _replSet.reset(new MockReplicaSet("test", 5));
         _originalConnectionHook = ConnectionString::getConnectionHook();
@@ -530,7 +654,7 @@ protected:
 
 private:
     ConnectionString::ConnectionHook* _originalConnectionHook;
-    boost::scoped_ptr<MockReplicaSet> _replSet;
+    std::unique_ptr<MockReplicaSet> _replSet;
 };
 
 TEST_F(TaggedFiveMemberRS, ConnShouldPinIfSameSettings) {
@@ -543,18 +667,18 @@ TEST_F(TaggedFiveMemberRS, ConnShouldPinIfSameSettings) {
     string dest;
     {
         Query query;
-        query.readPref(mongo::ReadPreference_PrimaryPreferred, BSONArray());
+        query.readPref(mongo::ReadPreference::PrimaryPreferred, BSONArray());
 
         // Note: IdentityNS contains the name of the server.
-        auto_ptr<DBClientCursor> cursor = replConn.query(IdentityNS, query);
+        unique_ptr<DBClientCursor> cursor = replConn.query(IdentityNS, query);
         BSONObj doc = cursor->next();
         dest = doc[HostField.name()].str();
     }
 
     {
         Query query;
-        query.readPref(mongo::ReadPreference_PrimaryPreferred, BSONArray());
-        auto_ptr<DBClientCursor> cursor = replConn.query(IdentityNS, query);
+        query.readPref(mongo::ReadPreference::PrimaryPreferred, BSONArray());
+        unique_ptr<DBClientCursor> cursor = replConn.query(IdentityNS, query);
         BSONObj doc = cursor->next();
         const string newDest = doc[HostField.name()].str();
         ASSERT_EQUALS(dest, newDest);
@@ -571,10 +695,10 @@ TEST_F(TaggedFiveMemberRS, ConnShouldNotPinIfHostMarkedAsFailed) {
     string dest;
     {
         Query query;
-        query.readPref(mongo::ReadPreference_PrimaryPreferred, BSONArray());
+        query.readPref(mongo::ReadPreference::PrimaryPreferred, BSONArray());
 
         // Note: IdentityNS contains the name of the server.
-        auto_ptr<DBClientCursor> cursor = replConn.query(IdentityNS, query);
+        unique_ptr<DBClientCursor> cursor = replConn.query(IdentityNS, query);
         BSONObj doc = cursor->next();
         dest = doc[HostField.name()].str();
     }
@@ -586,8 +710,8 @@ TEST_F(TaggedFiveMemberRS, ConnShouldNotPinIfHostMarkedAsFailed) {
 
     {
         Query query;
-        query.readPref(mongo::ReadPreference_PrimaryPreferred, BSONArray());
-        auto_ptr<DBClientCursor> cursor = replConn.query(IdentityNS, query);
+        query.readPref(mongo::ReadPreference::PrimaryPreferred, BSONArray());
+        unique_ptr<DBClientCursor> cursor = replConn.query(IdentityNS, query);
         BSONObj doc = cursor->next();
         const string newDest = doc[HostField.name()].str();
         ASSERT_NOT_EQUALS(dest, newDest);
@@ -607,10 +731,10 @@ TEST_F(TaggedFiveMemberRS, ConnShouldNotPinIfDiffMode) {
     string dest;
     {
         Query query;
-        query.readPref(mongo::ReadPreference_SecondaryPreferred, BSONArray());
+        query.readPref(mongo::ReadPreference::SecondaryPreferred, BSONArray());
 
         // Note: IdentityNS contains the name of the server.
-        auto_ptr<DBClientCursor> cursor = replConn.query(IdentityNS, query);
+        unique_ptr<DBClientCursor> cursor = replConn.query(IdentityNS, query);
         BSONObj doc = cursor->next();
         dest = doc[HostField.name()].str();
         ASSERT_NOT_EQUALS(dest, replSet->getPrimary());
@@ -618,8 +742,8 @@ TEST_F(TaggedFiveMemberRS, ConnShouldNotPinIfDiffMode) {
 
     {
         Query query;
-        query.readPref(mongo::ReadPreference_SecondaryOnly, BSONArray());
-        auto_ptr<DBClientCursor> cursor = replConn.query(IdentityNS, query);
+        query.readPref(mongo::ReadPreference::SecondaryOnly, BSONArray());
+        unique_ptr<DBClientCursor> cursor = replConn.query(IdentityNS, query);
         BSONObj doc = cursor->next();
         const string newDest = doc[HostField.name()].str();
         ASSERT_NOT_EQUALS(dest, newDest);
@@ -639,12 +763,12 @@ TEST_F(TaggedFiveMemberRS, ConnShouldNotPinIfDiffTag) {
     string dest;
     {
         Query query;
-        query.readPref(mongo::ReadPreference_SecondaryPreferred,
+        query.readPref(mongo::ReadPreference::SecondaryPreferred,
                        BSON_ARRAY(BSON("dc"
                                        << "sf")));
 
         // Note: IdentityNS contains the name of the server.
-        auto_ptr<DBClientCursor> cursor = replConn.query(IdentityNS, query);
+        unique_ptr<DBClientCursor> cursor = replConn.query(IdentityNS, query);
         BSONObj doc = cursor->next();
         dest = doc[HostField.name()].str();
         ASSERT_NOT_EQUALS(dest, replSet->getPrimary());
@@ -653,8 +777,8 @@ TEST_F(TaggedFiveMemberRS, ConnShouldNotPinIfDiffTag) {
     {
         Query query;
         vector<pair<string, string>> tagSet;
-        query.readPref(mongo::ReadPreference_SecondaryPreferred, BSON_ARRAY(BSON("group" << 1)));
-        auto_ptr<DBClientCursor> cursor = replConn.query(IdentityNS, query);
+        query.readPref(mongo::ReadPreference::SecondaryPreferred, BSON_ARRAY(BSON("group" << 1)));
+        unique_ptr<DBClientCursor> cursor = replConn.query(IdentityNS, query);
         BSONObj doc = cursor->next();
         const string newDest = doc[HostField.name()].str();
         ASSERT_NOT_EQUALS(dest, newDest);
@@ -677,9 +801,11 @@ TEST_F(TaggedFiveMemberRS, SlaveConnReturnsSecConn) {
     mongo::DBClientConnection& secConn = replConn.slaveConn();
 
     // Note: IdentityNS contains the name of the server.
-    auto_ptr<DBClientCursor> cursor = secConn.query(IdentityNS, Query());
+    unique_ptr<DBClientCursor> cursor = secConn.query(IdentityNS, Query());
     BSONObj doc = cursor->next();
     dest = doc[HostField.name()].str();
     ASSERT_NOT_EQUALS(dest, replSet->getPrimary());
 }
-}
+
+}  // namespace
+}  // namespace mongo

@@ -33,12 +33,10 @@
 #include <map>
 #include <string>
 
-#include <boost/scoped_ptr.hpp>
-#include <boost/thread/mutex.hpp>
-
 #include "mongo/db/storage/kv/kv_catalog.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/storage_engine.h"
+#include "mongo/stdx/mutex.h"
 
 namespace mongo {
 
@@ -48,17 +46,18 @@ class KVDatabaseCatalogEntry;
 
 struct KVStorageEngineOptions {
     KVStorageEngineOptions()
-        : directoryPerDB(false), directoryForIndexes(false), forRepair(false) {}
+        : directoryPerDB(false), directoryForIndexes(false), ephemeral(false), forRepair(false) {}
 
     bool directoryPerDB;
     bool directoryForIndexes;
+    bool ephemeral;
     bool forRepair;
 };
 
-class KVStorageEngine : public StorageEngine {
+class KVStorageEngine final : public StorageEngine {
 public:
     /**
-     * @param engine - owneership passes to me
+     * @param engine - ownership passes to me
      */
     KVStorageEngine(KVEngine* engine,
                     const KVStorageEngineOptions& options = KVStorageEngineOptions());
@@ -70,24 +69,31 @@ public:
 
     virtual void listDatabases(std::vector<std::string>* out) const;
 
-    virtual DatabaseCatalogEntry* getDatabaseCatalogEntry(OperationContext* opCtx,
-                                                          const StringData& db);
+    virtual DatabaseCatalogEntry* getDatabaseCatalogEntry(OperationContext* opCtx, StringData db);
 
     virtual bool supportsDocLocking() const {
         return _supportsDocLocking;
     }
 
-    virtual Status closeDatabase(OperationContext* txn, const StringData& db);
+    virtual Status closeDatabase(OperationContext* txn, StringData db);
 
-    virtual Status dropDatabase(OperationContext* txn, const StringData& db);
+    virtual Status dropDatabase(OperationContext* txn, StringData db);
 
     virtual int flushAllFiles(bool sync);
 
+    virtual Status beginBackup(OperationContext* txn);
+
+    virtual void endBackup(OperationContext* txn);
+
     virtual bool isDurable() const;
+
+    virtual bool isEphemeral() const;
 
     virtual Status repairRecordStore(OperationContext* txn, const std::string& ns);
 
     virtual void cleanShutdown();
+
+    SnapshotManager* getSnapshotManager() const final;
 
     // ------ kv ------
 
@@ -111,15 +117,18 @@ private:
     KVStorageEngineOptions _options;
 
     // This must be the first member so it is destroyed last.
-    boost::scoped_ptr<KVEngine> _engine;
+    std::unique_ptr<KVEngine> _engine;
 
     const bool _supportsDocLocking;
 
-    boost::scoped_ptr<RecordStore> _catalogRecordStore;
-    boost::scoped_ptr<KVCatalog> _catalog;
+    std::unique_ptr<RecordStore> _catalogRecordStore;
+    std::unique_ptr<KVCatalog> _catalog;
 
     typedef std::map<std::string, KVDatabaseCatalogEntry*> DBMap;
     DBMap _dbs;
-    mutable boost::mutex _dbsLock;
+    mutable stdx::mutex _dbsLock;
+
+    // Flag variable that states if the storage engine is in backup mode.
+    bool _inBackupMode = false;
 };
 }

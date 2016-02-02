@@ -17,16 +17,10 @@
 #ifdef HAVE_LIBTCMALLOC
 #include <gperftools/tcmalloc.h>
 
-/*
- * Define HAVE_POSIX_MEMALIGN explicitly since TCMalloc supports it
- */
-#define	HAVE_POSIX_MEMALIGN 1
-
 #define	calloc			tc_calloc
 #define	realloc 		tc_realloc
 #define	posix_memalign 		tc_posix_memalign
 #define	free 			tc_free
-
 #endif
 
 /*
@@ -49,6 +43,12 @@ __wt_calloc(WT_SESSION_IMPL *session, size_t number, size_t size, void *retp)
 	void *p;
 
 	/*
+	 * Defensive: if our caller doesn't handle errors correctly, ensure a
+	 * free won't fail.
+	 */
+	*(void **)retp = NULL;
+
+	/*
 	 * !!!
 	 * This function MUST handle a NULL WT_SESSION_IMPL handle.
 	 */
@@ -58,7 +58,9 @@ __wt_calloc(WT_SESSION_IMPL *session, size_t number, size_t size, void *retp)
 		WT_STAT_FAST_CONN_INCR(session, memory_allocation);
 
 	if ((p = calloc(number, size)) == NULL)
-		WT_RET_MSG(session, __wt_errno(), "memory allocation");
+		WT_RET_MSG(session, __wt_errno(),
+		    "memory allocation of %" WT_SIZET_FMT " bytes failed",
+		    size * number);
 
 	*(void **)retp = p;
 	return (0);
@@ -100,7 +102,9 @@ __wt_realloc(WT_SESSION_IMPL *session,
 	}
 
 	if ((p = realloc(p, bytes_to_allocate)) == NULL)
-		WT_RET_MSG(session, __wt_errno(), "memory allocation");
+		WT_RET_MSG(session, __wt_errno(),
+		    "memory allocation of %" WT_SIZET_FMT " bytes failed",
+		    bytes_to_allocate);
 
 	/*
 	 * Clear the allocated memory -- an application might: allocate memory,
@@ -171,7 +175,9 @@ __wt_realloc_aligned(WT_SESSION_IMPL *session,
 		if ((ret = posix_memalign(&newp,
 		    S2C(session)->buffer_alignment,
 		    bytes_to_allocate)) != 0)
-			WT_RET_MSG(session, ret, "memory allocation");
+			WT_RET_MSG(session, ret,
+			     "memory allocation of %" WT_SIZET_FMT
+			     " bytes failed", bytes_to_allocate);
 
 		if (p != NULL)
 			memcpy(newp, p, bytes_allocated);
@@ -225,17 +231,6 @@ __wt_strndup(WT_SESSION_IMPL *session, const void *str, size_t len, void *retp)
 
 	*(void **)retp = p;
 	return (0);
-}
-
-/*
- * __wt_strdup --
- *	ANSI strdup function.
- */
-int
-__wt_strdup(WT_SESSION_IMPL *session, const char *str, void *retp)
-{
-	return (__wt_strndup(
-	    session, str, (str == NULL) ? 0 : strlen(str), retp));
 }
 
 /*

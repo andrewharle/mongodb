@@ -60,9 +60,8 @@ public:
              BSONObj& cmdObj,
              int,
              string& errmsg,
-             BSONObjBuilder& result,
-             bool fromRepl) {
-        AuthorizationSession* authSession = ClientBasic::getCurrent()->getAuthorizationSession();
+             BSONObjBuilder& result) {
+        AuthorizationSession* authSession = AuthorizationSession::get(ClientBasic::getCurrent());
 
         bool showPrivileges;
         Status status =

@@ -28,26 +28,23 @@
 
 #include "mongo/platform/basic.h"
 
-#include <boost/scoped_ptr.hpp>
-#include <boost/thread/locks.hpp>
-
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/curop.h"
-#include "mongo/db/currentop_command.h"
-#include "mongo/db/global_environment_experiment.h"
+#include "mongo/db/dbwebserver.h"
 #include "mongo/db/matcher/expression_parser.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/dbwebserver.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/stats/fill_locker_info.h"
 #include "mongo/util/mongoutils/html.h"
 #include "mongo/util/stringutils.h"
 
 namespace mongo {
 
-using boost::scoped_ptr;
+using std::unique_ptr;
 using std::string;
 
 namespace {
@@ -77,36 +74,32 @@ public:
 
            << "</tr>\n";
 
-        _processAllClients(ss);
+        _processAllClients(txn->getClient()->getServiceContext(), ss);
 
         ss << "</table>\n";
     }
 
 private:
-    static void _processAllClients(std::stringstream& ss) {
+    static void _processAllClients(ServiceContext* service, std::stringstream& ss) {
         using namespace html;
 
-        boost::mutex::scoped_lock scopedLock(Client::clientsMutex);
-
-        ClientSet::const_iterator it = Client::clients.begin();
-        for (; it != Client::clients.end(); it++) {
-            Client* client = *it;
+        for (ServiceContext::LockedClientsCursor cursor(service); Client* client = cursor.next();) {
             invariant(client);
 
             // Make the client stable
-            boost::unique_lock<Client> clientLock(*client);
+            stdx::lock_guard<Client> lk(*client);
             const OperationContext* txn = client->getOperationContext();
             if (!txn)
                 continue;
 
-            CurOp* curOp = txn->getCurOp();
+            CurOp* curOp = CurOp::get(txn);
             if (!curOp)
                 continue;
 
             ss << "<tr><td>" << client->desc() << "</td>";
 
-            tablecell(ss, curOp->opNum());
-            tablecell(ss, curOp->active());
+            tablecell(ss, txn->getOpID());
+            tablecell(ss, true);
 
             // LockState
             {
@@ -119,13 +112,9 @@ private:
                 tablecell(ss, lockerInfoBuilder.obj());
             }
 
-            if (curOp->active()) {
-                tablecell(ss, curOp->elapsedSeconds());
-            } else {
-                tablecell(ss, "");
-            }
+            tablecell(ss, curOp->elapsedSeconds());
 
-            tablecell(ss, curOp->getOp());
+            tablecell(ss, curOp->getNetworkOp());
             tablecell(ss, html::escape(curOp->getNS()));
 
             if (curOp->haveQuery()) {
@@ -134,7 +123,7 @@ private:
                 tablecell(ss, "");
             }
 
-            tablecell(ss, curOp->getRemoteString());
+            tablecell(ss, client->clientAddress(true /*includePort*/));
 
             tablecell(ss, curOp->getMessage());
             tablecell(ss, curOp->getProgressMeter().toString());
@@ -161,7 +150,7 @@ public:
     virtual Status checkAuthForCommand(ClientBasic* client,
                                        const std::string& dbname,
                                        const BSONObj& cmdObj) {
-        if (client->getAuthorizationSession()->isAuthorizedForActionsOnResource(
+        if (AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
                 ResourcePattern::forClusterResource(), ActionType::inprog)) {
             return Status::OK();
         }
@@ -174,47 +163,47 @@ public:
              BSONObj& cmdObj,
              int,
              string& errmsg,
-             BSONObjBuilder& result,
-             bool fromRepl) {
-        scoped_ptr<MatchExpression> filter;
+             BSONObjBuilder& result) {
+        unique_ptr<MatchExpression> filter;
         if (cmdObj["filter"].isABSONObj()) {
-            StatusWithMatchExpression res = MatchExpressionParser::parse(cmdObj["filter"].Obj());
-            if (!res.isOK()) {
-                return appendCommandStatus(result, res.getStatus());
+            StatusWithMatchExpression statusWithMatcher =
+                MatchExpressionParser::parse(cmdObj["filter"].Obj());
+            if (!statusWithMatcher.isOK()) {
+                return appendCommandStatus(result, statusWithMatcher.getStatus());
             }
-            filter.reset(res.getValue());
+            filter = std::move(statusWithMatcher.getValue());
         }
 
-        result.appendArray("operations", _processAllClients(filter.get()));
+        result.appendArray("operations",
+                           _processAllClients(txn->getClient()->getServiceContext(), filter.get()));
 
         return true;
     }
 
 
 private:
-    static BSONArray _processAllClients(MatchExpression* matcher) {
+    static BSONArray _processAllClients(ServiceContext* service, MatchExpression* matcher) {
         BSONArrayBuilder array;
 
-        boost::mutex::scoped_lock scopedLock(Client::clientsMutex);
-
-        ClientSet::const_iterator it = Client::clients.begin();
-        for (; it != Client::clients.end(); it++) {
-            Client* client = *it;
+        for (ServiceContext::LockedClientsCursor cursor(service); Client* client = cursor.next();) {
             invariant(client);
 
             BSONObjBuilder b;
 
             // Make the client stable
-            boost::unique_lock<Client> clientLock(*client);
+            stdx::lock_guard<Client> lk(*client);
 
             client->reportState(b);
 
             const OperationContext* txn = client->getOperationContext();
+            b.appendBool("active", static_cast<bool>(txn));
             if (txn) {
-                // CurOp
-                if (txn->getCurOp()) {
-                    txn->getCurOp()->reportState(&b);
+                b.append("opid", txn->getOpID());
+                if (txn->isKillPending()) {
+                    b.append("killPending", true);
                 }
+
+                CurOp::get(txn)->reportState(&b);
 
                 // LockState
                 if (txn->lockState()) {

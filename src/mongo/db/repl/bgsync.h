@@ -28,13 +28,22 @@
 
 #pragma once
 
-#include <boost/thread/mutex.hpp>
-
-#include "mongo/util/queue.h"
-#include "mongo/db/repl/oplogreader.h"
+#include "mongo/base/status_with.h"
+#include "mongo/client/fetcher.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/db/repl/optime.h"
+#include "mongo/executor/thread_pool_task_executor.h"
+#include "mongo/stdx/condition_variable.h"
+#include "mongo/stdx/functional.h"
+#include "mongo/stdx/mutex.h"
+#include "mongo/util/net/hostandport.h"
+#include "mongo/util/queue.h"
 
 namespace mongo {
+
+class DBClientBase;
+class OperationContext;
+
 namespace repl {
 
 class Member;
@@ -78,10 +87,8 @@ public:
 
 
     void shutdown();
-    void notify(OperationContext* txn);
 
-    // Blocks until _pause becomes true from a call to stop() or shutdown()
-    void waitUntilPaused();
+    bool isPaused() const;
 
     virtual ~BackgroundSync() {}
 
@@ -102,12 +109,13 @@ public:
     // For monitoring
     BSONObj getCounters();
 
-    long long getLastAppliedHash() const;
-    void setLastAppliedHash(long long oldH);
-    void loadLastAppliedHash(OperationContext* txn);
-
     // Clears any fetched and buffered oplog entries.
     void clearBuffer();
+
+    /**
+     * Cancel existing find/getMore commands on the sync source's oplog collection.
+     */
+    void cancelFetcher();
 
     bool getInitialSyncRequestedFlag();
     void setInitialSyncRequestedFlag(bool value);
@@ -127,28 +135,25 @@ public:
 private:
     static BackgroundSync* s_instance;
     // protects creation of s_instance
-    static boost::mutex s_mutex;
+    static stdx::mutex s_mutex;
 
     // Production thread
     BlockingQueue<BSONObj> _buffer;
-    OplogReader _syncSourceReader;
 
-    // _mutex protects all of the class variables except _syncSourceReader and _buffer
-    mutable boost::mutex _mutex;
+    // Task executor used to run find/getMore commands on sync source.
+    executor::ThreadPoolTaskExecutor _threadPoolTaskExecutor;
+
+    // _mutex protects all of the class variables except _buffer
+    mutable stdx::mutex _mutex;
 
     OpTime _lastOpTimeFetched;
 
-    // lastAppliedHash is used to generate a new hash for the following op, when primary.
-    long long _lastAppliedHash;
     // lastFetchedHash is used to match ops to determine if we need to rollback, when
     // a secondary.
     long long _lastFetchedHash;
 
     // if produce thread should be running
     bool _pause;
-    boost::condition _pausedCondition;
-    bool _appliedBuffer;
-    boost::condition _appliedBufferCondition;
 
     HostAndPort _syncSourceHost;
 
@@ -158,13 +163,40 @@ private:
 
     // Production thread
     void _producerThread();
-    // Adds elements to the list, up to maxSize.
-    void produce(OperationContext* txn);
-    // Checks the criteria for rolling back and executes a rollback if warranted.
-    bool _rollbackIfNeeded(OperationContext* txn, OplogReader& r);
+    void _produce(OperationContext* txn);
 
-    // Evaluate if the current sync target is still good
-    bool shouldChangeSyncSource();
+    /**
+     * Processes query responses from fetcher.
+     */
+    void _fetcherCallback(const StatusWith<Fetcher::QueryResponse>& result,
+                          BSONObjBuilder* bob,
+                          const HostAndPort& source,
+                          OpTime lastOpTimeFetched,
+                          long long lastFetchedHash,
+                          Milliseconds fetcherMaxTimeMS,
+                          Status* returnStatus);
+
+    /**
+     * Executes a rollback.
+     * 'getConnection' returns a connection to the sync source.
+     */
+    void _rollback(OperationContext* txn,
+                   const HostAndPort& source,
+                   stdx::function<DBClientBase*()> getConnection);
+
+    /**
+     * Evaluate if the current sync source is still good.
+     * "syncSource" is the name of the current sync source, which will be used to look up the
+     * member's heartbeat data.
+     * "syncSourceLastOpTime" is the last OpTime the sync source has. This is passed in because the
+     * data stored from heartbeats could be too stale and would cause unnecessary sync source
+     * changes.
+     * "syncSourceHasSyncSource" indicates whether our sync source is currently syncing from another
+     * member.
+     */
+    bool _shouldChangeSyncSource(const HostAndPort& syncSource,
+                                 const OpTime& syncSourceLastOpTime,
+                                 bool syncSourceHasSyncSource);
 
     // restart syncing
     void start(OperationContext* txn);
@@ -177,7 +209,7 @@ private:
     // bool for indicating resync need on this node and the mutex that protects it
     // The resync command sets this flag; the Applier thread observes and clears it.
     bool _initialSyncRequestedFlag;
-    boost::mutex _initialSyncMutex;
+    stdx::mutex _initialSyncMutex;
 
     // This setting affects the Applier prefetcher behavior.
     IndexPrefetchConfig _indexPrefetchConfig;

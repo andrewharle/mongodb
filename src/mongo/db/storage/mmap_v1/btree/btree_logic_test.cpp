@@ -2302,7 +2302,7 @@ public:
             start.appendMinKey( "a" );
             BSONObjBuilder end;
             end.appendMaxKey( "a" );
-            auto_ptr< BtreeCursor > c( BtreeCursor::make( nsdetails( ns() ),
+            unique_ptr< BtreeCursor > c( BtreeCursor::make( nsdetails( ns() ),
                                                           id(),
                                                           start.done(),
                                                           end.done(),
@@ -2367,7 +2367,7 @@ public:
             end.appendMaxKey( "a" );
             BSONObj l = bt()->keyNode( 0 ).key.toBson();
             string toInsert;
-            auto_ptr< BtreeCursor > c( BtreeCursor::make( nsdetails( ns() ),
+            unique_ptr< BtreeCursor > c( BtreeCursor::make( nsdetails( ns() ),
                                                           id(),
                                                           start.done(),
                                                           end.done(),
@@ -2382,10 +2382,12 @@ public:
             }
             // too much work to try to make this happen through inserts and deletes
             // we are intentionally manipulating the btree bucket directly here
-            BtreeBucket::Loc* L = const_cast< BtreeBucket::Loc* >( &bt()->keyNode( 1
-                        ).prevChildBucket ); writing(L)->Null();
-            writingInt( const_cast< BtreeBucket::Loc& >( bt()->keyNode( 1 ).recordLoc ).GETOFS() )
-                |= 1; // make unused BSONObj k = BSON( "a" << toInsert );
+            BtreeBucket::Loc* L = const_cast< BtreeBucket::Loc* >(
+                            &bt()->keyNode( 1 ).prevChildBucket );
+            writing(L)->Null();
+            writingInt( const_cast< BtreeBucket::Loc& >(
+                            bt()->keyNode( 1 ).recordLoc ).GETOFS() ) |= 1; // make unused
+            BSONObj k = BSON( "a" << toInsert );
             Base::insert( k );
         }
     };

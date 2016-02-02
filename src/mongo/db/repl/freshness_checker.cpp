@@ -33,12 +33,12 @@
 #include "mongo/db/repl/freshness_checker.h"
 
 #include "mongo/base/status.h"
-#include "mongo/bson/optime.h"
-#include "mongo/db/get_status_from_command_result.h"
+#include "mongo/bson/timestamp.h"
 #include "mongo/db/repl/member_heartbeat_data.h"
 #include "mongo/db/repl/replica_set_config.h"
 #include "mongo/db/repl/replication_executor.h"
 #include "mongo/db/repl/scatter_gather_runner.h"
+#include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/util/log.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/time_support.h"
@@ -46,7 +46,9 @@
 namespace mongo {
 namespace repl {
 
-FreshnessChecker::Algorithm::Algorithm(OpTime lastOpTimeApplied,
+using executor::RemoteCommandRequest;
+
+FreshnessChecker::Algorithm::Algorithm(Timestamp lastOpTimeApplied,
                                        const ReplicaSetConfig& rsConfig,
                                        int selfIndex,
                                        const std::vector<HostAndPort>& targets)
@@ -74,8 +76,7 @@ FreshnessChecker::Algorithm::Algorithm(OpTime lastOpTimeApplied,
 
 FreshnessChecker::Algorithm::~Algorithm() {}
 
-std::vector<ReplicationExecutor::RemoteCommandRequest> FreshnessChecker::Algorithm::getRequests()
-    const {
+std::vector<RemoteCommandRequest> FreshnessChecker::Algorithm::getRequests() const {
     const MemberConfig& selfConfig = _rsConfig.getMemberAt(_selfIndex);
 
     // gather all not-down nodes, get their fullnames(or hostandport's)
@@ -83,17 +84,17 @@ std::vector<ReplicationExecutor::RemoteCommandRequest> FreshnessChecker::Algorit
     BSONObjBuilder freshCmdBuilder;
     freshCmdBuilder.append("replSetFresh", 1);
     freshCmdBuilder.append("set", _rsConfig.getReplSetName());
-    freshCmdBuilder.append("opTime", Date_t(_lastOpTimeApplied.asDate()));
+    freshCmdBuilder.append("opTime", Date_t::fromMillisSinceEpoch(_lastOpTimeApplied.asLL()));
     freshCmdBuilder.append("who", selfConfig.getHostAndPort().toString());
     freshCmdBuilder.appendIntOrLL("cfgver", _rsConfig.getConfigVersion());
     freshCmdBuilder.append("id", selfConfig.getId());
     const BSONObj replSetFreshCmd = freshCmdBuilder.obj();
 
-    std::vector<ReplicationExecutor::RemoteCommandRequest> requests;
+    std::vector<RemoteCommandRequest> requests;
     for (std::vector<HostAndPort>::const_iterator it = _targets.begin(); it != _targets.end();
          ++it) {
         invariant(*it != selfConfig.getHostAndPort());
-        requests.push_back(ReplicationExecutor::RemoteCommandRequest(
+        requests.push_back(RemoteCommandRequest(
             *it,
             "admin",
             replSetFreshCmd,
@@ -119,8 +120,8 @@ bool FreshnessChecker::Algorithm::_isVotingMember(const HostAndPort hap) const {
     return member->isVoter();
 }
 
-void FreshnessChecker::Algorithm::processResponse(
-    const ReplicationExecutor::RemoteCommandRequest& request, const ResponseStatus& response) {
+void FreshnessChecker::Algorithm::processResponse(const RemoteCommandRequest& request,
+                                                  const ResponseStatus& response) {
     ++_responsesProcessed;
     bool votingMember = _isVotingMember(request.target);
 
@@ -159,7 +160,7 @@ void FreshnessChecker::Algorithm::processResponse(
         _abortReason = FresherNodeFound;
         return;
     }
-    OpTime remoteTime(res["opTime"].date());
+    Timestamp remoteTime(res["opTime"].date());
     if (remoteTime == _lastOpTimeApplied) {
         _abortReason = FreshnessTie;
     }
@@ -204,7 +205,7 @@ FreshnessChecker::~FreshnessChecker() {}
 
 StatusWith<ReplicationExecutor::EventHandle> FreshnessChecker::start(
     ReplicationExecutor* executor,
-    const OpTime& lastOpTimeApplied,
+    const Timestamp& lastOpTimeApplied,
     const ReplicaSetConfig& currentConfig,
     int selfIndex,
     const std::vector<HostAndPort>& targets,

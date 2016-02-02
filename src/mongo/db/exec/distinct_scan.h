@@ -28,10 +28,8 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
 
 #include "mongo/db/exec/plan_stage.h"
-#include "mongo/db/index/btree_index_cursor.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/matcher/expression.h"
@@ -42,7 +40,6 @@
 namespace mongo {
 
 class IndexAccessMethod;
-class IndexCursor;
 class IndexDescriptor;
 class WorkingSet;
 
@@ -75,61 +72,28 @@ struct DistinctParams {
  *
  * Only created through the getExecutorDistinct path.  See db/query/get_executor.cpp
  */
-class DistinctScan : public PlanStage {
+class DistinctScan final : public PlanStage {
 public:
-    /**
-     * Keeps track of what this distinct scan is currently doing so that it
-     * can do the right thing on the next call to work().
-     */
-    enum ScanState {
-        // Need to initialize the underlying index traversal machinery.
-        INITIALIZING,
-
-        // Skipping keys in order to check whether we have reached the end.
-        CHECKING_END,
-
-        // Retrieving the next key, and applying the filter if necessary.
-        GETTING_NEXT,
-
-        // The index scan is finished.
-        HIT_END
-    };
-
     DistinctScan(OperationContext* txn, const DistinctParams& params, WorkingSet* workingSet);
-    virtual ~DistinctScan() {}
 
-    virtual StageState work(WorkingSetID* out);
-    virtual bool isEOF();
-    virtual void saveState();
-    virtual void restoreState(OperationContext* opCtx);
-    virtual void invalidate(OperationContext* txn, const RecordId& dl, InvalidationType type);
+    StageState work(WorkingSetID* out) final;
+    bool isEOF() final;
+    void doSaveState() final;
+    void doRestoreState() final;
+    void doDetachFromOperationContext() final;
+    void doReattachToOperationContext() final;
 
-    virtual std::vector<PlanStage*> getChildren() const;
-
-    virtual StageType stageType() const {
-        return STAGE_DISTINCT;
+    StageType stageType() const final {
+        return STAGE_DISTINCT_SCAN;
     }
 
-    virtual PlanStageStats* getStats();
+    std::unique_ptr<PlanStageStats> getStats() final;
 
-    virtual const CommonStats* getCommonStats();
-
-    virtual const SpecificStats* getSpecificStats();
+    const SpecificStats* getSpecificStats() const final;
 
     static const char* kStageType;
 
 private:
-    /**
-     * Initialize the underlying IndexCursor
-     */
-    void initIndexCursor();
-
-    /** See if the cursor is pointing at or past _endKey, if _endKey is non-empty. */
-    void checkEnd();
-
-    // transactional context for read locks. Not owned by us
-    OperationContext* _txn;
-
     // The WorkingSet we annotate with results.  Not owned by us.
     WorkingSet* _workingSet;
 
@@ -138,26 +102,15 @@ private:
     const IndexAccessMethod* _iam;       // owned by Collection -> IndexCatalog
 
     // The cursor we use to navigate the tree.
-    boost::scoped_ptr<BtreeIndexCursor> _btreeCursor;
-
-    // Keeps track of what work we need to do next.
-    ScanState _scanState;
-
-    // For yielding.
-    BSONObj _savedKey;
-    RecordId _savedLoc;
+    std::unique_ptr<SortedDataInterface::Cursor> _cursor;
 
     DistinctParams _params;
 
     // _checker gives us our start key and ensures we stay in bounds.
-    boost::scoped_ptr<IndexBoundsChecker> _checker;
-    int _keyEltsToUse;
-    bool _movePastKeyElts;
-    std::vector<const BSONElement*> _keyElts;
-    std::vector<bool> _keyEltsInc;
+    IndexBoundsChecker _checker;
+    IndexSeekPoint _seekPoint;
 
     // Stats
-    CommonStats _commonStats;
     DistinctScanStats _specificStats;
 };
 

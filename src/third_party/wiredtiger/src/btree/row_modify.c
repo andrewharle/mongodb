@@ -26,7 +26,7 @@ __wt_page_modify_alloc(WT_SESSION_IMPL *session, WT_PAGE *page)
 	 * Select a spinlock for the page; let the barrier immediately below
 	 * keep things from racing too badly.
 	 */
-	modify->page_lock = ++conn->page_lock_cnt % WT_PAGE_LOCKS(conn);
+	modify->page_lock = ++conn->page_lock_cnt % WT_PAGE_LOCKS;
 
 	/*
 	 * Multiple threads of control may be searching and deciding to modify
@@ -112,6 +112,7 @@ __wt_row_modify(WT_SESSION_IMPL *session, WT_CURSOR_BTREE *cbt,
 			 * there should only be one update list per key.
 			 */
 			WT_ASSERT(session, *upd_entry == NULL);
+
 			/*
 			 * Set the "old" entry to the second update in the list
 			 * so that the serialization function succeeds in
@@ -263,7 +264,6 @@ int
 __wt_update_alloc(
     WT_SESSION_IMPL *session, WT_ITEM *value, WT_UPDATE **updp, size_t *sizep)
 {
-	WT_UPDATE *upd;
 	size_t size;
 
 	/*
@@ -271,16 +271,15 @@ __wt_update_alloc(
 	 * the value into place.
 	 */
 	size = value == NULL ? 0 : value->size;
-	WT_RET(__wt_calloc(session, 1, sizeof(WT_UPDATE) + size, &upd));
+	WT_RET(__wt_calloc(session, 1, sizeof(WT_UPDATE) + size, updp));
 	if (value == NULL)
-		WT_UPDATE_DELETED_SET(upd);
+		WT_UPDATE_DELETED_SET(*updp);
 	else {
-		upd->size = WT_STORE_SIZE(size);
-		memcpy(WT_UPDATE_DATA(upd), value->data, size);
+		(*updp)->size = WT_STORE_SIZE(size);
+		memcpy(WT_UPDATE_DATA(*updp), value->data, size);
 	}
 
-	*updp = upd;
-	*sizep = WT_UPDATE_MEMSIZE(upd);
+	*sizep = WT_UPDATE_MEMSIZE(*updp);
 	return (0);
 }
 

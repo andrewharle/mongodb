@@ -42,8 +42,7 @@ SaslPLAINClientConversation::SaslPLAINClientConversation(SaslClientSession* sasl
 
 SaslPLAINClientConversation::~SaslPLAINClientConversation(){};
 
-StatusWith<bool> SaslPLAINClientConversation::step(const StringData& inputData,
-                                                   std::string* outputData) {
+StatusWith<bool> SaslPLAINClientConversation::step(StringData inputData, std::string* outputData) {
     // Create PLAIN message on the form: user\0user\0pwd
 
     StringBuilder sb;

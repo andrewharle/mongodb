@@ -102,7 +102,7 @@ bool ReplicaSetTagMatch::BoundTagValue::isSatisfied() const {
     return constraint.getMinCount() <= int32_t(boundValues.size());
 }
 
-ReplicaSetTag ReplicaSetTagConfig::makeTag(const StringData& key, const StringData& value) {
+ReplicaSetTag ReplicaSetTagConfig::makeTag(StringData key, StringData value) {
     int32_t keyIndex = _findKeyIndex(key);
     if (size_t(keyIndex) == _tagData.size()) {
         _tagData.push_back(make_pair(key.toString(), ValueVector()));
@@ -117,7 +117,7 @@ ReplicaSetTag ReplicaSetTagConfig::makeTag(const StringData& key, const StringDa
     return ReplicaSetTag(keyIndex, int32_t(values.size()) - 1);
 }
 
-ReplicaSetTag ReplicaSetTagConfig::findTag(const StringData& key, const StringData& value) const {
+ReplicaSetTag ReplicaSetTagConfig::findTag(StringData key, StringData value) const {
     int32_t keyIndex = _findKeyIndex(key);
     if (size_t(keyIndex) == _tagData.size())
         return ReplicaSetTag(-1, -1);
@@ -135,7 +135,7 @@ ReplicaSetTagPattern ReplicaSetTagConfig::makePattern() const {
 }
 
 Status ReplicaSetTagConfig::addTagCountConstraintToPattern(ReplicaSetTagPattern* pattern,
-                                                           const StringData& tagKey,
+                                                           StringData tagKey,
                                                            int32_t minCount) const {
     int32_t keyIndex = _findKeyIndex(tagKey);
     if (size_t(keyIndex) == _tagData.size()) {
@@ -146,7 +146,7 @@ Status ReplicaSetTagConfig::addTagCountConstraintToPattern(ReplicaSetTagPattern*
     return Status::OK();
 }
 
-int32_t ReplicaSetTagConfig::_findKeyIndex(const StringData& key) const {
+int32_t ReplicaSetTagConfig::_findKeyIndex(StringData key) const {
     size_t i;
     for (i = 0; i < _tagData.size(); ++i) {
         if (_tagData[i].first == key) {

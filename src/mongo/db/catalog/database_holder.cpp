@@ -39,10 +39,9 @@
 #include "mongo/db/clientcursor.h"
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/database_catalog_entry.h"
-#include "mongo/db/global_environment_experiment.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/storage/storage_engine.h"
-#include "mongo/util/file_allocator.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
@@ -53,7 +52,7 @@ using std::stringstream;
 
 namespace {
 
-StringData _todb(const StringData& ns) {
+StringData _todb(StringData ns) {
     size_t i = ns.find('.');
     if (i == std::string::npos) {
         uassert(13074, "db name can't be empty", ns.size());
@@ -79,11 +78,11 @@ DatabaseHolder& dbHolder() {
 }
 
 
-Database* DatabaseHolder::get(OperationContext* txn, const StringData& ns) const {
+Database* DatabaseHolder::get(OperationContext* txn, StringData ns) const {
     const StringData db = _todb(ns);
     invariant(txn->lockState()->isDbLockedForMode(db, MODE_IS));
 
-    SimpleMutex::scoped_lock lk(_m);
+    stdx::lock_guard<SimpleMutex> lk(_m);
     DBs::const_iterator it = _dbs.find(db);
     if (it != _dbs.end()) {
         return it->second;
@@ -92,7 +91,7 @@ Database* DatabaseHolder::get(OperationContext* txn, const StringData& ns) const
     return NULL;
 }
 
-Database* DatabaseHolder::openDb(OperationContext* txn, const StringData& ns, bool* justCreated) {
+Database* DatabaseHolder::openDb(OperationContext* txn, StringData ns, bool* justCreated) {
     const StringData dbname = _todb(ns);
     invariant(txn->lockState()->isDbLockedForMode(dbname, MODE_X));
 
@@ -111,17 +110,17 @@ Database* DatabaseHolder::openDb(OperationContext* txn, const StringData& ns, bo
         stringstream ss;
         ss << "db already exists with different case already have: [" << duplicate
            << "] trying to create [" << dbname.toString() << "]";
-        uasserted(DatabaseDifferCaseCode, ss.str());
+        uasserted(ErrorCodes::DatabaseDifferCase, ss.str());
     }
 
-    StorageEngine* storageEngine = getGlobalEnvironment()->getGlobalStorageEngine();
+    StorageEngine* storageEngine = getGlobalServiceContext()->getGlobalStorageEngine();
     invariant(storageEngine);
 
     DatabaseCatalogEntry* entry = storageEngine->getDatabaseCatalogEntry(txn, dbname);
     invariant(entry);
     const bool exists = entry->exists();
     if (!exists) {
-        audit::logCreateDatabase(currentClient.get(), dbname);
+        audit::logCreateDatabase(&cc(), dbname);
     }
 
     if (justCreated) {
@@ -134,19 +133,19 @@ Database* DatabaseHolder::openDb(OperationContext* txn, const StringData& ns, bo
     // no way we can insert two different databases for the same name.
     db = new Database(txn, dbname, entry);
 
-    SimpleMutex::scoped_lock lk(_m);
+    stdx::lock_guard<SimpleMutex> lk(_m);
     _dbs[dbname] = db;
 
     return db;
 }
 
-void DatabaseHolder::close(OperationContext* txn, const StringData& ns) {
+void DatabaseHolder::close(OperationContext* txn, StringData ns) {
     // TODO: This should be fine if only a DB X-lock
     invariant(txn->lockState()->isW());
 
     const StringData dbName = _todb(ns);
 
-    SimpleMutex::scoped_lock lk(_m);
+    stdx::lock_guard<SimpleMutex> lk(_m);
 
     DBs::const_iterator it = _dbs.find(dbName);
     if (it == _dbs.end()) {
@@ -157,13 +156,13 @@ void DatabaseHolder::close(OperationContext* txn, const StringData& ns) {
     delete it->second;
     _dbs.erase(it);
 
-    getGlobalEnvironment()->getGlobalStorageEngine()->closeDatabase(txn, dbName.toString());
+    getGlobalServiceContext()->getGlobalStorageEngine()->closeDatabase(txn, dbName.toString());
 }
 
 bool DatabaseHolder::closeAll(OperationContext* txn, BSONObjBuilder& result, bool force) {
     invariant(txn->lockState()->isW());
 
-    SimpleMutex::scoped_lock lk(_m);
+    stdx::lock_guard<SimpleMutex> lk(_m);
 
     set<string> dbs;
     for (DBs::const_iterator i = _dbs.begin(); i != _dbs.end(); ++i) {
@@ -190,7 +189,7 @@ bool DatabaseHolder::closeAll(OperationContext* txn, BSONObjBuilder& result, boo
 
         _dbs.erase(name);
 
-        getGlobalEnvironment()->getGlobalStorageEngine()->closeDatabase(txn, name);
+        getGlobalServiceContext()->getGlobalStorageEngine()->closeDatabase(txn, name);
 
         bb.append(name);
     }

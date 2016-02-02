@@ -28,7 +28,6 @@
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kCommand
 
-#include <boost/scoped_ptr.hpp>
 #include <vector>
 
 #include "mongo/db/auth/action_set.h"
@@ -39,21 +38,25 @@
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/curop.h"
+#include "mongo/db/db_raii.h"
+#include "mongo/db/exec/working_set_common.h"
 #include "mongo/db/geo/geoconstants.h"
-#include "mongo/db/matcher/expression_geo.h"
 #include "mongo/db/geo/geoparser.h"
-#include "mongo/db/index_names.h"
 #include "mongo/db/index/index_descriptor.h"
+#include "mongo/db/index_names.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/db/query/get_executor.h"
+#include "mongo/db/matcher/expression_geo.h"
+#include "mongo/db/matcher/extensions_callback_real.h"
 #include "mongo/db/query/explain.h"
+#include "mongo/db/query/find_common.h"
+#include "mongo/db/query/get_executor.h"
 #include "mongo/db/range_preserver.h"
 #include "mongo/platform/unordered_map.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
 
-using boost::scoped_ptr;
+using std::unique_ptr;
 using std::stringstream;
 
 class Geo2dFindNearCmd : public Command {
@@ -68,6 +71,13 @@ public:
     }
     bool slaveOverrideOk() const {
         return true;
+    }
+    bool supportsReadConcern() const final {
+        return true;
+    }
+
+    std::size_t reserveBytesForReply() const override {
+        return FindCommon::kInitReplyBufferSize;
     }
 
     void help(stringstream& h) const {
@@ -87,8 +97,7 @@ public:
              BSONObj& cmdObj,
              int,
              string& errmsg,
-             BSONObjBuilder& result,
-             bool fromRepl) {
+             BSONObjBuilder& result) {
         if (!cmdObj["start"].eoo()) {
             errmsg = "using deprecated 'start' argument to geoNear";
             return false;
@@ -182,27 +191,27 @@ public:
         BSONObj projObj = BSON("$pt" << BSON("$meta" << LiteParsedQuery::metaGeoNearPoint) << "$dis"
                                      << BSON("$meta" << LiteParsedQuery::metaGeoNearDistance));
 
-        CanonicalQuery* cq;
-        const WhereCallbackReal whereCallback(txn, nss.db());
-
-        if (!CanonicalQuery::canonicalize(
-                 nss, rewritten, BSONObj(), projObj, 0, numWanted, BSONObj(), &cq, whereCallback)
-                 .isOK()) {
+        const ExtensionsCallbackReal extensionsCallback(txn, &nss);
+        auto statusWithCQ = CanonicalQuery::canonicalize(
+            nss, rewritten, BSONObj(), projObj, 0, numWanted, BSONObj(), extensionsCallback);
+        if (!statusWithCQ.isOK()) {
             errmsg = "Can't parse filter / create query";
             return false;
         }
+        unique_ptr<CanonicalQuery> cq = std::move(statusWithCQ.getValue());
 
         // Prevent chunks from being cleaned up during yields - this allows us to only check the
         // version on initial entry into geoNear.
         RangePreserver preserver(collection);
 
-        PlanExecutor* rawExec;
-        if (!getExecutor(txn, collection, cq, PlanExecutor::YIELD_AUTO, &rawExec, 0).isOK()) {
+        auto statusWithPlanExecutor =
+            getExecutor(txn, collection, std::move(cq), PlanExecutor::YIELD_AUTO, 0);
+        if (!statusWithPlanExecutor.isOK()) {
             errmsg = "can't get query executor";
             return false;
         }
 
-        scoped_ptr<PlanExecutor> exec(rawExec);
+        unique_ptr<PlanExecutor> exec = std::move(statusWithPlanExecutor.getValue());
 
         double totalDistance = 0;
         BSONObjBuilder resultBuilder(result.subarrayStart("results"));
@@ -210,7 +219,8 @@ public:
 
         BSONObj currObj;
         long long results = 0;
-        while ((results < numWanted) && PlanExecutor::ADVANCED == exec->getNext(&currObj, NULL)) {
+        PlanExecutor::ExecState state;
+        while (PlanExecutor::ADVANCED == (state = exec->getNext(&currObj, NULL))) {
             // Come up with the correct distance.
             double dist = currObj["$dis"].number() * distanceMultiplier;
             totalDistance += dist;
@@ -247,23 +257,46 @@ public:
             }
             oneResultBuilder.append("obj", resObj);
             oneResultBuilder.done();
+
             ++results;
+
+            // Break if we have the number of requested result documents.
+            if (results >= numWanted) {
+                break;
+            }
         }
 
         resultBuilder.done();
+
+        // Return an error if execution fails for any reason.
+        if (PlanExecutor::FAILURE == state || PlanExecutor::DEAD == state) {
+            const std::unique_ptr<PlanStageStats> stats(exec->getStats());
+            log() << "Plan executor error during geoNear command: " << PlanExecutor::statestr(state)
+                  << ", stats: " << Explain::statsToBSON(*stats);
+
+            return appendCommandStatus(result,
+                                       Status(ErrorCodes::OperationFailed,
+                                              str::stream()
+                                                  << "Executor error during geoNear command: "
+                                                  << WorkingSetCommon::toStatusString(currObj)));
+        }
 
         // Fill out the stats subobj.
         BSONObjBuilder stats(result.subobjStart("stats"));
 
         // Fill in nscanned from the explain.
         PlanSummaryStats summary;
-        Explain::getSummaryStats(exec.get(), &summary);
+        Explain::getSummaryStats(*exec, &summary);
+        collection->infoCache()->notifyOfQuery(txn, summary.indexesUsed);
+
         stats.appendNumber("nscanned", summary.totalKeysExamined);
         stats.appendNumber("objectsLoaded", summary.totalDocsExamined);
 
-        stats.append("avgDistance", totalDistance / results);
+        if (results > 0) {
+            stats.append("avgDistance", totalDistance / results);
+        }
         stats.append("maxDistance", farthestDist);
-        stats.append("time", txn->getCurOp()->elapsedMillis());
+        stats.append("time", CurOp::get(txn)->elapsedMillis());
         stats.done();
 
         return true;

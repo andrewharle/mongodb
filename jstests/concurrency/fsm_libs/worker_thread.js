@@ -13,9 +13,11 @@ var workerThread = (function() {
     // args.latch = CountDownLatch instance for starting all threads
     // args.dbName = the database name
     // args.collName = the collection name
+    // args.cluster = connection strings for all cluster nodes (see cluster.js for format)
     // args.clusterOptions = the configuration of the cluster
     // args.seed = seed for the random number generator
     // args.globalAssertLevel = the global assertion level to use
+    // args.errorLatch = CountDownLatch instance that threads count down when they error
     // run = callback that takes a map of workloads to their associated $config
     function main(workloads, args, run) {
         var myDB;
@@ -27,10 +29,12 @@ var workerThread = (function() {
             if (Cluster.isStandalone(args.clusterOptions)) {
                 myDB = db.getSiblingDB(args.dbName);
             } else {
-                // The implicit database connection created within the thread's scope
-                // is unneeded, so forcibly clean it up
-                db = null;
-                gc();
+                if (typeof db !== 'undefined') {
+                    // The implicit database connection created within the thread's scope
+                    // is unneeded, so forcibly clean it up.
+                    db = null;
+                    gc();
+                }
 
                 myDB = new Mongo(args.host).getDB(args.dbName);
             }
@@ -49,20 +53,41 @@ var workerThread = (function() {
                 // workload A. The $config.data of workload B can define a
                 // function that closes over the $config object of workload A
                 // (known as $super to workload B). This reference is lost when
-                // the config object is serialized through BSON into the V8 isolate,
-                // which results in undefined variables in the derived workload.
+                // the config object is serialized to BSON, which results in
+                // undefined variables in the derived workload.
                 var data = Object.extend({}, args.data[workload], true);
                 data = Object.extend(data, config.data, true);
+
+                // Object.extend() defines all properties added to the destination object as
+                // configurable, enumerable, and writable. To prevent workloads from changing
+                // the iterations and threadCount properties in their state functions, we redefine
+                // them here as non-configurable, non-enumerable, and non-writable.
+                Object.defineProperties(data, {
+                    'iterations': {
+                        configurable: false,
+                        enumerable: false,
+                        writable: false,
+                        value: data.iterations
+                    },
+                    'threadCount': {
+                        configurable: false,
+                        enumerable: false,
+                        writable: false,
+                        value: data.threadCount
+                    }
+                });
 
                 data.tid = args.tid;
                 configs[workload] = {
                     data: data,
                     db: myDB,
                     collName: args.collName,
+                    cluster: args.cluster,
+                    iterations: data.iterations,
+                    passConnectionCache: config.passConnectionCache,
                     startState: config.startState,
                     states: config.states,
-                    transitions: config.transitions,
-                    iterations: config.iterations
+                    transitions: config.transitions
                 };
             });
 
@@ -79,7 +104,8 @@ var workerThread = (function() {
                 run(configs);
                 return { ok: 1 };
             } catch(e) {
-                return { ok: 0, err: e.toString(), stack: e.stack };
+                args.errorLatch.countDown();
+                return { ok: 0, err: e.toString(), stack: e.stack, workloads: workloads };
             }
         } finally {
             // Avoid retention of connection object

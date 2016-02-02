@@ -1,10 +1,22 @@
 Import("env")
 Import("wiredtiger")
 
+env.Library(
+    target='storage_wiredtiger_customization_hooks',
+    source= ['wiredtiger_customization_hooks.cpp'],
+    LIBDEPS= ['$BUILD_DIR/mongo/base',
+              '$BUILD_DIR/mongo/db/service_context'],
+    PROGDEPS_DEPENDENTS=[
+        '$BUILD_DIR/mongo/mongod',
+        '$BUILD_DIR/mongo/mongos',
+    ],
+    )
+
 if wiredtiger:
     wtEnv = env.Clone()
     wtEnv.InjectThirdPartyIncludePaths(libraries=['wiredtiger'])
     wtEnv.InjectThirdPartyIncludePaths(libraries=['zlib'])
+    wtEnv.InjectThirdPartyIncludePaths(libraries=['valgrind'])
 
     # This is the smallest possible set of files that wraps WT
     wtEnv.Library(
@@ -16,25 +28,35 @@ if wiredtiger:
             'wiredtiger_record_store.cpp',
             'wiredtiger_recovery_unit.cpp',
             'wiredtiger_session_cache.cpp',
+            'wiredtiger_snapshot_manager.cpp',
             'wiredtiger_size_storer.cpp',
             'wiredtiger_util.cpp',
             ],
         LIBDEPS= [
-            '$BUILD_DIR/mongo/bson',
+            'storage_wiredtiger_customization_hooks',
+            '$BUILD_DIR/mongo/base',
+            '$BUILD_DIR/mongo/db/namespace_string',
             '$BUILD_DIR/mongo/db/catalog/collection_options',
             '$BUILD_DIR/mongo/db/concurrency/write_conflict_exception',
             '$BUILD_DIR/mongo/db/index/index_descriptor',
+            '$BUILD_DIR/mongo/db/service_context',
             '$BUILD_DIR/mongo/db/storage/index_entry_comparison',
             '$BUILD_DIR/mongo/db/storage/key_string',
             '$BUILD_DIR/mongo/db/storage/oplog_hack',
-            '$BUILD_DIR/mongo/elapsed_tracker',
-            '$BUILD_DIR/mongo/foundation',
-            '$BUILD_DIR/mongo/processinfo',
+            '$BUILD_DIR/mongo/db/storage/storage_options',
+            '$BUILD_DIR/mongo/util/elapsed_tracker',
+            '$BUILD_DIR/mongo/util/foundation',
+            '$BUILD_DIR/mongo/util/processinfo',
             '$BUILD_DIR/mongo/util/concurrency/ticketholder',
             '$BUILD_DIR/third_party/shim_wiredtiger',
             '$BUILD_DIR/third_party/shim_snappy',
             '$BUILD_DIR/third_party/shim_zlib',
             ],
+        LIBDEPS_TAGS=[
+            # References WiredTigerKVEngine::initRsOplogBackgroundThread which does not have
+            # a unique definition.
+            'incomplete',
+        ],
         )
 
     wtEnv.Library(
@@ -47,8 +69,15 @@ if wiredtiger:
             'wiredtiger_server_status.cpp',
             ],
         LIBDEPS=['storage_wiredtiger_core',
+                 'storage_wiredtiger_customization_hooks',
                  '$BUILD_DIR/mongo/db/storage/kv/kv_engine',
-                 ]
+                 '$BUILD_DIR/mongo/db/storage/storage_engine_lock_file',
+                 '$BUILD_DIR/mongo/db/storage/storage_engine_metadata',
+                 ],
+        LIBDEPS_TAGS=[
+            # Depends on symbols defined in serverOnlyfiles
+            'incomplete',
+        ],
         )
 
     wtEnv.Library(
@@ -85,10 +114,8 @@ if wiredtiger:
         source=['wiredtiger_init_test.cpp',
                 ],
         LIBDEPS=[
-            '$BUILD_DIR/mongo/serveronly',
-            '$BUILD_DIR/mongo/coreserver',
-            '$BUILD_DIR/mongo/coredb',
-            '$BUILD_DIR/mongo/ntservice_mock',
+            '$BUILD_DIR/mongo/db/serveronly',
+            '$BUILD_DIR/mongo/util/ntservice_mock',
             ],
         NO_CRUTCH=True,
         )
@@ -108,6 +135,7 @@ if wiredtiger:
         source=['wiredtiger_util_test.cpp',
                 ],
         LIBDEPS=[
+            '$BUILD_DIR/mongo/db/service_context',
             'storage_wiredtiger_mock',
             ],
         )

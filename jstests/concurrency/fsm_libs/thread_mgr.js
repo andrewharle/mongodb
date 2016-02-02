@@ -20,8 +20,10 @@ var ThreadManager = function(clusterOptions, executionMode) {
             try {
                 return threadFn(workloads, args, options);
             } finally {
-                db = null;
-                gc();
+                if (typeof db !== 'undefined') {
+                    db = null;
+                    gc();
+                }
             }
         };
 
@@ -35,10 +37,11 @@ var ThreadManager = function(clusterOptions, executionMode) {
     }
 
     var latch;
+    var errorLatch;
+    var numThreads;
 
     var initialized = false;
     var threads = [];
-    var threadCounts = {};
 
     var _workloads, _context;
 
@@ -50,15 +53,14 @@ var ThreadManager = function(clusterOptions, executionMode) {
                   'the maximum allowed threads must be an integer');
 
         function computeNumThreads() {
+            // If we don't have any workloads, such as having no background workloads, return 0.
+            if (workloads.length === 0) {
+                return 0;
+            }
             return Array.sum(workloads.map(function(workload) {
-                return threadCounts[workload];
+                return context[workload].config.threadCount;
             }));
         }
-
-        workloads.forEach(function(workload) {
-            var config = context[workload].config;
-            threadCounts[workload] = config.threadCount;
-        });
 
         var requestedNumThreads = computeNumThreads();
         if (requestedNumThreads > maxAllowedThreads) {
@@ -66,16 +68,18 @@ var ThreadManager = function(clusterOptions, executionMode) {
             // them sum to less than 'maxAllowedThreads'
             var factor = maxAllowedThreads / requestedNumThreads;
             workloads.forEach(function(workload) {
-                var threadCount = threadCounts[workload];
+                var config = context[workload].config;
+                var threadCount = config.threadCount;
                 threadCount = Math.floor(factor * threadCount);
                 threadCount = Math.max(1, threadCount); // ensure workload is executed
-                threadCounts[workload] = threadCount;
+                config.threadCount = threadCount;
             });
         }
 
-        var numThreads = computeNumThreads();
+        numThreads = computeNumThreads();
         assert.lte(numThreads, maxAllowedThreads);
         latch = new CountDownLatch(numThreads);
+        errorLatch = new CountDownLatch(numThreads);
 
         var plural = numThreads === 1 ? '' : 's';
         print('Using ' + numThreads + ' thread' + plural +
@@ -87,36 +91,34 @@ var ThreadManager = function(clusterOptions, executionMode) {
         initialized = true;
     };
 
-    this.spawnAll = function spawnAll(host, options) {
+    this.spawnAll = function spawnAll(cluster, options) {
         if (!initialized) {
             throw new Error('thread manager has not been initialized yet');
         }
 
         var workloadData = {};
-        _workloads.forEach(function(workload) {
-            workloadData[workload] = _context[workload].config.data;
-        });
-
         var tid = 0;
         _workloads.forEach(function(workload) {
+            var config = _context[workload].config;
+            workloadData[workload] = config.data;
             var workloads = [workload]; // worker thread only needs to load 'workload'
             if (executionMode.composed) {
                 workloads = _workloads; // worker thread needs to load all workloads
             }
 
-            var config = _context[workload].config;
-
-            for (var i = 0; i < threadCounts[workload]; ++i) {
+            for (var i = 0; i < config.threadCount; ++i) {
                 var args = {
                     tid: tid++,
                     data: workloadData,
-                    host: host,
+                    host: cluster.getHost(),
                     latch: latch,
                     dbName: _context[workload].dbName,
                     collName: _context[workload].collName,
+                    cluster: cluster.getSerializedCluster(),
                     clusterOptions: clusterOptions,
                     seed: Random.randInt(1e13), // contains range of Date.getTime()
-                    globalAssertLevel: globalAssertLevel
+                    globalAssertLevel: globalAssertLevel,
+                    errorLatch: errorLatch
                 };
 
                 var t = makeThread(workloads, args, options);
@@ -154,6 +156,16 @@ var ThreadManager = function(clusterOptions, executionMode) {
         }
     };
 
+    this.checkForErrors = function checkForErrors() {
+        if (!initialized) {
+            throw new Error('thread manager has not been initialized yet');
+        }
+
+        // Each worker thread receives the errorLatch as an argument. The worker thread
+        // decreases the count when it receives an error.
+        return errorLatch.getCount() < numThreads;
+    };
+
     this.joinAll = function joinAll() {
         if (!initialized) {
             throw new Error('thread manager has not been initialized yet');
@@ -172,9 +184,21 @@ var ThreadManager = function(clusterOptions, executionMode) {
 
         initialized = false;
         threads = [];
-        threadCounts = {};
 
         return errors;
+    };
+
+    this.markAllForTermination = function markAllForTermination() {
+        if (_workloads.length === 0) {
+            return;
+        }
+
+        // Background threads periodically check the 'fsm_background' collection of the
+        // 'config' database for a document specifying { terminate: true }. If such a
+        // document is found the background thread terminates.
+        var coll = _context[_workloads[0]].db.getSiblingDB('config').fsm_background;
+        assert.writeOK(coll.update({ terminate: true }, { terminate: true }, { upsert: true }));
+
     };
 };
 

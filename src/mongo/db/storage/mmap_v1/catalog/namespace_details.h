@@ -115,8 +115,8 @@ public:
     DiskLoc deletedListLarge[LargeBuckets];
 
     // Think carefully before using this. We need at least 8 bytes reserved to leave room for a
-    // DiskLoc pointing to more data (eg in a dummy Record or Extent). There is still _reservedA
-    // above, but these are the final two reserved 8-byte regions.
+    // DiskLoc pointing to more data (eg in a dummy MmapV1RecordHeader or Extent). There is still
+    // _reservedA above, but these are the final two reserved 8-byte regions.
     char _reserved[8];
     /*-------- end data 496 bytes */
 public:
@@ -164,13 +164,10 @@ public:
         return (Extra*)(((char*)this) + _extraOffset);
     }
     /* add extra space for indexes when more than 10 */
-    Extra* allocExtra(OperationContext* txn,
-                      const StringData& ns,
-                      NamespaceIndex& ni,
-                      int nindexessofar);
+    Extra* allocExtra(OperationContext* txn, StringData ns, NamespaceIndex& ni, int nindexessofar);
 
     void copyingFrom(OperationContext* txn,
-                     const StringData& thisns,
+                     StringData thisns,
                      NamespaceIndex& ni,
                      NamespaceDetails* src);  // must be called when renaming a NS to fix up extra
 
@@ -227,7 +224,7 @@ public:
      */
     int _catalogFindIndexByName(OperationContext* txn,
                                 const Collection* coll,
-                                const StringData& name,
+                                StringData name,
                                 bool includeBackgroundInProgress) const;
 
 private:
@@ -243,11 +240,12 @@ private:
 
     /** Update cappedLastDelRecLastExtent() after capExtent changed in cappedTruncateAfter() */
     void cappedTruncateLastDelUpdate();
-    BOOST_STATIC_ASSERT(NIndexesMax <= NIndexesBase + NIndexesExtra * 2);
-    BOOST_STATIC_ASSERT(NIndexesMax <= 64);  // multiKey bits
-    BOOST_STATIC_ASSERT(sizeof(NamespaceDetails::Extra) == 496);
+    static_assert(NIndexesMax <= NIndexesBase + NIndexesExtra * 2,
+                  "NIndexesMax <= NIndexesBase + NIndexesExtra * 2");
+    static_assert(NIndexesMax <= 64, "NIndexesMax <= 64");  // multiKey bits
+    static_assert(sizeof(NamespaceDetails::Extra) == 496, "sizeof(NamespaceDetails::Extra) == 496");
 };  // NamespaceDetails
-BOOST_STATIC_ASSERT(sizeof(NamespaceDetails) == 496);
+static_assert(sizeof(NamespaceDetails) == 496, "sizeof(NamespaceDetails) == 496");
 #pragma pack()
 
 }  // namespace mongo

@@ -59,8 +59,7 @@ public:
              BSONObj& cmdObj,
              int,
              string& errmsg,
-             BSONObjBuilder& result,
-             bool fromRepl) {
+             BSONObjBuilder& result) {
         result.append("id", repl::instanceId);
         return true;
     }

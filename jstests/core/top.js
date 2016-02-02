@@ -14,7 +14,7 @@ testColl.remove({x:0});
 
 // get top statistics for the test collection
 function getTop() {
-   return testDB.adminCommand("top").totals[testColl.getFullName()];
+    return testDB.adminCommand("top").totals[testColl.getFullName()];
 }
 
 //  This variable is used to get differential output
@@ -22,7 +22,7 @@ var lastTop = getTop();
 
 //  return the number of operations since the last call to diffTop for the specified key
 function diffTop(key) {
-    const thisTop = getTop();
+    var thisTop = getTop();
     difference = { time  : thisTop[key].time - lastTop[key].time,
                    count : thisTop[key].count - lastTop[key].count }
     lastTop[key] = thisTop[key];
@@ -35,17 +35,14 @@ function diffTop(key) {
     return difference;
 }
 
-const numRecords = 100
+var numRecords = 100;
 
 // check stats for specified key are as expected
 var checked = { }
 function checkStats(key, expected) {
     checked[key]++
     var actual = diffTop(key).count;
-    if (actual != expected) {
-        print("top reports wrong count for " + key + 
-              ": actual " + actual + " /= expected " + expected);
-    }
+    assert.eq(actual, expected, "top reports wrong count for " + key);
 }
 
 //  Insert
@@ -53,6 +50,7 @@ for(i = 0; i < numRecords; i++) {
     testColl.insert({_id:i});
 }
 checkStats("insert", numRecords);
+checkStats("writeLock", numRecords);
 
 // Update
 for(i = 0; i < numRecords; i++) {
@@ -63,7 +61,7 @@ checkStats("update", numRecords);
 // Queries
 var query = { }
 for(i = 0; i < numRecords; i++) {
-    query[i] = testColl.find({x : {$gte:i}}).batchSize(1);
+    query[i] = testColl.find({x : {$gte:i}}).batchSize(2);
     assert.eq(query[i].next()._id, i);
 }
 checkStats("queries" ,numRecords);
@@ -77,7 +75,7 @@ for(i = 0; i < numRecords / 2; i++) {
 }
 checkStats("getmore", numRecords);
 
-// Remove 
+// Remove
 for(i = 0; i < numRecords; i++) {
     testColl.remove({_id : 1});
 }

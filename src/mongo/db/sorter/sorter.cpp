@@ -48,24 +48,27 @@
 #include "mongo/db/sorter/sorter.h"
 
 #include <boost/filesystem/operations.hpp>
-#include <boost/make_shared.hpp>
-#include <boost/shared_ptr.hpp>
 #include <snappy.h>
+#include <vector>
 
 #include "mongo/base/string_data.h"
+#include "mongo/config.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/db/storage_options.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/storage/storage_options.h"
+#include "mongo/db/storage/wiredtiger/wiredtiger_customization_hooks.h"
 #include "mongo/platform/atomic_word.h"
+#include "mongo/s/mongos_options.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/bufreader.h"
 #include "mongo/util/mongoutils/str.h"
 #include "mongo/util/print.h"
-#include "mongo/util/ptr.h"
+#include "mongo/util/unowned_ptr.h"
 
 namespace mongo {
 namespace sorter {
 
-using boost::shared_ptr;
+using std::shared_ptr;
 using namespace mongoutils;
 
 // We need to use the "real" errno everywhere, not GetLastError() on Windows
@@ -90,7 +93,7 @@ void compIsntSane(const Comparator& comp, const Data& lhs, const Data& rhs) {
 
 template <typename Data, typename Comparator>
 void dassertCompIsSane(const Comparator& comp, const Data& lhs, const Data& rhs) {
-#if defined(_DEBUG) && !defined(_MSC_VER)
+#if defined(MONGO_CONFIG_DEBUG_BUILD) && !defined(_MSC_VER)
     // MSVC++ already does similar verification in debug mode in addition to using
     // algorithms that do more comparisons. Doing our own verification in addition makes
     // debug builds considerably slower without any additional safety.
@@ -168,7 +171,7 @@ public:
 
     FileIterator(const std::string& fileName,
                  const Settings& settings,
-                 boost::shared_ptr<FileDeleter> fileDeleter)
+                 std::shared_ptr<FileDeleter> fileDeleter)
         : _settings(settings),
           _done(false),
           _fileName(fileName),
@@ -217,11 +220,27 @@ private:
 
         // negative size means compressed
         const bool compressed = rawSize < 0;
-        const int32_t blockSize = std::abs(rawSize);
+        int32_t blockSize = std::abs(rawSize);
 
         _buffer.reset(new char[blockSize]);
         read(_buffer.get(), blockSize);
         massert(16816, "file too short?", !_done);
+
+        auto hooks = WiredTigerCustomizationHooks::get(getGlobalServiceContext());
+        if (hooks->enabled()) {
+            std::unique_ptr<char[]> out(new char[blockSize]);
+            size_t outLen;
+            Status status = hooks->unprotectTmpData(reinterpret_cast<uint8_t*>(_buffer.get()),
+                                                    blockSize,
+                                                    reinterpret_cast<uint8_t*>(out.get()),
+                                                    blockSize,
+                                                    &outLen);
+            massert(28841,
+                    str::stream() << "Failed to unprotect data: " << status.toString(),
+                    status.isOK());
+            blockSize = outLen;
+            _buffer.swap(out);
+        }
 
         if (!compressed) {
             _reader.reset(new BufReader(_buffer.get(), blockSize));
@@ -235,7 +254,7 @@ private:
                 "couldn't get uncompressed length",
                 snappy::GetUncompressedLength(_buffer.get(), blockSize, &uncompressedSize));
 
-        boost::scoped_array<char> decompressionBuffer(new char[uncompressedSize]);
+        std::unique_ptr<char[]> decompressionBuffer(new char[uncompressedSize]);
         massert(17062,
                 "decompression failed",
                 snappy::RawUncompress(_buffer.get(), blockSize, decompressionBuffer.get()));
@@ -263,10 +282,10 @@ private:
 
     const Settings _settings;
     bool _done;
-    boost::scoped_array<char> _buffer;
-    boost::scoped_ptr<BufReader> _reader;
+    std::unique_ptr<char[]> _buffer;
+    std::unique_ptr<BufReader> _reader;
     std::string _fileName;
-    boost::shared_ptr<FileDeleter> _fileDeleter;  // Must outlive _file
+    std::shared_ptr<FileDeleter> _fileDeleter;  // Must outlive _file
     std::ifstream _file;
 };
 
@@ -278,7 +297,7 @@ public:
     typedef std::pair<Key, Value> Data;
 
 
-    MergeIterator(const std::vector<boost::shared_ptr<Input>>& iters,
+    MergeIterator(const std::vector<std::shared_ptr<Input>>& iters,
                   const SortOptions& opts,
                   const Comparator& comp)
         : _opts(opts),
@@ -287,7 +306,7 @@ public:
           _greater(comp) {
         for (size_t i = 0; i < iters.size(); i++) {
             if (iters[i]->more()) {
-                _heap.push_back(boost::make_shared<Stream>(i, iters[i]->next(), iters[i]));
+                _heap.push_back(std::make_shared<Stream>(i, iters[i]->next(), iters[i]));
             }
         }
 
@@ -344,7 +363,7 @@ public:
 private:
     class Stream {  // Data + Iterator
     public:
-        Stream(size_t fileNum, const Data& first, boost::shared_ptr<Input> rest)
+        Stream(size_t fileNum, const Data& first, std::shared_ptr<Input> rest)
             : fileNum(fileNum), _current(first), _rest(rest) {}
 
         const Data& current() const {
@@ -365,13 +384,13 @@ private:
 
     private:
         Data _current;
-        boost::shared_ptr<Input> _rest;
+        std::shared_ptr<Input> _rest;
     };
 
     class STLComparator {  // uses greater rather than less-than to maintain a MinHeap
     public:
         explicit STLComparator(const Comparator& comp) : _comp(comp) {}
-        bool operator()(ptr<const Stream> lhs, ptr<const Stream> rhs) const {
+        bool operator()(unowned_ptr<const Stream> lhs, unowned_ptr<const Stream> rhs) const {
             // first compare data
             dassertCompIsSane(_comp, lhs->current(), rhs->current());
             int ret = _comp(lhs->current(), rhs->current());
@@ -389,9 +408,9 @@ private:
     SortOptions _opts;
     unsigned long long _remaining;
     bool _first;
-    boost::shared_ptr<Stream> _current;
-    std::vector<boost::shared_ptr<Stream>> _heap;  // MinHeap
-    STLComparator _greater;                        // named so calls make sense
+    std::shared_ptr<Stream> _current;
+    std::vector<std::shared_ptr<Stream>> _heap;  // MinHeap
+    STLComparator _greater;                      // named so calls make sense
 };
 
 template <typename Key, typename Value, typename Comparator>
@@ -482,7 +501,7 @@ private:
             writer.addAlreadySorted(_data.front().first, _data.front().second);
         }
 
-        _iters.push_back(boost::shared_ptr<Iterator>(writer.done()));
+        _iters.push_back(std::shared_ptr<Iterator>(writer.done()));
 
         _memUsed = 0;
     }
@@ -491,8 +510,8 @@ private:
     const Settings _settings;
     SortOptions _opts;
     size_t _memUsed;
-    std::deque<Data> _data;                           // the "current" data
-    std::vector<boost::shared_ptr<Iterator>> _iters;  // data that has already been spilled
+    std::deque<Data> _data;                         // the "current" data
+    std::vector<std::shared_ptr<Iterator>> _iters;  // data that has already been spilled
 };
 
 template <typename Key, typename Value, typename Comparator>
@@ -762,7 +781,7 @@ private:
         // clear _data and release backing array's memory
         std::vector<Data>().swap(_data);
 
-        _iters.push_back(boost::shared_ptr<Iterator>(writer.done()));
+        _iters.push_back(std::shared_ptr<Iterator>(writer.done()));
 
         _memUsed = 0;
     }
@@ -772,7 +791,7 @@ private:
     SortOptions _opts;
     size_t _memUsed;
     std::vector<Data> _data;  // the "current" data. Organized as max-heap if size == limit.
-    std::vector<boost::shared_ptr<Iterator>> _iters;  // data that has already been spilled
+    std::vector<std::shared_ptr<Iterator>> _iters;  // data that has already been spilled
 
     // See updateCutoff() for a full description of how these members are used.
     bool _haveCutoff;
@@ -822,7 +841,7 @@ SortedFileWriter<Key, Value>::SortedFileWriter(const SortOptions& opts, const Se
                           << "\": " << sorter::myErrnoWithDescription(),
             _file.good());
 
-    _fileDeleter = boost::make_shared<sorter::FileDeleter>(_fileName);
+    _fileDeleter = std::make_shared<sorter::FileDeleter>(_fileName);
 
     // throw on failure
     _file.exceptions(std::ios::failbit | std::ios::badbit | std::ios::eofbit);
@@ -841,23 +860,46 @@ template <typename Key, typename Value>
 void SortedFileWriter<Key, Value>::spill() {
     namespace str = mongoutils::str;
 
-    if (_buffer.len() == 0)
+    int32_t size = _buffer.len();
+    char* outBuffer = _buffer.buf();
+
+    if (size == 0)
         return;
 
     std::string compressed;
-    snappy::Compress(_buffer.buf(), _buffer.len(), &compressed);
+    snappy::Compress(outBuffer, size, &compressed);
     verify(compressed.size() <= size_t(std::numeric_limits<int32_t>::max()));
 
+    const bool shouldCompress = compressed.size() < size_t(_buffer.len() / 10 * 9);
+    if (shouldCompress) {
+        size = compressed.size();
+        outBuffer = const_cast<char*>(compressed.data());
+    }
+
+    std::unique_ptr<char[]> out;
+    auto hooks = WiredTigerCustomizationHooks::get(getGlobalServiceContext());
+    if (hooks->enabled()) {
+        size_t protectedSizeMax = size + hooks->additionalBytesForProtectedBuffer();
+        out.reset(new char[protectedSizeMax]);
+        size_t resultLen;
+        Status status = hooks->protectTmpData(reinterpret_cast<const uint8_t*>(outBuffer),
+                                              size,
+                                              reinterpret_cast<uint8_t*>(out.get()),
+                                              protectedSizeMax,
+                                              &resultLen);
+        massert(28842,
+                str::stream() << "Failed to compress data: " << status.toString(),
+                status.isOK());
+        outBuffer = out.get();
+        size = resultLen;
+    }
+
+    // negative size means compressed
+    size = shouldCompress ? -size : size;
     try {
-        if (compressed.size() < size_t(_buffer.len() / 10 * 9)) {
-            const int32_t size = -int32_t(compressed.size());  // negative means compressed
-            _file.write(reinterpret_cast<const char*>(&size), sizeof(size));
-            _file.write(compressed.data(), compressed.size());
-        } else {
-            const int32_t size = _buffer.len();
-            _file.write(reinterpret_cast<const char*>(&size), sizeof(size));
-            _file.write(_buffer.buf(), _buffer.len());
-        }
+        _file.write(reinterpret_cast<const char*>(&size), sizeof(size));
+        _file.write(outBuffer, std::abs(size));
+
     } catch (const std::exception&) {
         msgasserted(16821,
                     str::stream() << "error writing to file \"" << _fileName
@@ -881,7 +923,7 @@ SortIteratorInterface<Key, Value>* SortedFileWriter<Key, Value>::done() {
 template <typename Key, typename Value>
 template <typename Comparator>
 SortIteratorInterface<Key, Value>* SortIteratorInterface<Key, Value>::merge(
-    const std::vector<boost::shared_ptr<SortIteratorInterface>>& iters,
+    const std::vector<std::shared_ptr<SortIteratorInterface>>& iters,
     const SortOptions& opts,
     const Comparator& comp) {
     return new sorter::MergeIterator<Key, Value, Comparator>(iters, opts, comp);

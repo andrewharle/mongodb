@@ -31,36 +31,33 @@
 #include "mongo/db/exec/scoped_timer.h"
 #include "mongo/db/exec/working_set.h"
 #include "mongo/db/exec/working_set_common.h"
+#include "mongo/stdx/memory.h"
 #include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
 
-using std::auto_ptr;
 using std::list;
 using std::string;
+using std::unique_ptr;
 using std::vector;
+using stdx::make_unique;
 
 // static
 const char* MergeSortStage::kStageType = "SORT_MERGE";
 
-MergeSortStage::MergeSortStage(const MergeSortStageParams& params,
+MergeSortStage::MergeSortStage(OperationContext* opCtx,
+                               const MergeSortStageParams& params,
                                WorkingSet* ws,
                                const Collection* collection)
-    : _collection(collection),
+    : PlanStage(kStageType, opCtx),
+      _collection(collection),
       _ws(ws),
       _pattern(params.pattern),
       _dedup(params.dedup),
-      _merging(StageWithValueComparison(ws, params.pattern)),
-      _commonStats(kStageType) {}
-
-MergeSortStage::~MergeSortStage() {
-    for (size_t i = 0; i < _children.size(); ++i) {
-        delete _children[i];
-    }
-}
+      _merging(StageWithValueComparison(ws, params.pattern)) {}
 
 void MergeSortStage::addChild(PlanStage* child) {
-    _children.push_back(child);
+    _children.emplace_back(child);
 
     // We have to call work(...) on every child before we can pick a min.
     _noResultToMerge.push(child);
@@ -90,10 +87,10 @@ PlanStage::StageState MergeSortStage::work(WorkingSetID* out) {
         StageState code = child->work(&id);
 
         if (PlanStage::ADVANCED == code) {
+            WorkingSetMember* member = _ws->get(id);
+
             // If we're deduping...
             if (_dedup) {
-                WorkingSetMember* member = _ws->get(id);
-
                 if (!member->hasLoc()) {
                     // Can't dedup data unless there's a RecordId.  We go ahead and use its
                     // result.
@@ -125,6 +122,8 @@ PlanStage::StageState MergeSortStage::work(WorkingSetID* out) {
             StageWithValue value;
             value.id = id;
             value.stage = child;
+            // Ensure that the BSONObj underlying the WorkingSetMember is owned in case we yield.
+            member->makeObjOwnedIfNeeded();
             _mergingData.push_front(value);
 
             // Insert the result (indirectly) into our priority queue.
@@ -138,7 +137,7 @@ PlanStage::StageState MergeSortStage::work(WorkingSetID* out) {
             _noResultToMerge.pop();
             ++_commonStats.needTime;
             return PlanStage::NEED_TIME;
-        } else if (PlanStage::FAILURE == code) {
+        } else if (PlanStage::FAILURE == code || PlanStage::DEAD == code) {
             *out = id;
             // If a stage fails, it may create a status WSM to indicate why it
             // failed, in which case 'id' is valid.  If ID is invalid, we
@@ -153,9 +152,9 @@ PlanStage::StageState MergeSortStage::work(WorkingSetID* out) {
         } else {
             if (PlanStage::NEED_TIME == code) {
                 ++_commonStats.needTime;
-            } else if (PlanStage::NEED_FETCH == code) {
+            } else if (PlanStage::NEED_YIELD == code) {
                 *out = id;
-                ++_commonStats.needFetch;
+                ++_commonStats.needYield;
             }
 
             return code;
@@ -189,26 +188,10 @@ PlanStage::StageState MergeSortStage::work(WorkingSetID* out) {
     return PlanStage::ADVANCED;
 }
 
-void MergeSortStage::saveState() {
-    ++_commonStats.yields;
-    for (size_t i = 0; i < _children.size(); ++i) {
-        _children[i]->saveState();
-    }
-}
 
-void MergeSortStage::restoreState(OperationContext* opCtx) {
-    ++_commonStats.unyields;
-    for (size_t i = 0; i < _children.size(); ++i) {
-        _children[i]->restoreState(opCtx);
-    }
-}
-
-void MergeSortStage::invalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) {
-    ++_commonStats.invalidates;
-    for (size_t i = 0; i < _children.size(); ++i) {
-        _children[i]->invalidate(txn, dl, type);
-    }
-
+void MergeSortStage::doInvalidate(OperationContext* txn,
+                                  const RecordId& dl,
+                                  InvalidationType type) {
     // Go through our data and see if we're holding on to the invalidated loc.
     for (list<StageWithValue>::iterator valueIt = _mergingData.begin();
          valueIt != _mergingData.end();
@@ -263,28 +246,20 @@ bool MergeSortStage::StageWithValueComparison::operator()(const MergingRef& lhs,
     return false;
 }
 
-vector<PlanStage*> MergeSortStage::getChildren() const {
-    return _children;
-}
-
-PlanStageStats* MergeSortStage::getStats() {
+unique_ptr<PlanStageStats> MergeSortStage::getStats() {
     _commonStats.isEOF = isEOF();
 
     _specificStats.sortPattern = _pattern;
 
-    auto_ptr<PlanStageStats> ret(new PlanStageStats(_commonStats, STAGE_SORT_MERGE));
-    ret->specific.reset(new MergeSortStats(_specificStats));
+    unique_ptr<PlanStageStats> ret = make_unique<PlanStageStats>(_commonStats, STAGE_SORT_MERGE);
+    ret->specific = make_unique<MergeSortStats>(_specificStats);
     for (size_t i = 0; i < _children.size(); ++i) {
-        ret->children.push_back(_children[i]->getStats());
+        ret->children.emplace_back(_children[i]->getStats());
     }
-    return ret.release();
+    return ret;
 }
 
-const CommonStats* MergeSortStage::getCommonStats() {
-    return &_commonStats;
-}
-
-const SpecificStats* MergeSortStage::getSpecificStats() {
+const SpecificStats* MergeSortStage::getSpecificStats() const {
     return &_specificStats;
 }
 

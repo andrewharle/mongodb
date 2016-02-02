@@ -29,10 +29,8 @@
 
 #pragma once
 
-#include <boost/noncopyable.hpp>
-#include <memory>
-
 #include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonobj.h"
 
 namespace mongo {
 
@@ -85,8 +83,8 @@ enum FieldCompareResult {
 
 /** Use BSON_ARRAY macro like BSON macro, but without keys
 
-    BSONArray arr =
-        BSON_ARRAY( "hello" << 1 << BSON( "foo" << BSON_ARRAY( "bar" << "baz" << "qux" ) ) );
+    BSONArray arr = BSON_ARRAY( "hello" << 1 <<
+                        BSON( "foo" << BSON_ARRAY( "bar" << "baz" << "qux" ) ) );
 
  */
 #define BSON_ARRAY(x) ((::mongo::BSONArrayBuilder() << x).arr())
@@ -153,26 +151,26 @@ private:
 
 // Utility class to allow adding a std::string to BSON as a Symbol
 struct BSONSymbol {
-    explicit BSONSymbol(const StringData& sym) : symbol(sym) {}
+    explicit BSONSymbol(StringData sym) : symbol(sym) {}
     StringData symbol;
 };
 
 // Utility class to allow adding a std::string to BSON as Code
 struct BSONCode {
-    explicit BSONCode(const StringData& str) : code(str) {}
+    explicit BSONCode(StringData str) : code(str) {}
     StringData code;
 };
 
 // Utility class to allow adding CodeWScope to BSON
 struct BSONCodeWScope {
-    explicit BSONCodeWScope(const StringData& str, const BSONObj& obj) : code(str), scope(obj) {}
+    explicit BSONCodeWScope(StringData str, const BSONObj& obj) : code(str), scope(obj) {}
     StringData code;
     BSONObj scope;
 };
 
 // Utility class to allow adding a RegEx to BSON
 struct BSONRegEx {
-    explicit BSONRegEx(const StringData& pat, const StringData& f = "") : pattern(pat), flags(f) {}
+    explicit BSONRegEx(StringData pat, StringData f = "") : pattern(pat), flags(f) {}
     StringData pattern;
     StringData flags;
 };
@@ -187,7 +185,7 @@ struct BSONBinData {
 
 // Utility class to allow adding deprecated DBRef type to BSON
 struct BSONDBRef {
-    BSONDBRef(const StringData& nameSpace, const OID& o) : ns(nameSpace), oid(o) {}
+    BSONDBRef(StringData nameSpace, const OID& o) : ns(nameSpace), oid(o) {}
     StringData ns;
     OID oid;
 };
@@ -217,7 +215,9 @@ inline BSONObj OR(const BSONObj& a,
 // definitions in bsonobjbuilder.h b/c of incomplete types
 
 // Utility class to implement BSON( key << val ) as described above.
-class BSONObjBuilderValueStream : public boost::noncopyable {
+class BSONObjBuilderValueStream {
+    MONGO_DISALLOW_COPYING(BSONObjBuilderValueStream);
+
 public:
     friend class Labeler;
     BSONObjBuilderValueStream(BSONObjBuilder* builder);
@@ -237,7 +237,7 @@ public:
 
     Labeler operator<<(const Labeler::Label& l);
 
-    void endField(const StringData& nextFieldName = StringData());
+    void endField(StringData nextFieldName = StringData());
     bool subobjStarted() const {
         return _fieldName != 0;
     }
@@ -253,6 +253,11 @@ public:
         return *_builder;
     }
 
+    /**
+     * Restores this object to its empty state.
+     */
+    void reset();
+
 private:
     StringData _fieldName;
     BSONObjBuilder* _builder;
@@ -261,7 +266,7 @@ private:
         return _subobj.get() != 0;
     }
     BSONObjBuilder* subobj();
-    std::auto_ptr<BSONObjBuilder> _subobj;
+    std::unique_ptr<BSONObjBuilder> _subobj;
 };
 
 /**

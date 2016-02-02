@@ -35,10 +35,11 @@
 #include "mongo/db/operation_context_impl.h"
 #include "mongo/db/storage/mmap_v1/extent.h"
 #include "mongo/db/storage/mmap_v1/extent_manager.h"
+#include "mongo/db/storage/mmap_v1/mmap.h"
 #include "mongo/db/storage/mmap_v1/record.h"
 #include "mongo/db/storage/mmap_v1/record_store_v1_capped_iterator.h"
+#include "mongo/stdx/memory.h"
 #include "mongo/util/log.h"
-#include "mongo/util/mmap.h"
 #include "mongo/util/mongoutils/str.h"
 
 /*
@@ -67,12 +68,12 @@ using std::hex;
 using std::vector;
 
 CappedRecordStoreV1::CappedRecordStoreV1(OperationContext* txn,
-                                         CappedDocumentDeleteCallback* collection,
-                                         const StringData& ns,
+                                         CappedCallback* collection,
+                                         StringData ns,
                                          RecordStoreV1MetaData* details,
                                          ExtentManager* em,
                                          bool isSystemIndexes)
-    : RecordStoreV1Base(ns, details, em, isSystemIndexes), _deleteCallback(collection) {
+    : RecordStoreV1Base(ns, details, em, isSystemIndexes), _cappedCallback(collection) {
     DiskLoc extentLoc = details->firstExtent(txn);
     while (!extentLoc.isNull()) {
         _extentAdvice.push_back(_extentManager->cacheHint(extentLoc, ExtentManager::Sequential));
@@ -167,7 +168,7 @@ StatusWith<DiskLoc> CappedRecordStoreV1::allocRecord(OperationContext* txn,
             }
 
             const RecordId fr = theCapExtent()->firstRecord.toRecordId();
-            Status status = _deleteCallback->aboutToDeleteCapped(txn, fr, dataFor(txn, fr));
+            Status status = _cappedCallback->aboutToDeleteCapped(txn, fr, dataFor(txn, fr));
             if (!status.isOK())
                 return StatusWith<DiskLoc>(status);
             deleteRecord(txn, fr);
@@ -367,7 +368,7 @@ bool CappedRecordStoreV1::nextIsInCapExtent(const DiskLoc& dl) const {
     return inCapExtent(next);
 }
 
-void CappedRecordStoreV1::advanceCapExtent(OperationContext* txn, const StringData& ns) {
+void CappedRecordStoreV1::advanceCapExtent(OperationContext* txn, StringData ns) {
     // We want cappedLastDelRecLastExtent() to be the last DeletedRecord of the prev cap extent
     // (or DiskLoc() if new capExtent == firstExtent)
     if (_details->capExtent() == _details->lastExtent(txn))
@@ -476,7 +477,7 @@ void CappedRecordStoreV1::cappedTruncateAfter(OperationContext* txn,
         WriteUnitOfWork wunit(txn);
         // Delete the newest record, and coalesce the new deleted
         // record with existing deleted records.
-        Status status = _deleteCallback->aboutToDeleteCapped(txn, currId, dataFor(txn, currId));
+        Status status = _cappedCallback->aboutToDeleteCapped(txn, currId, dataFor(txn, currId));
         uassertStatusOK(status);
         deleteRecord(txn, currId);
         _compact(txn);
@@ -564,8 +565,6 @@ Extent* CappedRecordStoreV1::theCapExtent() const {
 void CappedRecordStoreV1::addDeletedRec(OperationContext* txn, const DiskLoc& dloc) {
     DeletedRecord* d = txn->recoveryUnit()->writing(drec(dloc));
 
-    DEBUGGING log() << "TEMP: add deleted rec " << dloc.toString() << ' ' << hex << d->extentOfs()
-                    << endl;
     if (!cappedLastDelRecLastExtent().isValid()) {
         // Initial extent allocation.  Insert at end.
         d->nextDeleted() = DiskLoc();
@@ -584,14 +583,14 @@ void CappedRecordStoreV1::addDeletedRec(OperationContext* txn, const DiskLoc& dl
     }
 }
 
-RecordIterator* CappedRecordStoreV1::getIterator(OperationContext* txn,
-                                                 const RecordId& start,
-                                                 const CollectionScanParams::Direction& dir) const {
-    return new CappedRecordStoreV1Iterator(txn, this, start, false, dir);
+std::unique_ptr<SeekableRecordCursor> CappedRecordStoreV1::getCursor(OperationContext* txn,
+                                                                     bool forward) const {
+    return stdx::make_unique<CappedRecordStoreV1Iterator>(txn, this, forward);
 }
 
-vector<RecordIterator*> CappedRecordStoreV1::getManyIterators(OperationContext* txn) const {
-    OwnedPointerVector<RecordIterator> iterators;
+vector<std::unique_ptr<RecordCursor>> CappedRecordStoreV1::getManyCursors(
+    OperationContext* txn) const {
+    vector<std::unique_ptr<RecordCursor>> cursors;
 
     if (!_details->capLooped()) {
         // if we haven't looped yet, just spit out all extents (same as non-capped impl)
@@ -601,8 +600,8 @@ vector<RecordIterator*> CappedRecordStoreV1::getManyIterators(OperationContext* 
             if (ext->firstRecord.isNull())
                 continue;
 
-            iterators.push_back(
-                new RecordStoreV1Base::IntraExtentIterator(txn, ext->firstRecord, this));
+            cursors.push_back(stdx::make_unique<RecordStoreV1Base::IntraExtentIterator>(
+                txn, ext->firstRecord, this));
         }
     } else {
         // if we've looped we need to iterate the extents, starting and ending with the
@@ -617,8 +616,8 @@ vector<RecordIterator*> CappedRecordStoreV1::getManyIterators(OperationContext* 
             const Extent* ext = _getExtent(txn, extLoc);
             if (ext->firstRecord != details()->capFirstNewRecord()) {
                 // this means there is old data in capExtent
-                iterators.push_back(
-                    new RecordStoreV1Base::IntraExtentIterator(txn, ext->firstRecord, this));
+                cursors.push_back(stdx::make_unique<RecordStoreV1Base::IntraExtentIterator>(
+                    txn, ext->firstRecord, this));
             }
 
             extLoc = ext->xnext.isNull() ? details()->firstExtent(txn) : ext->xnext;
@@ -627,18 +626,18 @@ vector<RecordIterator*> CappedRecordStoreV1::getManyIterators(OperationContext* 
         // Next handle all the other extents
         while (extLoc != capExtent) {
             const Extent* ext = _getExtent(txn, extLoc);
-            iterators.push_back(
-                new RecordStoreV1Base::IntraExtentIterator(txn, ext->firstRecord, this));
+            cursors.push_back(stdx::make_unique<RecordStoreV1Base::IntraExtentIterator>(
+                txn, ext->firstRecord, this));
 
             extLoc = ext->xnext.isNull() ? details()->firstExtent(txn) : ext->xnext;
         }
 
         // Finally handle the "new" data in the capExtent
-        iterators.push_back(
-            new RecordStoreV1Base::IntraExtentIterator(txn, details()->capFirstNewRecord(), this));
+        cursors.push_back(stdx::make_unique<RecordStoreV1Base::IntraExtentIterator>(
+            txn, details()->capFirstNewRecord(), this));
     }
 
-    return iterators.release();
+    return cursors;
 }
 
 void CappedRecordStoreV1::_maybeComplain(OperationContext* txn, int len) const {

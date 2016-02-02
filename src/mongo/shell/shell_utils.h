@@ -27,10 +27,11 @@
  *    then also delete it in the license file.
  */
 
-
 #pragma once
 
 #include "mongo/db/jsobj.h"
+#include "mongo/stdx/mutex.h"
+#include "mongo/util/concurrency/mutex.h"
 
 namespace mongo {
 
@@ -75,10 +76,14 @@ public:
 
 private:
     std::map<std::string, std::set<std::string>> _connectionUris;
-    mutable mongo::mutex _mutex;
+    mutable stdx::mutex _mutex;
 };
 
 extern ConnectionRegistry connectionRegistry;
+
+// This mutex helps the shell serialize output on exit, to avoid deadlocks at shutdown. So
+// it also protects the global dbexitCalled.
+extern stdx::mutex& mongoProgramOutputMutex;
 
 // Helper to tell if a file exists cross platform
 // TODO: Remove this when we have a cross platform file utility library

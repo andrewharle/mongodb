@@ -29,7 +29,7 @@
 
 #pragma once
 
-#include "mongo/db/global_environment_experiment.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/platform/atomic_word.h"
 
@@ -80,10 +80,11 @@ public:
     virtual long long getNumberLongLong(const char* field) {
         return static_cast<long long>(getNumber(field));
     }
+    virtual Decimal128 getNumberDecimal(const char* field) = 0;
 
-    virtual void setElement(const char* field, const BSONElement& e) = 0;
+    virtual void setElement(const char* field, const BSONElement& e, const BSONObj& parent) = 0;
     virtual void setNumber(const char* field, double val) = 0;
-    virtual void setString(const char* field, const StringData& val) = 0;
+    virtual void setString(const char* field, StringData val) = 0;
     virtual void setObject(const char* field, const BSONObj& obj, bool readOnly = true) = 0;
     virtual void setBoolean(const char* field, bool val) = 0;
     virtual void setFunction(const char* field, const char* code) = 0;
@@ -101,6 +102,8 @@ public:
     virtual bool isKillPending() const = 0;
 
     virtual void gc() = 0;
+
+    virtual void advanceGeneration() = 0;
 
     virtual ScriptingFunction createFunction(const char* code);
 
@@ -138,14 +141,14 @@ public:
 
     virtual void injectNative(const char* field, NativeFunction func, void* data = 0) = 0;
 
-    virtual bool exec(const StringData& code,
+    virtual bool exec(StringData code,
                       const std::string& name,
                       bool printResult,
                       bool reportError,
                       bool assertOnError,
                       int timeoutMs = 0) = 0;
 
-    virtual void execSetup(const StringData& code, const std::string& name = "setup") {
+    virtual void execSetup(StringData code, const std::string& name = "setup") {
         exec(code, name, false, true, true, 0);
     }
 
@@ -234,11 +237,19 @@ public:
         return createScope();
     }
 
+    virtual Scope* newScopeForCurrentThread() {
+        return createScopeForCurrentThread();
+    }
+
     virtual void runTest() = 0;
 
     virtual bool utf8Ok() const = 0;
 
+    virtual void enableJIT(bool value) = 0;
+    virtual bool isJITEnabled() const = 0;
+
     static void setup();
+    static void dropScopeCache();
 
     /** gets a scope from the pool or a new one if pool is empty
      * @param db The db name
@@ -246,9 +257,9 @@ public:
      *                  This must include authenticated users.
      * @return the scope
      */
-    std::auto_ptr<Scope> getPooledScope(OperationContext* txn,
-                                        const std::string& db,
-                                        const std::string& scopeType);
+    std::unique_ptr<Scope> getPooledScope(OperationContext* txn,
+                                          const std::string& db,
+                                          const std::string& scopeType);
 
     void setScopeInitCallback(void (*func)(Scope&)) {
         _scopeInitCallback = func;
@@ -270,6 +281,7 @@ public:
 
 protected:
     virtual Scope* createScope() = 0;
+    virtual Scope* createScopeForCurrentThread() = 0;
     void (*_scopeInitCallback)(Scope&);
 
 private:

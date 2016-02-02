@@ -33,20 +33,22 @@
 
 #pragma once
 
+#include <cstdint>
 #include <deque>
+#include <set>
 #include <string>
 #include <vector>
-#include <set>
 
 #include "mongo/base/disallow_copying.h"
-#include "mongo/client/dbclient_rs.h"  // for TagSet and ReadPreferenceSettings
+#include "mongo/client/read_preference.h"
 #include "mongo/client/replica_set_monitor.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/platform/cstdint.h"
 #include "mongo/platform/random.h"
+#include "mongo/stdx/condition_variable.h"
 #include "mongo/util/net/hostandport.h"
 
 namespace mongo {
+
 struct ReplicaSetMonitor::IsMasterReply {
     IsMasterReply() : ok(false) {}
     IsMasterReply(const HostAndPort& host, int64_t latencyMicros, const BSONObj& reply)
@@ -69,6 +71,8 @@ struct ReplicaSetMonitor::IsMasterReply {
     HostAndPort primary;                // empty if not present
     std::set<HostAndPort> normalHosts;  // both "hosts" and "passives"
     BSONObj tags;
+    int minWireVersion{0};
+    int maxWireVersion{0};
 
     // remaining fields aren't in isMaster reply, but are known to caller.
     HostAndPort host;
@@ -79,18 +83,15 @@ struct ReplicaSetMonitor::SetState {
     MONGO_DISALLOW_COPYING(SetState);
 
 public:
-    // A single node in the replicaSet
+    /**
+     * Holds the state of a single node in the replicaSet
+     */
     struct Node {
-        explicit Node(const HostAndPort& host) : host(host), latencyMicros(unknownLatency) {
-            markFailed();
-        }
+        explicit Node(const HostAndPort& host);
 
-        void markFailed() {
-            isUp = false;
-            isMaster = false;
-        }
+        void markFailed();
 
-        bool matches(const ReadPreference& pref) const;
+        bool matches(const ReadPreference pref) const;
 
         /**
          * Checks if the given tag matches the tag attached to this node.
@@ -112,21 +113,23 @@ public:
          */
         void update(const IsMasterReply& reply);
 
-        // Intentionally chosen to compare worse than all known latencies.
-        static const int64_t unknownLatency;  // = numeric_limits<int64_t>::max()
-
         HostAndPort host;
-        bool isUp;
-        bool isMaster;          // implies isUp
+        bool isUp{false};
+        bool isMaster{false};   // implies isUp
         int64_t latencyMicros;  // unknownLatency if unknown
         BSONObj tags;           // owned
+        int minWireVersion{0};
+        int maxWireVersion{0};
     };
+
     typedef std::vector<Node> Nodes;
 
     /**
      * seedNodes must not be empty
      */
     SetState(StringData name, const std::set<HostAndPort>& seedNodes);
+
+    bool isUsable() const;
 
     /**
      * Returns a host matching criteria or an empty host if no known host matches.
@@ -148,16 +151,24 @@ public:
 
     void updateNodeIfInNodes(const IsMasterReply& reply);
 
-    std::string getServerAddress() const;
+    /**
+     * Returns the connection string of the nodes that are known the be in the set because we've
+     * seen them in the isMaster reply of a PRIMARY.
+     */
+    std::string getConfirmedServerAddress() const;
+
+    /**
+     * Returns the connection string of the nodes that are believed to be in the set because we've
+     * seen them in the isMaster reply of non-PRIMARY nodes in our seed list.
+     */
+    std::string getUnconfirmedServerAddress() const;
 
     /**
      * Before unlocking, do DEV checkInvariants();
      */
     void checkInvariants() const;
 
-    static ConfigChangeHook configChangeHook;
-
-    boost::mutex mutex;  // must hold this to access any other member or method (except name).
+    stdx::mutex mutex;  // must hold this to access any other member or method (except name).
 
     // If Refresher::getNextStep returns WAIT, you should wait on the condition_variable,
     // releasing mutex. It will be notified when either getNextStep will return something other
@@ -166,7 +177,7 @@ public:
     // progress.
     // TODO consider splitting cv into two: one for when looking for a master, one for all other
     // cases.
-    boost::condition_variable cv;
+    stdx::condition_variable cv;
 
     const std::string name;  // safe to read outside lock since it is const
     int consecutiveFailedScans;
@@ -205,4 +216,5 @@ public:
     typedef std::vector<IsMasterReply> UnconfirmedReplies;
     UnconfirmedReplies unconfirmedReplies;
 };
-}
+
+}  // namespace mongo

@@ -28,7 +28,6 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
 #include <vector>
 
 #include "mongo/db/jsobj.h"
@@ -50,19 +49,17 @@ namespace mongo {
  * operates with RecordIds, we are unable to evaluate the AND for the invalidated RecordId, and it
  * must be fully matched later.
  */
-class AndHashStage : public PlanStage {
+class AndHashStage final : public PlanStage {
 public:
-    AndHashStage(WorkingSet* ws, const MatchExpression* filter, const Collection* collection);
+    AndHashStage(OperationContext* opCtx, WorkingSet* ws, const Collection* collection);
 
     /**
      * For testing only. Allows tests to set memory usage threshold.
      */
-    AndHashStage(WorkingSet* ws,
-                 const MatchExpression* filter,
+    AndHashStage(OperationContext* opCtx,
+                 WorkingSet* ws,
                  const Collection* collection,
                  size_t maxMemUsage);
-
-    virtual ~AndHashStage();
 
     void addChild(PlanStage* child);
 
@@ -72,24 +69,18 @@ public:
      */
     size_t getMemUsage() const;
 
-    virtual StageState work(WorkingSetID* out);
-    virtual bool isEOF();
+    StageState work(WorkingSetID* out) final;
+    bool isEOF() final;
 
-    virtual void saveState();
-    virtual void restoreState(OperationContext* opCtx);
-    virtual void invalidate(OperationContext* txn, const RecordId& dl, InvalidationType type);
+    void doInvalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) final;
 
-    virtual std::vector<PlanStage*> getChildren() const;
-
-    virtual StageType stageType() const {
+    StageType stageType() const final {
         return STAGE_AND_HASH;
     }
 
-    virtual PlanStageStats* getStats();
+    std::unique_ptr<PlanStageStats> getStats() final;
 
-    virtual const CommonStats* getCommonStats();
-
-    virtual const SpecificStats* getSpecificStats();
+    const SpecificStats* getSpecificStats() const final;
 
     static const char* kStageType;
 
@@ -105,12 +96,6 @@ private:
 
     // Not owned by us.
     WorkingSet* _ws;
-
-    // Not owned by us.
-    const MatchExpression* _filter;
-
-    // The stages we read from.  Owned by us.
-    std::vector<PlanStage*> _children;
 
     // We want to see if any of our children are EOF immediately.  This requires working them a
     // few times to see if they hit EOF or if they produce a result.  If they produce a result,
@@ -134,7 +119,6 @@ private:
     size_t _currentChild;
 
     // Stats
-    CommonStats _commonStats;
     AndHashStats _specificStats;
 
     // The usage in bytes of all buffered data that we're holding.

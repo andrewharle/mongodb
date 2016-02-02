@@ -30,11 +30,11 @@
  * This file contains tests for mongo/db/exec/working_set.cpp
  */
 
-#include <boost/scoped_ptr.hpp>
 
 #include "mongo/db/exec/working_set.h"
 #include "mongo/db/json.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/db/storage/snapshot.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 
@@ -48,7 +48,7 @@ class WorkingSetFixture : public mongo::unittest::Test {
 protected:
     void setUp() {
         ws.reset(new WorkingSet());
-        WorkingSetID id = ws->allocate();
+        id = ws->allocate();
         ASSERT(id != WorkingSet::INVALID_ID);
         member = ws->get(id);
         ASSERT(NULL != member);
@@ -59,7 +59,8 @@ protected:
         member = NULL;
     }
 
-    boost::scoped_ptr<WorkingSet> ws;
+    std::unique_ptr<WorkingSet> ws;
+    WorkingSetID id;
     WorkingSetMember* member;
 };
 
@@ -67,18 +68,22 @@ TEST_F(WorkingSetFixture, noFieldToGet) {
     BSONElement elt;
 
     // Make sure we're not getting anything out of an invalid WSM.
-    ASSERT_EQUALS(WorkingSetMember::INVALID, member->state);
+    ASSERT_EQUALS(WorkingSetMember::INVALID, member->getState());
     ASSERT_FALSE(member->getFieldDotted("foo", &elt));
 
-    member->state = WorkingSetMember::LOC_AND_IDX;
+    ws->transitionToLocAndIdx(id);
     ASSERT_FALSE(member->getFieldDotted("foo", &elt));
 
     // Our state is that of a valid object.  The getFieldDotted shouldn't throw; there's
     // something to call getFieldDotted on, but there's no field there.
-    member->state = WorkingSetMember::LOC_AND_OBJ;
+    ws->transitionToLocAndObj(id);
     ASSERT_TRUE(member->getFieldDotted("foo", &elt));
 
-    member->state = WorkingSetMember::OWNED_OBJ;
+    WorkingSetMember* member = ws->get(id);
+    member->obj = {SnapshotId(),
+                   BSON("fake"
+                        << "obj")};
+    ws->transitionToOwnedObj(id);
     ASSERT_TRUE(member->getFieldDotted("foo", &elt));
 }
 
@@ -87,7 +92,7 @@ TEST_F(WorkingSetFixture, getFieldUnowned) {
 
     BSONObj obj = BSON(fieldName << 5);
     // Not truthful since the loc is bogus, but the loc isn't accessed anyway...
-    member->state = WorkingSetMember::LOC_AND_OBJ;
+    ws->transitionToLocAndObj(id);
     member->obj = Snapshotted<BSONObj>(SnapshotId(), BSONObj(obj.objdata()));
     ASSERT_TRUE(obj.isOwned());
     ASSERT_FALSE(member->obj.value().isOwned());
@@ -104,7 +109,7 @@ TEST_F(WorkingSetFixture, getFieldOwned) {
     BSONObj obj = BSON(fieldName << 5);
     member->obj = Snapshotted<BSONObj>(SnapshotId(), obj);
     ASSERT_TRUE(member->obj.value().isOwned());
-    member->state = WorkingSetMember::OWNED_OBJ;
+    ws->transitionToOwnedObj(id);
     BSONElement elt;
     ASSERT_TRUE(member->getFieldDotted(fieldName, &elt));
     ASSERT_EQUALS(elt.numberInt(), 5);
@@ -117,9 +122,9 @@ TEST_F(WorkingSetFixture, getFieldFromIndex) {
     string secondName = "y";
     int secondValue = 10;
 
-    member->keyData.push_back(IndexKeyDatum(BSON(firstName << 1), BSON("" << firstValue)));
+    member->keyData.push_back(IndexKeyDatum(BSON(firstName << 1), BSON("" << firstValue), NULL));
     // Also a minor lie as loc is bogus.
-    member->state = WorkingSetMember::LOC_AND_IDX;
+    ws->transitionToLocAndIdx(id);
     BSONElement elt;
     ASSERT_TRUE(member->getFieldDotted(firstName, &elt));
     ASSERT_EQUALS(elt.numberInt(), firstValue);
@@ -127,7 +132,7 @@ TEST_F(WorkingSetFixture, getFieldFromIndex) {
     ASSERT_FALSE(member->getFieldDotted("foo", &elt));
 
     // Add another index datum.
-    member->keyData.push_back(IndexKeyDatum(BSON(secondName << 1), BSON("" << secondValue)));
+    member->keyData.push_back(IndexKeyDatum(BSON(secondName << 1), BSON("" << secondValue), NULL));
     ASSERT_TRUE(member->getFieldDotted(secondName, &elt));
     ASSERT_EQUALS(elt.numberInt(), secondValue);
     ASSERT_TRUE(member->getFieldDotted(firstName, &elt));
@@ -140,8 +145,8 @@ TEST_F(WorkingSetFixture, getDottedFieldFromIndex) {
     string firstName = "x.y";
     int firstValue = 5;
 
-    member->keyData.push_back(IndexKeyDatum(BSON(firstName << 1), BSON("" << firstValue)));
-    member->state = WorkingSetMember::LOC_AND_IDX;
+    member->keyData.push_back(IndexKeyDatum(BSON(firstName << 1), BSON("" << firstValue), NULL));
+    ws->transitionToLocAndIdx(id);
     BSONElement elt;
     ASSERT_TRUE(member->getFieldDotted(firstName, &elt));
     ASSERT_EQUALS(elt.numberInt(), firstValue);

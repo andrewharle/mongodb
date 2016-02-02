@@ -33,34 +33,25 @@
 #include <iostream>
 
 #include "mongo/client/dbclientcursor.h"
+#include "mongo/db/catalog/collection.h"
 #include "mongo/db/clientcursor.h"
+#include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/dbhelpers.h"
-#include "mongo/db/global_environment_d.h"
-#include "mongo/db/global_environment_experiment.h"
-#include "mongo/db/global_optime.h"
+#include "mongo/db/service_context_d.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/global_timestamp.h"
 #include "mongo/db/json.h"
 #include "mongo/db/lasterror.h"
+#include "mongo/db/operation_context_impl.h"
 #include "mongo/db/query/find.h"
 #include "mongo/db/query/lite_parsed_query.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/operation_context_impl.h"
 #include "mongo/dbtests/dbtests.h"
 #include "mongo/util/timer.h"
 
-namespace mongo {
-void assembleRequest(const std::string& ns,
-                     BSONObj query,
-                     int nToReturn,
-                     int nToSkip,
-                     const BSONObj* fieldsToReturn,
-                     int queryOptions,
-                     Message& toSend);
-}
-
 namespace QueryTests {
 
-using std::auto_ptr;
+using std::unique_ptr;
 using std::cout;
 using std::endl;
 using std::string;
@@ -125,7 +116,7 @@ protected:
     OperationContextImpl _txn;
     ScopedTransaction _scopedXact;
     Lock::GlobalWrite _lk;
-    Client::Context _context;
+    OldClientContext _context;
 
     Database* _database;
     Collection* _collection;
@@ -187,7 +178,7 @@ public:
         // an empty object (one might be allowed inside a reserved namespace at some point).
         ScopedTransaction transaction(&_txn, MODE_X);
         Lock::GlobalWrite lk(_txn.lockState());
-        Client::Context ctx(&_txn, "unittests.querytests");
+        OldClientContext ctx(&_txn, "unittests.querytests");
 
         {
             WriteUnitOfWork wunit(&_txn);
@@ -196,7 +187,7 @@ public:
                 _collection = NULL;
                 db->dropCollection(&_txn, ns());
             }
-            _collection = db->createCollection(&_txn, ns(), CollectionOptions(), true, false);
+            _collection = db->createCollection(&_txn, ns(), CollectionOptions(), false);
             wunit.commit();
         }
         ASSERT(_collection);
@@ -224,13 +215,10 @@ public:
 class ClientBase {
 public:
     ClientBase() : _client(&_txn) {
-        _prevError = mongo::lastError._get(false);
-        mongo::lastError.release();
-        mongo::lastError.reset(new LastError());
-        _txn.getCurOp()->reset();
+        mongo::LastError::get(_txn.getClient()).reset();
     }
     virtual ~ClientBase() {
-        mongo::lastError.reset(_prevError);
+        mongo::LastError::get(_txn.getClient()).reset();
     }
 
 protected:
@@ -246,9 +234,6 @@ protected:
 
     OperationContextImpl _txn;
     DBDirectClient _client;
-
-private:
-    LastError* _prevError;
 };
 
 class BoundedKey : public ClientBase {
@@ -278,18 +263,15 @@ public:
         insert(ns, BSON("a" << 1));
         insert(ns, BSON("a" << 2));
         insert(ns, BSON("a" << 3));
-        auto_ptr<DBClientCursor> cursor = _client.query(ns, BSONObj(), 2);
+        unique_ptr<DBClientCursor> cursor = _client.query(ns, BSONObj(), 2);
         long long cursorId = cursor->getCursorId();
         cursor->decouple();
         cursor.reset();
 
         {
             // Check internal server handoff to getmore.
-            Client::WriteContext ctx(&_txn, ns);
+            OldClientWriteContext ctx(&_txn, ns);
             ClientCursorPin clientCursor(ctx.getCollection()->getCursorManager(), cursorId);
-            // pq doesn't exist if it's a runner inside of the clientcursor.
-            // ASSERT( clientCursor.c()->pq );
-            // ASSERT_EQUALS( 2, clientCursor.c()->pq->getNumToReturn() );
             ASSERT_EQUALS(2, clientCursor.c()->pos());
         }
 
@@ -306,7 +288,7 @@ public:
 class GetMoreKillOp : public ClientBase {
 public:
     ~GetMoreKillOp() {
-        getGlobalEnvironment()->unsetKillAllOperations();
+        getGlobalServiceContext()->unsetKillAllOperations();
         _client.dropCollection("unittests.querytests.GetMoreKillOp");
     }
     void run() {
@@ -317,7 +299,7 @@ public:
         }
 
         // Create a cursor on the collection, with a batch size of 200.
-        auto_ptr<DBClientCursor> cursor = _client.query(ns, "", 0, 0, 0, 0, 200);
+        unique_ptr<DBClientCursor> cursor = _client.query(ns, "", 0, 0, 0, 0, 200);
         CursorId cursorId = cursor->getCursorId();
 
         // Count 500 results, spanning a few batches of documents.
@@ -328,13 +310,13 @@ public:
 
         // Set the killop kill all flag, forcing the next get more to fail with a kill op
         // exception.
-        getGlobalEnvironment()->setKillAllOperations();
+        getGlobalServiceContext()->setKillAllOperations();
         while (cursor->more()) {
             cursor->next();
         }
 
         // Revert the killop kill all flag.
-        getGlobalEnvironment()->unsetKillAllOperations();
+        getGlobalServiceContext()->unsetKillAllOperations();
 
         // Check that the cursor has been removed.
         {
@@ -357,7 +339,7 @@ public:
 class GetMoreInvalidRequest : public ClientBase {
 public:
     ~GetMoreInvalidRequest() {
-        getGlobalEnvironment()->unsetKillAllOperations();
+        getGlobalServiceContext()->unsetKillAllOperations();
         _client.dropCollection("unittests.querytests.GetMoreInvalidRequest");
     }
     void run() {
@@ -368,7 +350,7 @@ public:
         }
 
         // Create a cursor on the collection, with a batch size of 200.
-        auto_ptr<DBClientCursor> cursor = _client.query(ns, "", 0, 0, 0, 0, 200);
+        unique_ptr<DBClientCursor> cursor = _client.query(ns, "", 0, 0, 0, 0, 200);
         CursorId cursorId = cursor->getCursorId();
 
         // Count 500 results, spanning a few batches of documents.
@@ -436,7 +418,7 @@ public:
         insert(ns, BSON("a" << 0));
         insert(ns, BSON("a" << 1));
         insert(ns, BSON("a" << 2));
-        auto_ptr<DBClientCursor> c =
+        unique_ptr<DBClientCursor> c =
             _client.query(ns,
                           QUERY("a" << GT << 0).hint(BSON("$natural" << 1)),
                           1,
@@ -461,7 +443,7 @@ public:
         insert(ns, BSON("a" << 0));
         insert(ns, BSON("a" << 1));
         insert(ns, BSON("a" << 2));
-        auto_ptr<DBClientCursor> c = _client.query(
+        unique_ptr<DBClientCursor> c = _client.query(
             ns, Query().hint(BSON("$natural" << 1)), 2, 0, 0, QueryOption_CursorTailable);
         ASSERT(0 != c->getCursorId());
         while (c->more())
@@ -484,7 +466,7 @@ public:
     void run() {
         const char* ns = "unittests.querytests.EmptyTail";
         _client.createCollection(ns, 1900, true);
-        auto_ptr<DBClientCursor> c = _client.query(
+        unique_ptr<DBClientCursor> c = _client.query(
             ns, Query().hint(BSON("$natural" << 1)), 2, 0, 0, QueryOption_CursorTailable);
         ASSERT_EQUALS(0, c->getCursorId());
         ASSERT(c->isDead());
@@ -506,7 +488,7 @@ public:
         _client.createCollection(ns, 8192, true, 2);
         insert(ns, BSON("a" << 0));
         insert(ns, BSON("a" << 1));
-        auto_ptr<DBClientCursor> c = _client.query(
+        unique_ptr<DBClientCursor> c = _client.query(
             ns, Query().hint(BSON("$natural" << 1)), 2, 0, 0, QueryOption_CursorTailable);
         c->next();
         c->next();
@@ -531,7 +513,7 @@ public:
         _client.createCollection(ns, 8192, true, 2);
         insert(ns, BSON("a" << 0));
         insert(ns, BSON("a" << 1));
-        auto_ptr<DBClientCursor> c = _client.query(
+        unique_ptr<DBClientCursor> c = _client.query(
             ns, Query().hint(BSON("$natural" << 1)), 2, 0, 0, QueryOption_CursorTailable);
         c->next();
         c->next();
@@ -558,7 +540,7 @@ public:
         _client.createCollection(ns, 1330, true);
         insert(ns, BSON("a" << 0));
         insert(ns, BSON("a" << 1));
-        auto_ptr<DBClientCursor> c = _client.query(
+        unique_ptr<DBClientCursor> c = _client.query(
             ns, Query().hint(BSON("$natural" << 1)), 2, 0, 0, QueryOption_CursorTailable);
         c->next();
         c->next();
@@ -579,7 +561,7 @@ public:
     void run() {
         const char* ns = "unittests.querytests.TailCappedOnly";
         _client.insert(ns, BSONObj());
-        auto_ptr<DBClientCursor> c =
+        unique_ptr<DBClientCursor> c =
             _client.query(ns, BSONObj(), 0, 0, 0, QueryOption_CursorTailable);
         ASSERT(c->isDead());
     }
@@ -609,11 +591,11 @@ public:
                            info);
         insertA(ns, 0);
         insertA(ns, 1);
-        auto_ptr<DBClientCursor> c1 =
+        unique_ptr<DBClientCursor> c1 =
             _client.query(ns, QUERY("a" << GT << -1), 0, 0, 0, QueryOption_CursorTailable);
         OID id;
         id.init("000000000000000000000000");
-        auto_ptr<DBClientCursor> c2 =
+        unique_ptr<DBClientCursor> c2 =
             _client.query(ns, QUERY("value" << GT << id), 0, 0, 0, QueryOption_CursorTailable);
         c1->next();
         c1->next();
@@ -642,7 +624,7 @@ public:
         insert(ns, BSON("ts" << 0));
         insert(ns, BSON("ts" << 1));
         insert(ns, BSON("ts" << 2));
-        auto_ptr<DBClientCursor> c =
+        unique_ptr<DBClientCursor> c =
             _client.query(ns,
                           QUERY("ts" << GT << 1).hint(BSON("$natural" << 1)),
                           0,
@@ -675,7 +657,7 @@ public:
         const char* ns = "unittests.querytests.OplogReplaySlaveReadTill";
         ScopedTransaction transaction(&_txn, MODE_IX);
         Lock::DBLock lk(_txn.lockState(), "unittests", MODE_X);
-        Client::Context ctx(&_txn, ns);
+        OldClientContext ctx(&_txn, ns);
 
         BSONObj info;
         _client.runCommand("unittests",
@@ -684,13 +666,13 @@ public:
                                 << "capped" << true << "size" << 8192),
                            info);
 
-        Date_t one = getNextGlobalOptime().asDate();
-        Date_t two = getNextGlobalOptime().asDate();
-        Date_t three = getNextGlobalOptime().asDate();
+        Date_t one = Date_t::fromMillisSinceEpoch(getNextGlobalTimestamp().asLL());
+        Date_t two = Date_t::fromMillisSinceEpoch(getNextGlobalTimestamp().asLL());
+        Date_t three = Date_t::fromMillisSinceEpoch(getNextGlobalTimestamp().asLL());
         insert(ns, BSON("ts" << one));
         insert(ns, BSON("ts" << two));
         insert(ns, BSON("ts" << three));
-        auto_ptr<DBClientCursor> c =
+        unique_ptr<DBClientCursor> c =
             _client.query(ns,
                           QUERY("ts" << GTE << two).hint(BSON("$natural" << 1)),
                           0,
@@ -702,7 +684,7 @@ public:
         long long cursorId = c->getCursorId();
 
         ClientCursorPin clientCursor(ctx.db()->getCollection(ns)->getCursorManager(), cursorId);
-        ASSERT_EQUALS(three.millis, clientCursor.c()->getSlaveReadTill().asDate());
+        ASSERT_EQUALS(three.toULL(), clientCursor.c()->getSlaveReadTill().asULL());
     }
 };
 
@@ -716,7 +698,7 @@ public:
         insert(ns, BSON("ts" << 0));
         insert(ns, BSON("ts" << 1));
         insert(ns, BSON("ts" << 2));
-        auto_ptr<DBClientCursor> c =
+        unique_ptr<DBClientCursor> c =
             _client.query(ns,
                           QUERY("ts" << GT << 1).hint(BSON("$natural" << 1)).explain(),
                           0,
@@ -851,9 +833,6 @@ public:
     }
     static const char* ns() {
         return "unittests.querytests.AutoResetIndexCache";
-    }
-    static const char* idxNs() {
-        return "unittests.system.indexes";
     }
     void index() {
         ASSERT_EQUALS(2u, _client.getIndexSpecs(ns()).size());
@@ -1035,7 +1014,7 @@ public:
             check(1, 2, 2, 2, 2, hints[i]);
             check(1, 2, 2, 1, 1, hints[i]);
 
-            auto_ptr<DBClientCursor> c = query(1, 2, 2, 2, hints[i]);
+            unique_ptr<DBClientCursor> c = query(1, 2, 2, 2, hints[i]);
             BSONObj obj = c->next();
             ASSERT_EQUALS(1, obj.getIntField("a"));
             ASSERT_EQUALS(2, obj.getIntField("b"));
@@ -1047,7 +1026,7 @@ public:
     }
 
 private:
-    auto_ptr<DBClientCursor> query(int minA, int minB, int maxA, int maxB, const BSONObj& hint) {
+    unique_ptr<DBClientCursor> query(int minA, int minB, int maxA, int maxB, const BSONObj& hint) {
         Query q;
         q = q.minKey(BSON("a" << minA << "b" << minB)).maxKey(BSON("a" << maxA << "b" << maxB));
         if (!hint.isEmpty())
@@ -1058,7 +1037,7 @@ private:
         int minA, int minB, int maxA, int maxB, int expectedCount, const BSONObj& hint = empty_) {
         ASSERT_EQUALS(expectedCount, count(query(minA, minB, maxA, maxB, hint)));
     }
-    int count(auto_ptr<DBClientCursor> c) {
+    int count(unique_ptr<DBClientCursor> c) {
         int ret = 0;
         while (c->more()) {
             ++ret;
@@ -1142,7 +1121,7 @@ public:
     void run() {
         ScopedTransaction transaction(&_txn, MODE_X);
         Lock::GlobalWrite lk(_txn.lockState());
-        Client::Context ctx(&_txn, "unittests.DirectLocking");
+        OldClientContext ctx(&_txn, "unittests.DirectLocking");
         _client.remove("a.b", BSONObj());
         ASSERT_EQUALS("unittests", ctx.db()->name());
     }
@@ -1192,7 +1171,7 @@ public:
         _client.dropCollection("unittests.querytests.DifferentNumbers");
     }
     void t(const char* ns) {
-        auto_ptr<DBClientCursor> cursor = _client.query(ns, Query().sort("7"));
+        unique_ptr<DBClientCursor> cursor = _client.query(ns, Query().sort("7"));
         while (cursor->more()) {
             BSONObj o = cursor->next();
             verify(o.valid());
@@ -1307,7 +1286,7 @@ public:
     }
     void run() {
         string err;
-        Client::WriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_txn, ns());
 
         // note that extents are always at least 4KB now - so this will get rounded up
         // a bit.
@@ -1328,7 +1307,7 @@ public:
 
         int a = count();
 
-        auto_ptr<DBClientCursor> c =
+        unique_ptr<DBClientCursor> c =
             _client.query(ns(),
                           QUERY("i" << GT << 0).hint(BSON("$natural" << 1)),
                           0,
@@ -1370,7 +1349,7 @@ public:
     HelperTest() : CollectionBase("helpertest") {}
 
     void run() {
-        Client::WriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_txn, ns());
 
         for (int i = 0; i < 50; i++) {
             insert(ns(), BSON("_id" << i << "x" << i * 2));
@@ -1382,10 +1361,10 @@ public:
         ASSERT(Helpers::findOne(&_txn, ctx.getCollection(), BSON("_id" << 20), res, true));
         ASSERT_EQUALS(40, res["x"].numberInt());
 
-        ASSERT(Helpers::findById(&_txn, ctx.ctx().db(), ns(), BSON("_id" << 20), res));
+        ASSERT(Helpers::findById(&_txn, ctx.db(), ns(), BSON("_id" << 20), res));
         ASSERT_EQUALS(40, res["x"].numberInt());
 
-        ASSERT(!Helpers::findById(&_txn, ctx.ctx().db(), ns(), BSON("_id" << 200), res));
+        ASSERT(!Helpers::findById(&_txn, ctx.db(), ns(), BSON("_id" << 200), res));
 
         long long slow;
         long long fast;
@@ -1416,7 +1395,7 @@ public:
     HelperByIdTest() : CollectionBase("helpertestbyid") {}
 
     void run() {
-        Client::WriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_txn, ns());
 
         for (int i = 0; i < 1000; i++) {
             insert(ns(), BSON("_id" << i << "x" << i * 2));
@@ -1437,7 +1416,7 @@ class ClientCursorTest : public CollectionBase {
     ClientCursorTest() : CollectionBase("clientcursortest") {}
 
     void run() {
-        Client::WriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_txn, ns());
 
         for (int i = 0; i < 1000; i++) {
             insert(ns(), BSON("_id" << i << "x" << i * 2));
@@ -1478,7 +1457,7 @@ public:
             int min =
                 _client.query(ns(), Query().sort(BSON("$natural" << 1)))->next()["ts"].numberInt();
             for (int j = -1; j < i; ++j) {
-                auto_ptr<DBClientCursor> c =
+                unique_ptr<DBClientCursor> c =
                     _client.query(ns(), QUERY("ts" << GTE << j), 0, 0, 0, QueryOption_OplogReplay);
                 ASSERT(c->more());
                 BSONObj next = c->next();
@@ -1515,7 +1494,7 @@ public:
             int min =
                 _client.query(ns(), Query().sort(BSON("$natural" << 1)))->next()["ts"].numberInt();
             for (int j = -1; j < i; ++j) {
-                auto_ptr<DBClientCursor> c =
+                unique_ptr<DBClientCursor> c =
                     _client.query(ns(), QUERY("ts" << GTE << j), 0, 0, 0, QueryOption_OplogReplay);
                 ASSERT(c->more());
                 BSONObj next = c->next();
@@ -1542,7 +1521,7 @@ public:
         size_t startNumCursors = numCursorsOpen();
 
         // Check OplogReplay mode with missing collection.
-        auto_ptr<DBClientCursor> c0 =
+        unique_ptr<DBClientCursor> c0 =
             _client.query(ns(), QUERY("ts" << GTE << 50), 0, 0, 0, QueryOption_OplogReplay);
         ASSERT(!c0->more());
 
@@ -1555,7 +1534,7 @@ public:
                                   info));
 
         // Check OplogReplay mode with empty collection.
-        auto_ptr<DBClientCursor> c =
+        unique_ptr<DBClientCursor> c =
             _client.query(ns(), QUERY("ts" << GTE << 50), 0, 0, 0, QueryOption_OplogReplay);
         ASSERT(!c->more());
 
@@ -1577,7 +1556,7 @@ public:
     void run() {
         BSONObj result;
         _client.runCommand("admin", BSON("whatsmyuri" << 1), result);
-        ASSERT_EQUALS(unknownAddress.toString(), result["you"].str());
+        ASSERT_EQUALS("", result["you"].str());
     }
 };
 
@@ -1592,7 +1571,7 @@ public:
 private:
     ScopedTransaction _scopedXact;
     Lock::DBLock _lk;
-    Client::Context _ctx;
+    OldClientContext _ctx;
 };
 
 class Exhaust : public CollectionInternalBase {
@@ -1607,18 +1586,18 @@ public:
                                   info));
         _client.insert(ns(), BSON("ts" << 0));
         Message message;
-        assembleRequest(ns(),
-                        BSON("ts" << GTE << 0),
-                        0,
-                        0,
-                        0,
-                        QueryOption_OplogReplay | QueryOption_CursorTailable | QueryOption_Exhaust,
-                        message);
+        assembleQueryRequest(ns(),
+                             BSON("ts" << GTE << 0),
+                             0,
+                             0,
+                             0,
+                             QueryOption_OplogReplay | QueryOption_CursorTailable |
+                                 QueryOption_Exhaust,
+                             message);
         DbMessage dbMessage(message);
         QueryMessage queryMessage(dbMessage);
         Message result;
-        string exhaust =
-            runQuery(&_txn, message, queryMessage, NamespaceString(ns()), *cc().curop(), result);
+        string exhaust = runQuery(&_txn, queryMessage, NamespaceString(ns()), result);
         ASSERT(exhaust.size());
         ASSERT_EQUALS(string(ns()), exhaust);
     }
@@ -1631,7 +1610,7 @@ public:
         for (int i = 0; i < 150; ++i) {
             insert(ns(), BSONObj());
         }
-        auto_ptr<DBClientCursor> c = _client.query(ns(), Query());
+        unique_ptr<DBClientCursor> c = _client.query(ns(), Query());
         ASSERT(c->more());
         long long cursorId = c->getCursorId();
 
@@ -1653,10 +1632,25 @@ public:
         for (int i = 0; i < 5; ++i) {
             insert(ns(), BSONObj());
         }
-        auto_ptr<DBClientCursor> c = _client.query(ns(), Query(), 5);
-        ASSERT(c->more());
-        // With five results and a batch size of 5, no cursor is created.
-        ASSERT_EQUALS(0, c->getCursorId());
+        {
+            // With five results and a batch size of 5, a cursor is created since we don't know
+            // there are no more results.
+            std::unique_ptr<DBClientCursor> c = _client.query(ns(), Query(), 5);
+            ASSERT(c->more());
+            ASSERT_NE(0, c->getCursorId());
+            for (int i = 0; i < 5; ++i) {
+                ASSERT(c->more());
+                c->next();
+            }
+            ASSERT(!c->more());
+        }
+        {
+            // With a batchsize of 6 we know there are no more results so we don't create a
+            // cursor.
+            std::unique_ptr<DBClientCursor> c = _client.query(ns(), Query(), 6);
+            ASSERT(c->more());
+            ASSERT_EQ(0, c->getCursorId());
+        }
     }
 };
 
@@ -1668,15 +1662,14 @@ public:
     KillPinnedCursor() : CollectionBase("killpinnedcursor") {}
     void run() {
         _client.insert(ns(), vector<BSONObj>(3, BSONObj()));
-        auto_ptr<DBClientCursor> cursor = _client.query(ns(), BSONObj(), 0, 0, 0, 0, 2);
+        unique_ptr<DBClientCursor> cursor = _client.query(ns(), BSONObj(), 0, 0, 0, 0, 2);
         ASSERT_EQUALS(2, cursor->objsLeftInBatch());
         long long cursorId = cursor->getCursorId();
 
         {
-            Client::WriteContext ctx(&_txn, ns());
-            ClientCursorPin pinCursor(ctx.ctx().db()->getCollection(ns())->getCursorManager(),
-                                      cursorId);
-            string expectedAssertion = str::stream() << "Cannot kill active cursor " << cursorId;
+            OldClientWriteContext ctx(&_txn, ns());
+            ClientCursorPin pinCursor(ctx.db()->getCollection(ns())->getCursorManager(), cursorId);
+            string expectedAssertion = str::stream() << "Cannot kill pinned cursor: " << cursorId;
             ASSERT_THROWS_WHAT(CursorManager::eraseCursorGlobal(&_txn, cursorId),
                                MsgAssertionException,
                                expectedAssertion);

@@ -32,7 +32,7 @@
 
 namespace mongo {
 
-BSONCollectionCatalogEntry::BSONCollectionCatalogEntry(const StringData& ns)
+BSONCollectionCatalogEntry::BSONCollectionCatalogEntry(StringData ns)
     : CollectionCatalogEntry(ns) {}
 
 CollectionOptions BSONCollectionCatalogEntry::getCollectionOptions(OperationContext* txn) const {
@@ -58,7 +58,7 @@ int BSONCollectionCatalogEntry::getCompletedIndexCount(OperationContext* txn) co
 }
 
 BSONObj BSONCollectionCatalogEntry::getIndexSpec(OperationContext* txn,
-                                                 const StringData& indexName) const {
+                                                 StringData indexName) const {
     MetaData md = _getMetaData(txn);
 
     int offset = md.findIndexOffset(indexName);
@@ -77,7 +77,7 @@ void BSONCollectionCatalogEntry::getAllIndexes(OperationContext* txn,
 }
 
 bool BSONCollectionCatalogEntry::isIndexMultikey(OperationContext* txn,
-                                                 const StringData& indexName) const {
+                                                 StringData indexName) const {
     MetaData md = _getMetaData(txn);
 
     int offset = md.findIndexOffset(indexName);
@@ -86,7 +86,7 @@ bool BSONCollectionCatalogEntry::isIndexMultikey(OperationContext* txn,
 }
 
 RecordId BSONCollectionCatalogEntry::getIndexHead(OperationContext* txn,
-                                                  const StringData& indexName) const {
+                                                  StringData indexName) const {
     MetaData md = _getMetaData(txn);
 
     int offset = md.findIndexOffset(indexName);
@@ -94,8 +94,7 @@ RecordId BSONCollectionCatalogEntry::getIndexHead(OperationContext* txn,
     return md.indexes[offset].head;
 }
 
-bool BSONCollectionCatalogEntry::isIndexReady(OperationContext* txn,
-                                              const StringData& indexName) const {
+bool BSONCollectionCatalogEntry::isIndexReady(OperationContext* txn, StringData indexName) const {
     MetaData md = _getMetaData(txn);
 
     int offset = md.findIndexOffset(indexName);
@@ -121,14 +120,14 @@ void BSONCollectionCatalogEntry::IndexMetaData::updateTTLSetting(long long newEx
 
 // --------------------------
 
-int BSONCollectionCatalogEntry::MetaData::findIndexOffset(const StringData& name) const {
+int BSONCollectionCatalogEntry::MetaData::findIndexOffset(StringData name) const {
     for (unsigned i = 0; i < indexes.size(); i++)
         if (indexes[i].name() == name)
             return i;
     return -1;
 }
 
-bool BSONCollectionCatalogEntry::MetaData::eraseIndex(const StringData& name) {
+bool BSONCollectionCatalogEntry::MetaData::eraseIndex(StringData name) {
     int indexOffset = findIndexOffset(name);
 
     if (indexOffset < 0) {
@@ -139,7 +138,7 @@ bool BSONCollectionCatalogEntry::MetaData::eraseIndex(const StringData& name) {
     return true;
 }
 
-void BSONCollectionCatalogEntry::MetaData::rename(const StringData& toNS) {
+void BSONCollectionCatalogEntry::MetaData::rename(StringData toNS) {
     ns = toNS.toString();
     for (size_t i = 0; i < indexes.size(); i++) {
         BSONObj spec = indexes[i].spec;
@@ -176,11 +175,11 @@ void BSONCollectionCatalogEntry::MetaData::parse(const BSONObj& obj) {
         options.parse(obj["options"].Obj());
     }
 
-    BSONElement e = obj["indexes"];
-    if (e.isABSONObj()) {
-        std::vector<BSONElement> entries = e.Array();
-        for (unsigned i = 0; i < entries.size(); i++) {
-            BSONObj idx = entries[i].Obj();
+    BSONElement indexList = obj["indexes"];
+
+    if (indexList.isABSONObj()) {
+        for (BSONElement elt : indexList.Obj()) {
+            BSONObj idx = elt.Obj();
             IndexMetaData imd;
             imd.spec = idx["spec"].Obj().getOwned();
             imd.ready = idx["ready"].trueValue();

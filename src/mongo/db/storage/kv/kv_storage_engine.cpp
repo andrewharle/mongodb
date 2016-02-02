@@ -50,7 +50,7 @@ const std::string catalogInfo = "_mdb_catalog";
 
 class KVStorageEngine::RemoveDBChange : public RecoveryUnit::Change {
 public:
-    RemoveDBChange(KVStorageEngine* engine, const StringData& db, KVDatabaseCatalogEntry* entry)
+    RemoveDBChange(KVStorageEngine* engine, StringData db, KVDatabaseCatalogEntry* entry)
         : _engine(engine), _db(db.toString()), _entry(entry) {}
 
     virtual void commit() {
@@ -58,7 +58,7 @@ public:
     }
 
     virtual void rollback() {
-        boost::mutex::scoped_lock lk(_engine->_dbsLock);
+        stdx::lock_guard<stdx::mutex> lk(_engine->_dbsLock);
         _engine->_dbs[_db] = _entry;
     }
 
@@ -121,7 +121,7 @@ KVStorageEngine::KVStorageEngine(KVEngine* engine, const KVStorageEngineOptions&
         uow.commit();
     }
 
-    opCtx.recoveryUnit()->commitAndRestart();
+    opCtx.recoveryUnit()->abandonSnapshot();
 
     // now clean up orphaned idents
 
@@ -181,7 +181,7 @@ RecoveryUnit* KVStorageEngine::newRecoveryUnit() {
 }
 
 void KVStorageEngine::listDatabases(std::vector<std::string>* out) const {
-    boost::mutex::scoped_lock lk(_dbsLock);
+    stdx::lock_guard<stdx::mutex> lk(_dbsLock);
     for (DBMap::const_iterator it = _dbs.begin(); it != _dbs.end(); ++it) {
         if (it->second->isEmpty())
             continue;
@@ -190,8 +190,8 @@ void KVStorageEngine::listDatabases(std::vector<std::string>* out) const {
 }
 
 DatabaseCatalogEntry* KVStorageEngine::getDatabaseCatalogEntry(OperationContext* opCtx,
-                                                               const StringData& dbName) {
-    boost::mutex::scoped_lock lk(_dbsLock);
+                                                               StringData dbName) {
+    stdx::lock_guard<stdx::mutex> lk(_dbsLock);
     KVDatabaseCatalogEntry*& db = _dbs[dbName.toString()];
     if (!db) {
         // Not registering change since db creation is implicit and never rolled back.
@@ -200,15 +200,15 @@ DatabaseCatalogEntry* KVStorageEngine::getDatabaseCatalogEntry(OperationContext*
     return db;
 }
 
-Status KVStorageEngine::closeDatabase(OperationContext* txn, const StringData& db) {
+Status KVStorageEngine::closeDatabase(OperationContext* txn, StringData db) {
     // This is ok to be a no-op as there is no database layer in kv.
     return Status::OK();
 }
 
-Status KVStorageEngine::dropDatabase(OperationContext* txn, const StringData& db) {
+Status KVStorageEngine::dropDatabase(OperationContext* txn, StringData db) {
     KVDatabaseCatalogEntry* entry;
     {
-        boost::mutex::scoped_lock lk(_dbsLock);
+        stdx::lock_guard<stdx::mutex> lk(_dbsLock);
         DBMap::const_iterator it = _dbs.find(db.toString());
         if (it == _dbs.end())
             return Status(ErrorCodes::NamespaceNotFound, "db not found to drop");
@@ -234,7 +234,7 @@ Status KVStorageEngine::dropDatabase(OperationContext* txn, const StringData& db
     invariant(toDrop.empty());
 
     {
-        boost::mutex::scoped_lock lk(_dbsLock);
+        stdx::lock_guard<stdx::mutex> lk(_dbsLock);
         txn->recoveryUnit()->registerChange(new RemoveDBChange(this, db, entry));
         _dbs.erase(db.toString());
     }
@@ -244,11 +244,39 @@ Status KVStorageEngine::dropDatabase(OperationContext* txn, const StringData& db
 }
 
 int KVStorageEngine::flushAllFiles(bool sync) {
+    if (isEphemeral()) {
+        return 0;
+    }
     return _engine->flushAllFiles(sync);
+}
+
+Status KVStorageEngine::beginBackup(OperationContext* txn) {
+    // We should not proceed if we are already in backup mode
+    if (_inBackupMode)
+        return Status(ErrorCodes::BadValue, "Already in Backup Mode");
+    Status status = _engine->beginBackup(txn);
+    if (status.isOK())
+        _inBackupMode = true;
+    return status;
+}
+
+void KVStorageEngine::endBackup(OperationContext* txn) {
+    // We should never reach here if we aren't already in backup mode
+    invariant(_inBackupMode);
+    _engine->endBackup(txn);
+    _inBackupMode = false;
 }
 
 bool KVStorageEngine::isDurable() const {
     return _engine->isDurable();
+}
+
+bool KVStorageEngine::isEphemeral() const {
+    return _engine->isEphemeral();
+}
+
+SnapshotManager* KVStorageEngine::getSnapshotManager() const {
+    return _engine->getSnapshotManager();
 }
 
 Status KVStorageEngine::repairRecordStore(OperationContext* txn, const std::string& ns) {

@@ -49,7 +49,7 @@ inline int fromHex(char c) {
 inline char fromHex(const char* c) {
     return (char)((fromHex(c[0]) << 4) | fromHex(c[1]));
 }
-inline char fromHex(const StringData& c) {
+inline char fromHex(StringData c) {
     return (char)((fromHex(c[0]) << 4) | fromHex(c[1]));
 }
 

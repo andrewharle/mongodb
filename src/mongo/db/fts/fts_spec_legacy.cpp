@@ -29,6 +29,7 @@
 #include "mongo/db/fts/fts_spec.h"
 
 #include "mongo/util/mongoutils/str.h"
+#include "mongo/util/stringutils.h"
 
 namespace mongo {
 
@@ -64,21 +65,20 @@ const FTSLanguage& FTSSpec::_getLanguageToUseV1(const BSONObj& userDoc) const {
 }
 
 void FTSSpec::_scoreStringV1(const Tools& tools,
-                             const StringData& raw,
+                             StringData raw,
                              TermFrequencyMap* docScores,
                              double weight) const {
     ScoreHelperMap terms;
 
     unsigned numTokens = 0;
 
-    Tokenizer i(tools.language, raw);
+    Tokenizer i(&tools.language, raw);
     while (i.more()) {
         Token t = i.next();
         if (t.type != Token::TEXT)
             continue;
 
-        string term = t.data.toString();
-        makeLower(&term);
+        string term = tolowerString(t.data);
         if (tools.stopwords->isStopWord(term))
             continue;
         term = tools.stemmer->stem(term);
@@ -118,7 +118,7 @@ void FTSSpec::_scoreStringV1(const Tools& tools,
     }
 }
 
-bool FTSSpec::_weightV1(const StringData& field, double* out) const {
+bool FTSSpec::_weightV1(StringData field, double* out) const {
     Weights::const_iterator i = _weights.find(field.toString());
     if (i == _weights.end())
         return false;
@@ -156,8 +156,8 @@ void FTSSpec::_scoreRecurseV1(const Tools& tools,
 void FTSSpec::_scoreDocumentV1(const BSONObj& obj, TermFrequencyMap* term_freqs) const {
     const FTSLanguage& language = _getLanguageToUseV1(obj);
 
-    Stemmer stemmer(language);
-    Tools tools(language, &stemmer, StopWords::getStopWords(language));
+    Stemmer stemmer(&language);
+    Tools tools(language, &stemmer, StopWords::getStopWords(&language));
 
     if (wildcard()) {
         // if * is specified for weight, we can recurse over all fields.

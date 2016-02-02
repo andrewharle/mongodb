@@ -28,26 +28,23 @@
 
 #pragma once
 
-#include <boost/shared_ptr.hpp>
 
 #include "mongo/db/repl/oplogreader.h"
 
 /* replication data overview
 
    at the slave:
-     local.sources { host: ..., source: ..., only: ..., syncedTo: ..., localLogTs: ..., dbsNextPass:
-     { ... }, incompleteCloneDbs: { ... } }
+     local.sources { host: ..., source: ..., only: ..., syncedTo: ..., localLogTs: ...,
+                    dbsNextPass: { ... }, incompleteCloneDbs: { ... } }
 
    at the master:
      local.oplog.$<source>
 */
 
 namespace mongo {
-namespace threadpool {
-class ThreadPool;
-}
 
 class Database;
+class OldThreadPool;
 class OperationContext;
 
 namespace repl {
@@ -72,14 +69,14 @@ public:
 
    Can be a group of things to replicate for several databases.
 
-      { host: ..., source: ..., only: ..., syncedTo: ..., dbsNextPass: { ... }, incompleteCloneDbs:
-      { ... } }
+      { host: ..., source: ..., only: ..., syncedTo: ..., dbsNextPass: { ... },
+        incompleteCloneDbs: { ... } }
 
    'source' defaults to 'main'; support for multiple source names is
    not done (always use main for now).
 */
 class ReplSource {
-    boost::shared_ptr<threadpool::ThreadPool> tp;
+    std::shared_ptr<OldThreadPool> tp;
 
     void resync(OperationContext* txn, const std::string& dbName);
 
@@ -133,22 +130,24 @@ class ReplSource {
 public:
     OplogReader oplogReader;
 
+    void applyCommand(OperationContext* txn, const BSONObj& op);
     void applyOperation(OperationContext* txn, Database* db, const BSONObj& op);
     std::string hostName;     // ip addr or hostname plus optionally, ":<port>"
     std::string _sourceName;  // a logical source name.
     std::string sourceName() const {
         return _sourceName.empty() ? "main" : _sourceName;
     }
+
     // only a certain db. note that in the sources collection, this may not be changed once you
     // start replicating.
     std::string only;
 
     /* the last time point we have already synced up to (in the remote/master's oplog). */
-    OpTime syncedTo;
+    Timestamp syncedTo;
 
     int nClonedThisPass;
 
-    typedef std::vector<boost::shared_ptr<ReplSource>> SourceVector;
+    typedef std::vector<std::shared_ptr<ReplSource>> SourceVector;
     static void loadAll(OperationContext* txn, SourceVector&);
 
     explicit ReplSource(OperationContext* txn, BSONObj);
@@ -189,20 +188,20 @@ public:
 
 /**
  * Helper class used to set and query an ignore state for a named database.
- * The ignore state will expire after a specified OpTime.
+ * The ignore state will expire after a specified Timestamp.
  */
 class DatabaseIgnorer {
 public:
     /** Indicate that operations for 'db' should be ignored until after 'futureOplogTime' */
-    void doIgnoreUntilAfter(const std::string& db, const OpTime& futureOplogTime);
+    void doIgnoreUntilAfter(const std::string& db, const Timestamp& futureOplogTime);
     /**
      * Query ignore state of 'db'; if 'currentOplogTime' is after the ignore
      * limit, the ignore state will be cleared.
      */
-    bool ignoreAt(const std::string& db, const OpTime& currentOplogTime);
+    bool ignoreAt(const std::string& db, const Timestamp& currentOplogTime);
 
 private:
-    std::map<std::string, OpTime> _ignores;
+    std::map<std::string, Timestamp> _ignores;
 };
 
 }  // namespace repl

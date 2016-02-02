@@ -28,7 +28,6 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
 #include <vector>
 
 #include "mongo/base/string_data.h"
@@ -123,7 +122,9 @@ public:
      * Returns !OK if the targeting process itself fails
      *             (no TargetedWrites will be added, state unchanged)
      */
-    Status targetWrites(const NSTargeter& targeter, std::vector<TargetedWrite*>* targetedWrites);
+    Status targetWrites(OperationContext* txn,
+                        const NSTargeter& targeter,
+                        std::vector<TargetedWrite*>* targetedWrites);
 
     /**
      * Returns the number of child writes that were last targeted.
@@ -178,7 +179,7 @@ private:
     std::vector<ChildWriteOp*> _childOps;
 
     // filled when state == _Error
-    boost::scoped_ptr<WriteErrorDetail> _error;
+    std::unique_ptr<WriteErrorDetail> _error;
 
     // Finished child operations, for debugging
     std::vector<ChildWriteOp*> _history;
@@ -203,10 +204,10 @@ struct ChildWriteOp {
     TargetedWrite* pendingWrite;
 
     // filled when state > _Pending
-    boost::scoped_ptr<ShardEndpoint> endpoint;
+    std::unique_ptr<ShardEndpoint> endpoint;
 
     // filled when state == _Error or (optionally) when state == _Cancelled
-    boost::scoped_ptr<WriteErrorDetail> error;
+    std::unique_ptr<WriteErrorDetail> error;
 };
 
 // First value is write item index in the batch, second value is child write op index

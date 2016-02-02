@@ -1,9 +1,11 @@
-// this is to make sure that temp collections get cleaned up on restart
+// this is to make sure that temp collections get cleaned up on restart.
+//
+// This test requires persistence beacuase it assumes data will survive a restart.
+// @tags: [requires_persistence]
 
 testname = 'temp_namespace_sw'
-path = MongoRunner.dataPath+testname
 
-conn = startMongodEmpty("--port", 30000, "--dbpath", path, "--smallfiles", "--noprealloc", "--nopreallocj");
+var conn = MongoRunner.runMongod({smallfiles: "", noprealloc: "", nopreallocj: ""});
 d = conn.getDB('test')
 d.runCommand({create: testname+'temp1', temp: true});
 d[testname+'temp1'].ensureIndex({x:1});
@@ -21,10 +23,15 @@ function countCollectionNames( theDB, regex ) {
 
 assert.eq(countCollectionNames( d, /temp\d$/) , 2)
 assert.eq(countCollectionNames( d, /keep\d$/) , 4)
-stopMongod(30000);
+MongoRunner.stopMongod(conn);
 
-conn = startMongodNoReset("--port", 30000, "--dbpath", path, "--smallfiles", "--noprealloc", "--nopreallocj");
+conn = MongoRunner.runMongod({restart:true,
+                              cleanData: false,
+                              dbpath: conn.dbpath,
+                              smallfiles: "",
+                              noprealloc: "",
+                              nopreallocj: ""});
 d = conn.getDB('test')
 assert.eq(countCollectionNames( d, /temp\d$/) , 0)
 assert.eq(countCollectionNames( d, /keep\d$/) , 4)
-stopMongod(30000);
+MongoRunner.stopMongod(conn);

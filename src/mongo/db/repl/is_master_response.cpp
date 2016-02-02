@@ -96,29 +96,6 @@ IsMasterResponse::IsMasterResponse()
       _shutdownInProgress(false) {}
 
 void IsMasterResponse::addToBSON(BSONObjBuilder* builder) const {
-    if (_shutdownInProgress) {
-        builder->append(kCodeFieldName, ErrorCodes::ShutdownInProgress);
-        builder->append(kErrmsgFieldName, "replication shutdown in progress");
-        return;
-    }
-
-    if (!_configSet) {
-        builder->append(kIsMasterFieldName, false);
-        builder->append(kSecondaryFieldName, false);
-        builder->append(kInfoFieldName, "Does not have a valid replica set config");
-        builder->append(kIsReplicaSetFieldName, true);
-        return;
-    }
-
-    invariant(_setNameSet);
-    builder->append(kSetNameFieldName, _setName);
-    invariant(_setVersionSet);
-    builder->append(kSetVersionFieldName, static_cast<int>(_setVersion));
-    invariant(_isMasterSet);
-    builder->append(kIsMasterFieldName, _isMaster);
-    invariant(_isSecondarySet);
-    builder->append(kSecondaryFieldName, _secondary);
-
     if (_hostsSet) {
         std::vector<std::string> hosts;
         for (size_t i = 0; i < _hosts.size(); ++i) {
@@ -140,6 +117,32 @@ void IsMasterResponse::addToBSON(BSONObjBuilder* builder) const {
         }
         builder->append(kArbitersFieldName, arbiters);
     }
+
+    if (_setNameSet) {
+        builder->append(kSetNameFieldName, _setName);
+    }
+
+    if (_shutdownInProgress) {
+        builder->append(kCodeFieldName, ErrorCodes::ShutdownInProgress);
+        builder->append(kErrmsgFieldName, "replication shutdown in progress");
+        return;
+    }
+
+    if (!_configSet) {
+        builder->append(kIsMasterFieldName, false);
+        builder->append(kSecondaryFieldName, false);
+        builder->append(kInfoFieldName, "Does not have a valid replica set config");
+        builder->append(kIsReplicaSetFieldName, true);
+        return;
+    }
+
+    invariant(_setVersionSet);
+    builder->append(kSetVersionFieldName, static_cast<int>(_setVersion));
+    invariant(_isMasterSet);
+    builder->append(kIsMasterFieldName, _isMaster);
+    invariant(_isSecondarySet);
+    builder->append(kSecondaryFieldName, _secondary);
+
     if (_primarySet)
         builder->append(kPrimaryFieldName, _primary.toString());
     if (_arbiterOnlySet)
@@ -151,7 +154,7 @@ void IsMasterResponse::addToBSON(BSONObjBuilder* builder) const {
     if (_buildIndexesSet)
         builder->append(kBuildIndexesFieldName, _buildIndexes);
     if (_slaveDelaySet)
-        builder->append(kSlaveDelayFieldName, _slaveDelay.total_seconds());
+        builder->appendIntOrLL(kSlaveDelayFieldName, durationCount<Seconds>(_slaveDelay));
     if (_tagsSet) {
         BSONObjBuilder tags(builder->subobjStart(kTagsFieldName));
         for (unordered_map<std::string, std::string>::const_iterator it = _tags.begin();

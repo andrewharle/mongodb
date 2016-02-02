@@ -47,13 +47,14 @@
 #include "mongo/db/clientcursor.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/field_ref.h"
-#include "mongo/db/global_environment_experiment.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index_legacy.h"
 #include "mongo/db/index_names.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/keypattern.h"
+#include "mongo/db/matcher/expression.h"
 #include "mongo/db/ops/delete.h"
 #include "mongo/db/query/internal_plans.h"
 #include "mongo/db/repl/replication_coordinator_global.h"
@@ -64,7 +65,7 @@
 
 namespace mongo {
 
-using std::auto_ptr;
+using std::unique_ptr;
 using std::endl;
 using std::string;
 using std::vector;
@@ -80,7 +81,9 @@ const BSONObj IndexCatalog::_idObj = BSON("_id" << 1);
 // -------------
 
 IndexCatalog::IndexCatalog(Collection* collection)
-    : _magic(INDEX_CATALOG_UNINIT), _collection(collection) {}
+    : _magic(INDEX_CATALOG_UNINIT),
+      _collection(collection),
+      _maxNumIndexesAllowed(_collection->getCatalogEntry()->getMaxAllowedIndexes()) {}
 
 IndexCatalog::~IndexCatalog() {
     if (_magic != INDEX_CATALOG_UNINIT) {
@@ -123,42 +126,22 @@ Status IndexCatalog::init(OperationContext* txn) {
     return Status::OK();
 }
 
-namespace {
-class IndexCleanupOnRollback : public RecoveryUnit::Change {
-public:
-    /**
-     * None of these pointers are owned by this class.
-     */
-    IndexCleanupOnRollback(OperationContext* txn,
-                           Collection* collection,
-                           IndexCatalogEntryContainer* entries,
-                           const IndexDescriptor* desc)
-        : _txn(txn), _collection(collection), _entries(entries), _desc(desc) {}
-
-    virtual void commit() {}
-
-    virtual void rollback() {
-        _entries->remove(_desc);
-        _collection->infoCache()->reset(_txn);
-    }
-
-private:
-    OperationContext* _txn;
-    Collection* _collection;
-    IndexCatalogEntryContainer* _entries;
-    const IndexDescriptor* _desc;
-};
-}  // namespace
-
 IndexCatalogEntry* IndexCatalog::_setupInMemoryStructures(OperationContext* txn,
                                                           IndexDescriptor* descriptor,
                                                           bool initFromDisk) {
-    auto_ptr<IndexDescriptor> descriptorCleanup(descriptor);
+    unique_ptr<IndexDescriptor> descriptorCleanup(descriptor);
 
-    auto_ptr<IndexCatalogEntry> entry(new IndexCatalogEntry(_collection->ns().ns(),
-                                                            _collection->getCatalogEntry(),
-                                                            descriptorCleanup.release(),
-                                                            _collection->infoCache()));
+    Status status = _isSpecOk(descriptor->infoObj());
+    if (!status.isOK() && status != ErrorCodes::IndexAlreadyExists) {
+        severe() << "Found an invalid index " << descriptor->infoObj() << " on the "
+                 << _collection->ns().ns() << " collection: " << status.reason();
+        fassertFailedNoTrace(28782);
+    }
+
+    unique_ptr<IndexCatalogEntry> entry(new IndexCatalogEntry(_collection->ns().ns(),
+                                                              _collection->getCatalogEntry(),
+                                                              descriptorCleanup.release(),
+                                                              _collection->infoCache()));
 
     entry->init(txn,
                 _collection->_dbce->getIndex(txn, _collection->getCatalogEntry(), entry.get()));
@@ -167,8 +150,12 @@ IndexCatalogEntry* IndexCatalog::_setupInMemoryStructures(OperationContext* txn,
     _entries.add(entry.release());
 
     if (!initFromDisk) {
-        txn->recoveryUnit()->registerChange(
-            new IndexCleanupOnRollback(txn, _collection, &_entries, descriptor));
+        txn->recoveryUnit()->onRollback([this, txn, descriptor] {
+            // Need to preserve indexName as descriptor no longer exists after remove().
+            const std::string indexName = descriptor->indexName();
+            _entries.remove(descriptor);
+            _collection->infoCache()->droppedIndex(txn, indexName);
+        });
     }
 
     invariant(save == _entries.find(descriptor));
@@ -259,9 +246,9 @@ Status IndexCatalog::_upgradeDatabaseMinorVersionIfNeeded(OperationContext* txn,
     // which allows creation of indexes using new plugins.
 
     RecordStore* indexes = dbce->getRecordStore(dbce->name() + ".system.indexes");
-    boost::scoped_ptr<RecordIterator> it(indexes->getIterator(txn));
-    while (!it->isEOF()) {
-        const BSONObj index = it->dataFor(it->getNext()).toBson();
+    auto cursor = indexes->getCursor(txn);
+    while (auto record = cursor->next()) {
+        const BSONObj index = record->data.releaseToBson();
         const BSONObj key = index.getObjectField("key");
         const string plugin = IndexNames::findPluginName(key);
         if (IndexNames::existedBefore24(plugin))
@@ -298,16 +285,6 @@ StatusWith<BSONObj> IndexCatalog::prepareSpecForCreate(OperationContext* txn,
         return StatusWith<BSONObj>(status);
 
     return StatusWith<BSONObj>(fixed);
-}
-
-void IndexCatalog::registerIndexBuild(IndexDescriptor* descriptor, unsigned int opNum) {
-    _inProgressIndexes[descriptor] = opNum;
-}
-
-void IndexCatalog::unregisterIndexBuild(IndexDescriptor* descriptor) {
-    InProgressIndexesMap::iterator it = _inProgressIndexes.find(descriptor);
-    invariant(it != _inProgressIndexes.end());
-    _inProgressIndexes.erase(it);
 }
 
 Status IndexCatalog::createIndexOnEmptyCollection(OperationContext* txn, BSONObj spec) {
@@ -373,7 +350,7 @@ Status IndexCatalog::IndexBuildBlock::init() {
     BSONObj keyPattern = _spec.getObjectField("key");
     IndexDescriptor* descriptor =
         new IndexDescriptor(_collection, IndexNames::findPluginName(keyPattern), _spec);
-    auto_ptr<IndexDescriptor> descriptorCleaner(descriptor);
+    unique_ptr<IndexDescriptor> descriptorCleaner(descriptor);
 
     _indexName = descriptor->indexName();
     _indexNamespace = descriptor->indexNamespace();
@@ -409,20 +386,69 @@ void IndexCatalog::IndexBuildBlock::fail() {
 }
 
 void IndexCatalog::IndexBuildBlock::success() {
-    fassert(17207, _catalog->_collection->ok());
+    Collection* collection = _catalog->_collection;
+    fassert(17207, collection->ok());
 
-    _catalog->_collection->getCatalogEntry()->indexBuildSuccess(_txn, _indexName);
-
-    _catalog->_collection->infoCache()->addedIndex(_txn);
+    collection->getCatalogEntry()->indexBuildSuccess(_txn, _indexName);
 
     IndexDescriptor* desc = _catalog->findIndexByName(_txn, _indexName, true);
     fassert(17330, desc);
     IndexCatalogEntry* entry = _catalog->_entries.find(desc);
     fassert(17331, entry && entry == _entry);
 
+    OperationContext* txn = _txn;
+    _txn->recoveryUnit()->onCommit([txn, entry, collection] {
+        // Note: this runs after the WUOW commits but before we release our X lock on the
+        // collection. This means that any snapshot created after this must include the full index,
+        // and no one can try to read this index before we set the visibility.
+        auto replCoord = repl::ReplicationCoordinator::get(txn);
+        auto snapshotName = replCoord->reserveSnapshotName(txn);
+        replCoord->forceSnapshotCreation();  // Ensures a newer snapshot gets created even if idle.
+        entry->setMinimumVisibleSnapshot(snapshotName);
+
+        // TODO remove this once SERVER-20439 is implemented. It is a stopgap solution for
+        // SERVER-20260 to make sure that reads with majority readConcern level can see indexes that
+        // are created with w:majority by making the readers block.
+        collection->setMinimumVisibleSnapshot(snapshotName);
+    });
+
     entry->setIsReady(true);
+
+    collection->infoCache()->addedIndex(_txn, desc);
 }
 
+namespace {
+// While technically recursive, only current possible with 2 levels.
+Status _checkValidFilterExpressions(MatchExpression* expression, int level = 0) {
+    if (!expression)
+        return Status::OK();
+
+    switch (expression->matchType()) {
+        case MatchExpression::AND:
+            if (level > 0)
+                return Status(ErrorCodes::CannotCreateIndex,
+                              "$and only supported in partialFilterExpression at top level");
+            for (size_t i = 0; i < expression->numChildren(); i++) {
+                Status status = _checkValidFilterExpressions(expression->getChild(i), level + 1);
+                if (!status.isOK())
+                    return status;
+            }
+            return Status::OK();
+        case MatchExpression::EQ:
+        case MatchExpression::LT:
+        case MatchExpression::LTE:
+        case MatchExpression::GT:
+        case MatchExpression::GTE:
+        case MatchExpression::EXISTS:
+        case MatchExpression::TYPE_OPERATOR:
+            return Status::OK();
+        default:
+            return Status(ErrorCodes::CannotCreateIndex,
+                          str::stream() << "unsupported expression in partial index: "
+                                        << expression->toString());
+    }
+}
+}
 
 Status IndexCatalog::_isSpecOk(const BSONObj& spec) const {
     const NamespaceString& nss = _collection->ns();
@@ -431,12 +457,12 @@ Status IndexCatalog::_isSpecOk(const BSONObj& spec) const {
     if (!vElt.eoo()) {
         if (!vElt.isNumber()) {
             return Status(ErrorCodes::CannotCreateIndex,
-                          str::stream() << "non-numeric value for \"v\" field:" << vElt);
+                          str::stream() << "non-numeric value for \"v\" field: " << vElt);
         }
         double v = vElt.Number();
 
         // SERVER-16893 Forbid use of v0 indexes with non-mmapv1 engines
-        if (v == 0 && !getGlobalEnvironment()->getGlobalStorageEngine()->isMmapV1()) {
+        if (v == 0 && !getGlobalServiceContext()->getGlobalStorageEngine()->isMmapV1()) {
             return Status(ErrorCodes::CannotCreateIndex,
                           str::stream() << "use of v0 indexes is only allowed with the "
                                         << "mmapv1 storage engine");
@@ -453,10 +479,10 @@ Status IndexCatalog::_isSpecOk(const BSONObj& spec) const {
 
     if (nss.isSystemDotIndexes())
         return Status(ErrorCodes::CannotCreateIndex,
-                      "cannot create indexes on the system.indexes collection");
+                      "cannot have an index on the system.indexes collection");
 
     if (nss.isOplog())
-        return Status(ErrorCodes::CannotCreateIndex, "cannot create indexes on the oplog");
+        return Status(ErrorCodes::CannotCreateIndex, "cannot have an index on the oplog");
 
     if (nss.coll() == "$freelist") {
         // this isn't really proper, but we never want it and its not an error per se
@@ -465,10 +491,14 @@ Status IndexCatalog::_isSpecOk(const BSONObj& spec) const {
 
     const BSONElement specNamespace = spec["ns"];
     if (specNamespace.type() != String)
-        return Status(ErrorCodes::CannotCreateIndex, "the index spec needs a 'ns' string field");
+        return Status(ErrorCodes::CannotCreateIndex,
+                      "the index spec is missing a \"ns\" string field");
 
     if (nss.ns() != specNamespace.valueStringData())
-        return Status(ErrorCodes::CannotCreateIndex, "the index spec ns does not match");
+        return Status(ErrorCodes::CannotCreateIndex,
+                      str::stream() << "the \"ns\" field of the index spec '"
+                                    << specNamespace.valueStringData()
+                                    << "' does not match the collection name '" << nss.ns() << "'");
 
     // logical name of the index
     const BSONElement nameElem = spec["name"];
@@ -477,10 +507,10 @@ Status IndexCatalog::_isSpecOk(const BSONObj& spec) const {
 
     const StringData name = nameElem.valueStringData();
     if (name.find('\0') != std::string::npos)
-        return Status(ErrorCodes::CannotCreateIndex, "index names cannot contain NUL bytes");
+        return Status(ErrorCodes::CannotCreateIndex, "index name cannot contain NUL bytes");
 
     if (name.empty())
-        return Status(ErrorCodes::CannotCreateIndex, "index names cannot be empty");
+        return Status(ErrorCodes::CannotCreateIndex, "index name cannot be empty");
 
     const std::string indexNamespace = IndexDescriptor::makeIndexNamespace(nss.ns(), name);
     if (indexNamespace.length() > NamespaceString::MaxNsLen)
@@ -496,10 +526,45 @@ Status IndexCatalog::_isSpecOk(const BSONObj& spec) const {
                                     << keyStatus.reason());
     }
 
+    const bool isSparse = spec["sparse"].trueValue();
+
+    // Ensure if there is a filter, its valid.
+    BSONElement filterElement = spec.getField("partialFilterExpression");
+    if (filterElement) {
+        if (isSparse) {
+            return Status(ErrorCodes::CannotCreateIndex,
+                          "cannot mix \"partialFilterExpression\" and \"sparse\" options");
+        }
+
+        if (filterElement.type() != Object) {
+            return Status(ErrorCodes::CannotCreateIndex,
+                          "\"partialFilterExpression\" for an index must be a document");
+        }
+        StatusWithMatchExpression statusWithMatcher =
+            MatchExpressionParser::parse(filterElement.Obj());
+        if (!statusWithMatcher.isOK()) {
+            return statusWithMatcher.getStatus();
+        }
+        const std::unique_ptr<MatchExpression> filterExpr = std::move(statusWithMatcher.getValue());
+
+        Status status = _checkValidFilterExpressions(filterExpr.get());
+        if (!status.isOK()) {
+            return status;
+        }
+    }
+
     if (IndexDescriptor::isIdIndexPattern(key)) {
         BSONElement uniqueElt = spec["unique"];
-        if (!uniqueElt.eoo() && !uniqueElt.trueValue()) {
+        if (uniqueElt && !uniqueElt.trueValue()) {
             return Status(ErrorCodes::CannotCreateIndex, "_id index cannot be non-unique");
+        }
+
+        if (filterElement) {
+            return Status(ErrorCodes::CannotCreateIndex, "_id index cannot be a partial index");
+        }
+
+        if (isSparse) {
+            return Status(ErrorCodes::CannotCreateIndex, "_id index cannot be sparse");
         }
     } else {
         // for non _id indexes, we check to see if replication has turned off all indexes
@@ -510,21 +575,27 @@ Status IndexCatalog::_isSpecOk(const BSONObj& spec) const {
         }
     }
 
+    // --- only storage engine checks allowed below this ----
+
     BSONElement storageEngineElement = spec.getField("storageEngine");
     if (storageEngineElement.eoo()) {
         return Status::OK();
     }
     if (storageEngineElement.type() != mongo::Object) {
-        return Status(ErrorCodes::BadValue, "'storageEngine' has to be a document.");
+        return Status(ErrorCodes::CannotCreateIndex,
+                      "\"storageEngine\" options must be a document if present");
     }
     BSONObj storageEngineOptions = storageEngineElement.Obj();
     if (storageEngineOptions.isEmpty()) {
-        return Status(ErrorCodes::BadValue,
-                      "Empty 'storageEngine' options are invalid. "
-                      "Please remove, or include valid options.");
+        return Status(ErrorCodes::CannotCreateIndex,
+                      "Empty \"storageEngine\" options are invalid. "
+                      "Please remove the field or include valid options.");
     }
-    Status storageEngineStatus = validateStorageOptions(
-        storageEngineOptions, &StorageEngine::Factory::validateIndexStorageOptions);
+    Status storageEngineStatus =
+        validateStorageOptions(storageEngineOptions,
+                               stdx::bind(&StorageEngine::Factory::validateIndexStorageOptions,
+                                          stdx::placeholders::_1,
+                                          stdx::placeholders::_2));
     if (!storageEngineStatus.isOK()) {
         return storageEngineStatus;
     }
@@ -582,8 +653,7 @@ Status IndexCatalog::_doesSpecConflictWithExisting(OperationContext* txn,
         }
     }
 
-    if (_collection->getCatalogEntry()->getTotalIndexCount(txn) >=
-        _collection->getCatalogEntry()->getMaxAllowedIndexes()) {
+    if (numIndexesTotal(txn) >= _maxNumIndexesAllowed) {
         string s = str::stream() << "add index fails, too many indexes for "
                                  << _collection->ns().ns() << " key:" << key.toString();
         log() << s;
@@ -624,7 +694,7 @@ Status IndexCatalog::dropAllIndexes(OperationContext* txn, bool includingIdIndex
 
     // there may be pointers pointing at keys in the btree(s).  kill them.
     // TODO: can this can only clear cursors on this index?
-    _collection->getCursorManager()->invalidateAll(false);
+    _collection->getCursorManager()->invalidateAll(false, "all indexes on collection dropped");
 
     // make sure nothing in progress
     massert(17348,
@@ -702,7 +772,7 @@ Status IndexCatalog::dropIndex(OperationContext* txn, IndexDescriptor* desc) {
 }
 
 namespace {
-class IndexRemoveChange : public RecoveryUnit::Change {
+class IndexRemoveChange final : public RecoveryUnit::Change {
 public:
     IndexRemoveChange(OperationContext* txn,
                       Collection* collection,
@@ -710,13 +780,19 @@ public:
                       IndexCatalogEntry* entry)
         : _txn(txn), _collection(collection), _entries(entries), _entry(entry) {}
 
-    virtual void commit() {
+    void commit() final {
+        // Ban reading from this collection on committed reads on snapshots before now.
+        auto replCoord = repl::ReplicationCoordinator::get(_txn);
+        auto snapshotName = replCoord->reserveSnapshotName(_txn);
+        replCoord->forceSnapshotCreation();  // Ensures a newer snapshot gets created even if idle.
+        _collection->setMinimumVisibleSnapshot(snapshotName);
+
         delete _entry;
     }
 
-    virtual void rollback() {
+    void rollback() final {
         _entries->add(_entry);
-        _collection->infoCache()->reset(_txn);
+        _collection->infoCache()->addedIndex(_txn, _entry->descriptor());
     }
 
 private:
@@ -744,9 +820,6 @@ Status IndexCatalog::_dropIndex(OperationContext* txn, IndexCatalogEntry* entry)
     if (!status.isOK())
         return status;
 
-    // wipe out stats
-    _collection->infoCache()->reset(txn);
-
     // Pulling indexName/indexNamespace out as they are needed post descriptor release.
     string indexName = entry->descriptor()->indexName();
     string indexNamespace = entry->descriptor()->indexNamespace();
@@ -757,30 +830,21 @@ Status IndexCatalog::_dropIndex(OperationContext* txn, IndexCatalogEntry* entry)
     // TODO only kill cursors that are actually using the index rather than everything on this
     // collection.
     if (entry->isReady(txn)) {
-        _collection->getCursorManager()->invalidateAll(false);
+        _collection->getCursorManager()->invalidateAll(
+            false, str::stream() << "index '" << indexName << "' dropped");
     }
 
     // --------- START REAL WORK ----------
-
-    audit::logDropIndex(currentClient.get(), indexName, _collection->ns().ns());
+    audit::logDropIndex(&cc(), indexName, _collection->ns().ns());
 
     invariant(_entries.release(entry->descriptor()) == entry);
     txn->recoveryUnit()->registerChange(new IndexRemoveChange(txn, _collection, &_entries, entry));
     entry = NULL;
-
-    try {
-        // ****   this is the first disk change ****
-        _deleteIndexFromDisk(txn, indexName, indexNamespace);
-    } catch (std::exception&) {
-        // this is bad, and we don't really know state
-        // going to leak to make sure things are safe
-
-        log() << "error dropping index: " << indexNamespace
-              << " going to leak some memory to be safe";
-        throw;
-    }
+    _deleteIndexFromDisk(txn, indexName, indexNamespace);
 
     _checkMagic();
+
+    _collection->infoCache()->droppedIndex(txn, indexName);
 
     return Status::OK();
 }
@@ -825,11 +889,20 @@ bool IndexCatalog::haveAnyIndexes() const {
 }
 
 int IndexCatalog::numIndexesTotal(OperationContext* txn) const {
-    return _collection->getCatalogEntry()->getTotalIndexCount(txn);
+    int count = _entries.size() + _unfinishedIndexes.size();
+    dassert(_collection->getCatalogEntry()->getTotalIndexCount(txn) == count);
+    return count;
 }
 
 int IndexCatalog::numIndexesReady(OperationContext* txn) const {
-    return _collection->getCatalogEntry()->getCompletedIndexCount(txn);
+    int count = 0;
+    IndexIterator ii = getIndexIterator(txn, /*includeUnfinished*/ false);
+    while (ii.more()) {
+        ii.next();
+        count++;
+    }
+    dassert(_collection->getCatalogEntry()->getCompletedIndexCount(txn) == count);
+    return count;
 }
 
 bool IndexCatalog::haveIdIndex(OperationContext* txn) const {
@@ -863,9 +936,14 @@ IndexDescriptor* IndexCatalog::IndexIterator::next() {
     return _prev->descriptor();
 }
 
-IndexAccessMethod* IndexCatalog::IndexIterator::accessMethod(IndexDescriptor* desc) {
+IndexAccessMethod* IndexCatalog::IndexIterator::accessMethod(const IndexDescriptor* desc) {
     invariant(desc == _prev->descriptor());
     return _prev->accessMethod();
+}
+
+IndexCatalogEntry* IndexCatalog::IndexIterator::catalogEntry(const IndexDescriptor* desc) {
+    invariant(desc == _prev->descriptor());
+    return _prev;
 }
 
 void IndexCatalog::IndexIterator::_advance() {
@@ -875,10 +953,22 @@ void IndexCatalog::IndexIterator::_advance() {
         IndexCatalogEntry* entry = *_iterator;
         ++_iterator;
 
-        if (_includeUnfinishedIndexes || entry->isReady(_txn)) {
-            _next = entry;
-            return;
+        if (!_includeUnfinishedIndexes) {
+            if (auto minSnapshot = entry->getMinimumVisibleSnapshot()) {
+                if (auto mySnapshot = _txn->recoveryUnit()->getMajorityCommittedSnapshot()) {
+                    if (mySnapshot < minSnapshot) {
+                        // This index isn't finished in my snapshot.
+                        continue;
+                    }
+                }
+            }
+
+            if (!entry->isReady(_txn))
+                continue;
         }
+
+        _next = entry;
+        return;
     }
 }
 
@@ -894,7 +984,7 @@ IndexDescriptor* IndexCatalog::findIdIndex(OperationContext* txn) const {
 }
 
 IndexDescriptor* IndexCatalog::findIndexByName(OperationContext* txn,
-                                               const StringData& name,
+                                               StringData name,
                                                bool includeUnfinishedIndexes) const {
     IndexIterator ii = getIndexIterator(txn, includeUnfinishedIndexes);
     while (ii.more()) {
@@ -917,16 +1007,19 @@ IndexDescriptor* IndexCatalog::findIndexByKeyPattern(OperationContext* txn,
     return NULL;
 }
 
-IndexDescriptor* IndexCatalog::findIndexByPrefix(OperationContext* txn,
-                                                 const BSONObj& keyPattern,
-                                                 bool requireSingleKey) const {
+IndexDescriptor* IndexCatalog::findShardKeyPrefixedIndex(OperationContext* txn,
+                                                         const BSONObj& shardKey,
+                                                         bool requireSingleKey) const {
     IndexDescriptor* best = NULL;
 
     IndexIterator ii = getIndexIterator(txn, false);
     while (ii.more()) {
         IndexDescriptor* desc = ii.next();
 
-        if (!keyPattern.isPrefixOf(desc->keyPattern()))
+        if (desc->isPartial())
+            continue;
+
+        if (!shardKey.isPrefixOf(desc->keyPattern()))
             continue;
 
         if (!desc->isMultikey(txn))
@@ -979,7 +1072,8 @@ const IndexDescriptor* IndexCatalog::refreshEntry(OperationContext* txn,
 
     // Notify other users of the IndexCatalog that we're about to invalidate 'oldDesc'.
     const bool collectionGoingAway = false;
-    _collection->getCursorManager()->invalidateAll(collectionGoingAway);
+    _collection->getCursorManager()->invalidateAll(
+        collectionGoingAway, str::stream() << "definition of index '" << indexName << "' changed");
 
     // Delete the IndexCatalogEntry that owns this descriptor.  After deletion, 'oldDesc' is
     // invalid and should not be dereferenced.
@@ -1014,16 +1108,38 @@ bool isDupsAllowed(IndexDescriptor* desc) {
 }
 }
 
-Status IndexCatalog::_indexRecord(OperationContext* txn,
-                                  IndexCatalogEntry* index,
-                                  const BSONObj& obj,
-                                  const RecordId& loc) {
+Status IndexCatalog::_indexFilteredRecords(OperationContext* txn,
+                                           IndexCatalogEntry* index,
+                                           const std::vector<BsonRecord>& bsonRecords) {
     InsertDeleteOptions options;
     options.logIfError = false;
     options.dupsAllowed = isDupsAllowed(index->descriptor());
 
-    int64_t inserted;
-    return index->accessMethod()->insert(txn, obj, loc, options, &inserted);
+    for (auto bsonRecord : bsonRecords) {
+        int64_t inserted;
+        invariant(bsonRecord.id != RecordId());
+        Status status = index->accessMethod()->insert(
+            txn, *bsonRecord.docPtr, bsonRecord.id, options, &inserted);
+        if (!status.isOK())
+            return status;
+    }
+    return Status::OK();
+}
+
+Status IndexCatalog::_indexRecords(OperationContext* txn,
+                                   IndexCatalogEntry* index,
+                                   const std::vector<BsonRecord>& bsonRecords) {
+    const MatchExpression* filter = index->getFilterExpression();
+    if (!filter)
+        return _indexFilteredRecords(txn, index, bsonRecords);
+
+    std::vector<BsonRecord> filteredBsonRecords;
+    for (auto bsonRecord : bsonRecords) {
+        if (filter->matchesBSON(*(bsonRecord.docPtr)))
+            filteredBsonRecords.push_back(bsonRecord);
+    }
+
+    return _indexFilteredRecords(txn, index, filteredBsonRecords);
 }
 
 Status IndexCatalog::_unindexRecord(OperationContext* txn,
@@ -1052,10 +1168,11 @@ Status IndexCatalog::_unindexRecord(OperationContext* txn,
 }
 
 
-Status IndexCatalog::indexRecord(OperationContext* txn, const BSONObj& obj, const RecordId& loc) {
+Status IndexCatalog::indexRecords(OperationContext* txn,
+                                  const std::vector<BsonRecord>& bsonRecords) {
     for (IndexCatalogEntryContainer::const_iterator i = _entries.begin(); i != _entries.end();
          ++i) {
-        Status s = _indexRecord(txn, *i, obj, loc);
+        Status s = _indexRecords(txn, *i, bsonRecords);
         if (!s.isOK())
             return s;
     }
@@ -1131,40 +1248,5 @@ BSONObj IndexCatalog::_fixIndexSpec(const BSONObj& spec) {
     }
 
     return b.obj();
-}
-
-std::vector<BSONObj> IndexCatalog::killMatchingIndexBuilds(
-    const IndexCatalog::IndexKillCriteria& criteria) {
-    std::vector<BSONObj> indexes;
-    for (InProgressIndexesMap::iterator it = _inProgressIndexes.begin();
-         it != _inProgressIndexes.end();
-         it++) {
-        // check criteria
-        IndexDescriptor* desc = it->first;
-        unsigned int opNum = it->second;
-        if (!criteria.ns.empty() && (desc->parentNS() != criteria.ns)) {
-            continue;
-        }
-        if (!criteria.name.empty() && (desc->indexName() != criteria.name)) {
-            continue;
-        }
-        if (!criteria.key.isEmpty() && (desc->keyPattern() != criteria.key)) {
-            continue;
-        }
-        indexes.push_back(desc->keyPattern().getOwned());
-        log() << "halting index build: " << desc->keyPattern();
-        // Note that we can only be here if the background index build in question is
-        // yielding. The bg index code is set up specially to check for interrupt
-        // immediately after it recovers from yield, such that no further work is done
-        // on the index build. Thus this thread does not have to synchronize with the
-        // bg index operation; we can just assume that it is safe to proceed.
-        getGlobalEnvironment()->killOperation(opNum);
-    }
-
-    if (indexes.size() > 0) {
-        log() << "halted " << indexes.size() << " index build(s)" << endl;
-    }
-
-    return indexes;
 }
 }

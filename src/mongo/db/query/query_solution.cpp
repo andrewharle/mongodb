@@ -73,9 +73,13 @@ void TextNode::appendToString(mongoutils::str::stream* ss, int indent) const {
     addIndent(ss, indent + 1);
     *ss << "keyPattern = " << indexKeyPattern.toString() << '\n';
     addIndent(ss, indent + 1);
-    *ss << "query = " << query << '\n';
+    *ss << "query = " << ftsQuery->getQuery() << '\n';
     addIndent(ss, indent + 1);
-    *ss << "language = " << language << '\n';
+    *ss << "language = " << ftsQuery->getLanguage() << '\n';
+    addIndent(ss, indent + 1);
+    *ss << "caseSensitive= " << ftsQuery->getCaseSensitive() << '\n';
+    addIndent(ss, indent + 1);
+    *ss << "diacriticSensitive= " << ftsQuery->getDiacriticSensitive() << '\n';
     addIndent(ss, indent + 1);
     *ss << "indexPrefix = " << indexPrefix.toString() << '\n';
     if (NULL != filter) {
@@ -91,8 +95,7 @@ QuerySolutionNode* TextNode::clone() const {
 
     copy->_sort = this->_sort;
     copy->indexKeyPattern = this->indexKeyPattern;
-    copy->query = this->query;
-    copy->language = this->language;
+    copy->ftsQuery = this->ftsQuery->clone();
     copy->indexPrefix = this->indexPrefix;
 
     return copy;
@@ -194,10 +197,6 @@ AndSortedNode::~AndSortedNode() {}
 void AndSortedNode::appendToString(mongoutils::str::stream* ss, int indent) const {
     addIndent(ss, indent);
     *ss << "AND_SORTED\n";
-    if (NULL != filter) {
-        addIndent(ss, indent + 1);
-        *ss << " filter = " << filter->toString() << '\n';
-    }
     addCommon(ss, indent);
     for (size_t i = 0; i < children.size(); ++i) {
         addIndent(ss, indent + 1);
@@ -579,6 +578,27 @@ QuerySolutionNode* IndexScanNode::clone() const {
     return copy;
 }
 
+namespace {
+
+bool filtersAreEquivalent(const MatchExpression* lhs, const MatchExpression* rhs) {
+    if (!lhs && !rhs) {
+        return true;
+    } else if (!lhs || !rhs) {
+        return false;
+    } else {
+        return lhs->equivalent(rhs);
+    }
+}
+
+}  // namespace
+
+bool IndexScanNode::operator==(const IndexScanNode& other) const {
+    return filtersAreEquivalent(filter.get(), other.filter.get()) &&
+        indexKeyPattern == other.indexKeyPattern && indexIsMultiKey == other.indexIsMultiKey &&
+        direction == other.direction && maxScan == other.maxScan &&
+        addKeyMetadata == other.addKeyMetadata && bounds == other.bounds;
+}
+
 //
 // ProjectionNode
 //
@@ -618,6 +638,31 @@ QuerySolutionNode* ProjectionNode::clone() const {
 }
 
 //
+// SortKeyGeneratorNode
+//
+
+void SortKeyGeneratorNode::appendToString(mongoutils::str::stream* ss, int indent) const {
+    addIndent(ss, indent);
+    *ss << "SORT_KEY_GENERATOR\n";
+    addIndent(ss, indent + 1);
+    *ss << "sortSpec = " << sortSpec.toString() << '\n';
+    addIndent(ss, indent + 1);
+    *ss << "queryObj = " << queryObj.toString() << '\n';
+    addCommon(ss, indent);
+    addIndent(ss, indent + 1);
+    *ss << "Child:" << '\n';
+    children[0]->appendToString(ss, indent + 2);
+}
+
+QuerySolutionNode* SortKeyGeneratorNode::clone() const {
+    SortKeyGeneratorNode* copy = new SortKeyGeneratorNode();
+    cloneBaseData(copy);
+    copy->queryObj = this->queryObj;
+    copy->sortSpec = this->sortSpec;
+    return copy;
+}
+
+//
 // SortNode
 //
 
@@ -626,8 +671,6 @@ void SortNode::appendToString(mongoutils::str::stream* ss, int indent) const {
     *ss << "SORT\n";
     addIndent(ss, indent + 1);
     *ss << "pattern = " << pattern.toString() << '\n';
-    addIndent(ss, indent + 1);
-    *ss << "query for bounds = " << query.toString() << '\n';
     addIndent(ss, indent + 1);
     *ss << "limit = " << limit << '\n';
     addCommon(ss, indent);
@@ -642,7 +685,6 @@ QuerySolutionNode* SortNode::clone() const {
 
     copy->_sorts = this->_sorts;
     copy->pattern = this->pattern;
-    copy->query = this->query;
     copy->limit = this->limit;
 
     return copy;

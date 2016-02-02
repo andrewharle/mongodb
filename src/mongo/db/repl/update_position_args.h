@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "mongo/db/jsobj.h"
+#include "mongo/db/repl/optime.h"
 
 namespace mongo {
 

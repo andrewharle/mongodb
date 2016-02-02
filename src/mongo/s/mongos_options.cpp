@@ -1,4 +1,4 @@
-/*
+/**
  *    Copyright (C) 2013 10gen Inc.
  *
  *    This program is free software: you can redistribute it and/or  modify
@@ -37,20 +37,20 @@
 #include <vector>
 
 #include "mongo/base/status.h"
+#include "mongo/base/status_with.h"
 #include "mongo/bson/util/builder.h"
+#include "mongo/config.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/server_options_helpers.h"
 #include "mongo/s/chunk.h"
 #include "mongo/s/version_mongos.h"
 #include "mongo/util/log.h"
+#include "mongo/util/mongoutils/str.h"
 #include "mongo/util/net/ssl_options.h"
 #include "mongo/util/options_parser/startup_options.h"
 #include "mongo/util/startup_test.h"
-#include "mongo/util/stringutils.h"
 
 namespace mongo {
-
-using std::endl;
 
 MongosGlobalParams mongosGlobalParams;
 
@@ -71,7 +71,7 @@ Status addMongosOptions(moe::OptionSection* options) {
     }
 #endif
 
-#ifdef MONGO_SSL
+#ifdef MONGO_CONFIG_SSL
     moe::OptionSection ssl_options("SSL options");
 
     ret = addSSLServerOptions(&ssl_options);
@@ -83,7 +83,13 @@ Status addMongosOptions(moe::OptionSection* options) {
     moe::OptionSection sharding_options("Sharding options");
 
     sharding_options.addOptionChaining(
-        "sharding.configDB", "configdb", moe::String, "1 or 3 comma separated config servers");
+        "sharding.configDB",
+        "configdb",
+        moe::String,
+        "Connection string for communicating with config servers. Acceptable forms:\n"
+        "CSRS: <config replset name>/<host1:port>,<host2:port>,[...]\n"
+        "SCCC (deprecated): <host1:port>,<host2:port>,<host3:port>\n"
+        "Single-node (for testing only): <host1:port>");
 
     sharding_options.addOptionChaining(
         "replication.localPingThresholdMs",
@@ -92,10 +98,6 @@ Status addMongosOptions(moe::OptionSection* options) {
         "ping time (in ms) for a node to be considered local (default 15ms)");
 
     sharding_options.addOptionChaining("test", "test", moe::Switch, "just run unit tests")
-        .setSources(moe::SourceAllLegacy);
-
-    sharding_options.addOptionChaining(
-                         "upgrade", "upgrade", moe::Switch, "upgrade meta data version")
         .setSources(moe::SourceAllLegacy);
 
     sharding_options.addOptionChaining(
@@ -120,7 +122,7 @@ Status addMongosOptions(moe::OptionSection* options) {
 
     options->addSection(sharding_options);
 
-#ifdef MONGO_SSL
+#ifdef MONGO_CONFIG_SSL
     options->addSection(ssl_options);
 #endif
 
@@ -178,7 +180,7 @@ Status canonicalizeMongosOptions(moe::Environment* params) {
         return ret;
     }
 
-#ifdef MONGO_SSL
+#ifdef MONGO_CONFIG_SSL
     ret = canonicalizeSSLServerOptions(params);
     if (!ret.isOK()) {
         return ret;
@@ -244,7 +246,7 @@ Status storeMongosOptions(const moe::Environment& params, const std::vector<std:
     if (params.count("sharding.autoSplit")) {
         Chunk::ShouldAutoSplit = params["sharding.autoSplit"].as<bool>();
         if (Chunk::ShouldAutoSplit == false) {
-            warning() << "running with auto-splitting disabled" << endl;
+            warning() << "running with auto-splitting disabled";
         }
     }
 
@@ -252,19 +254,43 @@ Status storeMongosOptions(const moe::Environment& params, const std::vector<std:
         return Status(ErrorCodes::BadValue, "error: no args for --configdb");
     }
 
-    splitStringDelim(
-        params["sharding.configDB"].as<std::string>(), &mongosGlobalParams.configdbs, ',');
-    if (mongosGlobalParams.configdbs.size() != 1 && mongosGlobalParams.configdbs.size() != 3) {
-        return Status(ErrorCodes::BadValue, "need either 1 or 3 configdbs");
+    {
+        std::string configdbString = params["sharding.configDB"].as<std::string>();
+
+        auto configdbConnectionString = ConnectionString::parse(configdbString);
+        if (!configdbConnectionString.isOK()) {
+            return Status(ErrorCodes::BadValue,
+                          str::stream() << "Invalid configdb connection string: "
+                                        << configdbConnectionString.getStatus().toString());
+        }
+
+        std::vector<HostAndPort> seedServers;
+        for (const auto& host : configdbConnectionString.getValue().getServers()) {
+            seedServers.push_back(host);
+            if (!seedServers.back().hasPort()) {
+                seedServers.back() = HostAndPort{host.host(), ServerGlobalParams::ConfigServerPort};
+            }
+        }
+
+        mongosGlobalParams.configdbs =
+            ConnectionString{configdbConnectionString.getValue().type(),
+                             seedServers,
+                             configdbConnectionString.getValue().getSetName()};
     }
 
-    if (mongosGlobalParams.configdbs.size() == 1) {
-        warning() << "running with 1 config server should be done only for testing purposes "
-                  << "and is not recommended for production" << endl;
+    std::vector<HostAndPort> configServers = mongosGlobalParams.configdbs.getServers();
+
+    if (mongosGlobalParams.configdbs.type() != ConnectionString::SYNC &&
+        mongosGlobalParams.configdbs.type() != ConnectionString::SET &&
+        mongosGlobalParams.configdbs.type() != ConnectionString::MASTER) {
+        return Status(ErrorCodes::BadValue,
+                      str::stream() << "Invalid config server value "
+                                    << mongosGlobalParams.configdbs.toString());
     }
 
-    if (params.count("upgrade")) {
-        mongosGlobalParams.upgrade = params["upgrade"].as<bool>();
+    if (configServers.size() < 3) {
+        warning() << "Running a sharded cluster with fewer than 3 config servers should only be "
+                     "done for testing purposes and is not recommended for production.";
     }
 
     return Status::OK();

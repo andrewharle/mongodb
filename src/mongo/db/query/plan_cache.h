@@ -30,17 +30,20 @@
 
 #include <set>
 #include <boost/optional/optional.hpp>
-#include <boost/scoped_ptr.hpp>
-#include <boost/thread/mutex.hpp>
 
 #include "mongo/db/exec/plan_stats.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/index_tag.h"
 #include "mongo/db/query/lru_key_value.h"
+#include "mongo/db/query/plan_cache_indexability.h"
 #include "mongo/db/query/query_planner_params.h"
 #include "mongo/platform/atomic_word.h"
+#include "mongo/stdx/mutex.h"
 
 namespace mongo {
+
+// A PlanCacheKey is a string-ified version of a query's predicate/projection/sort.
+typedef std::string PlanCacheKey;
 
 struct PlanRankingDecision;
 struct QuerySolution;
@@ -52,7 +55,7 @@ struct QuerySolutionNode;
  */
 struct PlanCacheEntryFeedback {
     // How well did the cached plan perform?
-    boost::scoped_ptr<PlanStageStats> stats;
+    std::unique_ptr<PlanStageStats> stats;
 
     // The "goodness" score produced by the plan ranker
     // corresponding to 'stats'.
@@ -83,7 +86,7 @@ typedef std::string PlanID;
  *   This is done by QueryPlanner::tagAccordingToCache.
  */
 struct PlanCacheIndexTree {
-    PlanCacheIndexTree() : entry(NULL), index_pos(0) {}
+    PlanCacheIndexTree() : entry(nullptr), index_pos(0) {}
 
     ~PlanCacheIndexTree() {
         for (std::vector<PlanCacheIndexTree*>::const_iterator it = children.begin();
@@ -112,7 +115,7 @@ struct PlanCacheIndexTree {
     std::vector<PlanCacheIndexTree*> children;
 
     // Owned here.
-    boost::scoped_ptr<IndexEntry> entry;
+    std::unique_ptr<IndexEntry> entry;
 
     size_t index_pos;
 };
@@ -125,7 +128,10 @@ struct PlanCacheIndexTree {
  */
 struct SolutionCacheData {
     SolutionCacheData()
-        : tree(NULL), solnType(USE_INDEX_TAGS_SOLN), wholeIXSolnDir(1), indexFilterApplied(false) {}
+        : tree(nullptr),
+          solnType(USE_INDEX_TAGS_SOLN),
+          wholeIXSolnDir(1),
+          indexFilterApplied(false) {}
 
     // Make a deep copy.
     SolutionCacheData* clone() const;
@@ -137,7 +143,7 @@ struct SolutionCacheData {
     // can be used to tag an isomorphic match expression. If 'wholeIXSoln'
     // is true, then 'tree' is used to store the relevant IndexEntry.
     // If 'collscanSoln' is true, then 'tree' should be NULL.
-    boost::scoped_ptr<PlanCacheIndexTree> tree;
+    std::unique_ptr<PlanCacheIndexTree> tree;
 
     enum SolutionType {
         // Indicates that the plan should use
@@ -177,10 +183,6 @@ public:
 
     // Owned here.
     std::vector<SolutionCacheData*> plannerData;
-
-    // An index into plannerData indicating the SolutionCacheData which should be
-    // used to produce a backup solution in the case of a blocking sort.
-    boost::optional<size_t> backupSoln;
 
     // Key used to provide feedback on the entry.
     PlanCacheKey key;
@@ -235,10 +237,6 @@ public:
     // it from the cache a deep copy is made and returned inside CachedSolution.
     std::vector<SolutionCacheData*> plannerData;
 
-    // An index into plannerData indicating the SolutionCacheData which should be
-    // used to produce a backup solution in the case of a blocking sort.
-    boost::optional<size_t> backupSoln;
-
     // TODO: Do we really want to just hold a copy of the CanonicalQuery?  For now we just
     // extract the data we need.
     //
@@ -254,21 +252,11 @@ public:
 
     // Information that went into picking the winning plan and also why
     // the other plans lost.
-    boost::scoped_ptr<PlanRankingDecision> decision;
+    std::unique_ptr<PlanRankingDecision> decision;
 
     // Annotations from cached runs.  The CachedPlanStage provides these stats about its
     // runs when they complete.
     std::vector<PlanCacheEntryFeedback*> feedback;
-
-    // The average score of all stored feedback.
-    boost::optional<double> averageScore;
-
-    // The standard deviation of the scores from stored as feedback.
-    boost::optional<double> stddevScore;
-
-    // In order to justify eviction, the deviation from the mean must exceed a
-    // minimum threshold.
-    static const double kMinDeviation;
 };
 
 /**
@@ -326,8 +314,8 @@ public:
 
     /**
      * When the CachedPlanStage runs a plan out of the cache, we want to record data about the
-     * plan's performance.  The CachedPlanStage calls feedback(...) at the end of query
-     * execution in order to do this.
+     * plan's performance.  The CachedPlanStage calls feedback(...) after executing the cached
+     * plan for a trial period in order to do this.
      *
      * Cache takes ownership of 'feedback'.
      *
@@ -336,13 +324,8 @@ public:
      *
      * If the entry corresponding to 'cq' still exists, 'feedback' is added to the run
      * statistics about the plan.  Status::OK() is returned.
-     *
-     * If 'allowedToEvict' is true, may cause the cache entry to be removed if it is determined
-     * that the cached plan is badly performing.
      */
-    Status feedback(const CanonicalQuery& cq,
-                    PlanCacheEntryFeedback* feedback,
-                    bool allowedToEvict);
+    Status feedback(const CanonicalQuery& cq, PlanCacheEntryFeedback* feedback);
 
     /**
      * Remove the entry corresponding to 'ck' from the cache.  Returns Status::OK() if the plan
@@ -351,9 +334,20 @@ public:
     Status remove(const CanonicalQuery& canonicalQuery);
 
     /**
-     * Remove *all* entries.
+     * Remove *all* cached plans.  Does not clear index information.
      */
     void clear();
+
+    /**
+     * Get the cache key corresponding to the given canonical query.  The query need not already
+     * be cached.
+     *
+     * This is provided in the public API simply as a convenience for consumers who need some
+     * description of query shape (e.g. index filters).
+     *
+     * Callers must hold the collection lock when calling this method.
+     */
+    PlanCacheKey computeKey(const CanonicalQuery&) const;
 
     /**
      * Returns a copy of a cache entry.
@@ -386,31 +380,37 @@ public:
      */
     size_t size() const;
 
-private:
     /**
-     * Releases resources associated with each cache entry
-     * and clears map.
-     * Invoked by clear() and during destruction.
+     * Updates internal state kept about the collection's indexes.  Must be called when the set
+     * of indexes on the associated collection have changed.
+     *
+     * Callers must hold the collection lock in exclusive mode when calling this method.
      */
-    void _clear();
+    void notifyOfIndexEntries(const std::vector<IndexEntry>& indexEntries);
+
+private:
+    void encodeKeyForMatch(const MatchExpression* tree, StringBuilder* keyBuilder) const;
+    void encodeKeyForSort(const BSONObj& sortObj, StringBuilder* keyBuilder) const;
+    void encodeKeyForProj(const BSONObj& projObj, StringBuilder* keyBuilder) const;
 
     LRUKeyValue<PlanCacheKey, PlanCacheEntry> _cache;
 
-    /**
-     * Protects _cache.
-     */
-    mutable boost::mutex _cacheMutex;
+    // Protects _cache.
+    mutable stdx::mutex _cacheMutex;
 
-    /**
-     * Counter for write notifications since initialization or last clear() invocation.
-     * Starts at 0.
-     */
+    // Counter for write notifications since initialization or last clear() invocation.  Starts
+    // at 0.
     AtomicInt32 _writeOperations;
 
-    /**
-     * Full namespace of collection.
-     */
+    // Full namespace of collection.
     std::string _ns;
+
+    // Holds computed information about the collection's indexes.  Used for generating plan
+    // cache keys.
+    //
+    // Concurrent access is synchronized by the collection lock.  Multiple concurrent readers
+    // are allowed.
+    PlanCacheIndexabilityState _indexabilityState;
 };
 
 }  // namespace mongo

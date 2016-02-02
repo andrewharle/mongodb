@@ -2,6 +2,13 @@
 // This test creates a user and then does two different sets of updates to that user's privileges
 // using the replSetTest command to trigger a rollback and verify that at the end the access control
 // data is rolled back correctly and the user only has access to the expected collections.
+//
+// If all data-bearing nodes in a replica set are using an ephemeral storage engine, the set will
+// not be able to survive a scenario where all data-bearing nodes are down simultaneously. In such a
+// scenario, none of the members will have any data, and upon restart will each look for a member to
+// inital sync from, so no primary will be elected. This test induces such a scenario, so cannot be
+// run on ephemeral storage engines.
+// @tags: [requires_persistence]
 
 (function () {
     "use strict";
@@ -32,8 +39,8 @@
                       ]});
 
     // Make sure we have a master
-    replTest.waitForState(replTest.nodes[0], replTest.PRIMARY, 60 * 1000);
-    var master = replTest.getMaster();
+    replTest.waitForState(replTest.nodes[0], ReplSetTest.State.PRIMARY, 60 * 1000);
+    var master = replTest.getPrimary();
     var a_conn = conns[0];
     var b_conn = conns[1];
     a_conn.setSlaveOk();

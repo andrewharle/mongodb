@@ -34,12 +34,15 @@
 
 #include "mongo/base/counter.h"
 #include "mongo/base/status.h"
+#include "mongo/base/status_with.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/auth/resource_pattern.h"
 #include "mongo/db/client_basic.h"
 #include "mongo/db/commands/server_status_metric.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/query/explain.h"
+#include "mongo/rpc/reply_builder_interface.h"
+#include "mongo/rpc/request_interface.h"
 #include "mongo/util/string_map.h"
 
 namespace mongo {
@@ -47,13 +50,18 @@ namespace mongo {
 class BSONObj;
 class BSONObjBuilder;
 class Client;
+class CurOp;
 class Database;
-class Timer;
 class OperationContext;
+class Timer;
 
 namespace mutablebson {
 class Document;
 }  // namespace mutablebson
+
+namespace rpc {
+class ServerSelectionMetadata;
+}  // namespace rpc
 
 /** mongodb "commands" (sent via db.$cmd.findOne(...))
     subclass to make a command.  define a singleton object for it.
@@ -71,6 +79,10 @@ protected:
 public:
     typedef StringMap<Command*> CommandMap;
 
+    // NOTE: Do not remove this declaration, or relocate it in this class. We
+    // are using this method to control where the vtable is emitted.
+    virtual ~Command();
+
     // Return the namespace for the command. If the first field in 'cmdObj' is of type
     // mongo::String, then that field is interpreted as the collection name, and is
     // appended to 'dbname' after a '.' character. If the first field is not of type
@@ -83,13 +95,14 @@ public:
     // collection name or just a database name.
     ResourcePattern parseResourcePattern(const std::string& dbname, const BSONObj& cmdObj) const;
 
+    virtual std::size_t reserveBytesForReply() const {
+        return 0u;
+    }
+
     const std::string name;
 
     /* run the given command
        implement this...
-
-       fromRepl - command is being invoked as part of replication syncing.  In this situation you
-                  normally do not want to log the command to the local oplog.
 
        return value is true if succeeded.  if false, set errmsg text.
     */
@@ -98,8 +111,18 @@ public:
                      BSONObj& cmdObj,
                      int options,
                      std::string& errmsg,
-                     BSONObjBuilder& result,
-                     bool fromRepl = false) = 0;
+                     BSONObjBuilder& result) = 0;
+
+    /**
+     * Translation point between the new request/response types and the legacy types.
+     *
+     * Then we won't need to mutate the command object. At that point we can also make
+     * this method virtual so commands can override it directly.
+     */
+    /*virtual*/ bool run(OperationContext* txn,
+                         const rpc::RequestInterface& request,
+                         rpc::ReplyBuilderInterface* replyBuilder);
+
 
     /**
      * This designation for the command is only used by the 'help' call and has nothing to do
@@ -129,7 +152,6 @@ public:
     }
 
     /* Return true if slaves are allowed to execute the command
-       (the command directly from a client -- if fromRepl, always allowed).
     */
     virtual bool slaveOk() const = 0;
 
@@ -161,11 +183,17 @@ public:
      *
      *   2) Calling Explain::explainStages(...) on the PlanExecutor. This is the function
      *   which knows how to convert an execution stage tree into explain output.
+     *
+     * TODO: Remove the 'serverSelectionMetadata' parameter in favor of reading the
+     * ServerSelectionMetadata off 'txn'. Once OP_COMMAND is implemented in mongos, this metadata
+     * will be parsed and attached as a decoration on the OperationContext, as is already done on
+     * the mongod side.
      */
     virtual Status explain(OperationContext* txn,
                            const std::string& dbname,
                            const BSONObj& cmdObj,
                            ExplainCommon::Verbosity verbosity,
+                           const rpc::ServerSelectionMetadata& serverSelectionMetadata,
                            BSONObjBuilder* out) const {
         return Status(ErrorCodes::IllegalOperation, "Cannot explain cmd: " + name);
     }
@@ -205,12 +233,30 @@ public:
         return true; /* assumed true prior to commit */
     }
 
+    /**
+     * Returns true if this Command supports the readConcern argument.
+     *
+     * If the readConcern argument is sent to a command that returns false the command processor
+     * will reject the command, returning an appropriate error message. For commands that support
+     * the argument, the command processor will instruct the RecoveryUnit to only return
+     * "committed" data, failing if this isn't supported by the storage engine.
+     *
+     * Note that this is never called on mongos. Sharded commands are responsible for forwarding
+     * the option to the shards as needed. We rely on the shards to fail the commands in the
+     * cases where it isn't supported.
+     */
+    virtual bool supportsReadConcern() const {
+        return false;
+    }
+
+    virtual LogicalOp getLogicalOp() const {
+        return LogicalOp::opCommand;
+    }
+
     /** @param webUI expose the command in the web ui as localhost:28017/<name>
         @param oldName an optional old, deprecated name for the command
     */
     Command(StringData _name, bool webUI = false, StringData oldName = StringData());
-
-    virtual ~Command() {}
 
 protected:
     /**
@@ -258,29 +304,37 @@ public:
     // Counter for unknown commands
     static Counter64 unknownCommands;
 
-    /** @return if command was found */
-    static void runAgainstRegistered(const char* ns,
+    static void runAgainstRegistered(OperationContext* txn,
+                                     const char* ns,
                                      BSONObj& jsobj,
                                      BSONObjBuilder& anObjBuilder,
                                      int queryOptions = 0);
-    static Command* findCommand(const StringData& name);
-    // For mongod and webserver.
+    static Command* findCommand(StringData name);
+
+    /**
+     * Executes a command after stripping metadata, performing authorization checks,
+     * handling audit impersonation, and (potentially) setting maintenance mode. This method
+     * also checks that the command is permissible to run on the node given its current
+     * replication state. All the logic here is independent of any particular command; any
+     * functionality relevant to a specific command should be confined to its run() method.
+     *
+     * This is currently used by mongod and dbwebserver.
+     */
     static void execCommand(OperationContext* txn,
-                            Command* c,
-                            int queryOptions,
-                            const char* ns,
-                            BSONObj& cmdObj,
-                            BSONObjBuilder& result,
-                            bool fromRepl);
+                            Command* command,
+                            const rpc::RequestInterface& request,
+                            rpc::ReplyBuilderInterface* replyBuilder);
+
     // For mongos
+    // TODO: remove this entirely now that all instances of ClientBasic are instances
+    // of Client. This will happen as part of SERVER-18292
     static void execCommandClientBasic(OperationContext* txn,
                                        Command* c,
                                        ClientBasic& client,
                                        int queryOptions,
                                        const char* ns,
                                        BSONObj& cmdObj,
-                                       BSONObjBuilder& result,
-                                       bool fromRepl);
+                                       BSONObjBuilder& result);
 
     // Helper for setting errmsg and ok field in command result object.
     static void appendCommandStatus(BSONObjBuilder& result, bool ok, const std::string& errmsg);
@@ -309,28 +363,98 @@ public:
                                             long long* batchSize);
 
     /**
-     * Builds a cursor response object from the provided cursor identifiers and "firstBatch",
-     * and appends the response object to the provided builder under the field name "cursor".
-     *
-     * The response object has the following format:
-     *   { id: <NumberLong>, ns: <String>, firstBatch: <Array> }.
+     * Helper for setting a writeConcernError field in the command result object if
+     * a writeConcern error occurs.
      */
-    static void appendCursorResponseObject(long long cursorId,
-                                           StringData cursorNamespace,
-                                           BSONArray firstBatch,
-                                           BSONObjBuilder* builder);
+    static void appendCommandWCStatus(BSONObjBuilder& result, const Status& status);
 
-    // Set by command line.  Controls whether or not testing-only commands should be available.
-    static int testCommandsEnabled;
+    /**
+     * If true, then testing commands are available. Defaults to false.
+     *
+     * Testing commands should conditionally register themselves by consulting this flag:
+     *
+     *     MONGO_INITIALIZER(RegisterMyTestCommand)(InitializerContext* context) {
+     *         if (Command::testCommandsEnabled) {
+     *             // Leaked intentionally: a Command registers itself when constructed.
+     *             new MyTestCommand();
+     *         }
+     *         return Status::OK();
+     *     }
+     *
+     * To make testing commands available by default, change the value to true before running any
+     * mongo initializers:
+     *
+     *     int myMain(int argc, char** argv, char** envp) {
+     *         static StaticObserver StaticObserver;
+     *         Command::testCommandsEnabled = true;
+     *         ...
+     *         runGlobalInitializersOrDie(argc, argv, envp);
+     *         ...
+     *     }
+     */
+    static bool testCommandsEnabled;
+
+    /**
+     * Returns true if this a request for the 'help' information associated with the command.
+     */
+    static bool isHelpRequest(const BSONElement& helpElem);
+
+    static const char kHelpFieldName[];
+
+    /**
+     * Generates a reply from the 'help' information associated with a command. The state of
+     * the passed ReplyBuilder will be in kOutputDocs after calling this method.
+     */
+    static void generateHelpResponse(OperationContext* txn,
+                                     const rpc::RequestInterface& request,
+                                     rpc::ReplyBuilderInterface* replyBuilder,
+                                     const Command& command);
+
+    /**
+     * When an assertion is hit during command execution, this method is used to fill the fields
+     * of the command reply with the information from the error. In addition, information about
+     * the command is logged. This function does not return anything, because there is typically
+     * already an active exception when this function is called, so there
+     * is little that can be done if it fails.
+     */
+    static void generateErrorResponse(OperationContext* txn,
+                                      rpc::ReplyBuilderInterface* replyBuilder,
+                                      const DBException& exception,
+                                      const rpc::RequestInterface& request,
+                                      Command* command,
+                                      const BSONObj& metadata);
+
+    /**
+     * Generates a command error response. This overload of generateErrorResponse is intended
+     * to be called if the command is successfully parsed, but there is an error before we have
+     * a handle to the actual Command object. This can happen, for example, when the command
+     * is not found.
+     */
+    static void generateErrorResponse(OperationContext* txn,
+                                      rpc::ReplyBuilderInterface* replyBuilder,
+                                      const DBException& exception,
+                                      const rpc::RequestInterface& request);
+
+    /**
+     * Generates a command error response. Similar to other overloads of generateErrorResponse,
+     * but doesn't print any information about the specific command being executed. This is
+     * neccessary, for example, if there is
+     * an assertion hit while parsing the command.
+     */
+    static void generateErrorResponse(OperationContext* txn,
+                                      rpc::ReplyBuilderInterface* replyBuilder,
+                                      const DBException& exception);
+
+    /**
+     * Records the error on to the OperationContext. This hook is needed because mongos
+     * does not have CurOp linked in to it.
+     */
+    static void registerError(OperationContext* txn, const DBException& exception);
 
 private:
     /**
      * Checks to see if the client is authorized to run the given command with the given
      * parameters on the given named database.
-     *
-     * fromRepl is true if this command is running as part of oplog application, which for
-     * historic reasons has slightly different authorization semantics.  TODO(schwerin): Check
-     * to see if this oddity can now be eliminated.
      *
      * Returns Status::OK() if the command is authorized.  Most likely returns
      * ErrorCodes::Unauthorized otherwise, but any return other than Status::OK implies not
@@ -339,16 +463,11 @@ private:
     static Status _checkAuthorization(Command* c,
                                       ClientBasic* client,
                                       const std::string& dbname,
-                                      const BSONObj& cmdObj,
-                                      bool fromRepl);
+                                      const BSONObj& cmdObj);
 };
 
-bool _runCommands(OperationContext* txn,
-                  const char* ns,
-                  BSONObj& jsobj,
-                  BufBuilder& b,
-                  BSONObjBuilder& anObjBuilder,
-                  bool fromRepl,
-                  int queryOptions);
+void runCommands(OperationContext* txn,
+                 const rpc::RequestInterface& request,
+                 rpc::ReplyBuilderInterface* replyBuilder);
 
 }  // namespace mongo

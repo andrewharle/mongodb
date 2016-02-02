@@ -30,29 +30,27 @@
 
 #include "mongo/db/storage/sorted_data_interface_test_harness.h"
 
-#include <boost/scoped_ptr.hpp>
+#include <memory>
 
 #include "mongo/db/storage/sorted_data_interface.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo {
 
-using boost::scoped_ptr;
-
 // Insert a key and try to locate it using a forward cursor
 // by specifying its exact key and RecordId.
 TEST(SortedDataInterface, Locate) {
-    scoped_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
-    scoped_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
+    const std::unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
-        scoped_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get(), 1));
-        ASSERT(!cursor->locate(key1, loc1));
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get()));
+        ASSERT(!cursor->seek(key1, true));
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             ASSERT_OK(sorted->insert(opCtx.get(), key1, loc1, true));
@@ -61,32 +59,29 @@ TEST(SortedDataInterface, Locate) {
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
-        scoped_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get(), 1));
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get()));
 
-        ASSERT(cursor->locate(key1, loc1));
-        ASSERT_EQUALS(key1, cursor->getKey());
-        ASSERT_EQUALS(loc1, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT(cursor->isEOF());
+        ASSERT_EQ(cursor->seek(key1, true), IndexKeyEntry(key1, loc1));
+        ASSERT_EQ(cursor->next(), boost::none);
     }
 }
 
 // Insert a key and try to locate it using a reverse cursor
 // by specifying its exact key and RecordId.
 TEST(SortedDataInterface, LocateReversed) {
-    scoped_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
-    scoped_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
+    const std::unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
-        scoped_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get(), -1));
-        ASSERT(!cursor->locate(key1, loc1));
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<SortedDataInterface::Cursor> cursor(
+            sorted->newCursor(opCtx.get(), false));
+        ASSERT(!cursor->seek(key1, true));
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             ASSERT_OK(sorted->insert(opCtx.get(), key1, loc1, true));
@@ -95,32 +90,29 @@ TEST(SortedDataInterface, LocateReversed) {
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
-        scoped_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get(), -1));
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<SortedDataInterface::Cursor> cursor(
+            sorted->newCursor(opCtx.get(), false));
 
-        ASSERT(cursor->locate(key1, loc1));
-        ASSERT_EQUALS(key1, cursor->getKey());
-        ASSERT_EQUALS(loc1, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT(cursor->isEOF());
+        ASSERT_EQ(cursor->seek(key1, true), IndexKeyEntry(key1, loc1));
+        ASSERT_EQ(cursor->next(), boost::none);
     }
 }
 
 // Insert a compound key and try to locate it using a forward cursor
 // by specifying its exact key and RecordId.
 TEST(SortedDataInterface, LocateCompoundKey) {
-    scoped_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
-    scoped_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
+    const std::unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
-        scoped_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get(), 1));
-        ASSERT(!cursor->locate(compoundKey1a, loc1));
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get()));
+        ASSERT(!cursor->seek(compoundKey1a, true));
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             ASSERT_OK(sorted->insert(opCtx.get(), compoundKey1a, loc1, true));
@@ -129,32 +121,29 @@ TEST(SortedDataInterface, LocateCompoundKey) {
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
-        scoped_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get(), 1));
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get()));
 
-        ASSERT(cursor->locate(compoundKey1a, loc1));
-        ASSERT_EQUALS(compoundKey1a, cursor->getKey());
-        ASSERT_EQUALS(loc1, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT(cursor->isEOF());
+        ASSERT_EQ(cursor->seek(compoundKey1a, true), IndexKeyEntry(compoundKey1a, loc1));
+        ASSERT_EQ(cursor->next(), boost::none);
     }
 }
 
 // Insert a compound key and try to locate it using a reverse cursor
 // by specifying its exact key and RecordId.
 TEST(SortedDataInterface, LocateCompoundKeyReversed) {
-    scoped_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
-    scoped_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
+    const std::unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
-        scoped_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get(), -1));
-        ASSERT(!cursor->locate(compoundKey1a, loc1));
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<SortedDataInterface::Cursor> cursor(
+            sorted->newCursor(opCtx.get(), false));
+        ASSERT(!cursor->seek(compoundKey1a, true));
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             ASSERT_OK(sorted->insert(opCtx.get(), compoundKey1a, loc1, true));
@@ -163,32 +152,29 @@ TEST(SortedDataInterface, LocateCompoundKeyReversed) {
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
-        scoped_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get(), -1));
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<SortedDataInterface::Cursor> cursor(
+            sorted->newCursor(opCtx.get(), false));
 
-        ASSERT(cursor->locate(compoundKey1a, loc1));
-        ASSERT_EQUALS(compoundKey1a, cursor->getKey());
-        ASSERT_EQUALS(loc1, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT(cursor->isEOF());
+        ASSERT_EQ(cursor->seek(compoundKey1a, true), IndexKeyEntry(compoundKey1a, loc1));
+        ASSERT_EQ(cursor->next(), boost::none);
     }
 }
 
 // Insert multiple keys and try to locate them using a forward cursor
 // by specifying their exact key and RecordId.
 TEST(SortedDataInterface, LocateMultiple) {
-    scoped_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
-    scoped_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
+    const std::unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
-        scoped_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get(), 1));
-        ASSERT(!cursor->locate(key1, loc1));
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get()));
+        ASSERT(!cursor->seek(key1, true));
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             ASSERT_OK(sorted->insert(opCtx.get(), key1, loc1, true));
@@ -198,23 +184,16 @@ TEST(SortedDataInterface, LocateMultiple) {
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
-        scoped_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get(), 1));
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get()));
 
-        ASSERT(cursor->locate(key1, loc1));
-        ASSERT_EQUALS(key1, cursor->getKey());
-        ASSERT_EQUALS(loc1, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT_EQUALS(key2, cursor->getKey());
-        ASSERT_EQUALS(loc2, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT(cursor->isEOF());
+        ASSERT_EQ(cursor->seek(key1, true), IndexKeyEntry(key1, loc1));
+        ASSERT_EQ(cursor->next(), IndexKeyEntry(key2, loc2));
+        ASSERT_EQ(cursor->next(), boost::none);
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             ASSERT_OK(sorted->insert(opCtx.get(), key3, loc3, true));
@@ -223,51 +202,35 @@ TEST(SortedDataInterface, LocateMultiple) {
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
-        scoped_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get(), 1));
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get()));
 
-        ASSERT(cursor->locate(key2, loc2));
-        ASSERT_EQUALS(key2, cursor->getKey());
-        ASSERT_EQUALS(loc2, cursor->getRecordId());
+        ASSERT_EQ(cursor->seek(key2, true), IndexKeyEntry(key2, loc2));
+        ASSERT_EQ(cursor->next(), IndexKeyEntry(key3, loc3));
+        ASSERT_EQ(cursor->next(), boost::none);
 
-        cursor->advance();
-        ASSERT_EQUALS(key3, cursor->getKey());
-        ASSERT_EQUALS(loc3, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT(cursor->isEOF());
-
-        ASSERT(cursor->locate(key1, loc1));
-        ASSERT_EQUALS(key1, cursor->getKey());
-        ASSERT_EQUALS(loc1, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT_EQUALS(key2, cursor->getKey());
-        ASSERT_EQUALS(loc2, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT_EQUALS(key3, cursor->getKey());
-        ASSERT_EQUALS(loc3, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT(cursor->isEOF());
+        ASSERT_EQ(cursor->seek(key1, true), IndexKeyEntry(key1, loc1));
+        ASSERT_EQ(cursor->next(), IndexKeyEntry(key2, loc2));
+        ASSERT_EQ(cursor->next(), IndexKeyEntry(key3, loc3));
+        ASSERT_EQ(cursor->next(), boost::none);
     }
 }
 
 // Insert multiple keys and try to locate them using a reverse cursor
 // by specifying their exact key and RecordId.
 TEST(SortedDataInterface, LocateMultipleReversed) {
-    scoped_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
-    scoped_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
+    const std::unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
-        scoped_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get(), -1));
-        ASSERT(!cursor->locate(key3, loc1));
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<SortedDataInterface::Cursor> cursor(
+            sorted->newCursor(opCtx.get(), false));
+        ASSERT(!cursor->seek(key3, true));
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             ASSERT_OK(sorted->insert(opCtx.get(), key1, loc1, true));
@@ -277,23 +240,17 @@ TEST(SortedDataInterface, LocateMultipleReversed) {
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
-        scoped_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get(), -1));
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<SortedDataInterface::Cursor> cursor(
+            sorted->newCursor(opCtx.get(), false));
 
-        ASSERT(cursor->locate(key2, loc2));
-        ASSERT_EQUALS(key2, cursor->getKey());
-        ASSERT_EQUALS(loc2, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT_EQUALS(key1, cursor->getKey());
-        ASSERT_EQUALS(loc1, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT(cursor->isEOF());
+        ASSERT_EQ(cursor->seek(key2, true), IndexKeyEntry(key2, loc2));
+        ASSERT_EQ(cursor->next(), IndexKeyEntry(key1, loc1));
+        ASSERT_EQ(cursor->next(), boost::none);
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             ASSERT_OK(sorted->insert(opCtx.get(), key3, loc3, true));
@@ -302,51 +259,35 @@ TEST(SortedDataInterface, LocateMultipleReversed) {
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
-        scoped_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get(), -1));
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<SortedDataInterface::Cursor> cursor(
+            sorted->newCursor(opCtx.get(), false));
 
-        ASSERT(cursor->locate(key2, loc2));
-        ASSERT_EQUALS(key2, cursor->getKey());
-        ASSERT_EQUALS(loc2, cursor->getRecordId());
+        ASSERT_EQ(cursor->seek(key2, true), IndexKeyEntry(key2, loc2));
+        ASSERT_EQ(cursor->next(), IndexKeyEntry(key1, loc1));
+        ASSERT_EQ(cursor->next(), boost::none);
 
-        cursor->advance();
-        ASSERT_EQUALS(key1, cursor->getKey());
-        ASSERT_EQUALS(loc1, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT(cursor->isEOF());
-
-        ASSERT(cursor->locate(key3, loc3));
-        ASSERT_EQUALS(key3, cursor->getKey());
-        ASSERT_EQUALS(loc3, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT_EQUALS(key2, cursor->getKey());
-        ASSERT_EQUALS(loc2, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT_EQUALS(key1, cursor->getKey());
-        ASSERT_EQUALS(loc1, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT(cursor->isEOF());
+        ASSERT_EQ(cursor->seek(key3, true), IndexKeyEntry(key3, loc3));
+        ASSERT_EQ(cursor->next(), IndexKeyEntry(key2, loc2));
+        ASSERT_EQ(cursor->next(), IndexKeyEntry(key1, loc1));
+        ASSERT_EQ(cursor->next(), boost::none);
     }
 }
 
 // Insert multiple compound keys and try to locate them using a forward cursor
 // by specifying their exact key and RecordId.
 TEST(SortedDataInterface, LocateMultipleCompoundKeys) {
-    scoped_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
-    scoped_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
+    const std::unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
-        scoped_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get(), 1));
-        ASSERT(!cursor->locate(compoundKey1a, loc1));
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get()));
+        ASSERT(!cursor->seek(compoundKey1a, true));
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             ASSERT_OK(sorted->insert(opCtx.get(), compoundKey1a, loc1, true));
@@ -357,27 +298,17 @@ TEST(SortedDataInterface, LocateMultipleCompoundKeys) {
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
-        scoped_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get(), 1));
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get()));
 
-        ASSERT(cursor->locate(compoundKey1a, loc1));
-        ASSERT_EQUALS(compoundKey1a, cursor->getKey());
-        ASSERT_EQUALS(loc1, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT_EQUALS(compoundKey1b, cursor->getKey());
-        ASSERT_EQUALS(loc2, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT_EQUALS(compoundKey2b, cursor->getKey());
-        ASSERT_EQUALS(loc3, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT(cursor->isEOF());
+        ASSERT_EQ(cursor->seek(compoundKey1a, true), IndexKeyEntry(compoundKey1a, loc1));
+        ASSERT_EQ(cursor->next(), IndexKeyEntry(compoundKey1b, loc2));
+        ASSERT_EQ(cursor->next(), IndexKeyEntry(compoundKey2b, loc3));
+        ASSERT_EQ(cursor->next(), boost::none);
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             ASSERT_OK(sorted->insert(opCtx.get(), compoundKey1c, loc4, true));
@@ -387,48 +318,33 @@ TEST(SortedDataInterface, LocateMultipleCompoundKeys) {
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
-        scoped_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get(), 1));
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get()));
 
-        ASSERT(cursor->locate(compoundKey1a, loc1));
-        ASSERT_EQUALS(compoundKey1a, cursor->getKey());
-        ASSERT_EQUALS(loc1, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT_EQUALS(compoundKey1b, cursor->getKey());
-        ASSERT_EQUALS(loc2, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT_EQUALS(compoundKey1c, cursor->getKey());
-        ASSERT_EQUALS(loc4, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT_EQUALS(compoundKey2b, cursor->getKey());
-        ASSERT_EQUALS(loc3, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT_EQUALS(compoundKey3a, cursor->getKey());
-        ASSERT_EQUALS(loc5, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT(cursor->isEOF());
+        ASSERT_EQ(cursor->seek(compoundKey1a, true), IndexKeyEntry(compoundKey1a, loc1));
+        ASSERT_EQ(cursor->next(), IndexKeyEntry(compoundKey1b, loc2));
+        ASSERT_EQ(cursor->next(), IndexKeyEntry(compoundKey1c, loc4));
+        ASSERT_EQ(cursor->next(), IndexKeyEntry(compoundKey2b, loc3));
+        ASSERT_EQ(cursor->next(), IndexKeyEntry(compoundKey3a, loc5));
+        ASSERT_EQ(cursor->next(), boost::none);
     }
 }
 
 // Insert multiple compound keys and try to locate them using a reverse cursor
 // by specifying their exact key and RecordId.
 TEST(SortedDataInterface, LocateMultipleCompoundKeysReversed) {
-    scoped_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
-    scoped_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
+    const std::unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
-        scoped_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get(), -1));
-        ASSERT(!cursor->locate(compoundKey3a, loc1));
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<SortedDataInterface::Cursor> cursor(
+            sorted->newCursor(opCtx.get(), false));
+        ASSERT(!cursor->seek(compoundKey3a, true));
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             ASSERT_OK(sorted->insert(opCtx.get(), compoundKey1a, loc1, true));
@@ -439,27 +355,18 @@ TEST(SortedDataInterface, LocateMultipleCompoundKeysReversed) {
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
-        scoped_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get(), -1));
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<SortedDataInterface::Cursor> cursor(
+            sorted->newCursor(opCtx.get(), false));
 
-        ASSERT(cursor->locate(compoundKey2b, loc3));
-        ASSERT_EQUALS(compoundKey2b, cursor->getKey());
-        ASSERT_EQUALS(loc3, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT_EQUALS(compoundKey1b, cursor->getKey());
-        ASSERT_EQUALS(loc2, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT_EQUALS(compoundKey1a, cursor->getKey());
-        ASSERT_EQUALS(loc1, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT(cursor->isEOF());
+        ASSERT_EQ(cursor->seek(compoundKey2b, true), IndexKeyEntry(compoundKey2b, loc3));
+        ASSERT_EQ(cursor->next(), IndexKeyEntry(compoundKey1b, loc2));
+        ASSERT_EQ(cursor->next(), IndexKeyEntry(compoundKey1a, loc1));
+        ASSERT_EQ(cursor->next(), boost::none);
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             ASSERT_OK(sorted->insert(opCtx.get(), compoundKey1c, loc4, true));
@@ -469,48 +376,33 @@ TEST(SortedDataInterface, LocateMultipleCompoundKeysReversed) {
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
-        scoped_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get(), -1));
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<SortedDataInterface::Cursor> cursor(
+            sorted->newCursor(opCtx.get(), false));
 
-        ASSERT(cursor->locate(compoundKey3a, loc5));
-        ASSERT_EQUALS(compoundKey3a, cursor->getKey());
-        ASSERT_EQUALS(loc5, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT_EQUALS(compoundKey2b, cursor->getKey());
-        ASSERT_EQUALS(loc3, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT_EQUALS(compoundKey1c, cursor->getKey());
-        ASSERT_EQUALS(loc4, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT_EQUALS(compoundKey1b, cursor->getKey());
-        ASSERT_EQUALS(loc2, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT_EQUALS(compoundKey1a, cursor->getKey());
-        ASSERT_EQUALS(loc1, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT(cursor->isEOF());
+        ASSERT_EQ(cursor->seek(compoundKey3a, true), IndexKeyEntry(compoundKey3a, loc5));
+        ASSERT_EQ(cursor->next(), IndexKeyEntry(compoundKey2b, loc3));
+        ASSERT_EQ(cursor->next(), IndexKeyEntry(compoundKey1c, loc4));
+        ASSERT_EQ(cursor->next(), IndexKeyEntry(compoundKey1b, loc2));
+        ASSERT_EQ(cursor->next(), IndexKeyEntry(compoundKey1a, loc1));
+        ASSERT_EQ(cursor->next(), boost::none);
     }
 }
 
 // Insert multiple keys and try to locate them using a forward cursor
 // by specifying either a smaller key or RecordId.
 TEST(SortedDataInterface, LocateIndirect) {
-    scoped_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
-    scoped_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
+    const std::unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
-        scoped_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get(), 1));
-        ASSERT(!cursor->locate(key1, loc1));
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get()));
+        ASSERT(!cursor->seek(key1, true));
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             ASSERT_OK(sorted->insert(opCtx.get(), key1, loc1, true));
@@ -520,19 +412,15 @@ TEST(SortedDataInterface, LocateIndirect) {
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
-        scoped_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get(), 1));
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get()));
 
-        ASSERT(!cursor->locate(key1, RecordId::max()));
-        ASSERT_EQUALS(key2, cursor->getKey());
-        ASSERT_EQUALS(loc2, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT(cursor->isEOF());
+        ASSERT_EQ(cursor->seek(key1, false), IndexKeyEntry(key2, loc2));
+        ASSERT_EQ(cursor->next(), boost::none);
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             ASSERT_OK(sorted->insert(opCtx.get(), key3, loc3, true));
@@ -541,40 +429,31 @@ TEST(SortedDataInterface, LocateIndirect) {
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
-        scoped_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get(), 1));
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get()));
 
-        ASSERT(!cursor->locate(key1, RecordId::min()));
-        ASSERT_EQUALS(key1, cursor->getKey());
-        ASSERT_EQUALS(loc1, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT_EQUALS(key2, cursor->getKey());
-        ASSERT_EQUALS(loc2, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT_EQUALS(key3, cursor->getKey());
-        ASSERT_EQUALS(loc3, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT(cursor->isEOF());
+        ASSERT_EQ(cursor->seek(key1, true), IndexKeyEntry(key1, loc1));
+        ASSERT_EQ(cursor->next(), IndexKeyEntry(key2, loc2));
+        ASSERT_EQ(cursor->next(), IndexKeyEntry(key3, loc3));
+        ASSERT_EQ(cursor->next(), boost::none);
     }
 }
 
 // Insert multiple keys and try to locate them using a reverse cursor
 // by specifying either a larger key or RecordId.
 TEST(SortedDataInterface, LocateIndirectReversed) {
-    scoped_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
-    scoped_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
+    const std::unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
-        scoped_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get(), -1));
-        ASSERT(!cursor->locate(key3, loc1));
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<SortedDataInterface::Cursor> cursor(
+            sorted->newCursor(opCtx.get(), false));
+        ASSERT(!cursor->seek(key3, true));
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             ASSERT_OK(sorted->insert(opCtx.get(), key1, loc1, true));
@@ -584,19 +463,16 @@ TEST(SortedDataInterface, LocateIndirectReversed) {
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
-        scoped_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get(), -1));
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<SortedDataInterface::Cursor> cursor(
+            sorted->newCursor(opCtx.get(), false));
 
-        ASSERT(!cursor->locate(key2, RecordId::min()));
-        ASSERT_EQUALS(key1, cursor->getKey());
-        ASSERT_EQUALS(loc1, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT(cursor->isEOF());
+        ASSERT_EQ(cursor->seek(key2, false), IndexKeyEntry(key1, loc1));
+        ASSERT_EQ(cursor->next(), boost::none);
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             ASSERT_OK(sorted->insert(opCtx.get(), key3, loc3, true));
@@ -605,40 +481,31 @@ TEST(SortedDataInterface, LocateIndirectReversed) {
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
-        scoped_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get(), -1));
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<SortedDataInterface::Cursor> cursor(
+            sorted->newCursor(opCtx.get(), false));
 
-        ASSERT(!cursor->locate(key3, RecordId::max()));
-        ASSERT_EQUALS(key3, cursor->getKey());
-        ASSERT_EQUALS(loc3, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT_EQUALS(key2, cursor->getKey());
-        ASSERT_EQUALS(loc2, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT_EQUALS(key1, cursor->getKey());
-        ASSERT_EQUALS(loc1, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT(cursor->isEOF());
+        ASSERT_EQ(cursor->seek(key3, true), IndexKeyEntry(key3, loc3));
+        ASSERT_EQ(cursor->next(), IndexKeyEntry(key2, loc2));
+        ASSERT_EQ(cursor->next(), IndexKeyEntry(key1, loc1));
+        ASSERT_EQ(cursor->next(), boost::none);
     }
 }
 
 // Insert multiple compound keys and try to locate them using a forward cursor
 // by specifying either a smaller key or RecordId.
 TEST(SortedDataInterface, LocateIndirectCompoundKeys) {
-    scoped_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
-    scoped_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
+    const std::unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
-        scoped_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get(), 1));
-        ASSERT(!cursor->locate(compoundKey1a, loc1));
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get()));
+        ASSERT(!cursor->seek(compoundKey1a, true));
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             ASSERT_OK(sorted->insert(opCtx.get(), compoundKey1a, loc1, true));
@@ -649,23 +516,16 @@ TEST(SortedDataInterface, LocateIndirectCompoundKeys) {
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
-        scoped_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get(), 1));
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get()));
 
-        ASSERT(!cursor->locate(compoundKey1a, RecordId::max()));
-        ASSERT_EQUALS(compoundKey1b, cursor->getKey());
-        ASSERT_EQUALS(loc2, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT_EQUALS(compoundKey2b, cursor->getKey());
-        ASSERT_EQUALS(loc3, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT(cursor->isEOF());
+        ASSERT_EQ(cursor->seek(compoundKey1a, false), IndexKeyEntry(compoundKey1b, loc2));
+        ASSERT_EQ(cursor->next(), IndexKeyEntry(compoundKey2b, loc3));
+        ASSERT_EQ(cursor->next(), boost::none);
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             ASSERT_OK(sorted->insert(opCtx.get(), compoundKey1c, loc4, true));
@@ -675,36 +535,30 @@ TEST(SortedDataInterface, LocateIndirectCompoundKeys) {
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
-        scoped_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get(), 1));
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get()));
 
-        ASSERT(!cursor->locate(compoundKey2a, loc1));
-        ASSERT_EQUALS(compoundKey2b, cursor->getKey());
-        ASSERT_EQUALS(loc3, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT_EQUALS(compoundKey3a, cursor->getKey());
-        ASSERT_EQUALS(loc5, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT(cursor->isEOF());
+        ASSERT_EQ(cursor->seek(compoundKey2a, true), IndexKeyEntry(compoundKey2b, loc3));
+        ASSERT_EQ(cursor->next(), IndexKeyEntry(compoundKey3a, loc5));
+        ASSERT_EQ(cursor->next(), boost::none);
     }
 }
 
 // Insert multiple compound keys and try to locate them using a reverse cursor
 // by specifying either a larger key or RecordId.
 TEST(SortedDataInterface, LocateIndirectCompoundKeysReversed) {
-    scoped_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
-    scoped_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
+    const std::unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
-        scoped_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get(), -1));
-        ASSERT(!cursor->locate(compoundKey3a, loc1));
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<SortedDataInterface::Cursor> cursor(
+            sorted->newCursor(opCtx.get(), false));
+        ASSERT(!cursor->seek(compoundKey3a, true));
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             ASSERT_OK(sorted->insert(opCtx.get(), compoundKey1a, loc1, true));
@@ -715,23 +569,17 @@ TEST(SortedDataInterface, LocateIndirectCompoundKeysReversed) {
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
-        scoped_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get(), -1));
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<SortedDataInterface::Cursor> cursor(
+            sorted->newCursor(opCtx.get(), false));
 
-        ASSERT(!cursor->locate(compoundKey2b, RecordId::min()));
-        ASSERT_EQUALS(compoundKey1b, cursor->getKey());
-        ASSERT_EQUALS(loc2, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT_EQUALS(compoundKey1a, cursor->getKey());
-        ASSERT_EQUALS(loc1, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT(cursor->isEOF());
+        ASSERT_EQ(cursor->seek(compoundKey2b, false), IndexKeyEntry(compoundKey1b, loc2));
+        ASSERT_EQ(cursor->next(), IndexKeyEntry(compoundKey1a, loc1));
+        ASSERT_EQ(cursor->next(), boost::none);
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             ASSERT_OK(sorted->insert(opCtx.get(), compoundKey1c, loc4, true));
@@ -741,63 +589,55 @@ TEST(SortedDataInterface, LocateIndirectCompoundKeysReversed) {
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
-        scoped_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get(), -1));
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<SortedDataInterface::Cursor> cursor(
+            sorted->newCursor(opCtx.get(), false));
 
-        ASSERT(!cursor->locate(compoundKey1d, loc1));
-        ASSERT_EQUALS(compoundKey1c, cursor->getKey());
-        ASSERT_EQUALS(loc4, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT_EQUALS(compoundKey1b, cursor->getKey());
-        ASSERT_EQUALS(loc2, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT_EQUALS(compoundKey1a, cursor->getKey());
-        ASSERT_EQUALS(loc1, cursor->getRecordId());
-
-        cursor->advance();
-        ASSERT(cursor->isEOF());
+        ASSERT_EQ(cursor->seek(compoundKey1d, true), IndexKeyEntry(compoundKey1c, loc4));
+        ASSERT_EQ(cursor->next(), IndexKeyEntry(compoundKey1b, loc2));
+        ASSERT_EQ(cursor->next(), IndexKeyEntry(compoundKey1a, loc1));
+        ASSERT_EQ(cursor->next(), boost::none);
     }
 }
 
 // Call locate on a forward cursor of an empty index and verify that the cursor
 // is positioned at EOF.
 TEST(SortedDataInterface, LocateEmpty) {
-    scoped_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
-    scoped_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
+    const std::unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT(sorted->isEmpty(opCtx.get()));
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
-        scoped_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get(), 1));
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get()));
 
-        ASSERT(!cursor->locate(BSONObj(), RecordId::min()));
-        ASSERT(cursor->isEOF());
+        ASSERT(!cursor->seek(BSONObj(), true));
+        ASSERT(!cursor->next());
     }
 }
 
 // Call locate on a reverse cursor of an empty index and verify that the cursor
 // is positioned at EOF.
 TEST(SortedDataInterface, LocateEmptyReversed) {
-    scoped_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
-    scoped_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
+    const std::unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT(sorted->isEmpty(opCtx.get()));
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
-        scoped_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get(), -1));
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<SortedDataInterface::Cursor> cursor(
+            sorted->newCursor(opCtx.get(), false));
 
-        ASSERT(!cursor->locate(BSONObj(), RecordId::max()));
-        ASSERT(cursor->isEOF());
+        ASSERT(!cursor->seek(BSONObj(), true));
+        ASSERT(!cursor->next());
     }
 }
 

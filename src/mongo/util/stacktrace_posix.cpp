@@ -38,11 +38,17 @@
 #include <sys/utsname.h>
 
 #include "mongo/base/init.h"
+#include "mongo/config.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/platform/backtrace.h"
 #include "mongo/util/hex.h"
 #include "mongo/util/log.h"
 #include "mongo/util/version.h"
+
+#if defined(MONGO_CONFIG_HAVE_EXECINFO_BACKTRACE)
+#include <execinfo.h>
+#elif defined(__sun)
+#include <ucontext.h>
+#endif
 
 namespace mongo {
 
@@ -60,15 +66,76 @@ std::string* soMapJson = NULL;
  *
  * E.g., for "/foo/bar/my.txt", returns "my.txt".
  */
-StringData getBaseName(const StringData& path) {
+StringData getBaseName(StringData path) {
     size_t lastSlash = path.rfind('/');
     if (lastSlash == std::string::npos)
         return path;
     return path.substr(lastSlash + 1);
 }
 
+// All platforms we build on have execinfo.h and we use backtrace() directly, with one exception
+#if defined(MONGO_CONFIG_HAVE_EXECINFO_BACKTRACE)
+using ::backtrace;
+
+// On Solaris 10, there is no execinfo.h, so we need to emulate it.
+// Solaris 11 has execinfo.h, and this code doesn't get used.
+#elif defined(__sun)
+class WalkcontextCallback {
+public:
+    WalkcontextCallback(uintptr_t* array, int size)
+        : _position(0), _count(size), _addresses(array) {}
+
+    // This callback function is called from C code, and so must not throw exceptions
+    //
+    static int callbackFunction(uintptr_t address,
+                                int signalNumber,
+                                WalkcontextCallback* thisContext) {
+        if (thisContext->_position < thisContext->_count) {
+            thisContext->_addresses[thisContext->_position++] = address;
+            return 0;
+        }
+        return 1;
+    }
+    int getCount() const {
+        return static_cast<int>(_position);
+    }
+
+private:
+    size_t _position;
+    size_t _count;
+    uintptr_t* _addresses;
+};
+
+typedef int (*WalkcontextCallbackFunc)(uintptr_t address, int signalNumber, void* thisContext);
+
+int backtrace(void** array, int size) {
+    WalkcontextCallback walkcontextCallback(reinterpret_cast<uintptr_t*>(array), size);
+    ucontext_t context;
+    if (getcontext(&context) != 0) {
+        return 0;
+    }
+    int wcReturn = walkcontext(
+        &context,
+        reinterpret_cast<WalkcontextCallbackFunc>(WalkcontextCallback::callbackFunction),
+        static_cast<void*>(&walkcontextCallback));
+    if (wcReturn == 0) {
+        return walkcontextCallback.getCount();
+    }
+    return 0;
+}
+#else
+// On unsupported platforms, we print an error instead of printing a stacktrace.
+#define MONGO_NO_BACKTRACE
+#endif
+
 }  // namespace
 
+#if defined(MONGO_NO_BACKTRACE)
+void printStackTrace(std::ostream& os) {
+    os << "This platform does not support printing stacktraces" << std::endl;
+}
+
+#else
 /**
  * Prints a stack backtrace for the current thread to the specified ostream.
  *
@@ -137,11 +204,7 @@ void printStackTrace(std::ostream& os) {
         const uintptr_t fileOffset = uintptr_t(addresses[i]) - uintptr_t(dlinfo.dli_fbase);
         if (i)
             os << ',';
-        os << "{\"b\":\"" << uintptr_t(dlinfo.dli_fbase) << "\",\"o\":\"" << fileOffset;
-        if (dlinfo.dli_sname) {
-            os << "\",\"s\":\"" << dlinfo.dli_sname;
-        }
-        os << "\"}";
+        os << "{\"b\":\"" << uintptr_t(dlinfo.dli_fbase) << "\",\"o\":\"" << fileOffset << "\"}";
     }
     os << ']';
 
@@ -175,6 +238,8 @@ void printStackTrace(std::ostream& os) {
     os << "-----  END BACKTRACE  -----" << std::endl;
 }
 
+#endif
+
 namespace {
 
 void addOSComponentsToSoMap(BSONObjBuilder* soMap);
@@ -188,6 +253,7 @@ MONGO_INITIALIZER(ExtractSOMap)(InitializerContext*) {
     BSONObjBuilder soMap;
     soMap << "mongodbVersion" << versionString;
     soMap << "gitVersion" << gitVersion();
+    soMap << "compiledModules" << compiledModules();
     struct utsname unameData;
     if (!uname(&unameData)) {
         BSONObjBuilder unameBuilder(soMap.subobjStart("uname"));
@@ -385,15 +451,6 @@ uint32_t lcType(const char* lcCurr) {
     return cmd->cmd;
 }
 
-template <typename SegmentCommandType>
-bool maybeAppendLoadAddr(BSONObjBuilder* soInfo, const SegmentCommandType* segmentCommand) {
-    if (StringData(SEG_TEXT) != segmentCommand->segname) {
-        return false;
-    }
-    *soInfo << "vmaddr" << integerToHex(segmentCommand->vmaddr);
-    return true;
-}
-
 void addOSComponentsToSoMap(BSONObjBuilder* soMap) {
     const uint32_t numImages = _dyld_image_count();
     BSONArrayBuilder soList(soMap->subarrayStart("somap"));
@@ -418,34 +475,16 @@ void addOSComponentsToSoMap(BSONObjBuilder* soMap) {
         const char* const loadCommandsBegin = reinterpret_cast<const char*>(header) + headerSize;
         const char* const loadCommandsEnd = loadCommandsBegin + header->sizeofcmds;
 
-        // Search the "load command" data in the Mach object for the entry encoding the UUID of the
-        // object, and for the __TEXT segment. Adding the "vmaddr" field of the __TEXT segment load
-        // command of an executable or dylib to an offset in that library provides an address
-        // suitable to passing to atos or llvm-symbolizer for symbolization.
-        //
-        // See, for example, http://lldb.llvm.org/symbolication.html.
-        bool foundTextSegment = false;
+        // Search the "load command" data in the Mach object for the entry
+        // encoding the UUID of the object.
         for (const char* lcCurr = loadCommandsBegin; lcCurr < loadCommandsEnd;
              lcCurr = lcNext(lcCurr)) {
-            switch (lcType(lcCurr)) {
-                case LC_UUID: {
-                    const auto uuidCmd = reinterpret_cast<const uuid_command*>(lcCurr);
-                    soInfo << "buildId" << toHex(uuidCmd->uuid, 16);
-                    break;
-                }
-                case LC_SEGMENT_64:
-                    if (!foundTextSegment) {
-                        foundTextSegment = maybeAppendLoadAddr(
-                            &soInfo, reinterpret_cast<const segment_command_64*>(lcCurr));
-                    }
-                    break;
-                case LC_SEGMENT:
-                    if (!foundTextSegment) {
-                        foundTextSegment = maybeAppendLoadAddr(
-                            &soInfo, reinterpret_cast<const segment_command*>(lcCurr));
-                    }
-                    break;
-            }
+            if (LC_UUID != lcType(lcCurr))
+                continue;
+
+            const uuid_command* uuidCmd = reinterpret_cast<const uuid_command*>(lcCurr);
+            soInfo << "buildId" << toHex(uuidCmd->uuid, 16);
+            break;
         }
     }
 }

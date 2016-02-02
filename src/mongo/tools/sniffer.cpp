@@ -44,7 +44,6 @@
 #undef max
 #endif
 
-#include <boost/shared_ptr.hpp>
 #include <ctype.h>
 #include <errno.h>
 #include <iostream>
@@ -66,13 +65,16 @@
 #include "mongo/bson/util/builder.h"
 #include "mongo/client/dbclientinterface.h"
 #include "mongo/db/dbmessage.h"
+#include "mongo/db/storage/mmap_v1/mmap.h"
+#include "mongo/rpc/command_reply.h"
+#include "mongo/rpc/command_request.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/net/message.h"
-#include "mongo/util/mmap.h"
 #include "mongo/util/quick_exit.h"
 #include "mongo/util/text.h"
 
 using namespace std;
-using boost::shared_ptr;
+using std::shared_ptr;
 using mongo::Message;
 using mongo::DbMessage;
 using mongo::BSONObj;
@@ -166,9 +168,9 @@ struct Connection {
 
 map<Connection, bool> seen;
 map<Connection, int> bytesRemainingInMessage;
-map<Connection, boost::shared_ptr<BufBuilder>> messageBuilder;
+map<Connection, std::shared_ptr<BufBuilder>> messageBuilder;
 map<Connection, unsigned> expectedSeq;
-map<Connection, boost::shared_ptr<DBClientConnection>> forwarder;
+map<Connection, std::shared_ptr<DBClientConnection>> forwarder;
 map<Connection, long long> lastCursor;
 map<Connection, map<long long, long long>> mapCursor;
 
@@ -290,6 +292,38 @@ void processMessage(Connection& c, Message& m) {
 
     try {
         switch (m.operation()) {
+            case mongo::dbCommand: {
+                mongo::rpc::CommandRequest c(&m);
+                out() << "\tcommand: " << c.getCommandName() << " ";
+                out() << "database: " << c.getDatabase() << " ";
+                out() << "metadata: " << c.getMetadata().toString() << " ";
+                out() << "commandArgs: " << c.getCommandArgs() << " ";
+                out() << "inputDocs: [ ";
+                mongo::rpc::DocumentRange docs = c.getInputDocs();
+                if (docs.begin() != docs.end()) {
+                    out() << endl;
+                }
+                for (const auto& doc : docs) {
+                    out() << doc.toString() << "," << endl;
+                }
+                out() << "]" << endl;
+                break;
+            }
+            case mongo::dbCommandReply: {
+                mongo::rpc::CommandReply c(&m);
+                out() << "\tcommandReply: " << c.getCommandReply() << " ";
+                out() << "metadata: " << c.getMetadata().toString() << " ";
+                out() << "outputDocs: [ ";
+                mongo::rpc::DocumentRange docs = c.getOutputDocs();
+                if (docs.begin() != docs.end()) {
+                    out() << endl;
+                }
+                for (const auto& doc : docs) {
+                    out() << doc.toString() << endl;
+                }
+                out() << "]" << endl;
+                break;
+            }
             case mongo::opReply: {
                 mongo::QueryResult::View r = m.singleData().view2ptr();
 
@@ -360,10 +394,10 @@ void processMessage(Connection& c, Message& m) {
 
     if (!forwardAddress.empty()) {
         if (m.operation() != mongo::opReply) {
-            boost::shared_ptr<DBClientConnection> conn = forwarder[c];
+            std::shared_ptr<DBClientConnection> conn = forwarder[c];
             if (!conn) {
                 conn.reset(new DBClientConnection(true));
-                conn->connect(forwardAddress);
+                uassertStatusOK(conn->connect(mongo::HostAndPort{forwardAddress}));
                 forwarder[c] = conn;
             }
             if (m.operation() == mongo::dbQuery || m.operation() == mongo::dbGetMore) {

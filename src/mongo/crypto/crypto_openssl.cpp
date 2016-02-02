@@ -28,13 +28,12 @@
 
 #include "mongo/platform/basic.h"
 
+#include "mongo/config.h"
 #include "mongo/util/scopeguard.h"
 
-#ifndef MONGO_SSL
+#ifndef MONGO_CONFIG_SSL
 #error This file should only be included in SSL-enabled builds
 #endif
-
-#include "mongo/platform/basic.h"
 
 #include <openssl/sha.h>
 #include <openssl/evp.h>

@@ -35,21 +35,20 @@
 #include "mongo/shell/bench.h"
 
 #include <pcrecpp.h>
-
-#include <boost/noncopyable.hpp>
-#include <boost/shared_ptr.hpp>
-#include <boost/thread/thread.hpp>
 #include <iostream>
 
-#include "mongo/db/namespace_string.h"
-#include "mongo/db/operation_context_noop.h"
 #include "mongo/client/dbclientcursor.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/query/cursor_response.h"
+#include "mongo/db/query/getmore_request.h"
+#include "mongo/db/query/lite_parsed_query.h"
 #include "mongo/scripting/bson_template_evaluator.h"
 #include "mongo/scripting/engine.h"
+#include "mongo/stdx/thread.h"
 #include "mongo/util/log.h"
 #include "mongo/util/md5.h"
-#include "mongo/util/timer.h"
 #include "mongo/util/time_support.h"
+#include "mongo/util/timer.h"
 #include "mongo/util/version.h"
 
 // ---------------------------------
@@ -76,7 +75,7 @@ inline pcrecpp::RE_Options flags2options(const char* flags) {
 
 namespace mongo {
 
-using std::auto_ptr;
+using std::unique_ptr;
 using std::cout;
 using std::endl;
 using std::map;
@@ -203,39 +202,40 @@ void BenchRunConfig::initializeFromBson(const BSONObj& args) {
         const char* regex = args["trapPattern"].regex();
         const char* flags = args["trapPattern"].regexFlags();
         this->trapPattern =
-            boost::shared_ptr<pcrecpp::RE>(new pcrecpp::RE(regex, flags2options(flags)));
+            std::shared_ptr<pcrecpp::RE>(new pcrecpp::RE(regex, flags2options(flags)));
     }
 
     if (!args["noTrapPattern"].eoo()) {
         const char* regex = args["noTrapPattern"].regex();
         const char* flags = args["noTrapPattern"].regexFlags();
         this->noTrapPattern =
-            boost::shared_ptr<pcrecpp::RE>(new pcrecpp::RE(regex, flags2options(flags)));
+            std::shared_ptr<pcrecpp::RE>(new pcrecpp::RE(regex, flags2options(flags)));
     }
 
     if (!args["watchPattern"].eoo()) {
         const char* regex = args["watchPattern"].regex();
         const char* flags = args["watchPattern"].regexFlags();
         this->watchPattern =
-            boost::shared_ptr<pcrecpp::RE>(new pcrecpp::RE(regex, flags2options(flags)));
+            std::shared_ptr<pcrecpp::RE>(new pcrecpp::RE(regex, flags2options(flags)));
     }
 
     if (!args["noWatchPattern"].eoo()) {
         const char* regex = args["noWatchPattern"].regex();
         const char* flags = args["noWatchPattern"].regexFlags();
         this->noWatchPattern =
-            boost::shared_ptr<pcrecpp::RE>(new pcrecpp::RE(regex, flags2options(flags)));
+            std::shared_ptr<pcrecpp::RE>(new pcrecpp::RE(regex, flags2options(flags)));
     }
 
     this->ops = args["ops"].Obj().getOwned();
 }
 
 DBClientBase* BenchRunConfig::createConnection() const {
+    const ConnectionString connectionString = uassertStatusOK(ConnectionString::parse(host));
+
     std::string errorMessage;
-    ConnectionString connectionString = ConnectionString::parse(host, errorMessage);
-    uassert(16157, errorMessage, connectionString.isValid());
     DBClientBase* connection = connectionString.connect(errorMessage);
     uassert(16158, errorMessage, connection != NULL);
+
     return connection;
 }
 
@@ -251,18 +251,18 @@ BenchRunState::~BenchRunState() {
 }
 
 void BenchRunState::waitForState(State awaitedState) {
-    boost::mutex::scoped_lock lk(_mutex);
+    stdx::unique_lock<stdx::mutex> lk(_mutex);
 
     switch (awaitedState) {
         case BRS_RUNNING:
             while (_numUnstartedWorkers > 0) {
                 massert(16147, "Already finished.", _numUnstartedWorkers + _numActiveWorkers > 0);
-                _stateChangeCondition.wait(_mutex);
+                _stateChangeCondition.wait(lk);
             }
             break;
         case BRS_FINISHED:
             while (_numUnstartedWorkers + _numActiveWorkers > 0) {
-                _stateChangeCondition.wait(_mutex);
+                _stateChangeCondition.wait(lk);
             }
             break;
         default:
@@ -280,7 +280,7 @@ void BenchRunState::tellWorkersToCollectStats() {
 }
 
 void BenchRunState::assertFinished() {
-    boost::mutex::scoped_lock lk(_mutex);
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
     verify(0 == _numUnstartedWorkers + _numActiveWorkers);
 }
 
@@ -293,7 +293,7 @@ bool BenchRunState::shouldWorkerCollectStats() {
 }
 
 void BenchRunState::onWorkerStarted() {
-    boost::mutex::scoped_lock lk(_mutex);
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
     verify(_numUnstartedWorkers > 0);
     --_numUnstartedWorkers;
     ++_numActiveWorkers;
@@ -303,7 +303,7 @@ void BenchRunState::onWorkerStarted() {
 }
 
 void BenchRunState::onWorkerFinished() {
-    boost::mutex::scoped_lock lk(_mutex);
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
     verify(_numActiveWorkers > 0);
     --_numActiveWorkers;
     if (_numActiveWorkers + _numUnstartedWorkers == 0) {
@@ -348,7 +348,7 @@ BenchRunWorker::BenchRunWorker(size_t id,
 BenchRunWorker::~BenchRunWorker() {}
 
 void BenchRunWorker::start() {
-    boost::thread(stdx::bind(&BenchRunWorker::run, this));
+    stdx::thread(stdx::bind(&BenchRunWorker::run, this)).detach();
 }
 
 bool BenchRunWorker::shouldStop() const {
@@ -360,6 +360,58 @@ bool BenchRunWorker::shouldCollectStats() const {
 }
 
 void doNothing(const BSONObj&) {}
+
+/**
+ * Issues the query 'lpq' against 'conn' using read commands.  Returns the size of the result set
+ * returned by the query.
+ *
+ * If 'lpq' has the 'wantMore' flag set to false and the 'limit' option set to 1LL, then the caller
+ * may optionally specify a pointer to an object in 'objOut', which will be filled in with the
+ * single object in the query result set (or the empty object, if the result set is empty).
+ * If 'lpq' doesn't have these options set, then nullptr must be passed for 'objOut'.
+ *
+ * On error, throws a UserException.
+ */
+int runQueryWithReadCommands(DBClientBase* conn,
+                             unique_ptr<LiteParsedQuery> lpq,
+                             BSONObj* objOut = nullptr) {
+    std::string dbName = lpq->nss().db().toString();
+    BSONObj findCommandResult;
+    bool res = conn->runCommand(dbName, lpq->asFindCommand(), findCommandResult);
+    uassert(ErrorCodes::CommandFailed,
+            str::stream() << "find command failed; reply was: " << findCommandResult,
+            res);
+
+    CursorResponse cursorResponse =
+        uassertStatusOK(CursorResponse::parseFromBSON(findCommandResult));
+    int count = cursorResponse.getBatch().size();
+
+    if (objOut) {
+        invariant(lpq->getLimit() && *lpq->getLimit() == 1 && !lpq->wantMore());
+        // Since this is a "single batch" query, we can simply grab the first item in the result set
+        // and return here.
+        *objOut = (count > 0) ? cursorResponse.getBatch()[0] : BSONObj();
+        return count;
+    }
+
+    while (cursorResponse.getCursorId() != 0) {
+        GetMoreRequest getMoreRequest(lpq->nss(),
+                                      cursorResponse.getCursorId(),
+                                      lpq->getBatchSize(),
+                                      boost::none,   // maxTimeMS
+                                      boost::none,   // term
+                                      boost::none);  // lastKnownCommittedOpTime
+        BSONObj getMoreCommandResult;
+        res = conn->runCommand(dbName, getMoreRequest.toBSON(), getMoreCommandResult);
+        uassert(ErrorCodes::CommandFailed,
+                str::stream() << "getMore command failed; reply was: " << getMoreCommandResult,
+                res);
+        cursorResponse = uassertStatusOK(CursorResponse::parseFromBSON(getMoreCommandResult));
+        count += cursorResponse.getBatch().size();
+    }
+
+    return count;
+}
 
 void BenchRunWorker::generateLoadOnConnection(DBClientBase* conn) {
     verify(conn);
@@ -389,12 +441,18 @@ void BenchRunWorker::generateLoadOnConnection(DBClientBase* conn) {
 
             int delay = e["delay"].eoo() ? 0 : e["delay"].Int();
 
-            // Let's default to writeCmd == false.
-            bool useWriteCmd = e["writeCmd"].eoo() ? false : e["writeCmd"].Bool();
+            bool useWriteCmd = false;  // By default, don't use write commands.
+            if (e["writeCmd"]) {
+                useWriteCmd = e["writeCmd"].Bool();
+            }
+            bool useReadCmd = false;  // By default, don't use read commands.
+            if (e["readCmd"]) {
+                useReadCmd = e["readCmd"].Bool();
+            }
 
             BSONObj context = e["context"].eoo() ? BSONObj() : e["context"].Obj();
 
-            auto_ptr<Scope> scope;
+            unique_ptr<Scope> scope;
             ScriptingFunction scopeFunc = 0;
             BSONObj scopeObj;
 
@@ -402,8 +460,7 @@ void BenchRunWorker::generateLoadOnConnection(DBClientBase* conn) {
             if (check) {
                 if (e["check"].type() == CodeWScope || e["check"].type() == Code ||
                     e["check"].type() == String) {
-                    OperationContextNoop txn;
-                    scope = globalScriptEngine->getPooledScope(&txn, ns, "benchrun");
+                    scope = globalScriptEngine->getPooledScope(NULL, ns, "benchrun");
                     verify(scope.get());
 
                     if (e.type() == CodeWScope) {
@@ -425,11 +482,26 @@ void BenchRunWorker::generateLoadOnConnection(DBClientBase* conn) {
                 if (op == "nop") {
                     // do nothing
                 } else if (op == "findOne") {
+                    BSONObj fixedQuery = fixQuery(e["query"].Obj(), bsonTemplateEvaluator);
                     BSONObj result;
-                    {
+                    if (useReadCmd) {
+                        unique_ptr<LiteParsedQuery> lpq =
+                            LiteParsedQuery::makeAsFindCmd(NamespaceString(ns),
+                                                           fixedQuery,
+                                                           BSONObj(),    // projection
+                                                           BSONObj(),    // sort
+                                                           BSONObj(),    // hint
+                                                           BSONObj(),    // readConcern
+                                                           boost::none,  // skip
+                                                           1LL,          // limit
+                                                           boost::none,  // batchSize
+                                                           boost::none,  // ntoreturn
+                                                           false);       // wantMore
                         BenchRunEventTrace _bret(&stats.findOneCounter);
-                        result =
-                            conn->findOne(ns, fixQuery(e["query"].Obj(), bsonTemplateEvaluator));
+                        runQueryWithReadCommands(conn, std::move(lpq), &result);
+                    } else {
+                        BenchRunEventTrace _bret(&stats.findOneCounter);
+                        result = conn->findOne(ns, fixedQuery);
                     }
 
                     if (check) {
@@ -479,24 +551,46 @@ void BenchRunWorker::generateLoadOnConnection(DBClientBase* conn) {
                     int skip = e["skip"].eoo() ? 0 : e["skip"].Int();
                     int options = e["options"].eoo() ? 0 : e["options"].Int();
                     int batchSize = e["batchSize"].eoo() ? 0 : e["batchSize"].Int();
-                    BSONObj filter = e["filter"].eoo() ? BSONObj() : e["filter"].Obj();
                     int expected = e["expected"].eoo() ? -1 : e["expected"].Int();
 
-                    auto_ptr<DBClientCursor> cursor;
+                    // TODO: The following option should be named "projection".  The work to rename
+                    // it is being tracked at SERVER-21013.
+                    BSONObj projection = e["filter"].eoo() ? BSONObj() : e["filter"].Obj();
+
                     int count;
 
                     BSONObj fixedQuery = fixQuery(e["query"].Obj(), bsonTemplateEvaluator);
 
-                    // use special query function for exhaust query option
-                    if (options & QueryOption_Exhaust) {
+                    if (useReadCmd) {
+                        uassert(28824,
+                                "cannot use 'options' in combination with read commands",
+                                !options);
+                        unique_ptr<LiteParsedQuery> lpq = LiteParsedQuery::makeAsFindCmd(
+                            NamespaceString(ns),
+                            fixedQuery,
+                            projection,
+                            BSONObj(),  // sort
+                            BSONObj(),  // hint
+                            BSONObj(),  // readConcern
+                            skip ? boost::optional<long long>(skip) : boost::none,
+                            limit ? boost::optional<long long>(limit) : boost::none,
+                            batchSize ? boost::optional<long long>(batchSize) : boost::none);
                         BenchRunEventTrace _bret(&stats.queryCounter);
-                        stdx::function<void(const BSONObj&)> castedDoNothing(doNothing);
-                        count = conn->query(castedDoNothing, ns, fixedQuery, &filter, options);
+                        count = runQueryWithReadCommands(conn, std::move(lpq));
                     } else {
-                        BenchRunEventTrace _bret(&stats.queryCounter);
-                        cursor =
-                            conn->query(ns, fixedQuery, limit, skip, &filter, options, batchSize);
-                        count = cursor->itcount();
+                        // Use special query function for exhaust query option.
+                        if (options & QueryOption_Exhaust) {
+                            BenchRunEventTrace _bret(&stats.queryCounter);
+                            stdx::function<void(const BSONObj&)> castedDoNothing(doNothing);
+                            count =
+                                conn->query(castedDoNothing, ns, fixedQuery, &projection, options);
+                        } else {
+                            BenchRunEventTrace _bret(&stats.queryCounter);
+                            unique_ptr<DBClientCursor> cursor;
+                            cursor = conn->query(
+                                ns, fixedQuery, limit, skip, &projection, options, batchSize);
+                            count = cursor->itcount();
+                        }
                     }
 
                     if (expected >= 0 && count != expected) {
@@ -543,7 +637,7 @@ void BenchRunWorker::generateLoadOnConnection(DBClientBase* conn) {
                                                        << "upsert" << upsert));
                             docBuilder.done();
                             auto wcElem = e["writeConcern"];
-                            if (wcElem.ok()) {
+                            if (wcElem) {
                                 builder.append("writeConcern", wcElem.Obj());
                             }
                             conn->runCommand(
@@ -602,7 +696,7 @@ void BenchRunWorker::generateLoadOnConnection(DBClientBase* conn) {
                             }
                             docBuilder.done();
                             auto wcElem = e["writeConcern"];
-                            if (wcElem.ok()) {
+                            if (wcElem) {
                                 builder.append("writeConcern", wcElem.Obj());
                             }
                             conn->runCommand(
@@ -664,7 +758,7 @@ void BenchRunWorker::generateLoadOnConnection(DBClientBase* conn) {
                             docBuilder.append(BSON("q" << predicate << "limit" << limit));
                             docBuilder.done();
                             auto wcElem = e["writeConcern"];
-                            if (wcElem.ok()) {
+                            if (wcElem) {
                                 builder.append("writeConcern", wcElem.Obj());
                             }
                             conn->runCommand(
@@ -775,7 +869,9 @@ void BenchRunWorker::generateLoadOnConnection(DBClientBase* conn) {
 }
 
 namespace {
-class BenchRunWorkerStateGuard : private boost::noncopyable {
+class BenchRunWorkerStateGuard {
+    MONGO_DISALLOW_COPYING(BenchRunWorkerStateGuard);
+
 public:
     explicit BenchRunWorkerStateGuard(BenchRunState* brState) : _brState(brState) {
         _brState->onWorkerStarted();
@@ -792,7 +888,7 @@ private:
 
 void BenchRunWorker::run() {
     try {
-        boost::scoped_ptr<DBClientBase> conn(_config->createConnection());
+        std::unique_ptr<DBClientBase> conn(_config->createConnection());
         if (!_config->username.empty()) {
             string errmsg;
             if (!conn->auth("admin", _config->username, _config->password, errmsg)) {
@@ -812,7 +908,7 @@ void BenchRunWorker::run() {
 
 BenchRunner::BenchRunner(BenchRunConfig* config) : _brState(config->parallel), _config(config) {
     _oid.init();
-    boost::mutex::scoped_lock lk(_staticMutex);
+    stdx::lock_guard<stdx::mutex> lk(_staticMutex);
     _activeRuns[_oid] = this;
 }
 
@@ -823,7 +919,7 @@ BenchRunner::~BenchRunner() {
 
 void BenchRunner::start() {
     {
-        boost::scoped_ptr<DBClientBase> conn(_config->createConnection());
+        std::unique_ptr<DBClientBase> conn(_config->createConnection());
         // Must authenticate to admin db in order to run serverStatus command
         if (_config->username != "") {
             string errmsg;
@@ -860,7 +956,7 @@ void BenchRunner::stop() {
     delete _brTimer;
 
     {
-        boost::scoped_ptr<DBClientBase> conn(_config->createConnection());
+        std::unique_ptr<DBClientBase> conn(_config->createConnection());
         if (_config->username != "") {
             string errmsg;
             // this can only fail if admin access was revoked since start of run
@@ -875,7 +971,7 @@ void BenchRunner::stop() {
     }
 
     {
-        boost::mutex::scoped_lock lk(_staticMutex);
+        stdx::lock_guard<stdx::mutex> lk(_staticMutex);
         _activeRuns.erase(_oid);
     }
 }
@@ -886,7 +982,7 @@ BenchRunner* BenchRunner::createWithConfig(const BSONObj& configArgs) {
 }
 
 BenchRunner* BenchRunner::get(OID oid) {
-    boost::mutex::scoped_lock lk(_staticMutex);
+    stdx::lock_guard<stdx::mutex> lk(_staticMutex);
     return _activeRuns[oid];
 }
 
@@ -948,7 +1044,7 @@ BSONObj BenchRunner::finish(BenchRunner* runner) {
     return zoo;
 }
 
-boost::mutex BenchRunner::_staticMutex;
+stdx::mutex BenchRunner::_staticMutex;
 map<OID, BenchRunner*> BenchRunner::_activeRuns;
 
 /**

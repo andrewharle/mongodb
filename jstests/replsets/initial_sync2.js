@@ -25,7 +25,7 @@ var replTest = new ReplSetTest( {name: basename, nodes: 2} );
 var conns = replTest.startSet();
 replTest.initiate();
 
-var master = replTest.getMaster();
+var master = replTest.getPrimary();
 var origMaster = master;
 var foo = master.getDB("foo");
 var admin = master.getDB("admin");
@@ -50,11 +50,9 @@ admin_s1.runCommand({replSetFreeze:999999});
 
 
 print("6. Bring up #3");
-var ports = allocatePorts( 3 );
-var basePath = MongoRunner.dataPath + basename;
 var hostname = getHostName();
 
-var slave2 = startMongodTest (ports[2], basename, false, {replSet : basename, oplogSize : 2} )
+var slave2 = MongoRunner.runMongod({replSet: basename, oplogSize: 2});
 
 var local_s2 = slave2.getDB("local");
 var admin_s2 = slave2.getDB("admin");
@@ -67,7 +65,7 @@ config.version = 2;
 db = admin;
 
 // If _id is not provided, rs.add() will generate _id for #3 based on existing members' _ids.
-assert.commandWorked(rs.add({host:hostname+":"+ports[2]}), "failed to add #3 to replica set");
+assert.commandWorked(rs.add({host:hostname+":"+slave2.port}), "failed to add #3 to replica set");
 
 reconnect(slave1);
 reconnect(slave2);
@@ -149,27 +147,7 @@ for (var i=0; i<10000; i++) {
 
 
 print("12. Everyone happy eventually");
-// if 3 is master...
-if (master+"" != origMaster+"") {
-  print("3 is master");
-  slave2 = origMaster;
-}
-
-wait(function() {
-    var op1 = getLatestOp(master);
-    var op2 = getLatestOp(slave1);
-    var op3 = getLatestOp(slave2);
-
-    occasionally(function() {
-        print("latest ops:");
-        printjson(op1);
-        printjson(op2);
-        printjson(op3);
-      });
-    
-    return friendlyEqual(getLatestOp(master), getLatestOp(slave1)) &&
-      friendlyEqual(getLatestOp(master), getLatestOp(slave2));
-  });
+replTest.awaitReplication(2 * 60 * 1000);
 
 replTest.stopSet();
 };

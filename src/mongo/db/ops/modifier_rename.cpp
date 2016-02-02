@@ -121,7 +121,7 @@ Status ModifierRename::init(const BSONElement& modExpr, const Options& opts, boo
 }
 
 Status ModifierRename::prepare(mutablebson::Element root,
-                               const StringData& matchedField,
+                               StringData matchedField,
                                ExecInfo* execInfo) {
     // Rename doesn't work with positional fields ($)
     dassert(matchedField.empty());
@@ -221,8 +221,10 @@ Status ModifierRename::apply() const {
         (_preparedState->toIdxFound == (_toFieldRef.numParts() - 1));
 
     if (destExists) {
-        // Set destination element to the value of the source element.
-        return _preparedState->toElemFound.setValueElement(_preparedState->fromElemFound);
+        removeStatus = _preparedState->toElemFound.remove();
+        if (!removeStatus.isOK()) {
+            return removeStatus;
+        }
     }
 
     // Creates the final element that's going to be the in 'doc'.

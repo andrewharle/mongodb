@@ -34,7 +34,7 @@
 
 #include <vector>
 
-#include "mongo/db/global_environment_experiment.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/util/background.h"
@@ -224,9 +224,9 @@ void CondVarLockGrantNotification::clear() {
 }
 
 LockResult CondVarLockGrantNotification::wait(unsigned timeoutMs) {
-    boost::unique_lock<boost::mutex> lock(_mutex);
+    stdx::unique_lock<stdx::mutex> lock(_mutex);
     while (_result == LOCK_INVALID) {
-        if (!_cond.timed_wait(lock, Milliseconds(timeoutMs))) {
+        if (stdx::cv_status::timeout == _cond.wait_for(lock, Milliseconds(timeoutMs))) {
             // Timeout
             return LOCK_TIMEOUT;
         }
@@ -236,7 +236,7 @@ LockResult CondVarLockGrantNotification::wait(unsigned timeoutMs) {
 }
 
 void CondVarLockGrantNotification::notify(ResourceId resId, LockResult result) {
-    boost::unique_lock<boost::mutex> lock(_mutex);
+    stdx::unique_lock<stdx::mutex> lock(_mutex);
     invariant(_result == LOCK_INVALID);
     _result = result;
 
@@ -425,7 +425,7 @@ bool LockerImpl<IsForMMAPV1>::isLockHeldForMode(ResourceId resId, LockMode mode)
 }
 
 template <bool IsForMMAPV1>
-bool LockerImpl<IsForMMAPV1>::isDbLockedForMode(const StringData& dbName, LockMode mode) const {
+bool LockerImpl<IsForMMAPV1>::isDbLockedForMode(StringData dbName, LockMode mode) const {
     invariant(nsIsDbOnly(dbName));
 
     if (isW())
@@ -438,7 +438,7 @@ bool LockerImpl<IsForMMAPV1>::isDbLockedForMode(const StringData& dbName, LockMo
 }
 
 template <bool IsForMMAPV1>
-bool LockerImpl<IsForMMAPV1>::isCollectionLockedForMode(const StringData& ns, LockMode mode) const {
+bool LockerImpl<IsForMMAPV1>::isCollectionLockedForMode(StringData ns, LockMode mode) const {
     invariant(nsIsFull(ns));
 
     if (isW())
@@ -594,7 +594,7 @@ void LockerImpl<IsForMMAPV1>::restoreLockState(const Locker::LockSnapshot& state
 
 template <bool IsForMMAPV1>
 LockResult LockerImpl<IsForMMAPV1>::lockBegin(ResourceId resId, LockMode mode) {
-    invariant(!getWaitingResource().isValid());
+    dassert(!getWaitingResource().isValid());
 
     LockRequest* request;
     bool isNew = true;
@@ -776,7 +776,7 @@ bool LockerImpl<IsForMMAPV1>::hasStrongLocks() const {
     if (!isLocked())
         return false;
 
-    boost::lock_guard<SpinLock> lk(_lock);
+    stdx::lock_guard<SpinLock> lk(_lock);
     LockRequestsMap::ConstIterator it = _requests.begin();
     while (!it.finished()) {
         if (it->mode == MODE_X || it->mode == MODE_S) {
@@ -913,5 +913,9 @@ const ResourceId resourceIdOplog = ResourceId(RESOURCE_COLLECTION, StringData("l
 const ResourceId resourceIdAdminDB = ResourceId(RESOURCE_DATABASE, StringData("admin"));
 const ResourceId resourceIdParallelBatchWriterMode =
     ResourceId(RESOURCE_GLOBAL, ResourceId::SINGLETON_PARALLEL_BATCH_WRITER_MODE);
+const ResourceId resourceCappedInFlightForLocalDb =
+    ResourceId(RESOURCE_METADATA, ResourceId::SINGLETON_CAPPED_IN_FLIGHT_LOCAL_DB);
+const ResourceId resourceCappedInFlightForOtherDb =
+    ResourceId(RESOURCE_METADATA, ResourceId::SINGLETON_CAPPED_IN_FLIGHT_OTHER_DB);
 
 }  // namespace mongo

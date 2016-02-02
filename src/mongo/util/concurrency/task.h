@@ -75,7 +75,7 @@ inline void sample() {
         virtual void doWork() { result = 1234; }
         Sample() : result(0) { }
     };
-    boost::shared_ptr<Sample> q( new Sample() );
+    std::shared_ptr<Sample> q( new Sample() );
     fork(q);
     cout << q->result << std::endl; // could print 1234 or 0.
 }

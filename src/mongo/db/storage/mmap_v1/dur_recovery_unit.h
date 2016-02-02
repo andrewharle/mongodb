@@ -46,15 +46,13 @@ class DurRecoveryUnit : public RecoveryUnit {
 public:
     DurRecoveryUnit();
 
-    virtual ~DurRecoveryUnit() {}
+    void beginUnitOfWork(OperationContext* opCtx) final;
+    void commitUnitOfWork() final;
+    void abortUnitOfWork() final;
 
-    virtual void beginUnitOfWork(OperationContext* opCtx);
-    virtual void commitUnitOfWork();
-    virtual void endUnitOfWork();
+    virtual bool waitUntilDurable();
 
-    virtual bool awaitCommit();
-
-    virtual void commitAndRestart();
+    virtual void abandonSnapshot();
 
     //  The recovery unit takes ownership of change.
     virtual void registerChange(Change* change);
@@ -88,22 +86,6 @@ private:
      */
     void rollbackChanges();
 
-    bool inAUnitOfWork() const {
-        return !_startOfUncommittedChangesForLevel.empty();
-    }
-
-    bool inOutermostUnitOfWork() const {
-        return _startOfUncommittedChangesForLevel.size() == 1;
-    }
-
-    /**
-     * If true, ending a unit of work will cause rollback. Ending a (possibly nested) unit of
-     * work without committing and without making any changes will not cause rollback.
-     */
-    bool haveUncommittedChangesAtCurrentLevel() const {
-        return _writeCount > _startOfUncommittedChangesForLevel.back().writeCount ||
-            _changes.size() > _startOfUncommittedChangesForLevel.back().changeIndex;
-    }
 
     /**
      * Version of writingPtr that checks existing writes for overlap and only stores those
@@ -175,23 +157,8 @@ private:
 
     std::string _preimageBuffer;
 
-    // Index of the first uncommitted Change in _changes and number of writes for each nesting
-    // level. Store the number of writes as maintained in _writeCount rather than the sum of
-    // _initialWrites and _mergedWrites, as coalescing might otherwise result in
-    // haveUncommittedChangesAtCurrent level missing merged writes when determining if rollback
-    // is necessary. Index 0 in this vector is always the outermost transaction and back() is
-    // always the innermost. The size() is the current nesting level.
-    struct Indexes {
-        Indexes(size_t changeIndex, size_t writeCount)
-            : changeIndex(changeIndex), writeCount(writeCount) {}
-        size_t changeIndex;
-        size_t writeCount;
-    };
-    std::vector<Indexes> _startOfUncommittedChangesForLevel;
+    bool _inUnitOfWork;
 
-    // If true, this RU is in a "failed" state and all changes must be rolled back. Once the
-    // outermost WUOW rolls back it reverts to false.
-    bool _mustRollback;
 
     // Default is false.
     // If true, no preimages are tracked.  If rollback is subsequently attempted, the process

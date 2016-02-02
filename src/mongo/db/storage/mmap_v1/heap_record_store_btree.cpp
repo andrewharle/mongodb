@@ -43,7 +43,7 @@ namespace mongo {
 RecordData HeapRecordStoreBtree::dataFor(OperationContext* txn, const RecordId& loc) const {
     Records::const_iterator it = _records.find(loc);
     invariant(it != _records.end());
-    const Record& rec = it->second;
+    const MmapV1RecordHeader& rec = it->second;
 
     return RecordData(rec.data.get(), rec.dataSize);
 }
@@ -54,7 +54,7 @@ bool HeapRecordStoreBtree::findRecord(OperationContext* txn,
     Records::const_iterator it = _records.find(loc);
     if (it == _records.end())
         return false;
-    const Record& rec = it->second;
+    const MmapV1RecordHeader& rec = it->second;
     *out = RecordData(rec.data.get(), rec.dataSize);
     return true;
 }
@@ -67,7 +67,7 @@ StatusWith<RecordId> HeapRecordStoreBtree::insertRecord(OperationContext* txn,
                                                         const char* data,
                                                         int len,
                                                         bool enforceQuota) {
-    Record rec(len);
+    MmapV1RecordHeader rec(len);
     memcpy(rec.data.get(), data, len);
 
     const RecordId loc = allocateLoc();
@@ -81,7 +81,7 @@ StatusWith<RecordId> HeapRecordStoreBtree::insertRecord(OperationContext* txn,
 StatusWith<RecordId> HeapRecordStoreBtree::insertRecord(OperationContext* txn,
                                                         const DocWriter* doc,
                                                         bool enforceQuota) {
-    Record rec(doc->documentSize());
+    MmapV1RecordHeader rec(doc->documentSize());
     doc->writeDocument(rec.data.get());
 
     const RecordId loc = allocateLoc();
@@ -109,23 +109,12 @@ Status HeapRecordStoreBtree::touch(OperationContext* txn, BSONObjBuilder* output
 
 // ---------------------------
 
-HeapRecordStoreBtreeRecoveryUnit::~HeapRecordStoreBtreeRecoveryUnit() {
-    invariant(_depth == 0);
-}
-
-void HeapRecordStoreBtreeRecoveryUnit::beginUnitOfWork(OperationContext* opCtx) {
-    _depth++;
-}
-
 void HeapRecordStoreBtreeRecoveryUnit::commitUnitOfWork() {
-    invariant(_depth == 1);
     _insertions.clear();
     _mods.clear();
 }
 
-void HeapRecordStoreBtreeRecoveryUnit::endUnitOfWork() {
-    invariant(_depth-- == 1);
-
+void HeapRecordStoreBtreeRecoveryUnit::abortUnitOfWork() {
     // reverse in case we write same area twice
     for (size_t i = _mods.size(); i > 0; i--) {
         ModEntry& e = _mods[i - 1];

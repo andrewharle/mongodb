@@ -6,20 +6,14 @@
 
     var nodes = rt.startSet();
     rt.initiate();
-    var master = rt.getMaster();
+    var master = rt.getPrimary();
     var ml = master.getDB( 'local' );
 
     var threw = false;
-    try {
-        ml.oplog.rs.drop();
-    }
-    catch (err) {
-        assert.eq(err, 
-                  "Error: drop failed: { \"ok\" : 0, \"errmsg\" : " +
-                  "\"can't drop live oplog while replicating\" }");
-        threw = true;
-    }
-    assert(threw);
+
+    var ret = assert.commandFailed(ml.runCommand({ drop: 'oplog.rs' }));
+    assert.eq('can\'t drop live oplog while replicating', ret.errmsg);
+
     var dropOutput = ml.dropDatabase();
     assert.eq(dropOutput.ok, 0);
     assert.eq(dropOutput.errmsg, "Cannot drop 'local' database while replication is active");

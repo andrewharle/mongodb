@@ -31,7 +31,7 @@
 #include "mongo/platform/basic.h"
 
 #include <algorithm>
-#include <math.h>
+#include <cmath>
 #include <vector>
 #include <utility>
 
@@ -42,7 +42,6 @@
 #include "mongo/db/query/explain.h"
 #include "mongo/db/query/query_knobs.h"
 #include "mongo/db/query/query_solution.h"
-#include "mongo/db/query/qlog.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/server_parameters.h"
 #include "mongo/util/log.h"
@@ -84,7 +83,7 @@ size_t PlanRanker::pickBestPlan(const vector<CandidatePlan>& candidates, PlanRan
     // because multi plan runner will need its own stats
     // trees for explain.
     for (size_t i = 0; i < candidates.size(); ++i) {
-        statTrees.push_back(candidates[i].root->getStats());
+        statTrees.push_back(candidates[i].root->getStats().release());
     }
 
     // Holds (score, candidateInndex).
@@ -93,16 +92,16 @@ size_t PlanRanker::pickBestPlan(const vector<CandidatePlan>& candidates, PlanRan
 
     // Compute score for each tree.  Record the best.
     for (size_t i = 0; i < statTrees.size(); ++i) {
-        QLOG() << "Scoring plan " << i << ":" << endl
+        LOG(5) << "Scoring plan " << i << ":" << endl
                << candidates[i].solution->toString() << "Stats:\n"
                << Explain::statsToBSON(*statTrees[i]).jsonString(Strict, true);
         LOG(2) << "Scoring query plan: " << Explain::getPlanSummary(candidates[i].root)
                << " planHitEOF=" << statTrees[i]->common.isEOF;
 
         double score = scoreTree(statTrees[i]);
-        QLOG() << "score = " << score << endl;
+        LOG(5) << "score = " << score << endl;
         if (statTrees[i]->common.isEOF) {
-            QLOG() << "Adding +" << eofBonus << " EOF bonus to score." << endl;
+            LOG(5) << "Adding +" << eofBonus << " EOF bonus to score." << endl;
             score += 1;
         }
         scoresAndCandidateindices.push_back(std::make_pair(score, i));
@@ -113,11 +112,11 @@ size_t PlanRanker::pickBestPlan(const vector<CandidatePlan>& candidates, PlanRan
         scoresAndCandidateindices.begin(), scoresAndCandidateindices.end(), scoreComparator);
 
     // Determine whether plans tied for the win.
-    if (scoresAndCandidateindices.size() > 1) {
+    if (scoresAndCandidateindices.size() > 1U) {
         double bestScore = scoresAndCandidateindices[0].first;
         double runnerUpScore = scoresAndCandidateindices[1].first;
-        static const double epsilon = 1e-10;
-        why->tieForBest = fabs(bestScore - runnerUpScore) < epsilon;
+        const double epsilon = 1e-10;
+        why->tieForBest = std::abs(bestScore - runnerUpScore) < epsilon;
     }
 
     // Update results in 'why'
@@ -170,7 +169,7 @@ double computeSelectivity(const PlanStageStats* stats) {
     } else {
         double sum = 0;
         for (size_t i = 0; i < stats->children.size(); ++i) {
-            sum += computeSelectivity(stats->children[i]);
+            sum += computeSelectivity(stats->children[i].get());
         }
         return sum;
     }
@@ -181,7 +180,7 @@ bool hasStage(const StageType type, const PlanStageStats* stats) {
         return true;
     }
     for (size_t i = 0; i < stats->children.size(); ++i) {
-        if (hasStage(type, stats->children[i])) {
+        if (hasStage(type, stats->children[i].get())) {
             return true;
         }
     }
@@ -247,7 +246,6 @@ double PlanRanker::scoreTree(const PlanStageStats* stats) {
        << " + tieBreakers(" << noFetchBonus << " noFetchBonus + " << noSortBonus
        << " noSortBonus + " << noIxisectBonus << " noIxisectBonus = " << tieBreakers << ")";
     std::string scoreStr = ss;
-    QLOG() << scoreStr << endl;
     LOG(2) << scoreStr;
 
     if (internalQueryForceIntersectionPlans) {
@@ -255,7 +253,7 @@ double PlanRanker::scoreTree(const PlanStageStats* stats) {
             // The boost should be >2.001 to make absolutely sure the ixisect plan will win due
             // to the combination of 1) productivity, 2) eof bonus, and 3) no ixisect bonus.
             score += 3;
-            QLOG() << "Score boosted to " << score << " due to intersection forcing." << endl;
+            LOG(5) << "Score boosted to " << score << " due to intersection forcing." << endl;
         }
     }
 

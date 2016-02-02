@@ -28,7 +28,6 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
 
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/exec/plan_stage.h"
@@ -40,6 +39,7 @@
 namespace mongo {
 
 class OperationContext;
+struct PlanSummaryStats;
 
 struct UpdateStageParams {
     UpdateStageParams(const UpdateRequest* r, UpdateDriver* d, OpDebug* o)
@@ -65,12 +65,14 @@ private:
 };
 
 /**
- * Execution stage responsible for updates to documents and upserts. NEED_TIME is returned
- * after performing an update or an insert.
+ * Execution stage responsible for updates to documents and upserts. If the prior or
+ * newly-updated version of the document was requested to be returned, then ADVANCED is
+ * returned after updating or inserting a document. Otherwise, NEED_TIME is returned after
+ * updating or inserting a document.
  *
  * Callers of work() must be holding a write lock.
  */
-class UpdateStage : public PlanStage {
+class UpdateStage final : public PlanStage {
     MONGO_DISALLOW_COPYING(UpdateStage);
 
 public:
@@ -80,37 +82,41 @@ public:
                 Collection* collection,
                 PlanStage* child);
 
-    virtual bool isEOF();
-    virtual StageState work(WorkingSetID* out);
+    bool isEOF() final;
+    StageState work(WorkingSetID* out) final;
 
-    virtual void saveState();
-    virtual void restoreState(OperationContext* opCtx);
-    virtual void invalidate(OperationContext* txn, const RecordId& dl, InvalidationType type);
+    void doRestoreState() final;
 
-    virtual std::vector<PlanStage*> getChildren() const;
-
-    virtual StageType stageType() const {
+    StageType stageType() const final {
         return STAGE_UPDATE;
     }
 
-    virtual PlanStageStats* getStats();
+    std::unique_ptr<PlanStageStats> getStats() final;
 
-    virtual const CommonStats* getCommonStats();
-
-    virtual const SpecificStats* getSpecificStats();
+    const SpecificStats* getSpecificStats() const final;
 
     static const char* kStageType;
 
     /**
-     * Converts the execution stats (stored by the update stage as an UpdateStats) for the
-     * update plan represented by 'exec' into the UpdateResult format used to report the results
-     * of writes.
+     * Gets a pointer to the UpdateStats inside 'exec'.
      *
-     * Also responsible for filling out 'opDebug' with execution info.
-     *
-     * Should only be called once this stage is EOF.
+     * The 'exec' must have an UPDATE stage as its root stage, and the plan must be EOF before
+     * calling this method.
      */
-    static UpdateResult makeUpdateResult(PlanExecutor* exec, OpDebug* opDebug);
+    static const UpdateStats* getUpdateStats(const PlanExecutor* exec);
+
+    /**
+     * Populate 'opDebug' with stats from 'updateStats' and 'summaryStats' describing the execution
+     * of this update.
+     */
+    static void fillOutOpDebug(const UpdateStats* updateStats,
+                               const PlanSummaryStats* summaryStats,
+                               OpDebug* opDebug);
+
+    /**
+     * Converts 'updateStats' into an UpdateResult.
+     */
+    static UpdateResult makeUpdateResult(const UpdateStats* updateStats);
 
     /**
      * Computes the document to insert if the upsert flag is set to true and no matching
@@ -142,9 +148,10 @@ public:
 private:
     /**
      * Computes the result of applying mods to the document 'oldObj' at RecordId 'loc' in
-     * memory, then commits these changes to the database.
+     * memory, then commits these changes to the database. Returns a possibly unowned copy
+     * of the newly-updated version of the document.
      */
-    void transformAndUpdate(const Snapshotted<BSONObj>& oldObj, RecordId& loc);
+    BSONObj transformAndUpdate(const Snapshotted<BSONObj>& oldObj, RecordId& loc);
 
     /**
      * Computes the document to insert and inserts it into the collection. Used if the
@@ -167,10 +174,7 @@ private:
     /**
      * Helper for restoring the state of this update.
      */
-    Status restoreUpdateState(OperationContext* opCtx);
-
-    // Transactional context.  Not owned by us.
-    OperationContext* _txn;
+    Status restoreUpdateState();
 
     UpdateStageParams _params;
 
@@ -180,11 +184,13 @@ private:
     // Not owned by us. May be NULL.
     Collection* _collection;
 
-    // Owned by us.
-    boost::scoped_ptr<PlanStage> _child;
+    // If not WorkingSet::INVALID_ID, we use this rather than asking our child what to do next.
+    WorkingSetID _idRetrying;
+
+    // If not WorkingSet::INVALID_ID, we return this member to our caller.
+    WorkingSetID _idReturning;
 
     // Stats
-    CommonStats _commonStats;
     UpdateStats _specificStats;
 
     // If the update was in-place, we may see it again.  This only matters if we're doing
@@ -200,7 +206,7 @@ private:
     //
     // So, no matter what, we keep track of where the doc wound up.
     typedef unordered_set<RecordId, RecordId::Hasher> DiskLocSet;
-    const boost::scoped_ptr<DiskLocSet> _updatedLocs;
+    const std::unique_ptr<DiskLocSet> _updatedLocs;
 
     // These get reused for each update.
     mutablebson::Document& _doc;

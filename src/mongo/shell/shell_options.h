@@ -28,10 +28,12 @@
 
 #pragma once
 
+#include <boost/optional.hpp>
 #include <string>
 #include <vector>
 
 #include "mongo/base/status.h"
+#include "mongo/rpc/protocol.h"
 
 namespace mongo {
 
@@ -59,6 +61,7 @@ struct ShellGlobalParams {
     bool runShell;
     bool nodb;
     bool norc;
+    bool nojit = false;
 
     std::string script;
 
@@ -66,14 +69,23 @@ struct ShellGlobalParams {
     bool useWriteCommandsDefault;
     std::string writeMode;
 
-    ShellGlobalParams() : autoKillOp(false), useWriteCommandsDefault(true), writeMode("commands") {}
+    std::string readMode;
+
+    boost::optional<rpc::ProtocolSet> rpcProtocols;
+
+    ShellGlobalParams()
+        : autoKillOp(false),
+          useWriteCommandsDefault(true),
+          writeMode("commands"),
+          readMode("compatibility"),
+          rpcProtocols() {}
 };
 
 extern ShellGlobalParams shellGlobalParams;
 
 Status addMongoShellOptions(moe::OptionSection* options);
 
-std::string getMongoShellHelp(const StringData& name, const moe::OptionSection& options);
+std::string getMongoShellHelp(StringData name, const moe::OptionSection& options);
 
 /**
  * Handle options that should come before validation, such as "help".

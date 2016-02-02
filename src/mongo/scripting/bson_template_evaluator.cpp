@@ -46,6 +46,7 @@ void BsonTemplateEvaluator::initializeEvaluator() {
     addOperator("CONCAT", &BsonTemplateEvaluator::evalConcat);
     addOperator("OID", &BsonTemplateEvaluator::evalObjId);
     addOperator("VARIABLE", &BsonTemplateEvaluator::evalVariable);
+    addOperator("CUR_DATE", &BsonTemplateEvaluator::evalCurrentDate);
 }
 
 BsonTemplateEvaluator::BsonTemplateEvaluator(int64_t seed) : _id(0), rng(seed) {
@@ -266,8 +267,8 @@ BsonTemplateEvaluator::Status BsonTemplateEvaluator::evalRandString(BsonTemplate
         "abcdefghijklmnopqrstuvwxyz"
         "0123456789+/";
     static const size_t alphaNumLength = sizeof(alphanum) - 1;
-    BOOST_STATIC_ASSERT(alphaNumLength == 64);
-    int32_t currentRand = 0;
+    static_assert(alphaNumLength == 64, "alphaNumLength == 64");
+    uint32_t currentRand = 0;
     std::string str;
     for (int i = 0; i < length; ++i, currentRand >>= 6) {
         if (i % 5 == 0)
@@ -325,6 +326,16 @@ BsonTemplateEvaluator::Status BsonTemplateEvaluator::evalVariable(BsonTemplateEv
     } else {
         return StatusOpEvaluationError;
     }
+}
+
+BsonTemplateEvaluator::Status BsonTemplateEvaluator::evalCurrentDate(BsonTemplateEvaluator* btl,
+                                                                     const char* fieldName,
+                                                                     const BSONObj& in,
+                                                                     BSONObjBuilder& out) {
+    // in = { #CUR_DATE: 1 }
+    auto offset = Milliseconds(in.firstElement().numberLong());
+    out.append(fieldName, Date_t::now() + offset);
+    return StatusSuccess;
 }
 
 }  // end namespace mongo

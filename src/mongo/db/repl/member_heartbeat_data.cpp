@@ -39,18 +39,17 @@
 namespace mongo {
 namespace repl {
 
-MemberHeartbeatData::MemberHeartbeatData()
-    : _health(-1), _upSince(0), _lastHeartbeat(0), _lastHeartbeatRecv(0), _authIssue(false) {
+MemberHeartbeatData::MemberHeartbeatData() : _health(-1), _authIssue(false) {
     _lastResponse.setState(MemberState::RS_UNKNOWN);
-    _lastResponse.setElectionTime(OpTime());
+    _lastResponse.setElectionTime(Timestamp());
     _lastResponse.setOpTime(OpTime());
 }
 
 void MemberHeartbeatData::setUpValues(Date_t now,
                                       const HostAndPort& host,
-                                      ReplSetHeartbeatResponse hbResponse) {
+                                      ReplSetHeartbeatResponse&& hbResponse) {
     _health = 1;
-    if (_upSince == 0) {
+    if (_upSince == Date_t()) {
         _upSince = now;
     }
     _authIssue = false;
@@ -71,35 +70,35 @@ void MemberHeartbeatData::setUpValues(Date_t now,
               << hbResponse.getState().toString() << rsLog;
     }
 
-    _lastResponse = hbResponse;
+    _lastResponse = std::move(hbResponse);
 }
 
 void MemberHeartbeatData::setDownValues(Date_t now, const std::string& heartbeatMessage) {
     _health = 0;
-    _upSince = 0;
+    _upSince = Date_t();
     _lastHeartbeat = now;
     _authIssue = false;
 
     _lastResponse = ReplSetHeartbeatResponse();
     _lastResponse.setState(MemberState::RS_DOWN);
-    _lastResponse.setElectionTime(OpTime());
+    _lastResponse.setElectionTime(Timestamp());
     _lastResponse.setOpTime(OpTime());
     _lastResponse.setHbMsg(heartbeatMessage);
-    _lastResponse.setSyncingTo("");
+    _lastResponse.setSyncingTo(HostAndPort());
 }
 
 void MemberHeartbeatData::setAuthIssue(Date_t now) {
     _health = 0;  // set health to 0 so that this doesn't count towards majority.
-    _upSince = 0;
+    _upSince = Date_t();
     _lastHeartbeat = now;
     _authIssue = true;
 
     _lastResponse = ReplSetHeartbeatResponse();
     _lastResponse.setState(MemberState::RS_UNKNOWN);
-    _lastResponse.setElectionTime(OpTime());
+    _lastResponse.setElectionTime(Timestamp());
     _lastResponse.setOpTime(OpTime());
     _lastResponse.setHbMsg("");
-    _lastResponse.setSyncingTo("");
+    _lastResponse.setSyncingTo(HostAndPort());
 }
 
 }  // namespace repl

@@ -43,9 +43,17 @@ struct CollectionOptions {
     void reset();
 
     /**
-     * Updates fields based on BSON document from client.
-     * If document contains a 'storageEngine' field, ensures that 'storageEngine'
-     * contains a single field of Object type.
+     * Returns true if collection options validates successfully.
+     */
+    bool isValid() const;
+
+    /**
+     * Confirms that collection options can be converted to BSON and back without errors.
+     */
+    Status validate() const;
+
+    /**
+     * Parses the "options" subfield of the collection info object.
      */
     Status parse(const BSONObj& obj);
 
@@ -89,5 +97,13 @@ struct CollectionOptions {
 
     // Storage engine collection options. Always owned or empty.
     BSONObj storageEngine;
+
+    // Default options for indexes created on the collection. Always owned or empty.
+    BSONObj indexOptionDefaults;
+
+    // Always owned or empty.
+    BSONObj validator;
+    std::string validationAction;
+    std::string validationLevel;
 };
 }

@@ -28,7 +28,7 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -44,6 +44,7 @@
 #include "mongo/db/namespace_string.h"
 
 namespace mongo {
+class ClientBasic;
 
 /**
  * Contains all the authorization logic for a single client connection.  It contains a set of
@@ -63,8 +64,35 @@ class AuthorizationSession {
     MONGO_DISALLOW_COPYING(AuthorizationSession);
 
 public:
+    /**
+     * Gets the AuthorizationSession associated with the given "client", or nullptr.
+     *
+     * The "client" object continues to own the returned AuthorizationSession.
+     */
+    static AuthorizationSession* get(ClientBasic* client);
+
+    /**
+     * Gets the AuthorizationSession associated with the given "client", or nullptr.
+     *
+     * The "client" object continues to own the returned AuthorizationSession.
+     */
+    static AuthorizationSession* get(ClientBasic& client);
+
+    /**
+     * Returns false if AuthorizationSession::get(client) would return nullptr.
+     */
+    static bool exists(ClientBasic* client);
+
+    /**
+     * Sets the AuthorizationSession associated with "client" to "session".
+     *
+     * "session" must not be NULL, and it is only legal to call this function once
+     * on each instance of "client".
+     */
+    static void set(ClientBasic* client, std::unique_ptr<AuthorizationSession> session);
+
     // Takes ownership of the externalState.
-    explicit AuthorizationSession(AuthzSessionExternalState* externalState);
+    explicit AuthorizationSession(std::unique_ptr<AuthzSessionExternalState> externalState);
     ~AuthorizationSession();
 
     AuthorizationManager& getAuthorizationManager();
@@ -111,14 +139,14 @@ public:
     // into a state where the first user can be created.
     PrivilegeVector getDefaultPrivileges();
 
-    // Checks if this connection has the privileges necessary to perform the given query on the
-    // given namespace.
-    Status checkAuthForQuery(const NamespaceString& ns, const BSONObj& query);
+    // Checks if this connection has the privileges necessary to perform a find operation
+    // on the supplied namespace identifier.
+    Status checkAuthForFind(const NamespaceString& ns, bool hasTerm);
 
     // Checks if this connection has the privileges necessary to perform a getMore operation on
     // the identified cursor, supposing that cursor is associated with the supplied namespace
     // identifier.
-    Status checkAuthForGetMore(const NamespaceString& ns, long long cursorID);
+    Status checkAuthForGetMore(const NamespaceString& ns, long long cursorID, bool hasTerm);
 
     // Checks if this connection has the privileges necessary to perform the given update on the
     // given namespace.
@@ -156,6 +184,10 @@ public:
     // Utility function for isAuthorizedForActionsOnResource(
     //         ResourcePattern::forDatabaseName(role.getDB()), ActionType::grantAnyRole)
     bool isAuthorizedToRevokeRole(const RoleName& role);
+
+    // Utility function for isAuthorizedToChangeOwnPasswordAsUser and
+    // isAuthorizedToChangeOwnCustomDataAsUser
+    bool isAuthorizedToChangeAsUser(const UserName& userName, ActionType actionType);
 
     // Returns true if the current session is authenticated as the given user and that user
     // is allowed to change his/her own password
@@ -227,7 +259,7 @@ private:
     // lock on the admin database (to update out-of-date user privilege information).
     bool _isAuthorizedForPrivilege(const Privilege& privilege);
 
-    boost::scoped_ptr<AuthzSessionExternalState> _externalState;
+    std::unique_ptr<AuthzSessionExternalState> _externalState;
 
     // All Users who have been authenticated on this connection.
     UserSet _authenticatedUsers;

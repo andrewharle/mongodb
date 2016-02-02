@@ -34,9 +34,8 @@
 
 #include "mongo/util/net/listen.h"
 
-#include <boost/scoped_array.hpp>
-#include <boost/shared_ptr.hpp>
 
+#include "mongo/config.h"
 #include "mongo/db/server_options.h"
 #include "mongo/base/owned_pointer_vector.h"
 #include "mongo/util/exit.h"
@@ -47,7 +46,7 @@
 
 #ifndef _WIN32
 
-#ifndef __sunos__
+#ifndef __sun
 #include <ifaddrs.h>
 #endif
 #include <sys/resource.h>
@@ -61,7 +60,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netdb.h>
-#ifdef __openbsd__
+#ifdef __OpenBSD__
 #include <sys/uio.h>
 #endif
 
@@ -75,7 +74,7 @@
 
 namespace mongo {
 
-using boost::shared_ptr;
+using std::shared_ptr;
 using std::endl;
 using std::string;
 using std::vector;
@@ -129,7 +128,7 @@ Listener::Listener(const string& name, const string& ip, int port, bool logConne
       _logConnect(logConnect),
       _elapsedTime(0),
       _ready(false) {
-#ifdef MONGO_SSL
+#ifdef MONGO_CONFIG_SSL
     _ssl = getSSLManager();
 #endif
 }
@@ -139,7 +138,7 @@ Listener::~Listener() {
         _timeTracker = 0;
 }
 
-void Listener::setupSockets() {
+bool Listener::setupSockets() {
     checkTicketNumbers();
 
 #if !defined(_WIN32)
@@ -154,7 +153,7 @@ void Listener::setupSockets() {
 
         if (!me.isValid()) {
             error() << "listen(): socket is invalid." << endl;
-            return;
+            return _setupSocketsSuccessful;
         }
 
         SOCKET sock = ::socket(me.getType(), SOCK_STREAM, 0);
@@ -194,7 +193,7 @@ void Listener::setupSockets() {
                     << " for socket: " << me.toString() << endl;
             if (x == EADDRINUSE)
                 error() << "  addr already in use" << endl;
-            return;
+            return _setupSocketsSuccessful;
         }
 
 #if !defined(_WIN32)
@@ -213,6 +212,7 @@ void Listener::setupSockets() {
     }
 
     _setupSocketsSuccessful = true;
+    return _setupSocketsSuccessful;
 }
 
 
@@ -242,7 +242,7 @@ void Listener::initAndListen() {
         return;
     }
 
-#ifdef MONGO_SSL
+#ifdef MONGO_CONFIG_SSL
     _logListen(_port, _ssl);
 #else
     _logListen(_port, false);
@@ -250,7 +250,7 @@ void Listener::initAndListen() {
 
     {
         // Wake up any threads blocked in waitUntilListening()
-        boost::lock_guard<boost::mutex> lock(_readyMutex);
+        stdx::lock_guard<stdx::mutex> lock(_readyMutex);
         _ready = true;
         _readyCondition.notify_all();
     }
@@ -343,8 +343,8 @@ void Listener::initAndListen() {
                       << myConnectionNumber << " (" << conns << word << " now open)" << endl;
             }
 
-            boost::shared_ptr<Socket> pnewSock(new Socket(s, from));
-#ifdef MONGO_SSL
+            std::shared_ptr<Socket> pnewSock(new Socket(s, from));
+#ifdef MONGO_CONFIG_SSL
             if (_ssl) {
                 pnewSock->secureAccepted(_ssl);
             }
@@ -420,7 +420,7 @@ void Listener::initAndListen() {
         ListeningSockets::get()->add(_socks[i]);
     }
 
-#ifdef MONGO_SSL
+#ifdef MONGO_CONFIG_SSL
     _logListen(_port, _ssl);
 #else
     _logListen(_port, false);
@@ -428,13 +428,13 @@ void Listener::initAndListen() {
 
     {
         // Wake up any threads blocked in waitUntilListening()
-        boost::lock_guard<boost::mutex> lock(_readyMutex);
+        stdx::lock_guard<stdx::mutex> lock(_readyMutex);
         _ready = true;
         _readyCondition.notify_all();
     }
 
     OwnedPointerVector<EventHolder> eventHolders;
-    boost::scoped_array<WSAEVENT> events(new WSAEVENT[_socks.size()]);
+    std::unique_ptr<WSAEVENT[]> events(new WSAEVENT[_socks.size()]);
 
 
     // Populate events array with an event for each socket we are watching
@@ -558,8 +558,8 @@ void Listener::initAndListen() {
                   << " (" << conns << word << " now open)" << endl;
         }
 
-        boost::shared_ptr<Socket> pnewSock(new Socket(s, from));
-#ifdef MONGO_SSL
+        std::shared_ptr<Socket> pnewSock(new Socket(s, from));
+#ifdef MONGO_CONFIG_SSL
         if (_ssl) {
             pnewSock->secureAccepted(_ssl);
         }
@@ -575,13 +575,13 @@ void Listener::_logListen(int port, bool ssl) {
 }
 
 void Listener::waitUntilListening() const {
-    boost::unique_lock<boost::mutex> lock(_readyMutex);
+    stdx::unique_lock<stdx::mutex> lock(_readyMutex);
     while (!_ready) {
         _readyCondition.wait(lock);
     }
 }
 
-void Listener::accepted(boost::shared_ptr<Socket> psocket, long long connectionId) {
+void Listener::accepted(std::shared_ptr<Socket> psocket, long long connectionId) {
     MessagingPort* port = new MessagingPort(psocket);
     port->setConnectionId(connectionId);
     acceptedMP(port);
@@ -644,7 +644,7 @@ void ListeningSockets::closeAll() {
     std::set<std::string>* paths;
 
     {
-        scoped_lock lk(_mutex);
+        stdx::lock_guard<stdx::mutex> lk(_mutex);
         sockets = _sockets;
         _sockets = new std::set<int>();
         paths = _socketPaths;

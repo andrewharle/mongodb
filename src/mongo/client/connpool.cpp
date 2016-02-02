@@ -35,11 +35,11 @@
 #include "mongo/platform/basic.h"
 
 #include "mongo/client/connpool.h"
+#include "mongo/client/global_conn_pool.h"
 #include "mongo/client/replica_set_monitor.h"
 #include "mongo/client/syncclusterconnection.h"
 #include "mongo/util/exit.h"
 #include "mongo/util/log.h"
-#include "mongo/s/shard.h"
 
 namespace mongo {
 
@@ -66,6 +66,8 @@ void PoolForHost::clear() {
 
 void PoolForHost::done(DBConnectionPool* pool, DBClientBase* c) {
     bool isFailed = c->isFailed();
+
+    --_checkedOut;
 
     // Remember that this host had a broken connection for later
     if (isFailed)
@@ -115,6 +117,7 @@ DBClientBase* PoolForHost::get(DBConnectionPool* pool, double socketTimeout) {
 
         verify(sc.conn->getSoTimeout() == socketTimeout);
 
+        ++_checkedOut;
         return sc.conn;
     }
 
@@ -162,7 +165,10 @@ bool PoolForHost::StoredConnection::ok(time_t now) {
 void PoolForHost::createdOne(DBClientBase* base) {
     if (_created == 0)
         _type = base->type();
-    _created++;
+    ++_created;
+    // _checkedOut is used to indicate the number of in-use connections so
+    // though we didn't actually check this connection out, we bump it here.
+    ++_checkedOut;
 }
 
 void PoolForHost::initializeHostName(const std::string& hostName) {
@@ -173,19 +179,16 @@ void PoolForHost::initializeHostName(const std::string& hostName) {
 
 // ------ DBConnectionPool ------
 
-DBConnectionPool pool;
-
 const int PoolForHost::kPoolSizeUnlimited(-1);
 
 DBConnectionPool::DBConnectionPool()
-    : _mutex("DBConnectionPool"),
-      _name("dbconnectionpool"),
+    : _name("dbconnectionpool"),
       _maxPoolSize(PoolForHost::kPoolSizeUnlimited),
       _hooks(new list<DBConnectionHook*>()) {}
 
 DBClientBase* DBConnectionPool::_get(const string& ident, double socketTimeout) {
     uassert(17382, "Can't use connection pool during shutdown", !inShutdown());
-    scoped_lock L(_mutex);
+    stdx::lock_guard<stdx::mutex> L(_mutex);
     PoolForHost& p = _pools[PoolKey(ident, socketTimeout)];
     p.setMaxPoolSize(_maxPoolSize);
     p.initializeHostName(ident);
@@ -196,7 +199,7 @@ DBClientBase* DBConnectionPool::_finishCreate(const string& host,
                                               double socketTimeout,
                                               DBClientBase* conn) {
     {
-        scoped_lock L(_mutex);
+        stdx::lock_guard<stdx::mutex> L(_mutex);
         PoolForHost& p = _pools[PoolKey(host, socketTimeout)];
         p.setMaxPoolSize(_maxPoolSize);
         p.initializeHostName(host);
@@ -245,10 +248,9 @@ DBClientBase* DBConnectionPool::get(const string& host, double socketTimeout) {
         return c;
     }
 
-    string errmsg;
-    ConnectionString cs = ConnectionString::parse(host, errmsg);
-    uassert(13071, (string) "invalid hostname [" + host + "]" + errmsg, cs.isValid());
+    const ConnectionString cs(uassertStatusOK(ConnectionString::parse(host)));
 
+    string errmsg;
     c = cs.connect(errmsg, socketTimeout);
     if (!c)
         throw SocketException(SocketException::CONNECT_ERROR,
@@ -271,7 +273,7 @@ void DBConnectionPool::onRelease(DBClientBase* conn) {
 void DBConnectionPool::release(const string& host, DBClientBase* c) {
     onRelease(c);
 
-    scoped_lock L(_mutex);
+    stdx::lock_guard<stdx::mutex> L(_mutex);
     _pools[PoolKey(host, c->getSoTimeout())].done(this, c);
 }
 
@@ -281,7 +283,7 @@ DBConnectionPool::~DBConnectionPool() {
 }
 
 void DBConnectionPool::flush() {
-    scoped_lock L(_mutex);
+    stdx::lock_guard<stdx::mutex> L(_mutex);
     for (PoolMap::iterator i = _pools.begin(); i != _pools.end(); i++) {
         PoolForHost& p = i->second;
         p.flush();
@@ -289,7 +291,7 @@ void DBConnectionPool::flush() {
 }
 
 void DBConnectionPool::clear() {
-    scoped_lock L(_mutex);
+    stdx::lock_guard<stdx::mutex> L(_mutex);
     LOG(2) << "Removing connections on all pools owned by " << _name << endl;
     for (PoolMap::iterator iter = _pools.begin(); iter != _pools.end(); ++iter) {
         iter->second.clear();
@@ -297,7 +299,7 @@ void DBConnectionPool::clear() {
 }
 
 void DBConnectionPool::removeHost(const string& host) {
-    scoped_lock L(_mutex);
+    stdx::lock_guard<stdx::mutex> L(_mutex);
     LOG(2) << "Removing connections from all pools for host: " << host << endl;
     for (PoolMap::iterator i = _pools.begin(); i != _pools.end(); ++i) {
         const string& poolHost = i->first.ident;
@@ -340,65 +342,40 @@ void DBConnectionPool::onDestroy(DBClientBase* conn) {
 }
 
 void DBConnectionPool::appendInfo(BSONObjBuilder& b) {
-    int avail = 0;
-    long long created = 0;
-
-
-    map<ConnectionString::ConnectionType, long long> createdByType;
+    int totalInUse = 0;
+    int totalAvailable = 0;
+    long long totalCreated = 0;
 
     BSONObjBuilder bb(b.subobjStart("hosts"));
     {
-        scoped_lock lk(_mutex);
+        stdx::lock_guard<stdx::mutex> lk(_mutex);
         for (PoolMap::iterator i = _pools.begin(); i != _pools.end(); ++i) {
             if (i->second.numCreated() == 0)
                 continue;
 
-            string s = str::stream() << i->first.ident << "::" << i->first.timeout;
+            auto inUse = i->second.numInUse();
+            auto available = i->second.numAvailable();
+            auto created = i->second.numCreated();
 
+            string s = str::stream() << i->first.ident << "::" << i->first.timeout;
             BSONObjBuilder temp(bb.subobjStart(s));
-            temp.append("available", i->second.numAvailable());
-            temp.appendNumber("created", i->second.numCreated());
+
+            temp.append("inUse", inUse);
+            temp.append("available", available);
+            temp.appendNumber("created", created);
+
             temp.done();
 
-            avail += i->second.numAvailable();
-            created += i->second.numCreated();
-
-            long long& x = createdByType[i->second.type()];
-            x += i->second.numCreated();
+            totalInUse += inUse;
+            totalAvailable += available;
+            totalCreated += created;
         }
     }
     bb.done();
 
-    // Always report all replica sets being tracked
-    set<string> replicaSets = ReplicaSetMonitor::getAllTrackedSets();
-
-    BSONObjBuilder setBuilder(b.subobjStart("replicaSets"));
-    for (set<string>::iterator i = replicaSets.begin(); i != replicaSets.end(); ++i) {
-        string rs = *i;
-        ReplicaSetMonitorPtr m = ReplicaSetMonitor::get(rs);
-        if (!m) {
-            warning() << "no monitor for set: " << rs << endl;
-            continue;
-        }
-
-        BSONObjBuilder temp(setBuilder.subobjStart(rs));
-        m->appendInfo(temp);
-        temp.done();
-    }
-    setBuilder.done();
-
-    {
-        BSONObjBuilder temp(bb.subobjStart("createdByType"));
-        for (map<ConnectionString::ConnectionType, long long>::iterator i = createdByType.begin();
-             i != createdByType.end();
-             ++i) {
-            temp.appendNumber(ConnectionString::typeToString(i->first), i->second);
-        }
-        temp.done();
-    }
-
-    b.append("totalAvailable", avail);
-    b.appendNumber("totalCreated", created);
+    b.append("totalInUse", totalInUse);
+    b.append("totalAvailable", totalAvailable);
+    b.appendNumber("totalCreated", totalCreated);
 }
 
 bool DBConnectionPool::serverNameCompare::operator()(const string& a, const string& b) const {
@@ -447,7 +424,7 @@ bool DBConnectionPool::isConnectionGood(const string& hostName, DBClientBase* co
     }
 
     {
-        scoped_lock sl(_mutex);
+        stdx::lock_guard<stdx::mutex> sl(_mutex);
         PoolForHost& pool = _pools[PoolKey(hostName, conn->getSoTimeout())];
         if (pool.isBadSocketCreationTime(conn->getSockCreationMicroSec())) {
             return false;
@@ -463,7 +440,7 @@ void DBConnectionPool::taskDoWork() {
     {
         // we need to get the connections inside the lock
         // but we can actually delete them outside
-        scoped_lock lk(_mutex);
+        stdx::lock_guard<stdx::mutex> lk(_mutex);
         for (PoolMap::iterator i = _pools.begin(); i != _pools.end(); ++i) {
             i->second.getStaleConnections(toDelete);
         }
@@ -480,6 +457,27 @@ void DBConnectionPool::taskDoWork() {
 }
 
 // ------ ScopedDbConnection ------
+
+ScopedDbConnection::ScopedDbConnection(const std::string& host, double socketTimeout)
+    : _host(host), _conn(globalConnPool.get(host, socketTimeout)), _socketTimeout(socketTimeout) {
+    _setSocketTimeout();
+}
+
+ScopedDbConnection::ScopedDbConnection(const ConnectionString& host, double socketTimeout)
+    : _host(host.toString()),
+      _conn(globalConnPool.get(host, socketTimeout)),
+      _socketTimeout(socketTimeout) {
+    _setSocketTimeout();
+}
+
+void ScopedDbConnection::done() {
+    if (!_conn) {
+        return;
+    }
+
+    globalConnPool.release(_host, _conn);
+    _conn = NULL;
+}
 
 void ScopedDbConnection::_setSocketTimeout() {
     if (!_conn)
@@ -510,7 +508,7 @@ ScopedDbConnection::~ScopedDbConnection() {
 }
 
 void ScopedDbConnection::clearPool() {
-    pool.clear();
+    globalConnPool.clear();
 }
 
 AtomicInt32 AScopedConnection::_numConnections;

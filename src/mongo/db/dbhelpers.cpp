@@ -1,32 +1,30 @@
-// dbhelpers.cpp
-
 /**
-*    Copyright (C) 2008-2014 MongoDB Inc.
-*
-*    This program is free software: you can redistribute it and/or  modify
-*    it under the terms of the GNU Affero General Public License, version 3,
-*    as published by the Free Software Foundation.
-*
-*    This program is distributed in the hope that it will be useful,
-*    but WITHOUT ANY WARRANTY; without even the implied warranty of
-*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*    GNU Affero General Public License for more details.
-*
-*    You should have received a copy of the GNU Affero General Public License
-*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*
-*    As a special exception, the copyright holders give permission to link the
-*    code of portions of this program with the OpenSSL library under certain
-*    conditions as described in each individual source file and distribute
-*    linked combinations including the program with the OpenSSL library. You
-*    must comply with the GNU Affero General Public License in all respects for
-*    all of the code used other than as permitted herein. If you modify file(s)
-*    with this exception, you may extend this exception to your version of the
-*    file(s), but you are not obligated to do so. If you do not wish to do so,
-*    delete this exception statement from your version. If you delete this
-*    exception statement from all source files in the program, then also delete
-*    it in the license file.
-*/
+ *    Copyright (C) 2008-2014 MongoDB Inc.
+ *
+ *    This program is free software: you can redistribute it and/or  modify
+ *    it under the terms of the GNU Affero General Public License, version 3,
+ *    as published by the Free Software Foundation.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    GNU Affero General Public License for more details.
+ *
+ *    You should have received a copy of the GNU Affero General Public License
+ *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the GNU Affero General Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
+ */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kDefault
 
@@ -34,17 +32,20 @@
 
 #include "mongo/db/dbhelpers.h"
 
-#include <boost/filesystem/convenience.hpp>
 #include <boost/filesystem/operations.hpp>
 #include <fstream>
 
-#include "mongo/client/dbclientinterface.h"
+#include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/index_create.h"
 #include "mongo/db/db.h"
+#include "mongo/db/db_raii.h"
 #include "mongo/db/exec/working_set_common.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/index/btree_access_method.h"
 #include "mongo/db/json.h"
 #include "mongo/db/keypattern.h"
-#include "mongo/db/index/btree_access_method.h"
+#include "mongo/db/matcher/extensions_callback_real.h"
+#include "mongo/db/op_observer.h"
 #include "mongo/db/ops/delete.h"
 #include "mongo/db/ops/update.h"
 #include "mongo/db/ops/update_lifecycle_impl.h"
@@ -53,20 +54,24 @@
 #include "mongo/db/query/get_executor.h"
 #include "mongo/db/query/internal_plans.h"
 #include "mongo/db/query/query_planner.h"
-#include "mongo/db/repl/oplog.h"
+#include "mongo/db/range_arithmetic.h"
+#include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/replication_coordinator_global.h"
+#include "mongo/db/storage/data_protector.h"
+#include "mongo/db/storage/storage_options.h"
+#include "mongo/db/storage/wiredtiger/wiredtiger_customization_hooks.h"
 #include "mongo/db/write_concern.h"
 #include "mongo/db/write_concern_options.h"
-#include "mongo/db/operation_context_impl.h"
-#include "mongo/db/storage_options.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/s/d_state.h"
+#include "mongo/db/s/collection_metadata.h"
+#include "mongo/db/s/sharding_state.h"
 #include "mongo/s/shard_key_pattern.h"
+#include "mongo/util/mongoutils/str.h"
 #include "mongo/util/log.h"
+#include "mongo/util/scopeguard.h"
 
 namespace mongo {
 
-using std::auto_ptr;
+using std::unique_ptr;
 using std::endl;
 using std::ios_base;
 using std::ofstream;
@@ -76,8 +81,6 @@ using std::stringstream;
 
 using logger::LogComponent;
 
-const BSONObj reverseNaturalObj = BSON("$natural" << -1);
-
 void Helpers::ensureIndex(OperationContext* txn,
                           Collection* collection,
                           BSONObj keyPattern,
@@ -85,7 +88,7 @@ void Helpers::ensureIndex(OperationContext* txn,
                           const char* name) {
     BSONObjBuilder b;
     b.append("name", name);
-    b.append("ns", collection->ns());
+    b.append("ns", collection->ns().ns());
     b.append("key", keyPattern);
     b.appendBool("unique", unique);
     BSONObj o = b.done();
@@ -129,20 +132,20 @@ RecordId Helpers::findOne(OperationContext* txn,
     if (!collection)
         return RecordId();
 
-    CanonicalQuery* cq;
-    const WhereCallbackReal whereCallback(txn, collection->ns().db());
+    const ExtensionsCallbackReal extensionsCallback(txn, &collection->ns());
 
-    massert(17244,
-            "Could not canonicalize " + query.toString(),
-            CanonicalQuery::canonicalize(collection->ns(), query, &cq, whereCallback).isOK());
+    auto statusWithCQ = CanonicalQuery::canonicalize(collection->ns(), query, extensionsCallback);
+    massert(17244, "Could not canonicalize " + query.toString(), statusWithCQ.isOK());
+    unique_ptr<CanonicalQuery> cq = std::move(statusWithCQ.getValue());
 
-    PlanExecutor* rawExec;
     size_t options = requireIndex ? QueryPlannerParams::NO_TABLE_SCAN : QueryPlannerParams::DEFAULT;
+    auto statusWithPlanExecutor =
+        getExecutor(txn, collection, std::move(cq), PlanExecutor::YIELD_MANUAL, options);
     massert(17245,
             "Could not get executor for query " + query.toString(),
-            getExecutor(txn, collection, cq, PlanExecutor::YIELD_MANUAL, &rawExec, options).isOK());
+            statusWithPlanExecutor.isOK());
 
-    auto_ptr<PlanExecutor> exec(rawExec);
+    unique_ptr<PlanExecutor> exec = std::move(statusWithPlanExecutor.getValue());
     PlanExecutor::ExecState state;
     RecordId loc;
     if (PlanExecutor::ADVANCED == (state = exec->getNext(NULL, &loc))) {
@@ -177,11 +180,7 @@ bool Helpers::findById(OperationContext* txn,
     if (indexFound)
         *indexFound = 1;
 
-    // See SERVER-12397.  This may not always be true.
-    BtreeBasedAccessMethod* accessMethod =
-        static_cast<BtreeBasedAccessMethod*>(catalog->getIndex(desc));
-
-    RecordId loc = accessMethod->findSingle(txn, query["_id"].wrap());
+    RecordId loc = catalog->getIndex(desc)->findSingle(txn, query["_id"].wrap());
     if (loc.isNull())
         return false;
     result = collection->docFor(txn, loc).value();
@@ -193,18 +192,16 @@ RecordId Helpers::findById(OperationContext* txn, Collection* collection, const 
     IndexCatalog* catalog = collection->getIndexCatalog();
     const IndexDescriptor* desc = catalog->findIdIndex(txn);
     uassert(13430, "no _id index", desc);
-    // See SERVER-12397.  This may not always be true.
-    BtreeBasedAccessMethod* accessMethod =
-        static_cast<BtreeBasedAccessMethod*>(catalog->getIndex(desc));
-    return accessMethod->findSingle(txn, idquery["_id"].wrap());
+    return catalog->getIndex(desc)->findSingle(txn, idquery["_id"].wrap());
 }
 
 bool Helpers::getSingleton(OperationContext* txn, const char* ns, BSONObj& result) {
     AutoGetCollectionForRead ctx(txn, ns);
-    auto_ptr<PlanExecutor> exec(InternalPlanner::collectionScan(txn, ns, ctx.getCollection()));
+    unique_ptr<PlanExecutor> exec(
+        InternalPlanner::collectionScan(txn, ns, ctx.getCollection(), PlanExecutor::YIELD_MANUAL));
     PlanExecutor::ExecState state = exec->getNext(&result, NULL);
 
-    txn->getCurOp()->done();
+    CurOp::get(txn)->done();
 
     if (PlanExecutor::ADVANCED == state) {
         result = result.getOwned();
@@ -215,8 +212,8 @@ bool Helpers::getSingleton(OperationContext* txn, const char* ns, BSONObj& resul
 
 bool Helpers::getLast(OperationContext* txn, const char* ns, BSONObj& result) {
     AutoGetCollectionForRead autoColl(txn, ns);
-    auto_ptr<PlanExecutor> exec(InternalPlanner::collectionScan(
-        txn, ns, autoColl.getCollection(), InternalPlanner::BACKWARD));
+    unique_ptr<PlanExecutor> exec(InternalPlanner::collectionScan(
+        txn, ns, autoColl.getCollection(), PlanExecutor::YIELD_MANUAL, InternalPlanner::BACKWARD));
     PlanExecutor::ExecState state = exec->getNext(&result, NULL);
 
     if (PlanExecutor::ADVANCED == state) {
@@ -232,7 +229,7 @@ void Helpers::upsert(OperationContext* txn, const string& ns, const BSONObj& o, 
     BSONObj id = e.wrap();
 
     OpDebug debug;
-    Client::Context context(txn, ns);
+    OldClientContext context(txn, ns);
 
     const NamespaceString requestNs(ns);
     UpdateRequest request(requestNs);
@@ -240,7 +237,6 @@ void Helpers::upsert(OperationContext* txn, const string& ns, const BSONObj& o, 
     request.setQuery(id);
     request.setUpdates(o);
     request.setUpsert();
-    request.setUpdateOpLog();
     request.setFromMigration(fromMigrate);
     UpdateLifecycleImpl updateLifecycle(true, requestNs);
     request.setLifecycle(&updateLifecycle);
@@ -250,37 +246,19 @@ void Helpers::upsert(OperationContext* txn, const string& ns, const BSONObj& o, 
 
 void Helpers::putSingleton(OperationContext* txn, const char* ns, BSONObj obj) {
     OpDebug debug;
-    Client::Context context(txn, ns);
+    OldClientContext context(txn, ns);
 
     const NamespaceString requestNs(ns);
     UpdateRequest request(requestNs);
 
     request.setUpdates(obj);
     request.setUpsert();
-    request.setUpdateOpLog();
     UpdateLifecycleImpl updateLifecycle(true, requestNs);
     request.setLifecycle(&updateLifecycle);
 
     update(txn, context.db(), request, &debug);
 
-    context.getClient()->curop()->done();
-}
-
-void Helpers::putSingletonGod(OperationContext* txn, const char* ns, BSONObj obj, bool logTheOp) {
-    OpDebug debug;
-    Client::Context context(txn, ns);
-
-    const NamespaceString requestNs(ns);
-    UpdateRequest request(requestNs);
-
-    request.setGod();
-    request.setUpdates(obj);
-    request.setUpsert();
-    request.setUpdateOpLog(logTheOp);
-
-    update(txn, context.db(), request, &debug);
-
-    context.getClient()->curop()->done();
+    CurOp::get(txn)->done();
 }
 
 BSONObj Helpers::toKeyFormat(const BSONObj& o) {
@@ -312,8 +290,10 @@ static bool findShardKeyIndexPattern(OperationContext* txn,
     // Allow multiKey based on the invariant that shard keys must be single-valued.
     // Therefore, any multi-key index prefixed by shard key cannot be multikey over
     // the shard key fields.
-    const IndexDescriptor* idx = collection->getIndexCatalog()->findIndexByPrefix(
-        txn, shardKeyPattern, false /* allow multi key */);
+    const IndexDescriptor* idx =
+        collection->getIndexCatalog()->findShardKeyPrefixedIndex(txn,
+                                                                 shardKeyPattern,
+                                                                 false);  // requireSingleKey
 
     if (idx == NULL)
         return false;
@@ -358,12 +338,12 @@ long long Helpers::removeRange(OperationContext* txn,
 
     long long numDeleted = 0;
 
-    long long millisWaitingForReplication = 0;
+    Milliseconds millisWaitingForReplication{0};
 
     while (1) {
         // Scoping for write lock.
         {
-            Client::WriteContext ctx(txn, ns);
+            OldClientWriteContext ctx(txn, ns);
             Collection* collection = ctx.getCollection();
             if (!collection)
                 break;
@@ -371,14 +351,16 @@ long long Helpers::removeRange(OperationContext* txn,
             IndexDescriptor* desc =
                 collection->getIndexCatalog()->findIndexByKeyPattern(txn, indexKeyPattern.toBSON());
 
-            auto_ptr<PlanExecutor> exec(InternalPlanner::indexScan(txn,
-                                                                   collection,
-                                                                   desc,
-                                                                   min,
-                                                                   max,
-                                                                   maxInclusive,
-                                                                   InternalPlanner::FORWARD,
-                                                                   InternalPlanner::IXSCAN_FETCH));
+            unique_ptr<PlanExecutor> exec(
+                InternalPlanner::indexScan(txn,
+                                           collection,
+                                           desc,
+                                           min,
+                                           max,
+                                           maxInclusive,
+                                           PlanExecutor::YIELD_MANUAL,
+                                           InternalPlanner::FORWARD,
+                                           InternalPlanner::IXSCAN_FETCH));
             exec->setYieldPolicy(PlanExecutor::YIELD_AUTO);
 
             RecordId rloc;
@@ -386,21 +368,17 @@ long long Helpers::removeRange(OperationContext* txn,
             PlanExecutor::ExecState state;
             // This may yield so we cannot touch nsd after this.
             state = exec->getNext(&obj, &rloc);
-            exec.reset();
             if (PlanExecutor::IS_EOF == state) {
                 break;
             }
 
-            if (PlanExecutor::DEAD == state) {
-                warning(LogComponent::kSharding) << "cursor died: aborting deletion for " << min
-                                                 << " to " << max << " in " << ns << endl;
-                break;
-            }
-
-            if (PlanExecutor::FAILURE == state) {
-                warning(LogComponent::kSharding) << "cursor error while trying to delete " << min
-                                                 << " to " << max << " in " << ns << ": "
-                                                 << WorkingSetCommon::toStatusString(obj) << endl;
+            if (PlanExecutor::FAILURE == state || PlanExecutor::DEAD == state) {
+                const std::unique_ptr<PlanStageStats> stats(exec->getStats());
+                warning(LogComponent::kSharding)
+                    << PlanExecutor::statestr(state) << " - cursor error while trying to delete "
+                    << min << " to " << max << " in " << ns << ": "
+                    << WorkingSetCommon::toStatusString(obj)
+                    << ", stats: " << Explain::statsToBSON(*stats) << endl;
                 break;
             }
 
@@ -415,12 +393,13 @@ long long Helpers::removeRange(OperationContext* txn,
 
                 // We should never be able to turn off the sharding state once enabled, but
                 // in the future we might want to.
-                verify(shardingState.enabled());
-
-                // In write lock, so will be the most up-to-date version
-                CollectionMetadataPtr metadataNow = shardingState.getCollectionMetadata(ns);
+                verify(ShardingState::get(txn)->enabled());
 
                 bool docIsOrphan;
+
+                // In write lock, so will be the most up-to-date version
+                std::shared_ptr<CollectionMetadata> metadataNow =
+                    ShardingState::get(txn)->getCollectionMetadata(ns);
                 if (metadataNow) {
                     ShardKeyPattern kp(metadataNow->getKeyPattern());
                     BSONObj key = kp.extractShardKeyFromDoc(obj);
@@ -439,7 +418,8 @@ long long Helpers::removeRange(OperationContext* txn,
                 }
             }
 
-            if (!repl::getGlobalReplicationCoordinator()->canAcceptWritesForDatabase(ns)) {
+            NamespaceString nss(ns);
+            if (!repl::getGlobalReplicationCoordinator()->canAcceptWritesFor(nss)) {
                 warning() << "stepped down from primary while deleting chunk; "
                           << "orphaning data in " << ns << " in range [" << min << ", " << max
                           << ")";
@@ -449,11 +429,7 @@ long long Helpers::removeRange(OperationContext* txn,
             if (callback)
                 callback->goingToDelete(obj);
 
-            const auto inMigratingRange = isInMigratingChunk(ns, obj);
-            BSONObj deletedId;
-            collection->deleteDocument(txn, rloc, false, false, &deletedId);
-            // The above throws on failure, and so is not logged
-            repl::logDeleteOp(txn, ns.c_str(), deletedId, fromMigrate, inMigratingRange);
+            collection->deleteDocument(txn, rloc);
             wuow.commit();
             numDeleted++;
         }
@@ -464,21 +440,23 @@ long long Helpers::removeRange(OperationContext* txn,
         if (writeConcern.shouldWaitForOtherNodes() && numDeleted > 0) {
             repl::ReplicationCoordinator::StatusAndDuration replStatus =
                 repl::getGlobalReplicationCoordinator()->awaitReplication(
-                    txn, txn->getClient()->getLastOp(), writeConcern);
+                    txn,
+                    repl::ReplClientInfo::forClient(txn->getClient()).getLastOp(),
+                    writeConcern);
             if (replStatus.status.code() == ErrorCodes::ExceededTimeLimit) {
                 warning(LogComponent::kSharding) << "replication to secondaries for removeRange at "
                                                     "least 60 seconds behind";
             } else {
                 massertStatusOK(replStatus.status);
             }
-            millisWaitingForReplication += replStatus.duration.total_milliseconds();
+            millisWaitingForReplication += replStatus.duration;
         }
     }
 
     if (writeConcern.shouldWaitForOtherNodes())
         log(LogComponent::kSharding)
             << "Helpers::removeRangeUnlocked time spent waiting for replication: "
-            << millisWaitingForReplication << "ms" << endl;
+            << durationCount<Milliseconds>(millisWaitingForReplication) << "ms" << endl;
 
     MONGO_LOG_COMPONENT(1, LogComponent::kSharding) << "end removal of " << min << " to " << max
                                                     << " in " << ns << " (took "
@@ -511,7 +489,7 @@ Status Helpers::getLocsInRange(OperationContext* txn,
 
     // Require single key
     IndexDescriptor* idx =
-        collection->getIndexCatalog()->findIndexByPrefix(txn, range.keyPattern, true);
+        collection->getIndexCatalog()->findShardKeyPrefixedIndex(txn, range.keyPattern, true);
 
     if (idx == NULL) {
         return Status(ErrorCodes::IndexNotFound, range.keyPattern.toString());
@@ -545,7 +523,13 @@ Status Helpers::getLocsInRange(OperationContext* txn,
     bool isLargeChunk = false;
     long long docCount = 0;
 
-    auto_ptr<PlanExecutor> exec(InternalPlanner::indexScan(txn, collection, idx, min, max, false));
+    unique_ptr<PlanExecutor> exec(InternalPlanner::indexScan(txn,
+                                                             collection,
+                                                             idx,
+                                                             min,
+                                                             max,
+                                                             false,  // endKeyInclusive
+                                                             PlanExecutor::YIELD_MANUAL));
     // we can afford to yield here because any change to the base data that we might miss  is
     // already being queued and will be migrated in the 'transferMods' stage
     exec->setYieldPolicy(PlanExecutor::YIELD_AUTO);
@@ -576,11 +560,15 @@ Status Helpers::getLocsInRange(OperationContext* txn,
 
 
 void Helpers::emptyCollection(OperationContext* txn, const char* ns) {
-    Client::Context context(txn, ns);
-    deleteObjects(txn, context.db(), ns, BSONObj(), PlanExecutor::YIELD_MANUAL, false);
+    OldClientContext context(txn, ns);
+    bool shouldReplicateWrites = txn->writesAreReplicated();
+    txn->setReplicatedWrites(false);
+    ON_BLOCK_EXIT(&OperationContext::setReplicatedWrites, txn, shouldReplicateWrites);
+    Collection* collection = context.db() ? context.db()->getCollection(ns) : nullptr;
+    deleteObjects(txn, collection, ns, BSONObj(), PlanExecutor::YIELD_MANUAL, false);
 }
 
-Helpers::RemoveSaver::RemoveSaver(const string& a, const string& b, const string& why) : _out(0) {
+Helpers::RemoveSaver::RemoveSaver(const string& a, const string& b, const string& why) {
     static int NUM = 0;
 
     _root = storageGlobalParams.dbpath;
@@ -595,29 +583,104 @@ Helpers::RemoveSaver::RemoveSaver(const string& a, const string& b, const string
     stringstream ss;
     ss << why << "." << terseCurrentTime(false) << "." << NUM++ << ".bson";
     _file /= ss.str();
+
+    auto hooks = WiredTigerCustomizationHooks::get(getGlobalServiceContext());
+    if (hooks->enabled()) {
+        _protector = hooks->getDataProtector();
+        _file += hooks->getProtectedPathSuffix();
+    }
 }
 
 Helpers::RemoveSaver::~RemoveSaver() {
-    if (_out) {
-        _out->close();
-        delete _out;
-        _out = 0;
+    if (_protector && _out) {
+        auto hooks = WiredTigerCustomizationHooks::get(getGlobalServiceContext());
+        invariant(hooks->enabled());
+
+        size_t protectedSizeMax = hooks->additionalBytesForProtectedBuffer();
+        std::unique_ptr<uint8_t[]> protectedBuffer(new uint8_t[protectedSizeMax]);
+
+        size_t resultLen;
+        Status status = _protector->finalize(protectedBuffer.get(), protectedSizeMax, &resultLen);
+        if (!status.isOK()) {
+            severe() << "Unable to finalize DataProtector while closing RemoveSaver: "
+                     << status.reason();
+            fassertFailed(34350);
+        }
+
+        _out->write(reinterpret_cast<const char*>(protectedBuffer.get()), resultLen);
+        if (_out->fail()) {
+            severe() << "Couldn't write finalized DataProtector data to: " << _file.string()
+                     << " for remove saving: " << errnoWithDescription();
+            fassertFailed(34351);
+        }
+
+        protectedBuffer.reset(new uint8_t[protectedSizeMax]);
+        status = _protector->finalizeTag(protectedBuffer.get(), protectedSizeMax, &resultLen);
+        if (!status.isOK()) {
+            severe() << "Unable to get finalizeTag from DataProtector while closing RemoveSaver: "
+                     << status.reason();
+            fassertFailed(34352);
+        }
+        if (resultLen != _protector->getNumberOfBytesReservedForTag()) {
+            severe() << "Attempted to write tag of size " << resultLen
+                     << " when DataProtector only reserved "
+                     << _protector->getNumberOfBytesReservedForTag() << " bytes";
+            fassertFailed(34353);
+        }
+        _out->seekp(0);
+        _out->write(reinterpret_cast<const char*>(protectedBuffer.get()), resultLen);
+        if (_out->fail()) {
+            severe() << "Couldn't write finalizeTag from DataProtector to: " << _file.string()
+                     << " for remove saving: " << errnoWithDescription();
+            fassertFailed(34354);
+        }
     }
 }
 
-void Helpers::RemoveSaver::goingToDelete(const BSONObj& o) {
+Status Helpers::RemoveSaver::goingToDelete(const BSONObj& o) {
     if (!_out) {
         boost::filesystem::create_directories(_root);
-        _out = new ofstream();
-        _out->open(_file.string().c_str(), ios_base::out | ios_base::binary);
-        if (!_out->good()) {
-            error() << "couldn't create file: " << _file.string() << " for remove saving" << endl;
-            delete _out;
+        _out.reset(new ofstream(_file.string().c_str(), ios_base::out | ios_base::binary));
+        if (_out->fail()) {
+            string msg = str::stream() << "couldn't create file: " << _file.string()
+                                       << " for remove saving: " << errnoWithDescription();
+            error() << msg;
+            _out.reset();
             _out = 0;
-            return;
+            return Status(ErrorCodes::FileNotOpen, msg);
         }
     }
-    _out->write(o.objdata(), o.objsize());
+
+    const uint8_t* data = reinterpret_cast<const uint8_t*>(o.objdata());
+    size_t dataSize = o.objsize();
+
+    std::unique_ptr<uint8_t[]> protectedBuffer;
+    if (_protector) {
+        auto hooks = WiredTigerCustomizationHooks::get(getGlobalServiceContext());
+        invariant(hooks->enabled());
+
+        size_t protectedSizeMax = dataSize + hooks->additionalBytesForProtectedBuffer();
+        protectedBuffer.reset(new uint8_t[protectedSizeMax]);
+
+        size_t resultLen;
+        Status status = _protector->protect(
+            data, dataSize, protectedBuffer.get(), protectedSizeMax, &resultLen);
+        if (!status.isOK()) {
+            return status;
+        }
+
+        data = protectedBuffer.get();
+        dataSize = resultLen;
+    }
+
+    _out->write(reinterpret_cast<const char*>(data), dataSize);
+    if (_out->fail()) {
+        string msg = str::stream() << "couldn't write document to file: " << _file.string()
+                                   << " for remove saving: " << errnoWithDescription();
+        error() << msg;
+        return Status(ErrorCodes::OperationFailed, msg);
+    }
+    return Status::OK();
 }
 
 

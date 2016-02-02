@@ -30,9 +30,17 @@
 
 #pragma once
 
+#include <initializer_list>
+#include <memory>
+
 #include "mongo/db/jsobj.h"
 #include "mongo/db/operation_context_noop.h"
 #include "mongo/db/record_id.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/service_context_noop.h"
+#include "mongo/db/storage/sorted_data_interface.h"
+#include "mongo/stdx/memory.h"
+#include "mongo/util/unowned_ptr.h"
 
 namespace mongo {
 
@@ -65,30 +73,86 @@ const BSONObj compoundKey3b = BSON("" << 3 << ""
 const BSONObj compoundKey3c = BSON("" << 3 << ""
                                       << "c");
 
-const RecordId loc1(10, 42);
-const RecordId loc2(10, 44);
-const RecordId loc3(10, 46);
-const RecordId loc4(10, 48);
-const RecordId loc5(10, 50);
-const RecordId loc6(10, 52);
-const RecordId loc7(10, 54);
-const RecordId loc8(10, 56);
+const RecordId loc1(0, 42);
+const RecordId loc2(0, 44);
+const RecordId loc3(0, 46);
+const RecordId loc4(0, 48);
+const RecordId loc5(0, 50);
+const RecordId loc6(0, 52);
+const RecordId loc7(0, 54);
+const RecordId loc8(0, 56);
 
 class RecoveryUnit;
-class SortedDataInterface;
 
 class HarnessHelper {
 public:
-    HarnessHelper() {}
+    HarnessHelper() : _serviceContext(), _client(_serviceContext.makeClient("hh")) {}
     virtual ~HarnessHelper() {}
 
-    virtual SortedDataInterface* newSortedDataInterface(bool unique) = 0;
-    virtual RecoveryUnit* newRecoveryUnit() = 0;
+    virtual std::unique_ptr<SortedDataInterface> newSortedDataInterface(bool unique) = 0;
+    virtual std::unique_ptr<RecoveryUnit> newRecoveryUnit() = 0;
 
-    virtual OperationContext* newOperationContext() {
-        return new OperationContextNoop(newRecoveryUnit());
+    std::unique_ptr<OperationContext> newOperationContext(Client* client) {
+        return stdx::make_unique<OperationContextNoop>(client, 1, newRecoveryUnit().release());
     }
+
+    std::unique_ptr<OperationContext> newOperationContext() {
+        return newOperationContext(nullptr);
+    }
+
+    /**
+     * Creates a new SDI with some initial data.
+     *
+     * For clarity to readers, toInsert must be sorted.
+     */
+    std::unique_ptr<SortedDataInterface> newSortedDataInterface(
+        bool unique, std::initializer_list<IndexKeyEntry> toInsert);
+
+    Client* client() {
+        return _client.get();
+    }
+
+    ServiceContext* serviceContext() {
+        return &_serviceContext;
+    }
+
+private:
+    ServiceContextNoop _serviceContext;
+    ServiceContext::UniqueClient _client;
 };
 
-HarnessHelper* newHarnessHelper();
+/**
+ * Inserts all entries in toInsert into index.
+ * ASSERT_OKs the inserts.
+ * Always uses dupsAllowed=true.
+ *
+ * Should be used for declaring and changing conditions, not for testing inserts.
+ */
+void insertToIndex(unowned_ptr<OperationContext> txn,
+                   unowned_ptr<SortedDataInterface> index,
+                   std::initializer_list<IndexKeyEntry> toInsert);
+
+inline void insertToIndex(unowned_ptr<HarnessHelper> harness,
+                          unowned_ptr<SortedDataInterface> index,
+                          std::initializer_list<IndexKeyEntry> toInsert) {
+    insertToIndex(harness->newOperationContext(), index, toInsert);
+}
+
+/**
+ * Removes all entries in toRemove from index.
+ * Always uses dupsAllowed=true.
+ *
+ * Should be used for declaring and changing conditions, not for testing removes.
+ */
+void removeFromIndex(unowned_ptr<OperationContext> txn,
+                     unowned_ptr<SortedDataInterface> index,
+                     std::initializer_list<IndexKeyEntry> toRemove);
+
+inline void removeFromIndex(unowned_ptr<HarnessHelper> harness,
+                            unowned_ptr<SortedDataInterface> index,
+                            std::initializer_list<IndexKeyEntry> toRemove) {
+    removeFromIndex(harness->newOperationContext(), index, toRemove);
+}
+
+std::unique_ptr<HarnessHelper> newHarnessHelper();
 }

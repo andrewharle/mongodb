@@ -1,12 +1,15 @@
-//
 // Tests of sharded GLE enforcing write concern against operations in a cluster
 // Basic sharded GLE operation is tested elsewhere.
 //
+// This test asserts that a journaled write to a mongod running with --nojournal should be rejected,
+// so cannot be run on the ephemeralForTest storage engine, as it accepts all journaled writes.
+// @tags: [SERVER-21420]
+
+(function() {
 
 // Options for a cluster with two replica set shards, the first with two nodes the second with one
 // This lets us try a number of GLE scenarios
-var options = { separateConfig : true,
-                rs : true,
+var options = { rs : true,
                 rsOptions : { nojournal : "" },
                 // Options for each replica set shard
                 rs0 : { nodes : 3 },
@@ -129,3 +132,5 @@ assert.eq(coll.count({ _id : 1 }), 1);
 jsTest.log( "DONE!" );
 
 st.stop();
+
+})();

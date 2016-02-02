@@ -11,6 +11,8 @@ output = db.output
 
 doc = { _id : 5 , x : 17 };
 
+assert.commandWorked(db.createCollection(output.getName()));
+
 db.oplog.insert( { ts : new Timestamp() , "op" : "i" , "ns" : output.getFullName() , "o" : doc } );
 
 assert.eq( 0 , output.count() , "before" )
@@ -19,7 +21,7 @@ t.runTool( "oplog" , "--oplogns" , db.getName() + ".oplog" , "--from" , "127.0.0
 
 assert.eq( 1 , output.count() , "after" );
 
-assert.eq( doc , output.findOne() , "after check" );
+assert.docEq( doc , output.findOne() , "after check" );
 
 t.stop();
 

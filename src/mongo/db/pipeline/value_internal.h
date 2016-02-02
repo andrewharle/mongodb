@@ -29,6 +29,7 @@
 #pragma once
 
 #include <algorithm>
+#include <boost/config.hpp>
 #include <boost/intrusive_ptr.hpp>
 
 #include "mongo/bson/bsonobj.h"
@@ -37,7 +38,7 @@
 #include "mongo/bson/oid.h"
 #include "mongo/util/debug_util.h"
 #include "mongo/util/intrusive_counter.h"
-#include "mongo/bson/optime.h"
+#include "mongo/bson/timestamp.h"
 
 
 namespace mongo {
@@ -50,7 +51,7 @@ class Value;
 class RCVector : public RefCountable {
 public:
     RCVector() {}
-    RCVector(const std::vector<Value>& v) : vec(v) {}
+    RCVector(std::vector<Value> v) : vec(std::move(v)) {}
     std::vector<Value> vec;
 };
 
@@ -66,6 +67,12 @@ public:
     RCDBRef(const std::string& str, const OID& o) : ns(str), oid(o) {}
     const std::string ns;
     const OID oid;
+};
+
+class RCDecimal : public RefCountable {
+public:
+    RCDecimal(const Decimal128& decVal) : decimalValue(decVal) {}
+    const Decimal128 decimalValue;
 };
 
 #pragma pack(1)
@@ -99,10 +106,15 @@ public:
         type = t;
         doubleValue = d;
     }
-    ValueStorage(BSONType t, ReplTime r) {
+    ValueStorage(BSONType t, const Decimal128& d) {
         zero();
         type = t;
-        timestampValue = r;
+        putDecimal(d);
+    }
+    ValueStorage(BSONType t, Timestamp r) {
+        zero();
+        type = t;
+        timestampValue = r.asULL();
     }
     ValueStorage(BSONType t, bool b) {
         zero();
@@ -119,7 +131,7 @@ public:
         type = t;
         putVector(a);
     }
-    ValueStorage(BSONType t, const StringData& s) {
+    ValueStorage(BSONType t, StringData s) {
         zero();
         type = t;
         putString(s);
@@ -156,6 +168,11 @@ public:
         memcpyed();
     }
 
+    ValueStorage(ValueStorage&& rhs) BOOST_NOEXCEPT {
+        memcpy(this, &rhs, sizeof(*this));
+        rhs.zero();  // Reset rhs to the missing state. TODO consider only doing this if refCounter.
+    }
+
     ~ValueStorage() {
         DEV verifyRefCountingIfShould();
         if (refCounter)
@@ -163,8 +180,34 @@ public:
         DEV memset(this, 0xee, sizeof(*this));
     }
 
-    ValueStorage& operator=(ValueStorage rhsCopy) {
-        this->swap(rhsCopy);
+    ValueStorage& operator=(const ValueStorage& rhs) {
+        // This is designed to be effectively a no-op on self-assign, without needing an explicit
+        // check. This requires that rhs's refcount is incremented before ours is released, and that
+        // we use memmove rather than memcpy.
+        DEV rhs.verifyRefCountingIfShould();
+        if (rhs.refCounter)
+            intrusive_ptr_add_ref(rhs.genericRCPtr);
+
+        DEV verifyRefCountingIfShould();
+        if (refCounter)
+            intrusive_ptr_release(genericRCPtr);
+
+        memmove(this, &rhs, sizeof(*this));
+        return *this;
+    }
+
+    ValueStorage& operator=(ValueStorage&& rhs) BOOST_NOEXCEPT {
+#if defined(_MSC_VER) && _MSC_VER < 1900  // MSVC 2013 STL can emit self-move-assign.
+        if (&rhs == this)
+            return *this;
+#endif
+
+        DEV verifyRefCountingIfShould();
+        if (refCounter)
+            intrusive_ptr_release(genericRCPtr);
+
+        memmove(this, &rhs, sizeof(*this));
+        rhs.zero();  // Reset rhs to the missing state. TODO consider only doing this if refCounter.
         return *this;
     }
 
@@ -184,7 +227,7 @@ public:
     }
 
     /// These are only to be called during Value construction on an empty Value
-    void putString(const StringData& s);
+    void putString(StringData s);
     void putVector(const RCVector* v);
     void putDocument(const Document& d);
     void putRegEx(const BSONRegEx& re);
@@ -199,6 +242,10 @@ public:
 
     void putCodeWScope(const BSONCodeWScope& cws) {
         putRefCountable(new RCCodeWScope(cws.code.toString(), cws.scope));
+    }
+
+    void putDecimal(const Decimal128& d) {
+        putRefCountable(new RCDecimal(d));
     }
 
     void putRefCountable(boost::intrusive_ptr<const RefCountable> ptr) {
@@ -235,6 +282,12 @@ public:
     boost::intrusive_ptr<const RCDBRef> getDBRef() const {
         dassert(typeid(*genericRCPtr) == typeid(const RCDBRef));
         return static_cast<const RCDBRef*>(genericRCPtr);
+    }
+
+    Decimal128 getDecimal() const {
+        dassert(typeid(*genericRCPtr) == typeid(const RCDecimal));
+        const RCDecimal* decPtr = static_cast<const RCDecimal*>(genericRCPtr);
+        return decPtr->decimalValue;
     }
 
     // Document is incomplete here so this can't be inline
@@ -299,7 +352,7 @@ public:
                         bool boolValue;
                         int intValue;
                         long long longValue;
-                        ReplTime timestampValue;
+                        unsigned long long timestampValue;
                         long long dateValue;
                     };
                 };
@@ -310,6 +363,6 @@ public:
         long long i64[2];
     };
 };
-BOOST_STATIC_ASSERT(sizeof(ValueStorage) == 16);
+static_assert(sizeof(ValueStorage) == 16, "sizeof(ValueStorage) == 16");
 #pragma pack()
 }

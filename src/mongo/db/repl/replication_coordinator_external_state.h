@@ -28,10 +28,11 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
+#include <boost/optional.hpp>
 
 #include "mongo/base/disallow_copying.h"
-#include "mongo/bson/optime.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/db/repl/optime.h"
 #include "mongo/util/time_support.h"
 
 namespace mongo {
@@ -39,12 +40,16 @@ namespace mongo {
 class BSONObj;
 class OID;
 class OperationContext;
+class SnapshotName;
 class Status;
 struct HostAndPort;
 template <typename T>
 class StatusWith;
 
 namespace repl {
+
+class LastVote;
+class ReplSettings;
 
 /**
  * This class represents the interface the ReplicationCoordinator uses to interact with the
@@ -64,7 +69,7 @@ public:
      *
      * NOTE: Only starts threads if they are not already started,
      */
-    virtual void startThreads() = 0;
+    virtual void startThreads(const ReplSettings& settings) = 0;
 
     /**
      * Starts the Master/Slave threads and sets up logOp
@@ -78,16 +83,17 @@ public:
     virtual void shutdown() = 0;
 
     /**
-     * Creates the oplog and writes the first entry.
+     * Creates the oplog, writes the first entry and stores the replica set config document.  Sets
+     * replCoord last optime if 'updateReplOpTime' is true.
      */
-    virtual void initiateOplog(OperationContext* txn) = 0;
+    virtual Status initializeReplSetStorage(OperationContext* txn,
+                                            const BSONObj& config,
+                                            bool updateReplOpTime) = 0;
 
     /**
-     * Simple wrapper around SyncSourceFeedback::forwardSlaveHandshake.  Signals to the
-     * SyncSourceFeedback thread that it needs to wake up and send a replication handshake
-     * upstream.
+     * Writes a message about our transition to primary to the oplog.
      */
-    virtual void forwardSlaveHandshake() = 0;
+    virtual void logTransitionToPrimaryToOplog(OperationContext* txn) = 0;
 
     /**
      * Simple wrapper around SyncSourceFeedback::forwardSlaveProgress.  Signals to the
@@ -120,15 +126,32 @@ public:
     virtual Status storeLocalConfigDocument(OperationContext* txn, const BSONObj& config) = 0;
 
     /**
+     * Gets the replica set lastVote document from local storage, or returns an error.
+     */
+    virtual StatusWith<LastVote> loadLocalLastVoteDocument(OperationContext* txn) = 0;
+
+    /**
+     * Stores the replica set lastVote document in local storage, or returns an error.
+     */
+    virtual Status storeLocalLastVoteDocument(OperationContext* txn, const LastVote& lastVote) = 0;
+
+    /**
      * Sets the global opTime to be 'newTime'.
      */
-    virtual void setGlobalOpTime(const OpTime& newTime) = 0;
+    virtual void setGlobalTimestamp(const Timestamp& newTime) = 0;
 
     /**
      * Gets the last optime of an operation performed on this host, from stable
      * storage.
      */
     virtual StatusWith<OpTime> loadLastOpTime(OperationContext* txn) = 0;
+
+    /**
+     * Cleaning up the oplog, by potentially truncating:
+     * If we are recovering from a failed batch then minvalid.start though minvalid.end need
+     * to be removed from the oplog before we can start applying operations.
+     */
+    virtual void cleanUpLastApplyBatch(OperationContext* txn) = 0;
 
     /**
      * Returns the HostAndPort of the remote client connected to us that initiated the operation
@@ -157,9 +180,22 @@ public:
     virtual void clearShardingState() = 0;
 
     /**
+     * Called when the instance transitions to primary in order to notify a potentially sharded
+     * host to recover its sharding state.
+     *
+     * Throws on errors.
+     */
+    virtual void recoverShardingState(OperationContext* txn) = 0;
+
+    /**
      * Notifies the bgsync and syncSourceFeedback threads to choose a new sync source.
      */
     virtual void signalApplierToChooseNewSyncSource() = 0;
+
+    /**
+     * Notifies the bgsync to cancel the current oplog fetcher.
+     */
+    virtual void signalApplierToCancelFetcher() = 0;
 
     /**
      * Returns an OperationContext, owned by the caller, that may be used in methods of
@@ -174,6 +210,44 @@ public:
      * for "txn".
      */
     virtual void dropAllTempCollections(OperationContext* txn) = 0;
+
+    /**
+     * Drops all snapshots and clears the "committed" snapshot.
+     */
+    virtual void dropAllSnapshots() = 0;
+
+    /**
+     * Updates the committed snapshot to the newCommitPoint, and deletes older snapshots.
+     *
+     * It is illegal to call with a newCommitPoint that does not name an existing snapshot.
+     */
+    virtual void updateCommittedSnapshot(SnapshotName newCommitPoint) = 0;
+
+    /**
+     * Signals the SnapshotThread, if running, to take a forced snapshot even if the global
+     * timestamp hasn't changed.
+     *
+     * Does not wait for the snapshot to be taken.
+     */
+    virtual void forceSnapshotCreation() = 0;
+
+    /**
+     * Returns whether or not the SnapshotThread is active.
+     */
+    virtual bool snapshotsEnabled() const = 0;
+
+    virtual void notifyOplogMetadataWaiters() = 0;
+
+    /**
+     * Returns multiplier to apply to election timeout to obtain upper bound
+     * on randomized offset.
+     */
+    virtual double getElectionTimeoutOffsetLimitFraction() const = 0;
+
+    /**
+     * Returns true if the current storage engine supports read committed.
+     */
+    virtual bool isReadCommittedSupportedByStorageEngine(OperationContext* txn) const = 0;
 };
 
 }  // namespace repl

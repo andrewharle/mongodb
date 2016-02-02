@@ -30,6 +30,7 @@
 
 #include <cstring>
 
+#include "mongo/base/data_type_endian.h"
 #include "mongo/platform/endian.h"
 #include "mongo/unittest/unittest.h"
 
@@ -50,9 +51,9 @@ TEST(DataView, ConstDataView) {
     ASSERT_EQUALS(buf, cdv.view());
     ASSERT_EQUALS(buf + 5, cdv.view(5));
 
-    ASSERT_EQUALS(native, cdv.readNative<uint32_t>());
-    ASSERT_EQUALS(native, cdv.readLE<uint32_t>(sizeof(uint32_t)));
-    ASSERT_EQUALS(native, cdv.readBE<uint32_t>(sizeof(uint32_t) * 2));
+    ASSERT_EQUALS(native, cdv.read<uint32_t>());
+    ASSERT_EQUALS(native, cdv.read<LittleEndian<uint32_t>>(sizeof(uint32_t)));
+    ASSERT_EQUALS(native, cdv.read<BigEndian<uint32_t>>(sizeof(uint32_t) * 2));
 }
 
 TEST(DataView, DataView) {
@@ -61,16 +62,16 @@ TEST(DataView, DataView) {
 
     DataView dv(buf);
 
-    dv.writeNative(native);
-    dv.writeLE(native, sizeof(uint32_t));
-    dv.writeBE(native, sizeof(uint32_t) * 2);
+    dv.write(native);
+    dv.write(LittleEndian<uint32_t>(native), sizeof(uint32_t));
+    dv.write(BigEndian<uint32_t>(native), sizeof(uint32_t) * 2);
 
     ASSERT_EQUALS(buf, dv.view());
     ASSERT_EQUALS(buf + 5, dv.view(5));
 
-    ASSERT_EQUALS(native, dv.readNative<uint32_t>());
-    ASSERT_EQUALS(native, dv.readLE<uint32_t>(sizeof(uint32_t)));
-    ASSERT_EQUALS(native, dv.readBE<uint32_t>(sizeof(uint32_t) * 2));
+    ASSERT_EQUALS(native, dv.read<uint32_t>());
+    ASSERT_EQUALS(native, dv.read<LittleEndian<uint32_t>>(sizeof(uint32_t)));
+    ASSERT_EQUALS(native, dv.read<BigEndian<uint32_t>>(sizeof(uint32_t) * 2));
 }
 
 }  // namespace mongo

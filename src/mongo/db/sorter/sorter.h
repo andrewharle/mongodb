@@ -28,7 +28,6 @@
 
 #pragma once
 
-#include <boost/shared_ptr.hpp>
 #include <deque>
 #include <fstream>
 #include <string>
@@ -142,7 +141,7 @@ public:
     /// Returns an iterator that merges the passed in iterators
     template <typename Comparator>
     static SortIteratorInterface* merge(
-        const std::vector<boost::shared_ptr<SortIteratorInterface>>& iters,
+        const std::vector<std::shared_ptr<SortIteratorInterface>>& iters,
         const SortOptions& opts,
         const Comparator& comp);
 
@@ -199,7 +198,7 @@ private:
 
     const Settings _settings;
     std::string _fileName;
-    boost::shared_ptr<sorter::FileDeleter> _fileDeleter;  // Must outlive _file
+    std::shared_ptr<sorter::FileDeleter> _fileDeleter;  // Must outlive _file
     std::ofstream _file;
     BufBuilder _buffer;
 };
@@ -224,7 +223,7 @@ private:
     /* factory functions */                                                              \
     template ::mongo::SortIteratorInterface<Key, Value>* ::mongo::                       \
         SortIteratorInterface<Key, Value>::merge<Comparator>(                            \
-            const std::vector<boost::shared_ptr<SortIteratorInterface>>& iters,          \
+            const std::vector<std::shared_ptr<SortIteratorInterface>>& iters,            \
             const SortOptions& opts,                                                     \
             const Comparator& comp);                                                     \
     template ::mongo::Sorter<Key, Value>* ::mongo::Sorter<Key, Value>::make<Comparator>( \

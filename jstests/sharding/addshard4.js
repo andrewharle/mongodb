@@ -1,8 +1,12 @@
-// a replica set's passive nodes should be okay to add as part of a shard config
+// A replica set's passive nodes should be okay to add as part of a shard config
+(function() {
 
-s = new ShardingTest( "addshard4", 2 , 0 , 1 , {useHostname : true});
+var s = new ShardingTest({ name: "addshard4",
+                           shards: 2,
+                           mongos: 1,
+                           other: {useHostname : true} });
 
-r = new ReplSetTest({name : "addshard4", nodes : 3, startPort : 31100});
+var r = new ReplSetTest({name: "addshard4", nodes: 3});
 r.startSet();
 
 var config = r.getReplSetConfig();
@@ -13,7 +17,7 @@ r.initiate(config);
 //to pre-allocate files on slow systems
 r.awaitReplication();
 
-var master = r.getMaster();
+var master = r.getPrimary();
 
 var members = config.members.map(function(elem) { return elem.host; });
 var shardName = "addshard4/"+members.join(",");
@@ -31,7 +35,7 @@ var result = s.adminCommand({"addshard" : shardName});
 printjson(result);
 assert.eq(result, true);
 
-r = new ReplSetTest({name : "addshard42", nodes : 3, startPort : 31200});
+r = new ReplSetTest({name : "addshard42", nodes : 3});
 r.startSet();
 
 config = r.getReplSetConfig();
@@ -42,7 +46,7 @@ r.initiate(config);
 // to pre-allocate files on slow systems
 r.awaitReplication();
 
-master = r.getMaster();
+master = r.getPrimary();
 
 print("adding shard addshard42");
 
@@ -50,3 +54,7 @@ result = s.adminCommand({"addshard" : "addshard42/"+config.members[2].host});
 
 printjson(result);
 assert.eq(result, true);
+
+s.stop();
+
+})();

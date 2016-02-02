@@ -28,8 +28,6 @@
 *    it in the license file.
 */
 
-#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kCommand
-
 #include "mongo/platform/basic.h"
 
 #include <string>
@@ -44,13 +42,16 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/curop.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/operation_context_impl.h"
+#include "mongo/db/op_observer.h"
 #include "mongo/db/ops/insert.h"
-#include "mongo/db/repl/oplog.h"
+#include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/replication_coordinator_global.h"
-#include "mongo/s/d_state.h"
+#include "mongo/db/s/collection_metadata.h"
+#include "mongo/db/s/sharding_state.h"
 #include "mongo/s/shard_key_pattern.h"
-#include "mongo/util/log.h"
+#include "mongo/util/scopeguard.h"
 
 namespace mongo {
 
@@ -76,7 +77,7 @@ public:
         ActionSet actions;
         actions.addAction(ActionType::createIndex);
         Privilege p(parseResourcePattern(dbname, cmdObj), actions);
-        if (client->getAuthorizationSession()->isAuthorizedForPrivilege(p))
+        if (AuthorizationSession::get(client)->isAuthorizedForPrivilege(p))
             return Status::OK();
         return Status(ErrorCodes::Unauthorized, "Unauthorized");
     }
@@ -84,7 +85,7 @@ public:
 
     BSONObj _addNsToSpec(const NamespaceString& ns, const BSONObj& obj) {
         BSONObjBuilder b;
-        b.append("ns", ns);
+        b.append("ns", ns.ns());
         b.appendElements(obj);
         return b.obj();
     }
@@ -94,8 +95,7 @@ public:
                      BSONObj& cmdObj,
                      int options,
                      string& errmsg,
-                     BSONObjBuilder& result,
-                     bool fromRepl = false) {
+                     BSONObjBuilder& result) {
         // ---  parse
 
         NamespaceString ns(dbname, cmdObj[name].String());
@@ -152,8 +152,7 @@ public:
         // Note: createIndexes command does not currently respect shard versioning.
         ScopedTransaction transaction(txn, MODE_IX);
         Lock::DBLock dbLock(txn->lockState(), ns.db(), MODE_X);
-        if (!fromRepl &&
-            !repl::getGlobalReplicationCoordinator()->canAcceptWritesForDatabase(dbname)) {
+        if (!repl::getGlobalReplicationCoordinator()->canAcceptWritesFor(ns)) {
             return appendCommandStatus(
                 result,
                 Status(ErrorCodes::NotMaster,
@@ -170,11 +169,8 @@ public:
         if (!collection) {
             MONGO_WRITE_CONFLICT_RETRY_LOOP_BEGIN {
                 WriteUnitOfWork wunit(txn);
-                collection = db->createCollection(txn, ns.ns());
+                collection = db->createCollection(txn, ns.ns(), CollectionOptions());
                 invariant(collection);
-                if (!fromRepl) {
-                    repl::logOp(txn, "c", (dbname + ".$cmd").c_str(), BSON("create" << ns.coll()));
-                }
                 wunit.commit();
             }
             MONGO_WRITE_CONFLICT_RETRY_LOOP_END(txn, "createIndexes", ns.ns());
@@ -182,6 +178,12 @@ public:
 
         const int numIndexesBefore = collection->getIndexCatalog()->numIndexesTotal(txn);
         result.append("numIndexesBefore", numIndexesBefore);
+
+        auto client = txn->getClient();
+        ScopeGuard lastOpSetterGuard =
+            MakeObjGuard(repl::ReplClientInfo::forClient(client),
+                         &repl::ReplClientInfo::setLastOpToSystemLastOpTime,
+                         txn);
 
         MultiIndexBlock indexer(txn, collection);
         indexer.allowBackgroundBuilding();
@@ -206,9 +208,15 @@ public:
                 status = checkUniqueIndexConstraints(txn, ns.ns(), spec["key"].Obj());
 
                 if (!status.isOK()) {
-                    appendCommandStatus(result, status);
-                    return false;
+                    return appendCommandStatus(result, status);
                 }
+            }
+            if (spec["v"].isNumber() && spec["v"].numberInt() == 0) {
+                return appendCommandStatus(
+                    result,
+                    Status(ErrorCodes::CannotCreateIndex,
+                           str::stream() << "illegal index specification: " << spec << ". "
+                                         << "The option v:0 cannot be passed explicitly"));
             }
         }
 
@@ -220,10 +228,9 @@ public:
         // If we're a background index, replace exclusive db lock with an intent lock, so that
         // other readers and writers can proceed during this phase.
         if (indexer.getBuildInBackground()) {
-            txn->recoveryUnit()->commitAndRestart();
+            txn->recoveryUnit()->abandonSnapshot();
             dbLock.relockWithMode(MODE_IX);
-            if (!fromRepl &&
-                !repl::getGlobalReplicationCoordinator()->canAcceptWritesForDatabase(dbname)) {
+            if (!repl::getGlobalReplicationCoordinator()->canAcceptWritesFor(ns)) {
                 return appendCommandStatus(
                     result,
                     Status(ErrorCodes::NotMaster,
@@ -243,11 +250,9 @@ public:
                 try {
                     // This function cannot throw today, but we will preemptively prepare for
                     // that day, to avoid data corruption due to lack of index cleanup.
-                    txn->recoveryUnit()->commitAndRestart();
+                    txn->recoveryUnit()->abandonSnapshot();
                     dbLock.relockWithMode(MODE_X);
-                    if (!fromRepl &&
-                        !repl::getGlobalReplicationCoordinator()->canAcceptWritesForDatabase(
-                            dbname)) {
+                    if (!repl::getGlobalReplicationCoordinator()->canAcceptWritesFor(ns)) {
                         return appendCommandStatus(
                             result,
                             Status(ErrorCodes::NotMaster,
@@ -264,13 +269,11 @@ public:
         }
         // Need to return db lock back to exclusive, to complete the index build.
         if (indexer.getBuildInBackground()) {
-            txn->recoveryUnit()->commitAndRestart();
+            txn->recoveryUnit()->abandonSnapshot();
             dbLock.relockWithMode(MODE_X);
-            uassert(
-                ErrorCodes::NotMaster,
-                str::stream() << "Not primary while completing index build in " << dbname,
-                fromRepl ||
-                    repl::getGlobalReplicationCoordinator()->canAcceptWritesForDatabase(dbname));
+            uassert(ErrorCodes::NotMaster,
+                    str::stream() << "Not primary while completing index build in " << dbname,
+                    repl::getGlobalReplicationCoordinator()->canAcceptWritesFor(ns));
 
             Database* db = dbHolder().get(txn, ns.db());
             uassert(28551, "database dropped during index build", db);
@@ -282,11 +285,10 @@ public:
 
             indexer.commit();
 
-            if (!fromRepl) {
-                for (size_t i = 0; i < specs.size(); i++) {
-                    std::string systemIndexes = ns.getSystemIndexesCollection();
-                    repl::logOp(txn, "i", systemIndexes.c_str(), specs[i]);
-                }
+            for (size_t i = 0; i < specs.size(); i++) {
+                std::string systemIndexes = ns.getSystemIndexesCollection();
+                getGlobalServiceContext()->getOpObserver()->onCreateIndex(
+                    txn, systemIndexes, specs[i]);
             }
 
             wunit.commit();
@@ -295,33 +297,22 @@ public:
 
         result.append("numIndexesAfter", collection->getIndexCatalog()->numIndexesTotal(txn));
 
-        for (size_t i = 0; i < specs.size(); i++) {
-            BSONObj spec = specs[i];
-
-            BSONElement filterElement = spec["partialFilterExpression"];
-            if (!filterElement.eoo()) {
-                warning() << "The index " << spec.getObjectField("key") << " specifies "
-                          << filterElement.wrap()
-                          << ", but this version of MongoDB does not support partial indexes. The"
-                             " index will contain index entries for all documents in the "
-                          << ns.ns()
-                          << " collection. It must be dropped and recreated after upgrading to"
-                             " function as a partial index." << startupWarningsLog;
-            }
-        }
+        lastOpSetterGuard.Dismiss();
 
         return true;
     }
 
 private:
     static Status checkUniqueIndexConstraints(OperationContext* txn,
-                                              const StringData& ns,
+                                              StringData ns,
                                               const BSONObj& newIdxKey) {
         invariant(txn->lockState()->isCollectionLockedForMode(ns, MODE_X));
 
-        if (shardingState.enabled()) {
-            CollectionMetadataPtr metadata(shardingState.getCollectionMetadata(ns.toString()));
+        ShardingState* const shardingState = ShardingState::get(txn);
 
+        if (shardingState->enabled()) {
+            std::shared_ptr<CollectionMetadata> metadata(
+                shardingState->getCollectionMetadata(ns.toString()));
             if (metadata) {
                 ShardKeyPattern shardKeyPattern(metadata->getKeyPattern());
                 if (!shardKeyPattern.isUniqueIndexCompatible(newIdxKey)) {
@@ -335,6 +326,5 @@ private:
 
         return Status::OK();
     }
-
 } cmdCreateIndex;
 }

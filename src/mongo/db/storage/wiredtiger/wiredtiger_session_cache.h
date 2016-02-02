@@ -34,12 +34,12 @@
 #include <list>
 #include <string>
 
-#include <boost/thread/mutex.hpp>
 #include <boost/thread/shared_mutex.hpp>
-
 #include <wiredtiger.h>
 
+#include "mongo/db/storage/wiredtiger/wiredtiger_snapshot_manager.h"
 #include "mongo/platform/atomic_word.h"
+#include "mongo/stdx/mutex.h"
 #include "mongo/util/concurrency/spin_lock.h"
 
 namespace mongo {
@@ -91,12 +91,12 @@ public:
         return _cursorsOut;
     }
 
-    static uint64_t genCursorId();
+    static uint64_t genTableId();
 
     /**
-     * For "metadata:" cursors. Guaranteed never to collide with genCursorId() ids.
+     * For "metadata:" cursors. Guaranteed never to collide with genTableId() ids.
      */
-    static const uint64_t kMetadataCursorId = 0;
+    static const uint64_t kMetadataTableId = 0;
 
 private:
     friend class WiredTigerSessionCache;
@@ -116,40 +116,74 @@ private:
     int _cursorsCached, _cursorsOut;
 };
 
+/**
+ *  This cache implements a shared pool of WiredTiger sessions with the goal to amortize the
+ *  cost of session creation and destruction over multiple uses.
+ */
 class WiredTigerSessionCache {
 public:
     WiredTigerSessionCache(WiredTigerKVEngine* engine);
     WiredTigerSessionCache(WT_CONNECTION* conn);
     ~WiredTigerSessionCache();
 
+    /**
+     * Returns a previously released session for reuse, or creates a new session.
+     * This method must only be called while holding the global lock to avoid races with
+     * shuttingDown, but otherwise is thread safe.
+     */
     WiredTigerSession* getSession();
-    void releaseSession(WiredTigerSession* session);
-
-    void closeAll();
-
-    void shuttingDown();
 
     /**
-     * Waits until all commits that happened before this call are durable.
+     * Returns a session to the cache for later reuse. If closeAll was called between getting this
+     * session and releasing it, the session is directly released. This method is thread safe.
      */
-    void waitUntilDurable(WiredTigerSession* session);
+    void releaseSession(WiredTigerSession* session);
+
+    /**
+     * Free all cached sessions and ensures that previously acquired sessions will be freed on
+     * release.
+     */
+    void closeAll();
+
+    /**
+     * Transitions the cache to shutting down mode. Any already released sessions are freed and
+     * any sessions released subsequently are leaked. Must be called while holding the global
+     * lock in exclusive mode to avoid races with getSession.
+     */
+    void shuttingDown();
+
+    bool isEphemeral();
+    /**
+     * Waits until all commits that happened before this call are durable, either by flushing
+     * the log or forcing a checkpoint if forceCheckpoint is true or the journal is disabled.
+     * Uses a temporary session. Safe to call without any locks, even during shutdown.
+     */
+    void waitUntilDurable(bool forceCheckpoint);
 
     WT_CONNECTION* conn() const {
         return _conn;
     }
 
+    WiredTigerSnapshotManager& snapshotManager() {
+        return _snapshotManager;
+    }
+    const WiredTigerSnapshotManager& snapshotManager() const {
+        return _snapshotManager;
+    }
+
 private:
     WiredTigerKVEngine* _engine;  // not owned, might be NULL
     WT_CONNECTION* _conn;         // not owned
+    WiredTigerSnapshotManager _snapshotManager;
 
-    // Regular operations take it in shared mode. Shutdown sets the _shuttingDown flag and
-    // then takes it in exclusive mode. This ensures that all threads, which would return
-    // sessions to the cache would leak them.
-    boost::shared_mutex _shutdownLock;
-    AtomicUInt32 _shuttingDown;  // Used as boolean - 0 = false, 1 = true
+    // Used as follows:
+    //   The low 31 bits are a count of active calls to releaseSession.
+    //   The high bit is a flag that is set if and only if we're shutting down.
+    AtomicUInt32 _shuttingDown;
+    static const uint32_t kShuttingDownMask = 1 << 31;
 
-    boost::mutex _cacheLock;
-    typedef std::list<WiredTigerSession*> SessionCache;
+    stdx::mutex _cacheLock;
+    typedef std::vector<WiredTigerSession*> SessionCache;
     SessionCache _sessions;
 
     // Bumped when all open sessions need to be closed
@@ -157,6 +191,6 @@ private:
 
     // Counter and critical section mutex for waitUntilDurable
     AtomicUInt32 _lastSyncTime;
-    boost::mutex _lastSyncMutex;
+    stdx::mutex _lastSyncMutex;
 };
 }  // namespace

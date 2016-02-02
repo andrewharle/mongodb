@@ -32,7 +32,6 @@
 
 #include "mongo/db/index/haystack_access_method.h"
 
-#include <boost/scoped_ptr.hpp>
 
 #include "mongo/base/status.h"
 #include "mongo/db/geo/hash.h"
@@ -45,11 +44,11 @@
 
 namespace mongo {
 
-using boost::scoped_ptr;
+using std::unique_ptr;
 
 HaystackAccessMethod::HaystackAccessMethod(IndexCatalogEntry* btreeState,
                                            SortedDataInterface* btree)
-    : BtreeBasedAccessMethod(btreeState, btree) {
+    : IndexAccessMethod(btreeState, btree) {
     const IndexDescriptor* descriptor = btreeState->descriptor();
 
     ExpressionParams::parseHaystackParams(
@@ -59,7 +58,7 @@ HaystackAccessMethod::HaystackAccessMethod(IndexCatalogEntry* btreeState,
     uassert(16774, "no non-geo fields specified", _otherFields.size());
 }
 
-void HaystackAccessMethod::getKeys(const BSONObj& obj, BSONObjSet* keys) {
+void HaystackAccessMethod::getKeys(const BSONObj& obj, BSONObjSet* keys) const {
     ExpressionKeysPrivate::getHaystackKeys(obj, _geoField, _otherFields, _bucketSize, keys);
 }
 
@@ -105,8 +104,13 @@ void HaystackAccessMethod::searchCommand(OperationContext* txn,
             unordered_set<RecordId, RecordId::Hasher> thisPass;
 
 
-            scoped_ptr<PlanExecutor> exec(
-                InternalPlanner::indexScan(txn, collection, _descriptor, key, key, true));
+            unique_ptr<PlanExecutor> exec(InternalPlanner::indexScan(txn,
+                                                                     collection,
+                                                                     _descriptor,
+                                                                     key,
+                                                                     key,
+                                                                     true,  // endKeyInclusive
+                                                                     PlanExecutor::YIELD_MANUAL));
             PlanExecutor::ExecState state;
             RecordId loc;
             while (PlanExecutor::ADVANCED == (state = exec->getNext(NULL, &loc))) {

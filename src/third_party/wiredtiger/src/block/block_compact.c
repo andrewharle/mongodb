@@ -121,7 +121,7 @@ __wt_block_compact_skip(WT_SESSION_IMPL *session, WT_BLOCK *block, bool *skipp)
 	    avail_eighty >= ((fh->size / 10) * 2)) {
 		*skipp = false;
 		block->compact_pct_tenths = 2;
-	 } else if (avail_ninety > WT_MEGABYTE &&
+	} else if (avail_ninety > WT_MEGABYTE &&
 	    avail_ninety >= fh->size / 10) {
 		*skipp = false;
 		block->compact_pct_tenths = 1;

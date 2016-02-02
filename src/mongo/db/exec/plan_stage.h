@@ -28,6 +28,9 @@
 
 #pragma once
 
+#include <memory>
+#include <vector>
+
 #include "mongo/db/exec/plan_stats.h"
 #include "mongo/db/exec/working_set.h"
 #include "mongo/db/invalidation_type.h"
@@ -101,7 +104,12 @@ class OperationContext;
  */
 class PlanStage {
 public:
+    PlanStage(const char* typeName, OperationContext* opCtx)
+        : _commonStats(typeName), _opCtx(opCtx) {}
+
     virtual ~PlanStage() {}
+
+    using Children = std::vector<std::unique_ptr<PlanStage>>;
 
     /**
      * All possible return values of work(...)
@@ -119,18 +127,28 @@ public:
         // nothing output in the out parameter.
         NEED_TIME,
 
-        // The storage engine says something isn't in memory. Fetch it.
+        // The storage engine says we need to yield, possibly to fetch a record from disk, or
+        // due to an aborted transaction in the storage layer.
         //
-        // Full fetch semantics:
+        // Full yield request semantics:
         //
-        // The fetch-requesting stage populates the out parameter of work(...) with a WSID that
-        // refers to a WSM with a Fetcher*.  Each stage that receives a NEED_FETCH from a child
-        // must propagate the NEED_FETCH up and perform no work.  The plan executor is
-        // responsible for paging in the data upon receipt of a NEED_FETCH. The plan executor
-        // does NOT free the WSID of the requested fetch. The stage that requested the fetch
-        // holds the WSID of the loc it wants fetched. On the next call to work() that stage
-        // can assume a fetch was performed on the WSM that the held WSID refers to.
-        NEED_FETCH,
+        // Each stage that receives a NEED_YIELD from a child must propagate the NEED_YIELD up
+        // and perform no work.
+        //
+        // If a yield is requested due to a WriteConflict, the out parameter of work(...) should
+        // be populated with WorkingSet::INVALID_ID. If it is illegal to yield, a
+        // WriteConflictException will be thrown.
+        //
+        // A yield-requesting stage populates the out parameter of work(...) with a WSID that
+        // refers to a WSM with a Fetcher*. If it is illegal to yield, this is ignored. This
+        // difference in behavior can be removed once SERVER-16051 is resolved.
+        //
+        // The plan executor is responsible for yielding and, if requested, paging in the data
+        // upon receipt of a NEED_YIELD. The plan executor does NOT free the WSID of the
+        // requested fetch. The stage that requested the fetch holds the WSID of the loc it
+        // wants fetched. On the next call to work() that stage can assume a fetch was performed
+        // on the WSM that the held WSID refers to.
+        NEED_YIELD,
 
         // Something went wrong but it's not an internal error.  Perhaps our collection was
         // dropped or state deleted.
@@ -151,6 +169,8 @@ public:
             return "IS_EOF";
         } else if (NEED_TIME == state) {
             return "NEED_TIME";
+        } else if (NEED_YIELD == state) {
+            return "NEED_YIELD";
         } else if (DEAD == state) {
             return "DEAD";
         } else {
@@ -187,21 +207,43 @@ public:
     //
 
     /**
-     * Notifies the stage that all locks are about to be released.  The stage must save any
-     * state required to resume where it was before saveState was called.
+     * Notifies the stage that the underlying data source may change.
+     *
+     * It is illegal to call work() or isEOF() when a stage is in the "saved" state.
+     *
+     * Propagates to all children, then calls doSaveState().
      */
-    virtual void saveState() = 0;
+    void saveState();
 
     /**
-     * Notifies the stage that any required locks have been reacquired.  The stage must restore
-     * any saved state and be ready to handle calls to work().
+     * Notifies the stage that underlying data is stable again and prepares for calls to work().
      *
-     * Can only be called after saveState.
+     * Can only be called while the stage in is the "saved" state.
      *
-     * If the stage needs an OperationContext during its execution, it may keep a handle to the
-     * provided OperationContext (which is valid until the next call to saveState()).
+     * Propagates to all children, then calls doRestoreState().
      */
-    virtual void restoreState(OperationContext* opCtx) = 0;
+    void restoreState();
+
+    /**
+     * Detaches from the OperationContext and releases any storage-engine state.
+     *
+     * It is only legal to call this when in a "saved" state. While in the "detached" state, it is
+     * only legal to call reattachToOperationContext or the destructor. It is not legal to call
+     * detachFromOperationContext() while already in the detached state.
+     *
+     * Propagates to all children, then calls doDetachFromOperationContext().
+     */
+    void detachFromOperationContext();
+
+    /**
+     * Reattaches to the OperationContext and reacquires any storage-engine state.
+     *
+     * It is only legal to call this in the "detached" state. On return, the cursor is left in a
+     * "saved" state, so callers must still call restoreState to use this object.
+     *
+     * Propagates to all children, then calls doReattachToOperationContext().
+     */
+    void reattachToOperationContext(OperationContext* opCtx);
 
     /**
      * Notifies a stage that a RecordId is going to be deleted (or in-place updated) so that the
@@ -213,14 +255,28 @@ public:
      * The provided OperationContext should be used if any work needs to be performed during the
      * invalidate (as the state of the stage must be saved before any calls to invalidate, the
      * stage's own OperationContext is inactive during the invalidate and should not be used).
+     *
+     * Propagates to all children, then calls doInvalidate().
      */
-    virtual void invalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) = 0;
+    void invalidate(OperationContext* txn, const RecordId& dl, InvalidationType type);
 
     /**
      * Retrieve a list of this stage's children. This stage keeps ownership of
      * its children.
      */
-    virtual std::vector<PlanStage*> getChildren() const = 0;
+    const Children& getChildren() const {
+        return _children;
+    }
+
+    /**
+     * Returns the only child.
+     *
+     * Convenience method for PlanStages that have exactly one child.
+     */
+    const std::unique_ptr<PlanStage>& child() const {
+        dassert(_children.size() == 1);
+        return _children.front();
+    }
 
     /**
      * What type of stage is this?
@@ -237,10 +293,8 @@ public:
      *
      * Creates plan stats tree which has the same topology as the original execution tree,
      * but has a separate lifetime.
-     *
-     * Caller owns returned pointer.
      */
-    virtual PlanStageStats* getStats() = 0;
+    virtual std::unique_ptr<PlanStageStats> getStats() = 0;
 
     /**
      * Get the CommonStats for this stage. The pointer is *not* owned by the caller.
@@ -249,7 +303,9 @@ public:
      * It must not exist past the stage. If you need the stats to outlive the stage,
      * use the getStats(...) method above.
      */
-    virtual const CommonStats* getCommonStats() = 0;
+    const CommonStats* getCommonStats() const {
+        return &_commonStats;
+    }
 
     /**
      * Get stats specific to this stage. Some stages may not have specific stats, in which
@@ -259,7 +315,52 @@ public:
      * It must not exist past the stage. If you need the stats to outlive the stage,
      * use the getStats(...) method above.
      */
-    virtual const SpecificStats* getSpecificStats() = 0;
+    virtual const SpecificStats* getSpecificStats() const = 0;
+
+protected:
+    /**
+     * Saves any stage-specific state required to resume where it was if the underlying data
+     * changes.
+     *
+     * Stages must be able to handle multiple calls to doSaveState() in a row without a call to
+     * doRestoreState() in between.
+     */
+    virtual void doSaveState() {}
+
+    /**
+     * Restores any stage-specific saved state and prepares to handle calls to work().
+     */
+    virtual void doRestoreState() {}
+
+    /**
+     * Does stage-specific detaching.
+     *
+     * Implementations of this method cannot use the pointer returned from getOpCtx().
+     */
+    virtual void doDetachFromOperationContext() {}
+
+    /**
+     * Does stage-specific attaching.
+     *
+     * If an OperationContext* is needed, use getOpCtx(), which will return a valid
+     * OperationContext* (the one to which the stage is reattaching).
+     */
+    virtual void doReattachToOperationContext() {}
+
+    /**
+     * Does the stage-specific invalidation work.
+     */
+    virtual void doInvalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) {}
+
+    OperationContext* getOpCtx() const {
+        return _opCtx;
+    }
+
+    Children _children;
+    CommonStats _commonStats;
+
+private:
+    OperationContext* _opCtx;
 };
 
 }  // namespace mongo

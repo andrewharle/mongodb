@@ -38,19 +38,20 @@
 namespace mongo {
 
 class Database;
+class OperationContext;
 
 /**
  * Registry of opened databases.
  */
 class DatabaseHolder {
 public:
-    DatabaseHolder() : _m("dbholder") {}
+    DatabaseHolder() = default;
 
     /**
      * Retrieves an already opened database or returns NULL. Must be called with the database
      * locked in at least IS-mode.
      */
-    Database* get(OperationContext* txn, const StringData& ns) const;
+    Database* get(OperationContext* txn, StringData ns) const;
 
     /**
      * Retrieves a database reference if it is already opened, or opens it if it hasn't been
@@ -59,12 +60,12 @@ public:
      * @param justCreated Returns whether the database was newly created (true) or it already
      *          existed (false). Can be NULL if this information is not necessary.
      */
-    Database* openDb(OperationContext* txn, const StringData& ns, bool* justCreated = NULL);
+    Database* openDb(OperationContext* txn, StringData ns, bool* justCreated = NULL);
 
     /**
      * Closes the specified database. Must be called with the database locked in X-mode.
      */
-    void close(OperationContext* txn, const StringData& ns);
+    void close(OperationContext* txn, StringData ns);
 
     /**
      * Closes all opened databases. Must be called with the global lock acquired in X-mode.
@@ -80,7 +81,7 @@ public:
      * lock is held, which would prevent database from disappearing or being created.
      */
     void getAllShortNames(std::set<std::string>& all) const {
-        SimpleMutex::scoped_lock lk(_m);
+        stdx::lock_guard<SimpleMutex> lk(_m);
         for (DBs::const_iterator j = _dbs.begin(); j != _dbs.end(); ++j) {
             all.insert(j->first);
         }

@@ -31,7 +31,6 @@
 #include <vector>
 
 #include "mongo/base/status.h"
-#include "mongo/db/index/btree_index_cursor.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/keypattern.h"
 
@@ -41,7 +40,7 @@ using std::vector;
 
 // Standard Btree implementation below.
 BtreeAccessMethod::BtreeAccessMethod(IndexCatalogEntry* btreeState, SortedDataInterface* btree)
-    : BtreeBasedAccessMethod(btreeState, btree) {
+    : IndexAccessMethod(btreeState, btree) {
     // The key generation wants these values.
     vector<const char*> fieldNames;
     vector<BSONElement> fixed;
@@ -62,7 +61,7 @@ BtreeAccessMethod::BtreeAccessMethod(IndexCatalogEntry* btreeState, SortedDataIn
     }
 }
 
-void BtreeAccessMethod::getKeys(const BSONObj& obj, BSONObjSet* keys) {
+void BtreeAccessMethod::getKeys(const BSONObj& obj, BSONObjSet* keys) const {
     _keyGenerator->getKeys(obj, keys);
 }
 

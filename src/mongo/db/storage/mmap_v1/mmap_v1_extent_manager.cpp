@@ -37,24 +37,25 @@
 #include "mongo/base/counter.h"
 #include "mongo/db/audit.h"
 #include "mongo/db/client.h"
-#include "mongo/db/global_environment_experiment.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/storage/mmap_v1/dur.h"
 #include "mongo/db/storage/mmap_v1/data_file.h"
 #include "mongo/db/storage/mmap_v1/record.h"
 #include "mongo/db/storage/mmap_v1/extent.h"
 #include "mongo/db/storage/mmap_v1/extent_manager.h"
+#include "mongo/db/storage/mmap_v1/mmap.h"
 #include "mongo/db/storage/mmap_v1/mmap_v1_engine.h"
 #include "mongo/db/storage/mmap_v1/mmap_v1_options.h"
 #include "mongo/db/storage/record_fetcher.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/stdx/memory.h"
 #include "mongo/util/fail_point_service.h"
 #include "mongo/util/file.h"
 #include "mongo/util/log.h"
-#include "mongo/util/mmap.h"
 
 namespace mongo {
 
-using std::auto_ptr;
+using std::unique_ptr;
 using std::endl;
 using std::max;
 using std::string;
@@ -75,7 +76,7 @@ class MmapV1RecordFetcher : public RecordFetcher {
     MONGO_DISALLOW_COPYING(MmapV1RecordFetcher);
 
 public:
-    explicit MmapV1RecordFetcher(const Record* record) : _record(record) {}
+    explicit MmapV1RecordFetcher(const MmapV1RecordHeader* record) : _record(record) {}
 
     virtual void setup() {
         invariant(!_filesLock.get());
@@ -100,21 +101,19 @@ public:
 
 private:
     // The record which needs to be touched in order to page fault. Not owned by us.
-    const Record* _record;
+    const MmapV1RecordHeader* _record;
 
-    // This ensures that our Record* does not drop out from under our feet before
+    // This ensures that our MmapV1RecordHeader* does not drop out from under our feet before
     // we dereference it.
-    boost::scoped_ptr<LockMongoFilesShared> _filesLock;
+    std::unique_ptr<LockMongoFilesShared> _filesLock;
 };
 
-MmapV1ExtentManager::MmapV1ExtentManager(const StringData& dbname,
-                                         const StringData& path,
-                                         bool directoryPerDB)
+MmapV1ExtentManager::MmapV1ExtentManager(StringData dbname, StringData path, bool directoryPerDB)
     : _dbname(dbname.toString()),
       _path(path.toString()),
       _directoryPerDB(directoryPerDB),
       _rid(RESOURCE_METADATA, dbname) {
-    StorageEngine* engine = getGlobalEnvironment()->getGlobalStorageEngine();
+    StorageEngine* engine = getGlobalServiceContext()->getGlobalStorageEngine();
     invariant(engine->isMmapV1());
     MMAPV1Engine* mmapEngine = static_cast<MMAPV1Engine*>(engine);
     _recordAccessTracker = &mmapEngine->getRecordAccessTracker();
@@ -165,7 +164,7 @@ Status MmapV1ExtentManager::init(OperationContext* txn) {
             }
         }
 
-        auto_ptr<DataFile> df(new DataFile(n));
+        unique_ptr<DataFile> df(new DataFile(n));
 
         Status s = df->openExisting(fullNameString.c_str());
         if (!s.isOK()) {
@@ -233,7 +232,7 @@ DataFile* MmapV1ExtentManager::_addAFile(OperationContext* txn,
     }
 
     {
-        auto_ptr<DataFile> allocFile(new DataFile(allocFileId));
+        unique_ptr<DataFile> allocFile(new DataFile(allocFileId));
         const string allocFileName = _fileName(allocFileId).string();
 
         Timer t;
@@ -250,7 +249,7 @@ DataFile* MmapV1ExtentManager::_addAFile(OperationContext* txn,
 
     // Preallocate is asynchronous
     if (preallocateNextFile) {
-        auto_ptr<DataFile> nextFile(new DataFile(allocFileId + 1));
+        unique_ptr<DataFile> nextFile(new DataFile(allocFileId + 1));
         const string nextFileName = _fileName(allocFileId + 1).string();
 
         nextFile->open(txn, nextFileName.c_str(), minSize, false);
@@ -273,7 +272,7 @@ long long MmapV1ExtentManager::fileSize() const {
     return size;
 }
 
-Record* MmapV1ExtentManager::_recordForV1(const DiskLoc& loc) const {
+MmapV1RecordHeader* MmapV1ExtentManager::_recordForV1(const DiskLoc& loc) const {
     loc.assertOk();
     const DataFile* df = _getOpenFile(loc.a());
 
@@ -282,36 +281,38 @@ Record* MmapV1ExtentManager::_recordForV1(const DiskLoc& loc) const {
         df->badOfs(ofs);  // will msgassert - external call to keep out of the normal code path
     }
 
-    return reinterpret_cast<Record*>(df->p() + ofs);
+    return reinterpret_cast<MmapV1RecordHeader*>(df->p() + ofs);
 }
 
-Record* MmapV1ExtentManager::recordForV1(const DiskLoc& loc) const {
-    Record* record = _recordForV1(loc);
+MmapV1RecordHeader* MmapV1ExtentManager::recordForV1(const DiskLoc& loc) const {
+    MmapV1RecordHeader* record = _recordForV1(loc);
     _recordAccessTracker->markAccessed(record);
     return record;
 }
 
-RecordFetcher* MmapV1ExtentManager::recordNeedsFetch(const DiskLoc& loc) const {
-    Record* record = _recordForV1(loc);
+std::unique_ptr<RecordFetcher> MmapV1ExtentManager::recordNeedsFetch(const DiskLoc& loc) const {
+    if (loc.isNull())
+        return {};
+    MmapV1RecordHeader* record = _recordForV1(loc);
 
     // For testing: if failpoint is enabled we randomly request fetches without
     // going to the RecordAccessTracker.
     if (MONGO_FAIL_POINT(recordNeedsFetchFail)) {
         needsFetchFailCounter.increment();
         if ((needsFetchFailCounter.get() % kNeedsFetchFailFreq) == 0) {
-            return new MmapV1RecordFetcher(record);
+            return stdx::make_unique<MmapV1RecordFetcher>(record);
         }
     }
 
     if (!_recordAccessTracker->checkAccessedAndMark(record)) {
-        return new MmapV1RecordFetcher(record);
+        return stdx::make_unique<MmapV1RecordFetcher>(record);
     }
 
-    return NULL;
+    return {};
 }
 
 DiskLoc MmapV1ExtentManager::extentLocForV1(const DiskLoc& loc) const {
-    Record* record = recordForV1(loc);
+    MmapV1RecordHeader* record = recordForV1(loc);
     return DiskLoc(loc.a(), record->extentOfs());
 }
 
@@ -638,7 +639,7 @@ MmapV1ExtentManager::FilesArray::~FilesArray() {
 }
 
 void MmapV1ExtentManager::FilesArray::push_back(DataFile* val) {
-    scoped_lock lk(_writersMutex);
+    stdx::lock_guard<stdx::mutex> lk(_writersMutex);
     const int n = _size.load();
     invariant(n < DiskLoc::MaxFiles);
     // Note ordering: _size update must come after updating the _files array

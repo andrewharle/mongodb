@@ -29,6 +29,7 @@
 #pragma once
 
 #include <list>
+#include <memory>
 #include <vector>
 
 #include "mongo/base/owned_pointer_vector.h"
@@ -71,9 +72,27 @@ struct CandidatePlan {
     CandidatePlan(QuerySolution* s, PlanStage* r, WorkingSet* w)
         : solution(s), root(r), ws(w), failed(false) {}
 
-    QuerySolution* solution;
-    PlanStage* root;
-    WorkingSet* ws;
+#if defined(_MSC_VER) && _MSC_VER < 1900  // MVSC++ <= 2013 can't generate default move operations
+    CandidatePlan(CandidatePlan&& other)
+        : solution(std::move(other.solution)),
+          root(std::move(other.root)),
+          ws(std::move(other.ws)),
+          results(std::move(other.results)),
+          failed(std::move(other.failed)) {}
+
+    CandidatePlan& operator=(CandidatePlan&& other) {
+        solution = std::move(other.solution);
+        root = std::move(other.root);
+        ws = std::move(other.ws);
+        results = std::move(other.results);
+        failed = std::move(other.failed);
+        return *this;
+    }
+#endif
+
+    std::unique_ptr<QuerySolution> solution;
+    PlanStage* root;  // Not owned here.
+    WorkingSet* ws;   // Not owned here.
 
     // Any results produced during the plan's execution prior to ranking are retained here.
     std::list<WorkingSetID> results;
@@ -86,7 +105,7 @@ struct CandidatePlan {
  * and used to compare expected performance with actual.
  */
 struct PlanRankingDecision {
-    PlanRankingDecision() : tieForBest(false) {}
+    PlanRankingDecision() {}
 
     /**
      * Make a deep copy.
@@ -100,7 +119,6 @@ struct PlanRankingDecision {
         }
         decision->scores = scores;
         decision->candidateOrder = candidateOrder;
-        decision->tieForBest = tieForBest;
         return decision;
     }
 
@@ -120,12 +138,11 @@ struct PlanRankingDecision {
     // candidates[candidateOrder[2]], ...
     std::vector<size_t> candidateOrder;
 
-    // Did two plans tie for best?
+    // Whether two plans tied for the win.
     //
-    // NOTE: Reading this is the only reliable way to determine if there was a tie,
-    // because the scores kept inside the PlanRankingDecision do not incorporate
-    // the EOF bonus.
-    bool tieForBest;
+    // Reading this flag is the only reliable way for callers to determine if there was a tie,
+    // because the scores kept inside the PlanRankingDecision do not incorporate the EOF bonus.
+    bool tieForBest = false;
 };
 
 }  // namespace mongo

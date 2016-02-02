@@ -140,7 +140,7 @@ public:
      * Releases the entire vector to allow you to transfer ownership.
      *
      * Leaves the OwnedPointerVector empty.
-     * Named after the similar method and pattern in std::auto_ptr.
+     * Named after the similar method and pattern in std::unique_ptr.
      */
     std::vector<T*> release() {
         std::vector<T*> out;

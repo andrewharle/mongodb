@@ -28,8 +28,6 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
-#include <boost/thread/thread.hpp>
 #include <deque>
 #include <set>
 #include <string>
@@ -39,9 +37,10 @@
 #include "mongo/base/string_data.h"
 #include "mongo/db/clientcursor.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/db/operation_context.h"
+#include "mongo/db/range_arithmetic.h"
 #include "mongo/db/write_concern_options.h"
-#include "mongo/s/range_arithmetic.h"
+#include "mongo/stdx/mutex.h"
+#include "mongo/stdx/thread.h"
 #include "mongo/util/concurrency/mutex.h"
 #include "mongo/util/concurrency/synchronization.h"
 #include "mongo/util/time_support.h"
@@ -72,7 +71,7 @@ struct RangeDeleterOptions;
  *   RangeDeleter* deleter = new RangeDeleter(new ...);
  *   deleter->startWorkers();
  *   ...
- *   getGlobalEnvironment()->killAllOperations(); // stop all deletes
+ *   getGlobalServiceContext()->killAllOperations(); // stop all deletes
  *   deleter->stopWorkers();
  *   delete deleter;
  */
@@ -189,7 +188,7 @@ private:
     void doWork();
 
     /** Returns true if the range doesn't intersect with one other range */
-    bool canEnqueue_inlock(const StringData& ns,
+    bool canEnqueue_inlock(StringData ns,
                            const BSONObj& min,
                            const BSONObj& max,
                            std::string* errMsg) const;
@@ -197,13 +196,13 @@ private:
     /** Returns true if stopWorkers() was called. This call is synchronized. */
     bool stopRequested() const;
 
-    boost::scoped_ptr<RangeDeleterEnv> _env;
+    std::unique_ptr<RangeDeleterEnv> _env;
 
     // Initially not active. Must be started explicitly.
-    boost::scoped_ptr<boost::thread> _worker;
+    std::unique_ptr<stdx::thread> _worker;
 
     // Protects _stopRequested.
-    mutable mutex _stopMutex;
+    mutable stdx::mutex _stopMutex;
 
     // If set, no other delete taks should be accepted.
     bool _stopRequested;
@@ -211,13 +210,13 @@ private:
     // No delete is in progress. Used to make sure that there is no activity
     // in this deleter, and therefore is safe to destroy it. Must be used in
     // conjunction with _stopRequested.
-    boost::condition _nothingInProgressCV;
+    stdx::condition_variable _nothingInProgressCV;
 
     // Protects all the data structure below this.
-    mutable mutex _queueMutex;
+    mutable stdx::mutex _queueMutex;
 
     // _taskQueue has a task ready to work on.
-    boost::condition _taskQueueNotEmptyCV;
+    stdx::condition_variable _taskQueueNotEmptyCV;
 
     // Queue for storing the list of ranges that have cursors pending on it.
     //
@@ -240,7 +239,7 @@ private:
     size_t _deletesInProgress;
 
     // Protects _statsHistory
-    mutable mutex _statsHistoryMutex;
+    mutable stdx::mutex _statsHistoryMutex;
     std::deque<DeleteJobStats*> _statsHistory;
 };
 
@@ -304,8 +303,6 @@ struct RangeDeleteEntry {
 struct RangeDeleterEnv {
     virtual ~RangeDeleterEnv() {}
 
-    virtual void initThread() = 0;
-
     /**
      * Deletes the documents from the given range. This method should be
      * responsible for making sure that the proper contexts are setup
@@ -328,7 +325,7 @@ struct RangeDeleterEnv {
      * Must not throw exception.
      */
     virtual void getCursorIds(OperationContext* txn,
-                              const StringData& ns,
+                              StringData ns,
                               std::set<CursorId>* openCursors) = 0;
 };
 

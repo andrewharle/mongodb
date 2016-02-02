@@ -30,17 +30,18 @@
 
 #include "mongo/db/storage/mmap_v1/catalog/namespace_details_rsv1_metadata.h"
 
-#include <boost/scoped_ptr.hpp>
 
 #include "mongo/db/operation_context.h"
 
 namespace mongo {
 
-using boost::scoped_ptr;
+using std::unique_ptr;
 using std::numeric_limits;
 
-BOOST_STATIC_ASSERT(RecordStoreV1Base::Buckets ==
-                    NamespaceDetails::SmallBuckets + NamespaceDetails::LargeBuckets);
+static_assert(RecordStoreV1Base::Buckets ==
+                  NamespaceDetails::SmallBuckets + NamespaceDetails::LargeBuckets,
+              "RecordStoreV1Base::Buckets == NamespaceDetails::SmallBuckets + "
+              "NamespaceDetails::LargeBuckets");
 
 NamespaceDetailsRSV1MetaData::NamespaceDetailsRSV1MetaData(StringData ns, NamespaceDetails* details)
     : _ns(ns.toString()), _details(details) {}

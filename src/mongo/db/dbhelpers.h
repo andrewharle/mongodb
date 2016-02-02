@@ -28,21 +28,20 @@
 
 #pragma once
 
-#include <boost/noncopyable.hpp>
+#include <memory>
+#include <boost/filesystem/path.hpp>
 
-#include "mongo/db/client.h"
 #include "mongo/db/db.h"
 #include "mongo/db/record_id.h"
-#include "mongo/db/keypattern.h"
-#include "mongo/s/range_arithmetic.h"
+#include "mongo/db/storage/data_protector.h"
 
 namespace mongo {
 
-extern const BSONObj reverseNaturalObj;  // {"$natural": -1 }
-
 class Collection;
 class Cursor;
+class DataProtector;
 class OperationContext;
+struct KeyRange;
 struct WriteConcernOptions;
 
 /**
@@ -73,8 +72,8 @@ struct Helpers {
     /* fetch a single object from collection ns that matches query.
        set your db SavedContext first.
 
-       @param query - the query to perform.  note this is the low level portion of query so "orderby
-               : ..." won't work.
+       @param query - the query to perform.  note this is the low level portion of query so
+                      "orderby : ..." won't work.
 
        @param requireIndex if true, assert if no index for the query.  a way to guard against
        writing a slow query.
@@ -130,8 +129,6 @@ struct Helpers {
      * Callers must have "ns" locked.
      */
     static void putSingleton(OperationContext* txn, const char* ns, BSONObj obj);
-
-    static void putSingletonGod(OperationContext* txn, const char* ns, BSONObj obj, bool logTheOp);
 
     /**
      * you have to lock
@@ -217,17 +214,25 @@ struct Helpers {
     /**
      * for saving deleted bson objects to a flat file
      */
-    class RemoveSaver : public boost::noncopyable {
+    class RemoveSaver {
+        MONGO_DISALLOW_COPYING(RemoveSaver);
+
     public:
         RemoveSaver(const std::string& type, const std::string& ns, const std::string& why);
         ~RemoveSaver();
 
-        void goingToDelete(const BSONObj& o);
+        /**
+         * Writes document to file. File is created lazily before writing the first document.
+         * Returns error status if the file could not be created or if there were errors writing
+         * to the file.
+         */
+        Status goingToDelete(const BSONObj& o);
 
     private:
         boost::filesystem::path _root;
         boost::filesystem::path _file;
-        std::ofstream* _out;
+        std::unique_ptr<DataProtector> _protector;
+        std::unique_ptr<std::ostream> _out;
     };
 };
 

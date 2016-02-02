@@ -28,7 +28,6 @@
 
 #pragma once
 
-#include <boost/scoped_array.hpp>
 #include <iosfwd>
 #include <string>
 #include <vector>
@@ -54,7 +53,7 @@ class FieldRef {
 public:
     FieldRef();
 
-    explicit FieldRef(const StringData& path);
+    explicit FieldRef(StringData path);
 
     /**
      * Field parts accessed through getPart() calls no longer would be valid, after the
@@ -65,13 +64,13 @@ public:
     /**
      * Builds a field path out of each field part in 'dottedField'.
      */
-    void parse(const StringData& dottedField);
+    void parse(StringData dottedField);
 
     /**
      * Sets the 'i-th' field part to point to 'part'. Assumes i < size(). Behavior is
      * undefined otherwise.
      */
-    void setPart(size_t i, const StringData& part);
+    void setPart(size_t i, StringData part);
 
     /**
      * Returns the 'i-th' field part. Assumes i < size(). Behavior is undefined otherwise.
@@ -104,7 +103,7 @@ public:
     /**
      * Compares the full dotted path represented by this FieldRef to other
      */
-    bool equalsDottedField(const StringData& other) const;
+    bool equalsDottedField(StringData other) const;
 
     /**
      * Return 0 if 'this' is equal to 'other' lexicographically, -1 if is it less than or
@@ -142,7 +141,7 @@ private:
     /**
      * Parses 'path' into parts.
      */
-    void _parse(const StringData& path);
+    void _parse(StringData path);
 
     /** Converts the field part index to the variable part equivalent */
     size_t getIndex(size_t i) const {
@@ -153,7 +152,7 @@ private:
      * Returns the new number of parts after appending 'part' to this field path. It
      * assumes that 'part' is pointing to an internally allocated area.
      */
-    size_t appendPart(const StringData& part);
+    size_t appendPart(StringData part);
 
     /**
      * Re-assemble _dotted from components, including any replacements in _replacements,

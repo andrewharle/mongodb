@@ -28,9 +28,9 @@
 
 #pragma once
 
-#include <boost/unordered_map.hpp>
 #include <list>
 #include <memory>
+#include <unordered_map>
 
 #include "mongo/base/status.h"
 #include "mongo/util/assert_util.h"
@@ -72,7 +72,7 @@ public:
     typedef typename KVList::iterator KVListIt;
     typedef typename KVList::const_iterator KVListConstIt;
 
-    typedef boost::unordered_map<K, KVListIt> KVMap;
+    typedef std::unordered_map<K, KVListIt> KVMap;
     typedef typename KVMap::const_iterator KVMapConstIt;
 
     /**
@@ -88,9 +88,9 @@ public:
      * kv-store is full prior to the add() operation.
      *
      * If an entry is evicted, it will be returned in
-     * an auto_ptr for the caller to use before disposing.
+     * an unique_ptr for the caller to use before disposing.
      */
-    std::auto_ptr<V> add(const K& key, V* entry) {
+    std::unique_ptr<V> add(const K& key, V* entry) {
         // If the key already exists, delete it first.
         KVMapConstIt i = _kvMap.find(key);
         if (i != _kvMap.end()) {
@@ -117,11 +117,11 @@ public:
             invariant(_currentSize == _maxSize);
 
             // Pass ownership of evicted entry to caller.
-            // If caller chooses to ignore this auto_ptr,
+            // If caller chooses to ignore this unique_ptr,
             // the evicted entry will be deleted automatically.
-            return std::auto_ptr<V>(evictedEntry);
+            return std::unique_ptr<V>(evictedEntry);
         }
-        return std::auto_ptr<V>();
+        return std::unique_ptr<V>();
     }
 
     /**

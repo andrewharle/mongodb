@@ -36,12 +36,12 @@ namespace mongo {
 namespace fts {
 
 TEST(Tokenizer, Empty1) {
-    Tokenizer i(languageEnglishV2, "");
+    Tokenizer i(&languageEnglishV2, "");
     ASSERT(!i.more());
 }
 
 TEST(Tokenizer, Basic1) {
-    Tokenizer i(languageEnglishV2, "blue red green");
+    Tokenizer i(&languageEnglishV2, "blue red green");
 
     ASSERT(i.more());
     ASSERT_EQUALS(i.next().data.toString(), "blue");
@@ -56,7 +56,7 @@ TEST(Tokenizer, Basic1) {
 }
 
 TEST(Tokenizer, Basic2) {
-    Tokenizer i(languageEnglishV2, "blue-red");
+    Tokenizer i(&languageEnglishV2, "blue-red");
 
     Token a = i.next();
     Token b = i.next();
@@ -71,14 +71,10 @@ TEST(Tokenizer, Basic2) {
     ASSERT_EQUALS("blue", a.data.toString());
     ASSERT_EQUALS("-", b.data.toString());
     ASSERT_EQUALS("red", c.data.toString());
-
-    ASSERT(a.previousWhiteSpace);
-    ASSERT(!b.previousWhiteSpace);
-    ASSERT(!c.previousWhiteSpace);
 }
 
 TEST(Tokenizer, Basic3) {
-    Tokenizer i(languageEnglishV2, "blue -red");
+    Tokenizer i(&languageEnglishV2, "blue -red");
 
     Token a = i.next();
     Token b = i.next();
@@ -93,11 +89,6 @@ TEST(Tokenizer, Basic3) {
     ASSERT_EQUALS("blue", a.data.toString());
     ASSERT_EQUALS("-", b.data.toString());
     ASSERT_EQUALS("red", c.data.toString());
-
-    ASSERT(a.previousWhiteSpace);
-    ASSERT(b.previousWhiteSpace);
-    ASSERT(!c.previousWhiteSpace);
-
 
     ASSERT_EQUALS(0U, a.offset);
     ASSERT_EQUALS(5U, b.offset);
@@ -105,7 +96,7 @@ TEST(Tokenizer, Basic3) {
 }
 
 TEST(Tokenizer, Quote1English) {
-    Tokenizer i(languageEnglishV2, "eliot's car");
+    Tokenizer i(&languageEnglishV2, "eliot's car");
 
     Token a = i.next();
     Token b = i.next();
@@ -115,7 +106,7 @@ TEST(Tokenizer, Quote1English) {
 }
 
 TEST(Tokenizer, Quote1French) {
-    Tokenizer i(languageFrenchV2, "eliot's car");
+    Tokenizer i(&languageFrenchV2, "eliot's car");
 
     Token a = i.next();
     Token b = i.next();

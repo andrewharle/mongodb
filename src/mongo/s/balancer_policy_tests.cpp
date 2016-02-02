@@ -1,4 +1,5 @@
-/*    Copyright 2012 10gen Inc.
+/**
+ *    Copyright (C) 2012-2015 MongoDB Inc.
  *
  *    This program is free software: you can redistribute it and/or  modify
  *    it under the terms of the GNU Affero General Public License, version 3,
@@ -27,29 +28,22 @@
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kDefault
 
-#include <boost/scoped_ptr.hpp>
-
-#include "mongo/base/owned_pointer_map.h"
 #include "mongo/platform/random.h"
 #include "mongo/s/balancer_policy.h"
+#include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/config.h"
-#include "mongo/s/type_chunk.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/log.h"
 
-namespace mongo {
+namespace {
 
-using boost::scoped_ptr;
-using std::auto_ptr;
-using std::endl;
+using namespace mongo;
+
 using std::map;
 using std::string;
 using std::stringstream;
 using std::vector;
 
-namespace {
-
-typedef OwnedPointerMap<string, OwnedPointerVector<ChunkType>> OwnedShardToChunksMap;
 
 TEST(BalancerPolicyTests, SizeMaxedShardTest) {
     ASSERT(!ShardInfo(0, 0, false).isSizeMaxed());
@@ -58,108 +52,124 @@ TEST(BalancerPolicyTests, SizeMaxedShardTest) {
 }
 
 TEST(BalancerPolicyTests, BalanceNormalTest) {
-    // 2 chunks and 0 chunk shards
-    OwnedShardToChunksMap chunkMap;
-    auto_ptr<OwnedPointerVector<ChunkType>> chunks(new OwnedPointerVector<ChunkType>());
+    ShardToChunksMap chunkMap;
+    vector<ChunkType> chunks;
 
-    auto_ptr<ChunkType> chunk(new ChunkType());
-    chunk->setMin(BSON("x" << BSON("$minKey" << 1)));
-    chunk->setMax(BSON("x" << 49));
-    chunks->push_back(chunk.release());
+    {
+        ChunkType chunk;
+        chunk.setMin(BSON("x" << BSON("$minKey" << 1)));
+        chunk.setMax(BSON("x" << 49));
+        chunks.push_back(chunk);
+    }
 
-    chunk.reset(new ChunkType());
-    chunk->setMin(BSON("x" << 49));
-    chunk->setMax(BSON("x" << BSON("$maxKey" << 1)));
-    chunks->push_back(chunk.release());
+    {
+        ChunkType chunk;
+        chunk.setMin(BSON("x" << 49));
+        chunk.setMax(BSON("x" << BSON("$maxKey" << 1)));
+        chunks.push_back(chunk);
+    }
 
-    chunkMap.mutableMap()["shard0"] = chunks.release();
-    chunkMap.mutableMap()["shard1"] = new OwnedPointerVector<ChunkType>();
+    chunkMap["shard0"] = chunks;
+    chunkMap["shard1"] = vector<ChunkType>();
 
     // no limits
     ShardInfoMap info;
     info["shard0"] = ShardInfo(0, 2, false);
     info["shard1"] = ShardInfo(0, 0, false);
 
-    DistributionStatus status(info, chunkMap.map());
-    boost::scoped_ptr<MigrateInfo> c(BalancerPolicy::balance("ns", status, 1));
+    DistributionStatus status(info, chunkMap);
+    std::unique_ptr<MigrateInfo> c(BalancerPolicy::balance("ns", status, 1));
+
     ASSERT(c);
 }
 
 
 TEST(BalancerPolicyTests, BalanceJumbo) {
-    // 2 chunks and 0 chunk shards
-    OwnedShardToChunksMap chunkMap;
-    auto_ptr<OwnedPointerVector<ChunkType>> chunks(new OwnedPointerVector<ChunkType>());
+    ShardToChunksMap chunkMap;
+    vector<ChunkType> chunks;
 
-    auto_ptr<ChunkType> chunk(new ChunkType());
-    chunk->setMin(BSON("x" << BSON("$minKey" << 1)));
-    chunk->setMax(BSON("x" << 10));
-    chunk->setJumbo(true);
-    chunks->push_back(chunk.release());
+    {
+        ChunkType chunk;
+        chunk.setMin(BSON("x" << BSON("$minKey" << 1)));
+        chunk.setMax(BSON("x" << 10));
+        chunk.setJumbo(true);
+        chunks.push_back(chunk);
+    }
 
-    chunk.reset(new ChunkType());
-    chunk->setMin(BSON("x" << 10));
-    chunk->setMax(BSON("x" << 20));
-    chunk->setJumbo(true);
-    chunks->push_back(chunk.release());
+    {
+        ChunkType chunk;
+        chunk.setMin(BSON("x" << 10));
+        chunk.setMax(BSON("x" << 20));
+        chunk.setJumbo(true);
+        chunks.push_back(chunk);
+    }
 
-    chunk.reset(new ChunkType());
-    chunk->setMin(BSON("x" << 20));
-    chunk->setMax(BSON("x" << 30));
-    chunks->push_back(chunk.release());
+    {
+        ChunkType chunk;
+        chunk.setMin(BSON("x" << 20));
+        chunk.setMax(BSON("x" << 30));
+        chunks.push_back(chunk);
+    }
 
-    chunk.reset(new ChunkType());
-    chunk->setMin(BSON("x" << 30));
-    chunk->setMax(BSON("x" << 40));
-    chunk->setJumbo(true);
-    chunks->push_back(chunk.release());
+    {
+        ChunkType chunk;
+        chunk.setMin(BSON("x" << 30));
+        chunk.setMax(BSON("x" << 40));
+        chunk.setJumbo(true);
+        chunks.push_back(chunk);
+    }
 
-    chunk.reset(new ChunkType());
-    chunk->setMin(BSON("x" << 40));
-    chunk->setMax(BSON("x" << BSON("$maxKey" << 1)));
-    chunks->push_back(chunk.release());
+    {
+        ChunkType chunk;
+        chunk.setMin(BSON("x" << 40));
+        chunk.setMax(BSON("x" << BSON("$maxKey" << 1)));
+        chunks.push_back(chunk);
+    }
 
-    chunkMap.mutableMap()["shard0"] = chunks.release();
-    chunkMap.mutableMap()["shard1"] = new OwnedPointerVector<ChunkType>;
+    chunkMap["shard0"] = chunks;
+    chunkMap["shard1"] = vector<ChunkType>();
 
     // no limits
     ShardInfoMap info;
     info["shard0"] = ShardInfo(0, 2, false);
     info["shard1"] = ShardInfo(0, 0, false);
 
-    DistributionStatus status(info, chunkMap.map());
-    boost::scoped_ptr<MigrateInfo> c(BalancerPolicy::balance("ns", status, 1));
+    DistributionStatus status(info, chunkMap);
+    std::unique_ptr<MigrateInfo> c(BalancerPolicy::balance("ns", status, 1));
+
     ASSERT(c);
     ASSERT_EQUALS(30, c->chunk.max["x"].numberInt());
 }
 
-
 TEST(BalanceNormalTests, BalanceDrainingTest) {
-    // one normal, one draining
-    // 2 chunks and 0 chunk shards
-    OwnedShardToChunksMap chunkMap;
-    auto_ptr<OwnedPointerVector<ChunkType>> chunks(new OwnedPointerVector<ChunkType>());
+    ShardToChunksMap chunkMap;
+    vector<ChunkType> chunks;
 
-    auto_ptr<ChunkType> chunk(new ChunkType());
-    chunk->setMin(BSON("x" << BSON("$minKey" << 1)));
-    chunk->setMax(BSON("x" << 49));
-    chunks->push_back(chunk.release());
+    {
+        ChunkType chunk;
+        chunk.setMin(BSON("x" << BSON("$minKey" << 1)));
+        chunk.setMax(BSON("x" << 49));
+        chunks.push_back(chunk);
+    }
 
-    chunk.reset(new ChunkType());
-    chunk->setMin(BSON("x" << 49));
-    chunk->setMax(BSON("x" << BSON("$maxKey" << 1)));
-    chunks->push_back(chunk.release());
+    {
+        ChunkType chunk;
+        chunk.setMin(BSON("x" << 49));
+        chunk.setMax(BSON("x" << BSON("$maxKey" << 1)));
+        chunks.push_back(chunk);
+    }
 
-    chunkMap.mutableMap()["shard0"] = chunks.release();
-    chunkMap.mutableMap()["shard1"] = new OwnedPointerVector<ChunkType>();
+    chunkMap["shard0"] = chunks;
+    chunkMap["shard1"] = vector<ChunkType>();
 
     // shard0 is draining
     ShardInfoMap limitsMap;
     limitsMap["shard0"] = ShardInfo(0LL, 2LL, true);
     limitsMap["shard1"] = ShardInfo(0LL, 0LL, false);
 
-    DistributionStatus status(limitsMap, chunkMap.map());
-    boost::scoped_ptr<MigrateInfo> c(BalancerPolicy::balance("ns", status, 0));
+    DistributionStatus status(limitsMap, chunkMap);
+    std::unique_ptr<MigrateInfo> c(BalancerPolicy::balance("ns", status, 0));
+
     ASSERT(c);
     ASSERT_EQUALS(c->to, "shard1");
     ASSERT_EQUALS(c->from, "shard0");
@@ -167,52 +177,58 @@ TEST(BalanceNormalTests, BalanceDrainingTest) {
 }
 
 TEST(BalancerPolicyTests, BalanceEndedDrainingTest) {
-    // 2 chunks and 0 chunk (drain completed) shards
-    OwnedShardToChunksMap chunkMap;
-    auto_ptr<OwnedPointerVector<ChunkType>> chunks(new OwnedPointerVector<ChunkType>());
+    ShardToChunksMap chunkMap;
+    vector<ChunkType> chunks;
 
-    auto_ptr<ChunkType> chunk(new ChunkType());
-    chunk->setMin(BSON("x" << BSON("$minKey" << 1)));
-    chunk->setMax(BSON("x" << 49));
-    chunks->push_back(chunk.release());
+    {
+        ChunkType chunk;
+        chunk.setMin(BSON("x" << BSON("$minKey" << 1)));
+        chunk.setMax(BSON("x" << 49));
+        chunks.push_back(chunk);
+    }
 
-    chunk.reset(new ChunkType());
-    chunk->setMin(BSON("x" << 49));
-    chunk->setMax(BSON("x" << BSON("$maxKey" << 1)));
-    chunks->push_back(chunk.release());
+    {
+        ChunkType chunk;
+        chunk.setMin(BSON("x" << 49));
+        chunk.setMax(BSON("x" << BSON("$maxKey" << 1)));
+        chunks.push_back(chunk);
+    }
 
-    chunkMap.mutableMap()["shard0"] = chunks.release();
-    chunkMap.mutableMap()["shard1"] = new OwnedPointerVector<ChunkType>();
+    chunkMap["shard0"] = chunks;
+    chunkMap["shard1"] = vector<ChunkType>();
 
     // no limits
     ShardInfoMap limitsMap;
     limitsMap["shard0"] = ShardInfo(0, 2, false);
     limitsMap["shard1"] = ShardInfo(0, 0, true);
 
-    DistributionStatus status(limitsMap, chunkMap.map());
-    boost::scoped_ptr<MigrateInfo> c(BalancerPolicy::balance("ns", status, 0));
+    DistributionStatus status(limitsMap, chunkMap);
+    std::unique_ptr<MigrateInfo> c(BalancerPolicy::balance("ns", status, 0));
+
     ASSERT(!c);
 }
 
 TEST(BalancerPolicyTests, BalanceImpasseTest) {
-    // one maxed out, one draining
-    // 2 chunks and 0 chunk shards
-    OwnedShardToChunksMap chunkMap;
-    auto_ptr<OwnedPointerVector<ChunkType>> chunks(new OwnedPointerVector<ChunkType>());
+    ShardToChunksMap chunkMap;
+    vector<ChunkType> chunks;
 
-    auto_ptr<ChunkType> chunk(new ChunkType());
-    chunk->setMin(BSON("x" << BSON("$minKey" << 1)));
-    chunk->setMax(BSON("x" << 49));
-    chunks->push_back(chunk.release());
+    {
+        ChunkType chunk;
+        chunk.setMin(BSON("x" << BSON("$minKey" << 1)));
+        chunk.setMax(BSON("x" << 49));
+        chunks.push_back(chunk);
+    }
 
-    chunk.reset(new ChunkType());
-    chunk->setMin(BSON("x" << 49));
-    chunk->setMax(BSON("x" << BSON("$maxKey" << 1)));
-    chunks->push_back(chunk.release());
+    {
+        ChunkType chunk;
+        chunk.setMin(BSON("x" << 49));
+        chunk.setMax(BSON("x" << BSON("$maxKey" << 1)));
+        chunks.push_back(chunk);
+    }
 
-    chunkMap.mutableMap()["shard0"] = new OwnedPointerVector<ChunkType>();
-    chunkMap.mutableMap()["shard1"] = chunks.release();
-    chunkMap.mutableMap()["shard2"] = new OwnedPointerVector<ChunkType>();
+    chunkMap["shard0"] = vector<ChunkType>();
+    chunkMap["shard1"] = chunks;
+    chunkMap["shard2"] = vector<ChunkType>();
 
     // shard0 is draining, shard1 is maxed out, shard2 has writebacks pending
     ShardInfoMap limitsMap;
@@ -220,60 +236,63 @@ TEST(BalancerPolicyTests, BalanceImpasseTest) {
     limitsMap["shard1"] = ShardInfo(1, 1, false);
     limitsMap["shard2"] = ShardInfo(0, 1, true);
 
-    DistributionStatus status(limitsMap, chunkMap.map());
-    boost::scoped_ptr<MigrateInfo> c(BalancerPolicy::balance("ns", status, 0));
+    DistributionStatus status(limitsMap, chunkMap);
+    std::unique_ptr<MigrateInfo> c(BalancerPolicy::balance("ns", status, 0));
+
     ASSERT(!c);
 }
 
 
-void addShard(OwnedShardToChunksMap& map, unsigned numChunks, bool last) {
+void addShard(ShardToChunksMap& shardToChunks, unsigned numChunks, bool last) {
     unsigned total = 0;
-    const OwnedShardToChunksMap::MapType& shardToChunks = map.map();
-    for (OwnedShardToChunksMap::MapType::const_iterator i = shardToChunks.begin();
-         i != shardToChunks.end();
-         ++i) {
-        total += i->second->size();
+    for (const auto& chunk : shardToChunks) {
+        total += chunk.second.size();
     }
 
     stringstream ss;
     ss << "shard" << shardToChunks.size();
     string myName = ss.str();
-    auto_ptr<OwnedPointerVector<ChunkType>> chunksList(new OwnedPointerVector<ChunkType>());
+
+    vector<ChunkType> chunksList;
 
     for (unsigned i = 0; i < numChunks; i++) {
-        auto_ptr<ChunkType> chunk(new ChunkType());
+        ChunkType chunk;
 
-        if (i == 0 && total == 0)
-            chunk->setMin(BSON("x" << BSON("$minKey" << 1)));
-        else
-            chunk->setMin(BSON("x" << total + i));
+        if (i == 0 && total == 0) {
+            chunk.setMin(BSON("x" << BSON("$minKey" << 1)));
+        } else {
+            chunk.setMin(BSON("x" << total + i));
+        }
 
-        if (last && i == (numChunks - 1))
-            chunk->setMax(BSON("x" << BSON("$maxKey" << 1)));
-        else
-            chunk->setMax(BSON("x" << 1 + total + i));
+        if (last && i == (numChunks - 1)) {
+            chunk.setMax(BSON("x" << BSON("$maxKey" << 1)));
+        } else {
+            chunk.setMax(BSON("x" << 1 + total + i));
+        }
 
-        chunksList->push_back(chunk.release());
+        chunksList.push_back(chunk);
     }
 
-    OwnedShardToChunksMap::MapType& mutableShardToChunks = map.mutableMap();
-    mutableShardToChunks[myName] = chunksList.release();
+    shardToChunks[myName] = chunksList;
 }
 
-void moveChunk(OwnedShardToChunksMap& map, MigrateInfo* m) {
-    vector<ChunkType*>& chunks = map.mutableMap()[m->from]->mutableVector();
-    for (vector<ChunkType*>::iterator i = chunks.begin(); i != chunks.end(); ++i) {
-        if ((*i)->getMin() == m->chunk.min) {
-            map.mutableMap()[m->to]->push_back(*i);
+void moveChunk(ShardToChunksMap& shardToChunks, MigrateInfo* m) {
+    vector<ChunkType>& chunks = shardToChunks[m->from];
+
+    for (vector<ChunkType>::iterator i = chunks.begin(); i != chunks.end(); ++i) {
+        if (i->getMin() == m->chunk.min) {
+            shardToChunks[m->to].push_back(*i);
             chunks.erase(i);
             return;
         }
     }
-    verify(0);
+
+    invariant(false);
 }
 
+
 TEST(BalancerPolicyTests, MultipleDraining) {
-    OwnedShardToChunksMap chunks;
+    ShardToChunksMap chunks;
     addShard(chunks, 5, false);
     addShard(chunks, 10, false);
     addShard(chunks, 5, true);
@@ -283,15 +302,16 @@ TEST(BalancerPolicyTests, MultipleDraining) {
     shards["shard1"] = ShardInfo(0, 5, true);
     shards["shard2"] = ShardInfo(0, 5, false);
 
-    DistributionStatus d(shards, chunks.map());
-    boost::scoped_ptr<MigrateInfo> m(BalancerPolicy::balance("ns", d, 0));
+    DistributionStatus d(shards, chunks);
+    std::unique_ptr<MigrateInfo> m(BalancerPolicy::balance("ns", d, 0));
+
     ASSERT(m);
     ASSERT_EQUALS("shard2", m->to);
 }
 
 
 TEST(BalancerPolicyTests, TagsDraining) {
-    OwnedShardToChunksMap chunks;
+    ShardToChunksMap chunks;
     addShard(chunks, 5, false);
     addShard(chunks, 5, false);
     addShard(chunks, 5, true);
@@ -307,13 +327,14 @@ TEST(BalancerPolicyTests, TagsDraining) {
     shards["shard2"].addTag("b");
 
     while (true) {
-        DistributionStatus d(shards, chunks.map());
+        DistributionStatus d(shards, chunks);
         d.addTagRange(TagRange(BSON("x" << -1), BSON("x" << 7), "a"));
         d.addTagRange(TagRange(BSON("x" << 7), BSON("x" << 1000), "b"));
 
-        boost::scoped_ptr<MigrateInfo> m(BalancerPolicy::balance("ns", d, 0));
-        if (!m)
+        std::unique_ptr<MigrateInfo> m(BalancerPolicy::balance("ns", d, 0));
+        if (!m) {
             break;
+        }
 
         if (m->chunk.min["x"].numberInt() < 7) {
             ASSERT_EQUALS("shard0", m->to);
@@ -324,14 +345,14 @@ TEST(BalancerPolicyTests, TagsDraining) {
         moveChunk(chunks, m.get());
     }
 
-    ASSERT_EQUALS(7U, chunks.mutableMap()["shard0"]->size());
-    ASSERT_EQUALS(0U, chunks.mutableMap()["shard1"]->size());
-    ASSERT_EQUALS(8U, chunks.mutableMap()["shard2"]->size());
+    ASSERT_EQUALS(7U, chunks["shard0"].size());
+    ASSERT_EQUALS(0U, chunks["shard1"].size());
+    ASSERT_EQUALS(8U, chunks["shard2"].size());
 }
 
 
 TEST(BalancerPolicyTests, TagsPolicyChange) {
-    OwnedShardToChunksMap chunks;
+    ShardToChunksMap chunks;
     addShard(chunks, 5, false);
     addShard(chunks, 5, false);
     addShard(chunks, 5, true);
@@ -345,28 +366,31 @@ TEST(BalancerPolicyTests, TagsPolicyChange) {
     shards["shard1"].addTag("a");
 
     while (true) {
-        DistributionStatus d(shards, chunks.map());
+        DistributionStatus d(shards, chunks);
         d.addTagRange(TagRange(BSON("x" << -1), BSON("x" << 1000), "a"));
 
-        boost::scoped_ptr<MigrateInfo> m(BalancerPolicy::balance("ns", d, 0));
-        if (!m)
+        std::unique_ptr<MigrateInfo> m(BalancerPolicy::balance("ns", d, 0));
+        if (!m) {
             break;
+        }
 
         moveChunk(chunks, m.get());
     }
 
-    const size_t shard0Size = chunks.mutableMap()["shard0"]->size();
-    const size_t shard1Size = chunks.mutableMap()["shard1"]->size();
+    const size_t shard0Size = chunks["shard0"].size();
+    const size_t shard1Size = chunks["shard1"].size();
+
     ASSERT_EQUALS(15U, shard0Size + shard1Size);
     ASSERT(shard0Size == 7U || shard0Size == 8U);
-    ASSERT_EQUALS(0U, chunks.mutableMap()["shard2"]->size());
+    ASSERT_EQUALS(0U, chunks["shard2"].size());
 }
 
 
 TEST(BalancerPolicyTests, TagsSelector) {
-    OwnedShardToChunksMap chunks;
+    ShardToChunksMap chunks;
     ShardInfoMap shards;
-    DistributionStatus d(shards, chunks.map());
+    DistributionStatus d(shards, chunks);
+
     ASSERT(d.addTagRange(TagRange(BSON("x" << 1), BSON("x" << 10), "a")));
     ASSERT(d.addTagRange(TagRange(BSON("x" << 10), BSON("x" << 20), "b")));
     ASSERT(d.addTagRange(TagRange(BSON("x" << 20), BSON("x" << 30), "c")));
@@ -375,27 +399,47 @@ TEST(BalancerPolicyTests, TagsSelector) {
     ASSERT(!d.addTagRange(TagRange(BSON("x" << 22), BSON("x" << 28), "c")));
     ASSERT(!d.addTagRange(TagRange(BSON("x" << 28), BSON("x" << 33), "c")));
 
-    ChunkType chunk;
-    chunk.setMin(BSON("x" << -4));
-    ASSERT_EQUALS("", d.getTagForChunk(chunk));
+    {
+        ChunkType chunk;
+        chunk.setMin(BSON("x" << -4));
+        ASSERT_EQUALS("", d.getTagForChunk(chunk));
+    }
 
-    chunk.setMin(BSON("x" << 0));
-    ASSERT_EQUALS("", d.getTagForChunk(chunk));
+    {
+        ChunkType chunk;
+        chunk.setMin(BSON("x" << 0));
+        ASSERT_EQUALS("", d.getTagForChunk(chunk));
+    }
 
-    chunk.setMin(BSON("x" << 1));
-    ASSERT_EQUALS("a", d.getTagForChunk(chunk));
+    {
+        ChunkType chunk;
+        chunk.setMin(BSON("x" << 1));
+        ASSERT_EQUALS("a", d.getTagForChunk(chunk));
+    }
 
-    chunk.setMin(BSON("x" << 10));
-    ASSERT_EQUALS("b", d.getTagForChunk(chunk));
+    {
+        ChunkType chunk;
+        chunk.setMin(BSON("x" << 10));
+        ASSERT_EQUALS("b", d.getTagForChunk(chunk));
+    }
 
-    chunk.setMin(BSON("x" << 15));
-    ASSERT_EQUALS("b", d.getTagForChunk(chunk));
+    {
+        ChunkType chunk;
+        chunk.setMin(BSON("x" << 15));
+        ASSERT_EQUALS("b", d.getTagForChunk(chunk));
+    }
 
-    chunk.setMin(BSON("x" << 25));
-    ASSERT_EQUALS("c", d.getTagForChunk(chunk));
+    {
+        ChunkType chunk;
+        chunk.setMin(BSON("x" << 25));
+        ASSERT_EQUALS("c", d.getTagForChunk(chunk));
+    }
 
-    chunk.setMin(BSON("x" << 35));
-    ASSERT_EQUALS("", d.getTagForChunk(chunk));
+    {
+        ChunkType chunk;
+        chunk.setMin(BSON("x" << 35));
+        ASSERT_EQUALS("", d.getTagForChunk(chunk));
+    }
 }
 
 /**
@@ -404,7 +448,7 @@ TEST(BalancerPolicyTests, TagsSelector) {
  * Even though the overloaded shard has less chunks, we shouldn't move chunks to that shard.
  */
 TEST(BalancerPolicyTests, MaxSizeRespect) {
-    OwnedShardToChunksMap chunks;
+    ShardToChunksMap chunks;
     addShard(chunks, 3, false);
     addShard(chunks, 4, false);
     addShard(chunks, 6, true);
@@ -413,13 +457,13 @@ TEST(BalancerPolicyTests, MaxSizeRespect) {
     // Other shards have maxSize = 0 = unset.
 
     ShardInfoMap shards;
-    // ShardInfo(maxSize, currSize, draining, opsQueued)
     shards["shard0"] = ShardInfo(1, 3, false);
     shards["shard1"] = ShardInfo(0, 4, false);
     shards["shard2"] = ShardInfo(0, 6, false);
 
-    DistributionStatus d(shards, chunks.map());
-    scoped_ptr<MigrateInfo> m(BalancerPolicy::balance("ns", d, 0));
+    DistributionStatus d(shards, chunks);
+    std::unique_ptr<MigrateInfo> m(BalancerPolicy::balance("ns", d, 0));
+
     ASSERT(m);
     ASSERT_EQUALS("shard2", m->from);
     ASSERT_EQUALS("shard1", m->to);
@@ -430,7 +474,8 @@ TEST(BalancerPolicyTests, MaxSizeRespect) {
  * to empty shards for no other reason than they are over this limit.
  */
 TEST(BalancerPolicyTests, MaxSizeNoDrain) {
-    OwnedShardToChunksMap chunks;
+    ShardToChunksMap chunks;
+
     // Shard0 will be overloaded
     addShard(chunks, 4, false);
     addShard(chunks, 4, false);
@@ -445,8 +490,9 @@ TEST(BalancerPolicyTests, MaxSizeNoDrain) {
     shards["shard1"] = ShardInfo(0, 4, false);
     shards["shard2"] = ShardInfo(0, 4, false);
 
-    DistributionStatus d(shards, chunks.map());
-    boost::scoped_ptr<MigrateInfo> m(BalancerPolicy::balance("ns", d, 0));
+    DistributionStatus d(shards, chunks);
+    std::unique_ptr<MigrateInfo> m(BalancerPolicy::balance("ns", d, 0));
+
     ASSERT(!m);
 }
 
@@ -471,14 +517,11 @@ TEST(BalancerPolicyTests, Simulation) {
 
     // Run test 10 times
     for (int test = 0; test < 10; test++) {
-        //
         // Setup our shards as draining, with maxSize, and normal
-        //
-
         int numShards = 7;
         int numChunks = 0;
 
-        OwnedShardToChunksMap chunks;
+        ShardToChunksMap chunks;
         ShardInfoMap shards;
 
         map<string, int> expected;
@@ -488,10 +531,13 @@ TEST(BalancerPolicyTests, Simulation) {
             bool draining = i < 2;
             bool maxed = i >= 2 && i < 4;
 
-            if (draining)
+            if (draining) {
                 expected[str::stream() << "shard" << i] = 0;
-            if (maxed)
+            }
+
+            if (maxed) {
                 expected[str::stream() << "shard" << i] = numShardChunks + 1;
+            }
 
             addShard(chunks, numShardChunks, false);
             numChunks += numShardChunks;
@@ -501,19 +547,15 @@ TEST(BalancerPolicyTests, Simulation) {
         }
 
         for (ShardInfoMap::iterator it = shards.begin(); it != shards.end(); ++it) {
-            log() << it->first << " : " << it->second.toString() << endl;
+            log() << it->first << " : " << it->second.toString();
         }
 
-        //
         // Perform migrations and increment data size as chunks move
-        //
-
         for (int i = 0; i < numChunks; i++) {
-            DistributionStatus d(shards, chunks.map());
-            boost::scoped_ptr<MigrateInfo> m(BalancerPolicy::balance("ns", d, i != 0));
-
+            DistributionStatus d(shards, chunks);
+            std::unique_ptr<MigrateInfo> m(BalancerPolicy::balance("ns", d, i != 0));
             if (!m) {
-                log() << "Finished with test moves." << endl;
+                log() << "Finished with test moves.";
                 break;
             }
 
@@ -532,37 +574,35 @@ TEST(BalancerPolicyTests, Simulation) {
             }
         }
 
-        //
         // Make sure our balance is correct and our data size is low.
-        //
 
         // The balanced value is the count on the last shard, since it's not draining or
-        // limited
+        // limited.
         int balancedSize = (--shards.end())->second.getCurrSizeMB();
 
         for (ShardInfoMap::iterator it = shards.begin(); it != shards.end(); ++it) {
-            log() << it->first << " : " << it->second.toString() << endl;
+            log() << it->first << " : " << it->second.toString();
         }
 
         for (ShardInfoMap::iterator it = shards.begin(); it != shards.end(); ++it) {
-            log() << it->first << " : " << it->second.toString() << endl;
+            log() << it->first << " : " << it->second.toString();
 
             map<string, int>::iterator expectedIt = expected.find(it->first);
 
             if (expectedIt == expected.end()) {
                 bool isInRange = it->second.getCurrSizeMB() >= balancedSize - 1 &&
                     it->second.getCurrSizeMB() <= balancedSize + 1;
-
                 if (!isInRange) {
                     warning() << "non-limited and non-draining shard had "
                               << it->second.getCurrSizeMB() << " chunks, expected near "
-                              << balancedSize << endl;
+                              << balancedSize;
                 }
 
                 ASSERT(isInRange);
             } else {
                 int expectedSize = expectedIt->second;
                 bool isInRange = it->second.getCurrSizeMB() <= expectedSize;
+
                 if (isInRange && expectedSize >= balancedSize) {
                     isInRange = it->second.getCurrSizeMB() >= balancedSize - 1 &&
                         it->second.getCurrSizeMB() <= balancedSize + 1;
@@ -571,7 +611,7 @@ TEST(BalancerPolicyTests, Simulation) {
                 if (!isInRange) {
                     warning() << "limited or draining shard had " << it->second.getCurrSizeMB()
                               << " chunks, expected less than " << expectedSize
-                              << " and (if less than expected) near " << balancedSize << endl;
+                              << " and (if less than expected) near " << balancedSize;
                 }
 
                 ASSERT(isInRange);
@@ -579,5 +619,5 @@ TEST(BalancerPolicyTests, Simulation) {
         }
     }
 }
-}
-}
+
+}  // namespace

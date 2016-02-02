@@ -30,10 +30,11 @@
  * This file tests db/exec/keep_mutations.cpp.
  */
 
-#include <boost/shared_ptr.hpp>
 
 #include "mongo/client/dbclientcursor.h"
+#include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/database.h"
+#include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/exec/collection_scan.h"
 #include "mongo/db/exec/eof.h"
@@ -43,16 +44,18 @@
 #include "mongo/db/json.h"
 #include "mongo/db/matcher/expression_parser.h"
 #include "mongo/db/operation_context_impl.h"
-#include "mongo/db/catalog/collection.h"
 #include "mongo/dbtests/dbtests.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/fail_point_registry.h"
 #include "mongo/util/fail_point_service.h"
+#include "mongo/stdx/memory.h"
 
 namespace QueryStageKeep {
 
-using boost::shared_ptr;
 using std::set;
+using std::shared_ptr;
+using std::unique_ptr;
+using stdx::make_unique;
 
 class QueryStageKeepBase {
 public:
@@ -63,12 +66,10 @@ public:
     }
 
     void getLocs(set<RecordId>* out, Collection* coll) {
-        RecordIterator* it = coll->getIterator(&_txn);
-        while (!it->isEOF()) {
-            RecordId nextLoc = it->getNext();
-            out->insert(nextLoc);
+        auto cursor = coll->getCursor(&_txn);
+        while (auto record = cursor->next()) {
+            out->insert(record->id);
         }
-        delete it;
     }
 
     void insert(const BSONObj& obj) {
@@ -108,8 +109,8 @@ protected:
 class KeepStageBasic : public QueryStageKeepBase {
 public:
     void run() {
-        Client::WriteContext ctx(&_txn, ns());
-        Database* db = ctx.ctx().db();
+        OldClientWriteContext ctx(&_txn, ns());
+        Database* db = ctx.db();
         Collection* coll = db->getCollection(ns());
         if (!coll) {
             WriteUnitOfWork wuow(&_txn);
@@ -128,8 +129,8 @@ public:
         for (size_t i = 0; i < 10; ++i) {
             WorkingSetID id = ws.allocate();
             WorkingSetMember* member = ws.get(id);
-            member->state = WorkingSetMember::OWNED_OBJ;
             member->obj = Snapshotted<BSONObj>(SnapshotId(), BSON("x" << 2));
+            member->transitionToOwnedObj();
             ws.flagForReview(id);
         }
 
@@ -144,7 +145,7 @@ public:
         // Create a KeepMutations stage to merge in the 10 flagged objects.
         // Takes ownership of 'cs'
         MatchExpression* nullFilter = NULL;
-        std::auto_ptr<KeepMutationsStage> keep(new KeepMutationsStage(nullFilter, &ws, cs));
+        auto keep = make_unique<KeepMutationsStage>(&_txn, nullFilter, &ws, cs);
 
         for (size_t i = 0; i < 10; ++i) {
             WorkingSetID id = getNextResult(keep.get());
@@ -153,7 +154,10 @@ public:
             ASSERT_EQUALS(member->obj.value()["x"].numberInt(), 1);
         }
 
-        ASSERT(cs->isEOF());
+        {
+            WorkingSetID out;
+            ASSERT_EQ(cs->work(&out), PlanStage::IS_EOF);
+        }
 
         // Flagged results *must* be at the end.
         for (size_t i = 0; i < 10; ++i) {
@@ -172,9 +176,9 @@ public:
 class KeepStageFlagAdditionalAfterStreamingStarts : public QueryStageKeepBase {
 public:
     void run() {
-        Client::WriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_txn, ns());
 
-        Database* db = ctx.ctx().db();
+        Database* db = ctx.db();
         Collection* coll = db->getCollection(ns());
         if (!coll) {
             WriteUnitOfWork wuow(&_txn);
@@ -189,13 +193,12 @@ public:
         // Create a KeepMutationsStage with an EOF child, and flag 50 objects.  We expect these
         // objects to be returned by the KeepMutationsStage.
         MatchExpression* nullFilter = NULL;
-        std::auto_ptr<KeepMutationsStage> keep(
-            new KeepMutationsStage(nullFilter, &ws, new EOFStage()));
+        auto keep = make_unique<KeepMutationsStage>(&_txn, nullFilter, &ws, new EOFStage(&_txn));
         for (size_t i = 0; i < 50; ++i) {
             WorkingSetID id = ws.allocate();
             WorkingSetMember* member = ws.get(id);
-            member->state = WorkingSetMember::OWNED_OBJ;
             member->obj = Snapshotted<BSONObj>(SnapshotId(), BSON("x" << 1));
+            member->transitionToOwnedObj();
             ws.flagForReview(id);
             expectedResultIds.insert(id);
         }
@@ -219,8 +222,8 @@ public:
         while (ws.getFlagged().size() <= rehashSize) {
             WorkingSetID id = ws.allocate();
             WorkingSetMember* member = ws.get(id);
-            member->state = WorkingSetMember::OWNED_OBJ;
             member->obj = Snapshotted<BSONObj>(SnapshotId(), BSON("x" << 1));
+            member->transitionToOwnedObj();
             ws.flagForReview(id);
         }
         while ((id = getNextResult(keep.get())) != WorkingSet::INVALID_ID) {

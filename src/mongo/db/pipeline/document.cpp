@@ -31,7 +31,6 @@
 #include "mongo/db/pipeline/document.h"
 
 #include <boost/functional/hash.hpp>
-#include <boost/scoped_array.hpp>
 
 #include "mongo/db/jsobj.h"
 #include "mongo/db/pipeline/field_path.h"
@@ -143,7 +142,7 @@ void DocumentStorage::alloc(unsigned newSize) {
 
     uassert(16490, "Tried to make oversized document", capacity <= size_t(BufferMaxSize));
 
-    boost::scoped_array<char> oldBuf(_buffer);
+    std::unique_ptr<char[]> oldBuf(_buffer);
     _buffer = new char[capacity];
     _bufferEnd = _buffer + capacity - hashTabBytes();
 
@@ -194,8 +193,9 @@ intrusive_ptr<DocumentStorage> DocumentStorage::clone() const {
     out->_usedBytes = _usedBytes;
     out->_numFields = _numFields;
     out->_hashTabMask = _hashTabMask;
-    out->_hasTextScore = _hasTextScore;
+    out->_metaFields = _metaFields;
     out->_textScore = _textScore;
+    out->_randVal = _randVal;
 
     // Tell values that they have been memcpyed (updates ref counts)
     for (DocumentStorageIterator it = out->iteratorAll(); !it.atEnd(); it.advance()) {
@@ -206,7 +206,7 @@ intrusive_ptr<DocumentStorage> DocumentStorage::clone() const {
 }
 
 DocumentStorage::~DocumentStorage() {
-    boost::scoped_array<char> deleteBufferAtScopeEnd(_buffer);
+    std::unique_ptr<char[]> deleteBufferAtScopeEnd(_buffer);
 
     for (DocumentStorageIterator it = iteratorAll(); !it.atEnd(); it.advance()) {
         it->val.~Value();  // explicit destructor call
@@ -245,12 +245,15 @@ BSONObj Document::toBson() const {
 }
 
 const StringData Document::metaFieldTextScore("$textScore", StringData::LiteralTag());
+const StringData Document::metaFieldRandVal("$randVal", StringData::LiteralTag());
 
 BSONObj Document::toBsonWithMetaData() const {
     BSONObjBuilder bb;
     toBson(&bb);
     if (hasTextScore())
         bb.append(metaFieldTextScore, getTextScore());
+    if (hasRandMetaField())
+        bb.append(metaFieldRandVal, getRandMetaField());
     return bb.obj();
 }
 
@@ -260,15 +263,19 @@ Document Document::fromBsonWithMetaData(const BSONObj& bson) {
     BSONObjIterator it(bson);
     while (it.more()) {
         BSONElement elem(it.next());
-        if (elem.fieldName()[0] == '$') {
-            if (elem.fieldNameStringData() == metaFieldTextScore) {
+        auto fieldName = elem.fieldNameStringData();
+        if (fieldName[0] == '$') {
+            if (fieldName == metaFieldTextScore) {
                 md.setTextScore(elem.Double());
+                continue;
+            } else if (fieldName == metaFieldRandVal) {
+                md.setRandMetaField(elem.Double());
                 continue;
             }
         }
 
         // Note: this will not parse out metadata in embedded documents.
-        md.addField(elem.fieldNameStringData(), Value(elem));
+        md.addField(fieldName, Value(elem));
     }
 
     return md.freeze();
@@ -426,11 +433,14 @@ void Document::serializeForSorter(BufBuilder& buf) const {
     }
 
     if (hasTextScore()) {
-        buf.appendNum(char(1));
+        buf.appendNum(char(DocumentStorage::MetaType::TEXT_SCORE + 1));
         buf.appendNum(getTextScore());
-    } else {
-        buf.appendNum(char(0));
     }
+    if (hasRandMetaField()) {
+        buf.appendNum(char(DocumentStorage::MetaType::RAND_VAL + 1));
+        buf.appendNum(getRandMetaField());
+    }
+    buf.appendNum(char(0));
 }
 
 Document Document::deserializeForSorter(BufReader& buf, const SorterDeserializeSettings&) {
@@ -441,8 +451,15 @@ Document Document::deserializeForSorter(BufReader& buf, const SorterDeserializeS
         doc.addField(name, Value::deserializeForSorter(buf, Value::SorterDeserializeSettings()));
     }
 
-    if (buf.read<char>())  // hasTextScore
-        doc.setTextScore(buf.read<double>());
+    while (char marker = buf.read<char>()) {
+        if (marker == char(DocumentStorage::MetaType::TEXT_SCORE) + 1) {
+            doc.setTextScore(buf.read<double>());
+        } else if (marker == char(DocumentStorage::MetaType::RAND_VAL) + 1) {
+            doc.setRandMetaField(buf.read<double>());
+        } else {
+            uasserted(28744, "Unrecognized marker, unable to deserialize buffer");
+        }
+    }
 
     return doc.freeze();
 }

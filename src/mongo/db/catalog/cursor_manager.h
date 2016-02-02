@@ -30,7 +30,6 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
 
 #include "mongo/db/clientcursor.h"
 #include "mongo/db/invalidation_type.h"
@@ -47,7 +46,7 @@ class PlanExecutor;
 
 class CursorManager {
 public:
-    CursorManager(const StringData& ns);
+    CursorManager(StringData ns);
 
     /**
      * will kill() all PlanExecutor instances it has
@@ -60,8 +59,11 @@ public:
      * @param collectionGoingAway Pass as true if the Collection instance is going away.
      *                            This could be because the db is being closed, or the
      *                            collection/db is being dropped.
+     * @param reason              The motivation for invalidating all cursors. Will be used
+     *                            for error reporting and logging when an operation finds that
+     *                            the cursor it was operating on has been killed.
      */
-    void invalidateAll(bool collectionGoingAway);
+    void invalidateAll(bool collectionGoingAway, const std::string& reason);
 
     /**
      * Broadcast a document invalidation to all relevant PlanExecutor(s).  invalidateDocument
@@ -95,7 +97,15 @@ public:
     CursorId registerCursor(ClientCursor* cc);
     void deregisterCursor(ClientCursor* cc);
 
-    bool eraseCursor(OperationContext* txn, CursorId id, bool checkAuth);
+    /**
+     * Returns an OK status if the cursor was successfully erased.
+     *
+     * Returns error code CursorNotFound if the cursor id is not owned by this manager. Returns
+     * error code OperationFailed if attempting to erase a pinned cursor.
+     *
+     * If 'shouldAudit' is true, will perform audit logging.
+     */
+    Status eraseCursor(OperationContext* txn, CursorId id, bool shouldAudit);
 
     /**
      * Returns true if the space of cursor ids that cursor manager is responsible for includes
@@ -138,7 +148,7 @@ private:
 
     NamespaceString _nss;
     unsigned _collectionCacheRuntimeId;
-    boost::scoped_ptr<PseudoRandom> _random;
+    std::unique_ptr<PseudoRandom> _random;
 
     mutable SimpleMutex _mutex;
 

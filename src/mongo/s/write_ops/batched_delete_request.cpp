@@ -33,7 +33,7 @@
 
 namespace mongo {
 
-using std::auto_ptr;
+using std::unique_ptr;
 using std::string;
 
 using mongoutils::str::stream;
@@ -43,7 +43,6 @@ const BSONField<std::string> BatchedDeleteRequest::collName("delete");
 const BSONField<std::vector<BatchedDeleteDocument*>> BatchedDeleteRequest::deletes("deletes");
 const BSONField<BSONObj> BatchedDeleteRequest::writeConcern("writeConcern");
 const BSONField<bool> BatchedDeleteRequest::ordered("ordered", true);
-const BSONField<BSONObj> BatchedDeleteRequest::metadata("metadata");
 
 BatchedDeleteRequest::BatchedDeleteRequest() {
     clear();
@@ -60,7 +59,7 @@ bool BatchedDeleteRequest::isValid(std::string* errMsg) const {
     }
 
     // All the mandatory fields must be present.
-    if (!_isCollNameSet) {
+    if (!_isNSSet) {
         *errMsg = stream() << "missing " << collName.name() << " field";
         return false;
     }
@@ -76,8 +75,8 @@ bool BatchedDeleteRequest::isValid(std::string* errMsg) const {
 BSONObj BatchedDeleteRequest::toBSON() const {
     BSONObjBuilder builder;
 
-    if (_isCollNameSet)
-        builder.append(collName(), _collName);
+    if (_isNSSet)
+        builder.append(collName(), _ns.coll());
 
     if (_isDeletesSet) {
         BSONArrayBuilder deletesBuilder(builder.subarrayStart(deletes()));
@@ -96,13 +95,10 @@ BSONObj BatchedDeleteRequest::toBSON() const {
     if (_isOrderedSet)
         builder.append(ordered(), _ordered);
 
-    if (_metadata)
-        builder.append(metadata(), _metadata->toBSON());
-
     return builder.obj();
 }
 
-bool BatchedDeleteRequest::parseBSON(const BSONObj& source, string* errMsg) {
+bool BatchedDeleteRequest::parseBSON(StringData dbName, const BSONObj& source, string* errMsg) {
     clear();
 
     std::string dummy;
@@ -114,8 +110,8 @@ bool BatchedDeleteRequest::parseBSON(const BSONObj& source, string* errMsg) {
     fieldState = FieldParser::extract(source, collName, &collNameTemp, errMsg);
     if (fieldState == FieldParser::FIELD_INVALID)
         return false;
-    _collName = NamespaceString(collNameTemp);
-    _isCollNameSet = fieldState == FieldParser::FIELD_SET;
+    _ns = NamespaceString(dbName, collNameTemp);
+    _isNSSet = fieldState == FieldParser::FIELD_SET;
 
     fieldState = FieldParser::extract(source, deletes, &_deletes, errMsg);
     if (fieldState == FieldParser::FIELD_INVALID)
@@ -132,24 +128,12 @@ bool BatchedDeleteRequest::parseBSON(const BSONObj& source, string* errMsg) {
         return false;
     _isOrderedSet = fieldState == FieldParser::FIELD_SET;
 
-    BSONObj metadataObj;
-    fieldState = FieldParser::extract(source, metadata, &metadataObj, errMsg);
-    if (fieldState == FieldParser::FIELD_INVALID)
-        return false;
-
-    if (!metadataObj.isEmpty()) {
-        _metadata.reset(new BatchedRequestMetadata());
-        if (!_metadata->parseBSON(metadataObj, errMsg)) {
-            return false;
-        }
-    }
-
     return true;
 }
 
 void BatchedDeleteRequest::clear() {
-    _collName = NamespaceString();
-    _isCollNameSet = false;
+    _ns = NamespaceString();
+    _isNSSet = false;
 
     unsetDeletes();
 
@@ -158,20 +142,18 @@ void BatchedDeleteRequest::clear() {
 
     _ordered = false;
     _isOrderedSet = false;
-
-    _metadata.reset();
 }
 
 void BatchedDeleteRequest::cloneTo(BatchedDeleteRequest* other) const {
     other->clear();
 
-    other->_collName = _collName;
-    other->_isCollNameSet = _isCollNameSet;
+    other->_ns = _ns;
+    other->_isNSSet = _isNSSet;
 
     for (std::vector<BatchedDeleteDocument*>::const_iterator it = _deletes.begin();
          it != _deletes.end();
          ++it) {
-        auto_ptr<BatchedDeleteDocument> tempBatchDeleteDocument(new BatchedDeleteDocument);
+        unique_ptr<BatchedDeleteDocument> tempBatchDeleteDocument(new BatchedDeleteDocument);
         (*it)->cloneTo(tempBatchDeleteDocument.get());
         other->addToDeletes(tempBatchDeleteDocument.release());
     }
@@ -182,46 +164,27 @@ void BatchedDeleteRequest::cloneTo(BatchedDeleteRequest* other) const {
 
     other->_ordered = _ordered;
     other->_isOrderedSet = _isOrderedSet;
-
-    if (_metadata) {
-        other->_metadata.reset(new BatchedRequestMetadata());
-        _metadata->cloneTo(other->_metadata.get());
-    }
 }
 
 std::string BatchedDeleteRequest::toString() const {
     return toBSON().toString();
 }
 
-void BatchedDeleteRequest::setCollName(const StringData& collName) {
-    _collName = NamespaceString(collName);
-    _isCollNameSet = true;
+void BatchedDeleteRequest::setNS(NamespaceString ns) {
+    _ns = std::move(ns);
+    _isNSSet = true;
 }
 
-const std::string& BatchedDeleteRequest::getCollName() const {
-    dassert(_isCollNameSet);
-    return _collName.ns();
-}
-
-void BatchedDeleteRequest::setCollNameNS(const NamespaceString& collName) {
-    _collName = collName;
-    _isCollNameSet = true;
-}
-
-const NamespaceString& BatchedDeleteRequest::getCollNameNS() const {
-    dassert(_isCollNameSet);
-    return _collName;
-}
-
-const NamespaceString& BatchedDeleteRequest::getTargetingNSS() const {
-    return getCollNameNS();
+const NamespaceString& BatchedDeleteRequest::getNS() const {
+    dassert(_isNSSet);
+    return _ns;
 }
 
 void BatchedDeleteRequest::setDeletes(const std::vector<BatchedDeleteDocument*>& deletes) {
     for (std::vector<BatchedDeleteDocument*>::const_iterator it = deletes.begin();
          it != deletes.end();
          ++it) {
-        auto_ptr<BatchedDeleteDocument> tempBatchDeleteDocument(new BatchedDeleteDocument);
+        unique_ptr<BatchedDeleteDocument> tempBatchDeleteDocument(new BatchedDeleteDocument);
         (*it)->cloneTo(tempBatchDeleteDocument.get());
         addToDeletes(tempBatchDeleteDocument.release());
     }
@@ -298,22 +261,6 @@ bool BatchedDeleteRequest::getOrdered() const {
     } else {
         return ordered.getDefault();
     }
-}
-
-void BatchedDeleteRequest::setMetadata(BatchedRequestMetadata* metadata) {
-    _metadata.reset(metadata);
-}
-
-void BatchedDeleteRequest::unsetMetadata() {
-    _metadata.reset();
-}
-
-bool BatchedDeleteRequest::isMetadataSet() const {
-    return _metadata.get();
-}
-
-BatchedRequestMetadata* BatchedDeleteRequest::getMetadata() const {
-    return _metadata.get();
 }
 
 }  // namespace mongo

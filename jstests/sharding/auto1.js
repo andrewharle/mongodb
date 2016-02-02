@@ -1,8 +1,12 @@
-// auto1.js
+(function() {
 
-s = new ShardingTest( "auto1" , 2 , 1 , 1, { enableBalancer : 1 } );
+var s = new ShardingTest({ name: "auto1",
+                           shards: 2,
+                           mongos: 1,
+                           other: { enableBalancer : 1 } });
 
 s.adminCommand( { enablesharding : "test" } );
+s.ensurePrimaryShard('test', 'shard0001');
 s.adminCommand( { shardcollection : "test.foo" , key : { num : 1 } } );
 
 bigString = "";
@@ -71,3 +75,5 @@ print( counts )
 printjson( db.stats() )
 
 s.stop();
+
+})();

@@ -8,7 +8,6 @@
 
 #include "wt_internal.h"
 
-static int __lsm_manager_aggressive_update(WT_SESSION_IMPL *, WT_LSM_TREE *);
 static int __lsm_manager_run_server(WT_SESSION_IMPL *);
 
 static WT_THREAD_RET __lsm_worker_manager(void *);
@@ -204,12 +203,14 @@ __wt_lsm_manager_reconfig(WT_SESSION_IMPL *session, const char **cfg)
 int
 __wt_lsm_manager_start(WT_SESSION_IMPL *session)
 {
+	WT_CONNECTION_IMPL *conn;
 	WT_DECL_RET;
 	WT_LSM_MANAGER *manager;
 	WT_SESSION_IMPL *worker_session;
 	uint32_t i;
 
-	manager = &S2C(session)->lsm_manager;
+	conn = S2C(session);
+	manager = &conn->lsm_manager;
 
 	/*
 	 * We need at least a manager, a switch thread and a generic
@@ -226,7 +227,7 @@ __wt_lsm_manager_start(WT_SESSION_IMPL *session)
 	 */
 	for (i = 0; i < WT_LSM_MAX_WORKERS; i++) {
 		WT_ERR(__wt_open_internal_session(
-		    S2C(session), "lsm-worker", true, false, &worker_session));
+		    conn, "lsm-worker", false, 0, &worker_session));
 		worker_session->isolation = WT_ISO_READ_UNCOMMITTED;
 		manager->lsm_worker_cookies[i].session = worker_session;
 	}
@@ -235,7 +236,7 @@ __wt_lsm_manager_start(WT_SESSION_IMPL *session)
 	WT_ERR(__wt_thread_create(session, &manager->lsm_worker_cookies[0].tid,
 	    __lsm_worker_manager, &manager->lsm_worker_cookies[0]));
 
-	F_SET(S2C(session), WT_CONN_SERVER_LSM);
+	F_SET(conn, WT_CONN_SERVER_LSM);
 
 	if (0) {
 err:		for (i = 0;
@@ -321,8 +322,7 @@ __wt_lsm_manager_destroy(WT_SESSION_IMPL *session)
 			WT_TRET(wt_session->close(wt_session, NULL));
 		}
 	}
-	WT_STAT_FAST_CONN_INCRV(session,
-	    lsm_work_units_discarded, removed);
+	WT_STAT_FAST_CONN_INCRV(session, lsm_work_units_discarded, removed);
 
 	/* Free resources that are allocated in connection initialize */
 	__wt_spin_destroy(session, &manager->switch_lock);
@@ -331,43 +331,6 @@ __wt_lsm_manager_destroy(WT_SESSION_IMPL *session)
 	WT_TRET(__wt_cond_destroy(session, &manager->work_cond));
 
 	return (ret);
-}
-
-/*
- * __lsm_manager_aggressive_update --
- *	Update the merge aggressiveness for a single LSM tree.
- */
-static int
-__lsm_manager_aggressive_update(WT_SESSION_IMPL *session, WT_LSM_TREE *lsm_tree)
-{
-	struct timespec now;
-	uint64_t chunk_wait, stallms;
-	u_int new_aggressive;
-
-	WT_RET(__wt_epoch(session, &now));
-	stallms = WT_TIMEDIFF(now, lsm_tree->last_flush_ts) / WT_MILLION;
-	/*
-	 * Get aggressive if more than enough chunks for a merge should have
-	 * been created by now. Use 10 seconds as a default if we don't have an
-	 * estimate.
-	 */
-	if (lsm_tree->nchunks > 1)
-		chunk_wait = stallms / (lsm_tree->chunk_fill_ms == 0 ?
-		    10000 : lsm_tree->chunk_fill_ms);
-	else
-		chunk_wait = 0;
-	new_aggressive = (u_int)(chunk_wait / lsm_tree->merge_min);
-
-	if (new_aggressive > lsm_tree->merge_aggressiveness) {
-		WT_RET(__wt_verbose(session, WT_VERB_LSM,
-		    "LSM merge %s got aggressive (old %u new %u), "
-		    "merge_min %d, %u / %" PRIu64,
-		    lsm_tree->name, lsm_tree->merge_aggressiveness,
-		    new_aggressive, lsm_tree->merge_min, stallms,
-		    lsm_tree->chunk_fill_ms));
-		lsm_tree->merge_aggressiveness = new_aggressive;
-	}
-	return (0);
 }
 
 /*
@@ -423,12 +386,9 @@ __lsm_manager_run_server(WT_SESSION_IMPL *session)
 		TAILQ_FOREACH(lsm_tree, &S2C(session)->lsmqh, q) {
 			if (!F_ISSET(lsm_tree, WT_LSM_TREE_ACTIVE))
 				continue;
-			WT_ERR(__lsm_manager_aggressive_update(
-			    session, lsm_tree));
 			WT_ERR(__wt_epoch(session, &now));
 			pushms = lsm_tree->work_push_ts.tv_sec == 0 ? 0 :
-			    WT_TIMEDIFF(
-			    now, lsm_tree->work_push_ts) / WT_MILLION;
+			    WT_TIMEDIFF_MS(now, lsm_tree->work_push_ts);
 			fillms = 3 * lsm_tree->chunk_fill_ms;
 			if (fillms == 0)
 				fillms = 10000;
@@ -453,7 +413,8 @@ __lsm_manager_run_server(WT_SESSION_IMPL *session)
 			    lsm_tree->nchunks > 1) ||
 			    (lsm_tree->queue_ref == 0 &&
 			    lsm_tree->nchunks > 1) ||
-			    (lsm_tree->merge_aggressiveness > 3 &&
+			    (lsm_tree->merge_aggressiveness >
+			    WT_LSM_AGGRESSIVE_THRESHOLD &&
 			     !F_ISSET(lsm_tree, WT_LSM_TREE_COMPACTING)) ||
 			    pushms > fillms) {
 				WT_ERR(__wt_lsm_manager_push_entry(
@@ -464,7 +425,8 @@ __lsm_manager_run_server(WT_SESSION_IMPL *session)
 				    session, WT_LSM_WORK_FLUSH, 0, lsm_tree));
 				WT_ERR(__wt_lsm_manager_push_entry(
 				    session, WT_LSM_WORK_BLOOM, 0, lsm_tree));
-				WT_ERR(__wt_verbose(session, WT_VERB_LSM,
+				WT_ERR(__wt_verbose(session,
+				    WT_VERB_LSM_MANAGER,
 				    "MGR %s: queue %d mod %d nchunks %d"
 				    " flags 0x%x aggressive %d pushms %" PRIu64
 				    " fillms %" PRIu64,
@@ -647,8 +609,10 @@ int
 __wt_lsm_manager_push_entry(WT_SESSION_IMPL *session,
     uint32_t type, uint32_t flags, WT_LSM_TREE *lsm_tree)
 {
+	WT_DECL_RET;
 	WT_LSM_MANAGER *manager;
 	WT_LSM_WORK_UNIT *entry;
+	bool pushed;
 
 	manager = &S2C(session)->lsm_manager;
 
@@ -667,13 +631,27 @@ __wt_lsm_manager_push_entry(WT_SESSION_IMPL *session,
 		break;
 	}
 
-	WT_RET(__wt_epoch(session, &lsm_tree->work_push_ts));
+	/*
+	 * Don't allow any work units unless a tree is active, this avoids
+	 * races on shutdown between clearing out queues and pushing new
+	 * work units.
+	 *
+	 * Increment the queue reference before checking the flag since
+	 * on close, the flag is cleared and then the queue reference count
+	 * is checked.
+	 */
+	(void)__wt_atomic_add32(&lsm_tree->queue_ref, 1);
+	if (!F_ISSET(lsm_tree, WT_LSM_TREE_ACTIVE)) {
+		(void)__wt_atomic_sub32(&lsm_tree->queue_ref, 1);
+		return (0);
+	}
 
-	WT_RET(__wt_calloc_one(session, &entry));
+	pushed = false;
+	WT_ERR(__wt_epoch(session, &lsm_tree->work_push_ts));
+	WT_ERR(__wt_calloc_one(session, &entry));
 	entry->type = type;
 	entry->flags = flags;
 	entry->lsm_tree = lsm_tree;
-	(void)__wt_atomic_add32(&lsm_tree->queue_ref, 1);
 	WT_STAT_FAST_CONN_INCR(session, lsm_work_units_created);
 
 	if (type == WT_LSM_WORK_SWITCH)
@@ -685,8 +663,12 @@ __wt_lsm_manager_push_entry(WT_SESSION_IMPL *session,
 	else
 		LSM_PUSH_ENTRY(&manager->appqh,
 		    &manager->app_lock, lsm_work_queue_app);
+	pushed = true;
 
-	WT_RET(__wt_cond_signal(session, manager->work_cond));
-
+	WT_ERR(__wt_cond_signal(session, manager->work_cond));
 	return (0);
+err:
+	if (!pushed)
+		(void)__wt_atomic_sub32(&lsm_tree->queue_ref, 1);
+	return (ret);
 }

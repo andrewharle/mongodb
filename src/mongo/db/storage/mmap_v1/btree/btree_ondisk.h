@@ -181,8 +181,10 @@ struct BtreeBucketV0 {
 };
 
 // BtreeBucketV0 is part of the on-disk format, so it should never be changed
-BOOST_STATIC_ASSERT(sizeof(BtreeBucketV0) - sizeof(static_cast<BtreeBucketV0*>(NULL)->data) ==
-                    BtreeBucketV0::HeaderSize);
+static_assert(sizeof(BtreeBucketV0) - sizeof(static_cast<BtreeBucketV0*>(NULL)->data) ==
+                  BtreeBucketV0::HeaderSize,
+              "sizeof(BtreeBucketV0) - sizeof(static_cast<BtreeBucketV0*>(NULL)->data) == "
+              "BtreeBucketV0::HeaderSize");
 
 /**
  * A variant of DiskLoc Used by the V1 bucket type.
@@ -322,8 +324,10 @@ struct BtreeBucketV1 {
 };
 
 // BtreeBucketV1 is part of the on-disk format, so it should never be changed
-BOOST_STATIC_ASSERT(sizeof(BtreeBucketV1) - sizeof(static_cast<BtreeBucketV1*>(NULL)->data) ==
-                    BtreeBucketV1::HeaderSize);
+static_assert(sizeof(BtreeBucketV1) - sizeof(static_cast<BtreeBucketV1*>(NULL)->data) ==
+                  BtreeBucketV1::HeaderSize,
+              "sizeof(BtreeBucketV1) - sizeof(static_cast<BtreeBucketV1*>(NULL)->data) == "
+              "BtreeBucketV1::HeaderSize");
 
 enum Flags { Packed = 1 };
 
@@ -359,7 +363,7 @@ struct BtreeLayoutV1 {
     typedef BtreeBucketV1 BucketType;
 
     enum {
-        BucketSize = 8192 - 16,  // The -16 is to leave room for the Record header
+        BucketSize = 8192 - 16,  // The -16 is to leave room for the MmapV1RecordHeader header
         BucketBodySize = BucketSize - BucketType::HeaderSize
     };
 

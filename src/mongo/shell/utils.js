@@ -19,6 +19,22 @@ function reconnect(db) {
                 });
 };
 
+function _getErrorWithCode(codeOrObj, message) {
+    var e = new Error(message);
+    if (codeOrObj != undefined) {
+        if (codeOrObj.writeError) {
+            e.code = codeOrObj.writeError.code;
+        } else if (codeOrObj.code) {
+            e.code = codeOrObj.code;
+        } else {
+            // At this point assume codeOrObj is a number type
+            e.code = codeOrObj;
+        }
+    }
+
+    return e;
+}
+
 // Please consider using bsonWoCompare instead of this as much as possible.
 friendlyEqual = function( a , b ){
     if ( a == b )
@@ -119,6 +135,23 @@ shellPrint = function( x ){
     }
 }
 
+print.captureAllOutput = function (fn, args) {
+    var res = {};
+    res.output = [];
+    var __orig_print = print;
+    print = function () {
+        Array.prototype.push.apply(res.output, Array.prototype.slice.call(arguments).join(" ").split("\n"));
+    };
+    try {
+        res.result = fn.apply(undefined, args);
+    }
+    finally {
+        // Stop capturing print() output
+        print = __orig_print;
+    }
+    return res;
+};
+
 if ( typeof TestData == "undefined" ){
     TestData = undefined
 }
@@ -158,8 +191,19 @@ jsTestOptions = function(){
                               authMechanism : TestData.authMechanism,
                               adminUser : TestData.adminUser || "admin",
                               adminPassword : TestData.adminPassword || "password",
-                              useSSL : TestData.useSSL,
-                              useX509 : TestData.useX509});
+                              useLegacyConfigServers: TestData.useLegacyConfigServers || false,
+                              useLegacyReplicationProtocol:
+                                    TestData.useLegacyReplicationProtocol || false,
+                              enableMajorityReadConcern: TestData.enableMajorityReadConcern,
+                              enableEncryption: TestData.enableEncryption,
+                              encryptionKeyFile: TestData.encryptionKeyFile,
+                              auditDestination: TestData.auditDestination,
+                              minPort: TestData.minPort,
+                              maxPort: TestData.maxPort,
+                              // Note: does not support the array version
+                              mongosBinVersion: TestData.mongosBinVersion || "",
+                            }
+                        );
     }
     return _jsTestOptions;
 }
@@ -195,7 +239,7 @@ jsTest.randomize = function( seed ) {
 }
 
 jsTest.authenticate = function(conn) {
-    if (!jsTest.options().auth && !jsTest.options().keyFile && !jsTest.options().useX509) {
+    if (!jsTest.options().auth && !jsTest.options().keyFile) {
         conn.authenticated = true;
         return true;
     }
@@ -243,6 +287,21 @@ jsTest.isMongos = function(conn) {
 
 defaultPrompt = function() {
     var status = db.getMongo().authStatus;
+    var prefix = db.getMongo().promptPrefix;
+
+    if (typeof prefix == 'undefined') {
+        prefix = "";
+        var buildInfo = db.runCommand({buildInfo: 1});
+        try {
+            if (buildInfo.modules.indexOf("enterprise") > -1) {
+                prefix = "MongoDB Enterprise "
+            }
+        } catch (e) {
+            // Don't do anything here. Just throw the error away.
+        }
+        db.getMongo().promptPrefix = prefix;
+    }
+
     try {
         // try to use repl set prompt -- no status or auth detected yet
         if (!status || !status.authRequired) {
@@ -250,7 +309,7 @@ defaultPrompt = function() {
                 var prompt = replSetMemberStatePrompt();
                 // set our status that it was good
                 db.getMongo().authStatus = {replSetGetStatus:true, isMaster: true};
-                return prompt;
+                return prefix + prompt;
             } catch (e) {
                 // don't have permission to run that, or requires auth
                 //print(e);
@@ -266,7 +325,7 @@ defaultPrompt = function() {
                 // set our status that it was good
                 status.replSetGetStatus = true;
                 db.getMongo().authStatus = status;
-                return prompt;
+                return prefix + prompt;
             } catch (e) {
                 // don't have permission to run that, or requires auth
                 //print(e);
@@ -281,7 +340,7 @@ defaultPrompt = function() {
                 var prompt = isMasterStatePrompt();
                 status.isMaster = true;
                 db.getMongo().authStatus = status;
-                return prompt;
+                return prefix + prompt;
             } catch (e) {
                 status.authRequired = true;
                 status.isMaster = false;
@@ -294,7 +353,7 @@ defaultPrompt = function() {
     }
 
     db.getMongo().authStatus = status;
-    return "> ";
+    return prefix + "> ";
 }
 
 replSetMemberStatePrompt = function() {
@@ -317,7 +376,7 @@ replSetMemberStatePrompt = function() {
          if ( info && info.length < 20 ) {
              state = info; // "mongos", "configsvr"
          } else {
-             throw Error("Failed:" + info);
+             throw _getErrorWithCode(stateInfo, "Failed:" + info);
          }
     }
     return state + '> ';
@@ -347,7 +406,7 @@ isMasterStatePrompt = function() {
         }
         state = state + role;
     } else {
-        throw Error("Failed: " + tojson(isMaster));
+        throw _getErrorWithCode(isMaster, "Failed: " + tojson(isMaster));
     }
     return state + '> ';
 }
@@ -360,6 +419,11 @@ if (typeof(_useWriteCommandsDefault) == 'undefined') {
 if (typeof(_writeMode) == 'undefined') {
     // This is for cases when the v8 engine is used other than the mongo shell, like map reduce.
     _writeMode = function() { return "commands"; };
+};
+
+if (typeof(_readMode) == 'undefined') {
+    // This is for cases when the v8 engine is used other than the mongo shell, like map reduce.
+    _readMode = function() { return "legacy"; };
 };
 
 shellPrintHelper = function (x) {
@@ -387,6 +451,9 @@ shellPrintHelper = function (x) {
         print("null");
         return;
     }
+
+    if (x === MinKey || x === MaxKey)
+        return x.tojson();
 
     if (typeof x != "object")
         return print(x);
@@ -424,6 +491,9 @@ shellAutocomplete = function ( /*prefix*/ ) { // outer scope function called on 
     builtinMethods[BinData] = "hex base64 length subtype".split(' ');
 
     var extraGlobals = "Infinity NaN undefined null true false decodeURI decodeURIComponent encodeURI encodeURIComponent escape eval isFinite isNaN parseFloat parseInt unescape Array Boolean Date Math Number RegExp String print load gc MinKey MaxKey Mongo NumberInt NumberLong ObjectId DBPointer UUID BinData HexData MD5 Map Timestamp JSON".split( ' ' );
+    if (typeof NumberDecimal !== 'undefined') {
+        extraGlobals[extraGlobals.length] = "NumberDecimal";
+    }
 
     var isPrivate = function( name ) {
         if ( shellAutocomplete.showPrivate ) return false;
@@ -745,7 +815,7 @@ Math.sigFig = function( x , N ){
 Random = function() {}
 
 // set random seed
-Random.srand = function( s ) { _srand( s ); }
+Random.srand = function( s ) { return _srand( s ); }
 
 // random number 0 <= r < 1
 Random.rand = function() { return _rand(); }
@@ -754,9 +824,8 @@ Random.rand = function() { return _rand(); }
 Random.randInt = function( n ) { return Math.floor( Random.rand() * n ); }
 
 Random.setRandomSeed = function( s ) {
-    s = s || new Date().getTime();
-    print( "setting random seed: " + s );
-    Random.srand( s );
+    var seed = Random.srand( s );
+    print("setting random seed: " + seed);
 }
 
 // generate a random value from the exponential distribution with the specified mean
@@ -991,6 +1060,11 @@ rs.add = function (hostport, arb) {
         if (arb)
             cfg.arbiterOnly = true;
     }
+    else if (arb == true) {
+        throw Error("Expected first parameter to be a host-and-port string of arbiter, but got " +
+                    tojson(hostport));
+    }
+
     if (cfg._id == null){
         cfg._id = max+1;
     }
@@ -1150,16 +1224,8 @@ help = shellHelper.help = function (x) {
         return;
     }
     else if (x == "test") {
-        print("\tstartMongodEmpty(args)        DELETES DATA DIR and then starts mongod");
+        print("\tMongoRunner.runMongod(args)   DELETES DATA DIR and then starts mongod");
         print("\t                              returns a connection to the new server");
-        print("\tstartMongodTest(port,dir,options)");
-        print("\t                              DELETES DATA DIR");
-        print("\t                              automatically picks port #s starting at 27000 and increasing");
-        print("\t                              or you can specify the port as the first arg");
-        print("\t                              dir is /data/db/<port>/ if not specified as the 2nd arg");
-        print("\t                              returns a connection to the new server");
-        print("\tresetDbpath(dirpathstr)       deletes everything under the dir specified including subdirs");
-        print("\tstopMongoProgram(port[, signal])");
         return;
     }
     else if (x == "") {

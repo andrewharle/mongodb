@@ -31,15 +31,17 @@
 
 #pragma once
 
-#include "mongo/util/mmap.h"
-#include "mongo/util/paths.h"
+#include "mongo/db/storage/mmap_v1/mmap.h"
+#include "mongo/db/storage/paths.h"
+#include "mongo/stdx/mutex.h"
 
 namespace mongo {
 
-/** DurableMappedFile adds some layers atop memory mapped files - specifically our handling of
+/**
+ * DurableMappedFile adds some layers atop memory mapped files - specifically our handling of
  * private views & such. if you don't care about journaling/durability (temp sort files & such) use
  * MemoryMappedFile class, not this.
-*/
+ */
 class DurableMappedFile : private MemoryMappedFile {
 protected:
     virtual void* viewForFlushing() {
@@ -219,7 +221,7 @@ public:
     DurableMappedFile* find(void* p, /*out*/ size_t& ofs);
 
     /** for doing many finds in a row with one lock operation */
-    mutex& _mutex() {
+    stdx::mutex& _mutex() {
         return _m;
     }
 
@@ -250,7 +252,7 @@ private:
     //  Protects internal consistency of data structure
     // Lock Ordering:
     //  Must be taken before MapViewMutex if both are taken to prevent deadlocks
-    mutex _m;
+    stdx::mutex _m;
     std::map<void*, DurableMappedFile*> _views;
 
 #ifdef _WIN32

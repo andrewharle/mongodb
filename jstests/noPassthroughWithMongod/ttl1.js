@@ -47,7 +47,7 @@ assert.eq(t.count(), 30);
 var loggedWarning = false;
 var log = db.adminCommand({getLog: "global"}).log;
 var msg = RegExp("ttl indexes require the expireAfterSeconds" +
-                 " field to be numeric but received a type of:");
+                 " field to be numeric but received a type of");
 assertEntryMatches(log, msg);
 
 // Part 2
@@ -56,10 +56,13 @@ t.ensureIndex( { x : 1 } , { expireAfterSeconds : 20000 } );
 assert.soon(
     function() {
         return t.count() < 30;
-    }, "TTL index on x didn't delete" , 70 * 1000
-);
+    }, "TTL index on x didn't delete" , 70 * 1000);
 
-assert.eq( 0 , t.find( { x : { $lt : new Date( now - 20000000 ) } } ).count() );
+// We know the TTL thread has started deleting. Wait a few seconds to give it a chance to finish.
+assert.soon(
+    function() {
+        return t.find( { x : { $lt : new Date( now - ( 20000 * 1000 ) ) } } ).count() === 0;
+   }, "TTL index on x didn't finish deleting", 5 * 1000);
 assert.eq( 12 , t.count() );
 
 assert.lte( 18, db.serverStatus().metrics.ttl.deletedDocuments );
@@ -71,8 +74,10 @@ t.ensureIndex( { y : 1 } , { expireAfterSeconds : 10000 } );
 assert.soon(
     function() {
         return t.count() < 12;
-    }, "TTL index on y didn't delete" , 70 * 1000
-);
+    }, "TTL index on y didn't delete" , 70 * 1000);
 
-assert.eq( 0 , t.find( { y : { $lt : new Date( now - 10000000 ) } } ).count() );
+assert.soon(
+    function() {
+        return t.find( { y : { $lt : new Date( now - ( 10000 * 1000 ) ) } } ).count() === 0;
+    }, "TTL index on y didn't finish deleting", 5 * 1000);
 assert.eq( 9 , t.count() );

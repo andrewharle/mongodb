@@ -30,7 +30,6 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
 #include <list>
 #include <string>
 
@@ -60,14 +59,14 @@ public:
 
     void init(OperationContext* txn);
 
-    void add_ns(OperationContext* txn, const StringData& ns, const DiskLoc& loc, bool capped);
-    void add_ns(OperationContext* txn, const StringData& ns, const NamespaceDetails* details);
+    void add_ns(OperationContext* txn, StringData ns, const DiskLoc& loc, bool capped);
+    void add_ns(OperationContext* txn, StringData ns, const NamespaceDetails* details);
     void add_ns(OperationContext* txn, const Namespace& ns, const NamespaceDetails* details);
 
-    NamespaceDetails* details(const StringData& ns) const;
+    NamespaceDetails* details(StringData ns) const;
     NamespaceDetails* details(const Namespace& ns) const;
 
-    void kill_ns(OperationContext* txn, const StringData& ns);
+    void kill_ns(OperationContext* txn, StringData ns);
 
     bool allocated() const {
         return _ht.get() != 0;
@@ -88,6 +87,6 @@ private:
     const std::string _database;
 
     DurableMappedFile _f;
-    boost::scoped_ptr<NamespaceHashTable> _ht;
+    std::unique_ptr<NamespaceHashTable> _ht;
 };
 }

@@ -2,20 +2,24 @@
 // this is also a test of saveState() as that will get exercised by the update
 
 function f(variant, quickCommits, paranoid) {
-    var path = MongoRunner.dataDir + "/closeall";
-    var path2 = MongoRunner.dataDir + "/closeall_slave";
     var ourdb = "closealltest";
 
     print("closeall.js start mongod variant:" + variant + "." + quickCommits + "." + paranoid);
     var options = (paranoid==1 ? 8 : 0); // 8 is DurParanoid
-    print("closeall.js --durOptions " + options);
+    print("closeall.js --journalOptions " + options);
     var N = 1000;
     if (options) 
         N = 300;
 
     // use replication to exercise that code too with a close, and also to test local.sources with a close
-    var conn = startMongodEmpty("--port", 30001, "--dbpath", path, "--dur", "--durOptions", options, "--master", "--oplogSize", 64);
-    var connSlave = startMongodEmpty("--port", 30002, "--dbpath", path2, "--dur", "--durOptions", options, "--slave", "--source", "localhost:30001");
+    var conn = MongoRunner.runMongod({journal: "",
+                                      journalOptions: options + "",
+                                      master: "",
+                                      oplogSize: 64});
+    var connSlave = MongoRunner.runMongod({journal: "",
+                                           journalOptions: options + "",
+                                           slave: "",
+                                           source: "localhost:" + conn.port});
 
     var slave = connSlave.getDB(ourdb);
 
@@ -35,17 +39,18 @@ function f(variant, quickCommits, paranoid) {
     print("initial sync done")
 
     var writeOps = startParallelShell('var coll = db.getSiblingDB("' + ourdb + '").foo; \
-                                       var bulk = coll.initializeUnorderedBulkOp(); \
                                        for( var i = 0; i < ' + N + '; i++ ) { \
+                                           var bulk = coll.initializeUnorderedBulkOp(); \
                                            bulk.insert({ x: 1 }); \
                                            if ( i % 7 == 0 ) \
                                                bulk.insert({ x: 99, y: 2 }); \
                                            if ( i % 49 == 0 ) \
                                                bulk.find({ x: 99 }).update( \
-                                                   { a: 1, b: 2, c: 3, d: 4 }); \
+                                                   { $set: { a: 1, b: 2, c: 3, d: 4 }}); \
                                            if( i == 800 ) \
                                                coll.ensureIndex({ x: 1 }); \
-                                       }', 30001);
+                                           assert.writeOK(bulk.execute()); \
+                                       }', conn.port);
 
     for( var i = 0; i < N; i++ ) {
         var res = null;
@@ -76,14 +81,14 @@ function f(variant, quickCommits, paranoid) {
         assert( res.ok, "dropDatabase res.ok=false");
     }
 
+    writeOps();
+
     print("closeall.js end test loop.  slave.foo.count:");
     print(slave.foo.count());
 
     print("closeall.js shutting down servers");
-    stopMongod(30002);
-    stopMongod(30001);
-
-    writeOps();
+    MongoRunner.stopMongod(connSlave);
+    MongoRunner.stopMongod(conn);
 }
 
 // Skip this test on 32-bit Windows (unfixable failures in MapViewOfFileEx)

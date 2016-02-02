@@ -34,7 +34,7 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/storage_options.h"
+#include "mongo/db/storage/storage_options.h"
 #include "mongo/util/mongoutils/str.h"
 #include "mongo/util/string_map.h"
 
@@ -49,16 +49,72 @@ class NamespaceDetails;
 class OperationContext;
 
 /**
- * Database represents a database database
- * Each database database has its own set of files -- dbname.ns, dbname.0, dbname.1, ...
- * NOT memory mapped
-*/
+ * Represents a logical database containing Collections.
+ *
+ * The semantics for a const Database are that you can mutate individual collections but not add or
+ * remove them.
+ */
 class Database {
 public:
-    Database(OperationContext* txn, const StringData& name, DatabaseCatalogEntry* dbEntry);
+    typedef StringMap<Collection*> CollectionMap;
+
+    /**
+     * Iterating over a Database yields Collection* pointers.
+     */
+    class iterator {
+    public:
+        using iterator_category = std::forward_iterator_tag;
+        using value_type = Collection*;
+        using pointer = const value_type*;
+        using reference = const value_type&;
+        using difference_type = ptrdiff_t;
+
+        iterator() = default;
+        iterator(CollectionMap::const_iterator it) : _it(it) {}
+
+        reference operator*() const {
+            return _it->second;
+        }
+
+        pointer operator->() const {
+            return &_it->second;
+        }
+
+        bool operator==(const iterator& other) {
+            return _it == other._it;
+        }
+
+        bool operator!=(const iterator& other) {
+            return _it != other._it;
+        }
+
+        iterator& operator++() {
+            ++_it;
+            return *this;
+        }
+
+        iterator operator++(int) {
+            auto oldPosition = *this;
+            ++_it;
+            return oldPosition;
+        }
+
+    private:
+        CollectionMap::const_iterator _it;
+    };
+
+    Database(OperationContext* txn, StringData name, DatabaseCatalogEntry* dbEntry);
 
     // must call close first
     ~Database();
+
+    iterator begin() const {
+        return iterator(_collections.begin());
+    }
+
+    iterator end() const {
+        return iterator(_collections.end());
+    }
 
     // closes files and other cleanup see below.
     void close(OperationContext* txn);
@@ -88,28 +144,27 @@ public:
 
     const DatabaseCatalogEntry* getDatabaseCatalogEntry() const;
 
-    Status dropCollection(OperationContext* txn, const StringData& fullns);
+    Status dropCollection(OperationContext* txn, StringData fullns);
 
     Collection* createCollection(OperationContext* txn,
-                                 const StringData& ns,
+                                 StringData ns,
                                  const CollectionOptions& options = CollectionOptions(),
-                                 bool allocateSpace = true,
                                  bool createDefaultIndexes = true);
 
     /**
      * @param ns - this is fully qualified, which is maybe not ideal ???
      */
-    Collection* getCollection(const StringData& ns) const;
+    Collection* getCollection(StringData ns) const;
 
     Collection* getCollection(const NamespaceString& ns) const {
         return getCollection(ns.ns());
     }
 
-    Collection* getOrCreateCollection(OperationContext* txn, const StringData& ns);
+    Collection* getOrCreateCollection(OperationContext* txn, StringData ns);
 
     Status renameCollection(OperationContext* txn,
-                            const StringData& fromNS,
-                            const StringData& toNS,
+                            StringData fromNS,
+                            StringData toNS,
                             bool stayTemp);
 
     /**
@@ -121,7 +176,7 @@ public:
     static std::string duplicateUncasedName(const std::string& name,
                                             std::set<std::string>* duplicates = 0);
 
-    static Status validateDBName(const StringData& dbname);
+    static Status validateDBName(StringData dbname);
 
     const std::string& getSystemIndexesName() const {
         return _indexesName;
@@ -135,9 +190,13 @@ private:
      * Note: This does not add the collection to _collections map, that must be done
      * by the caller, who takes onership of the Collection*
      */
-    Collection* _getOrCreateCollectionInstance(OperationContext* txn, const StringData& fullns);
+    Collection* _getOrCreateCollectionInstance(OperationContext* txn, StringData fullns);
 
-    void _clearCollectionCache(OperationContext* txn, const StringData& fullns);
+    /**
+     * Deregisters and invalidates all cursors on collection 'fullns'.  Callers must specify
+     * 'reason' for why the cache is being cleared.
+     */
+    void _clearCollectionCache(OperationContext* txn, StringData fullns, const std::string& reason);
 
     class AddCollectionChange;
     class RemoveCollectionChange;
@@ -151,10 +210,6 @@ private:
 
     int _profile;  // 0=off.
 
-    // TODO: make sure deletes go through
-    // this in some ways is a dupe of _namespaceIndex
-    // but it points to a much more useful data structure
-    typedef StringMap<Collection*> CollectionMap;
     CollectionMap _collections;
 
     friend class Collection;
@@ -168,9 +223,8 @@ void dropAllDatabasesExceptLocal(OperationContext* txn);
 
 Status userCreateNS(OperationContext* txn,
                     Database* db,
-                    const StringData& ns,
+                    StringData ns,
                     BSONObj options,
-                    bool logForReplication,
                     bool createDefaultIndexes = true);
 
 }  // namespace mongo

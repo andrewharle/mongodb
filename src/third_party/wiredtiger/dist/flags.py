@@ -8,13 +8,6 @@ flags = {
 ###################################################
 # Internal routine flag declarations
 ###################################################
-    'cache_flush' : [
-        'SYNC_CHECKPOINT',
-        'SYNC_CLOSE',
-        'SYNC_DISCARD',
-        'SYNC_DISCARD_FORCE',
-        'SYNC_WRITE_LEAVES',
-    ],
     'file_types' : [
         'FILE_TYPE_CHECKPOINT',
         'FILE_TYPE_DATA',
@@ -29,9 +22,11 @@ flags = {
         'LOGSCAN_RECOVER',
     ],
     'log_write' : [
+        'LOG_BACKGROUND',
         'LOG_DSYNC',
         'LOG_FLUSH',
         'LOG_FSYNC',
+        'LOG_SYNC_ENABLED',
     ],
     'page_read' : [
         'READ_CACHE',
@@ -42,13 +37,16 @@ flags = {
         'READ_NO_WAIT',
         'READ_PREV',
         'READ_SKIP_INTL',
+        'READ_SKIP_LEAF',
         'READ_TRUNCATE',
         'READ_WONT_NEED',
     ],
     'rec_write' : [
+        'EVICT_IN_MEMORY',
+        'EVICT_LOOKASIDE',
+        'EVICT_UPDATE_RESTORE',
         'EVICTING',
-        'SKIP_UPDATE_ERR',
-        'SKIP_UPDATE_RESTORE',
+        'VISIBILITY_ERR',
     ],
     'txn_log_checkpoint' : [
         'TXN_LOG_CKPT_CLEANUP',
@@ -67,6 +65,7 @@ flags = {
         'VERB_FILEOPS',
         'VERB_LOG',
         'VERB_LSM',
+        'VERB_LSM_MANAGER',
         'VERB_METADATA',
         'VERB_MUTEX',
         'VERB_OVERFLOW',
@@ -91,6 +90,8 @@ flags = {
         'CONN_CKPT_SYNC',
         'CONN_CLOSING',
         'CONN_EVICTION_RUN',
+        'CONN_IN_MEMORY',
+        'CONN_LAS_OPEN',
         'CONN_LEAK_MEMORY',
         'CONN_LOG_SERVER_RUN',
         'CONN_LSM_MERGE',
@@ -106,18 +107,21 @@ flags = {
     'session' : [
         'SESSION_CAN_WAIT',
         'SESSION_CLEAR_EVICT_WALK',
-        'SESSION_DISCARD_FORCE',
         'SESSION_INTERNAL',
+        'SESSION_LOCKED_CHECKPOINT',
         'SESSION_LOCKED_HANDLE_LIST',
         'SESSION_LOCKED_SCHEMA',
+        'SESSION_LOCKED_SLOT',
         'SESSION_LOCKED_TABLE',
+        'SESSION_LOCKED_TURTLE',
         'SESSION_LOGGING_INMEM',
+        'SESSION_LOOKASIDE_CURSOR',
         'SESSION_NO_CACHE',
-        'SESSION_NO_CACHE_CHECK',
         'SESSION_NO_DATA_HANDLES',
+        'SESSION_NO_EVICTION',
         'SESSION_NO_LOGGING',
         'SESSION_NO_SCHEMA_LOCK',
-        'SESSION_SALVAGE_CORRUPT_OK',
+        'SESSION_QUIET_CORRUPT_FILE',
         'SESSION_SERVER_ASYNC',
     ],
 }

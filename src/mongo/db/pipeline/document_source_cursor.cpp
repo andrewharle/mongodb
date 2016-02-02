@@ -30,22 +30,21 @@
 
 #include "mongo/db/pipeline/document_source.h"
 
-#include <boost/shared_ptr.hpp>
 
 #include "mongo/db/catalog/database_holder.h"
+#include "mongo/db/db_raii.h"
 #include "mongo/db/exec/working_set_common.h"
 #include "mongo/db/instance.h"
 #include "mongo/db/pipeline/document.h"
 #include "mongo/db/query/explain.h"
-#include "mongo/db/query/find_constants.h"
-#include "mongo/db/storage_options.h"
+#include "mongo/db/query/find_common.h"
+#include "mongo/db/storage/storage_options.h"
 #include "mongo/s/d_state.h"
-
 
 namespace mongo {
 
 using boost::intrusive_ptr;
-using boost::shared_ptr;
+using std::shared_ptr;
 using std::string;
 
 DocumentSourceCursor::~DocumentSourceCursor() {
@@ -89,7 +88,7 @@ void DocumentSourceCursor::loadBatch() {
     const NamespaceString nss(_ns);
     AutoGetCollectionForRead autoColl(pExpCtx->opCtx, nss);
 
-    _exec->restoreState(pExpCtx->opCtx);
+    _exec->restoreState();
 
     int memUsageBytes = 0;
     BSONObj obj;
@@ -110,7 +109,7 @@ void DocumentSourceCursor::loadBatch() {
 
         memUsageBytes += _currentBatch.back().getApproximateSize();
 
-        if (memUsageBytes > MaxBytesToReturnToClientAtOnce) {
+        if (memUsageBytes > FindCommon::kMaxBytesToReturnToClientAtOnce) {
             // End this batch and prepare PlanExecutor for yielding.
             _exec->saveState();
             return;
@@ -121,21 +120,19 @@ void DocumentSourceCursor::loadBatch() {
     // dispose since we want to keep the _currentBatch.
     _exec.reset();
 
-    uassert(
-        16028, "collection or index disappeared when cursor yielded", state != PlanExecutor::DEAD);
+    uassert(16028,
+            str::stream() << "collection or index disappeared when cursor yielded: "
+                          << WorkingSetCommon::toStatusString(obj),
+            state != PlanExecutor::DEAD);
 
-    uassert(17285,
-            "cursor encountered an error: " + WorkingSetCommon::toStatusString(obj),
-            state != PlanExecutor::FAILURE);
+    uassert(
+        17285,
+        str::stream() << "cursor encountered an error: " << WorkingSetCommon::toStatusString(obj),
+        state != PlanExecutor::FAILURE);
 
     massert(17286,
             str::stream() << "Unexpected return from PlanExecutor::getNext: " << state,
             state == PlanExecutor::IS_EOF || state == PlanExecutor::ADVANCED);
-}
-
-void DocumentSourceCursor::setSource(DocumentSource* pSource) {
-    /* this doesn't take a source */
-    verify(false);
 }
 
 long long DocumentSourceCursor::getLimit() const {
@@ -170,7 +167,7 @@ Value DocumentSourceCursor::serialize(bool explain) const {
 
         massert(17392, "No _exec. Were we disposed before explained?", _exec);
 
-        _exec->restoreState(pExpCtx->opCtx);
+        _exec->restoreState();
         Explain::explainStages(_exec.get(), ExplainCommon::QUERY_PLANNER, &explainBuilder);
         _exec->saveState();
     }
@@ -196,13 +193,13 @@ Value DocumentSourceCursor::serialize(bool explain) const {
 }
 
 DocumentSourceCursor::DocumentSourceCursor(const string& ns,
-                                           const boost::shared_ptr<PlanExecutor>& exec,
+                                           const std::shared_ptr<PlanExecutor>& exec,
                                            const intrusive_ptr<ExpressionContext>& pCtx)
     : DocumentSource(pCtx), _docsAddedToBatches(0), _ns(ns), _exec(exec) {}
 
 intrusive_ptr<DocumentSourceCursor> DocumentSourceCursor::create(
     const string& ns,
-    const boost::shared_ptr<PlanExecutor>& exec,
+    const std::shared_ptr<PlanExecutor>& exec,
     const intrusive_ptr<ExpressionContext>& pExpCtx) {
     return new DocumentSourceCursor(ns, exec, pExpCtx);
 }

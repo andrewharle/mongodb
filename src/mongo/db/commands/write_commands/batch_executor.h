@@ -28,12 +28,10 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
 #include <string>
 
 #include "mongo/base/disallow_copying.h"
 #include "mongo/db/ops/update_request.h"
-#include "mongo/db/write_concern_options.h"
 #include "mongo/s/write_ops/batched_command_request.h"
 #include "mongo/s/write_ops/batched_command_response.h"
 #include "mongo/s/write_ops/batched_delete_document.h"
@@ -44,12 +42,11 @@ namespace mongo {
 
 class BSONObjBuilder;
 class CurOp;
+class LastError;
 class OpCounters;
 class OperationContext;
-struct LastError;
-
-struct WriteOpStats;
 class WriteBatchStats;
+struct WriteOpStats;
 
 /**
  * An instance of WriteBatchExecutor is an object capable of issuing a write batch.
@@ -61,10 +58,7 @@ public:
     // State object used by private execInserts.  TODO: Do not expose this type.
     class ExecInsertsState;
 
-    WriteBatchExecutor(OperationContext* txn,
-                       const WriteConcernOptions& defaultWriteConcern,
-                       OpCounters* opCounters,
-                       LastError* le);
+    WriteBatchExecutor(OperationContext* txn, OpCounters* opCounters, LastError* le);
 
     /**
      * Issues writes with requested write concern.  Fills response with errors if problems
@@ -86,9 +80,19 @@ private:
      * Dispatches to one of the three functions below for DBLock, CurOp, and stats management.
      */
     void bulkExecute(const BatchedCommandRequest& request,
-                     const WriteConcernOptions& writeConcern,
                      std::vector<BatchedUpsertDetail*>* upsertedIds,
                      std::vector<WriteErrorDetail*>* errors);
+
+    /**
+     * Inserts a subset of an insert batch.
+     * Returns a true to discontinue the insert, or false if not.
+     */
+    bool insertMany(WriteBatchExecutor::ExecInsertsState* state,
+                    size_t startIndex,
+                    size_t endIndex,
+                    CurOp* currentOp,
+                    std::vector<WriteErrorDetail*>* errors,
+                    bool ordered);
 
     /**
      * Executes the inserts of an insert batch and returns the write errors.
@@ -97,14 +101,7 @@ private:
      * May execute multiple inserts inside the same DBLock, and/or take the DBLock multiple
      * times.
      */
-    void execInserts(const BatchedCommandRequest& request,
-                     const WriteConcernOptions& writeConcern,
-                     std::vector<WriteErrorDetail*>* errors);
-
-    /**
-     * Executes a single insert from a batch, described in the opaque "state" object.
-     */
-    void execOneInsert(ExecInsertsState* state, WriteErrorDetail** error);
+    void execInserts(const BatchedCommandRequest& request, std::vector<WriteErrorDetail*>* errors);
 
     /**
      * Executes an update item (which may update many documents or upsert), and returns the
@@ -124,27 +121,17 @@ private:
     void execRemove(const BatchItemRef& removeItem, WriteErrorDetail** error);
 
     /**
-     * Helper for incrementing stats on the next CurOp.
-     *
-     * No lock requirements.
-     */
-    void incOpStats(const BatchItemRef& currWrite);
-
-    /**
      * Helper for incrementing stats after each individual write op.
      *
      * No lock requirements (though usually done inside write lock to make stats update look
      * atomic).
      */
-    void incWriteStats(const BatchItemRef& currWrite,
+    void incWriteStats(const BatchedCommandRequest::BatchType opType,
                        const WriteOpStats& stats,
                        const WriteErrorDetail* error,
                        CurOp* currentOp);
 
     OperationContext* _txn;
-
-    // Default write concern, if one isn't provide in the batches.
-    const WriteConcernOptions _defaultWriteConcern;
 
     // OpCounters object to update - needed for stats reporting
     // Not owned here.
@@ -155,7 +142,7 @@ private:
     LastError* _le;
 
     // Stats
-    boost::scoped_ptr<WriteBatchStats> _stats;
+    std::unique_ptr<WriteBatchStats> _stats;
 };
 
 /**

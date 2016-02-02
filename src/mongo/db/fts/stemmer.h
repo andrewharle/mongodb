@@ -47,11 +47,13 @@ namespace fts {
  * running/Running -> run/Run
  */
 class Stemmer {
+    MONGO_DISALLOW_COPYING(Stemmer);
+
 public:
-    Stemmer(const FTSLanguage& language);
+    Stemmer(const FTSLanguage* language);
     ~Stemmer();
 
-    std::string stem(const StringData& word) const;
+    std::string stem(StringData word) const;
 
 private:
     struct sb_stemmer* _stemmer;

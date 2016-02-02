@@ -1,11 +1,8 @@
 (function() {
     'use strict';
 
-    var t = db.create_indexes;
-    t.drop();
-
-    // TODO: revisit this after createIndexes api stabilizes.
     var isMongos = ("isdbgrid" == db.runCommand("ismaster").msg);
+
     var extractResult = function(obj) {
         if (!isMongos) return obj;
 
@@ -34,7 +31,24 @@
         return result;
     };
 
+    var dbTest = db.getSisterDB('create_indexes_db');
+    dbTest.dropDatabase();
 
+    // Database does not exist
+    var collDbNotExist = dbTest.create_indexes_no_db;
+    var res = assert.commandWorked(collDbNotExist.runCommand(
+                                                'createIndexes',
+                                                {indexes: [{key: {x: 1}, name: 'x_1'}]}));
+    res = extractResult( res );
+    assert( res.createdCollectionAutomatically );
+    assert.eq( 1, res.numIndexesBefore );
+    assert.eq( 2, res.numIndexesAfter );
+    assert.isnull(res.note,
+                  'createIndexes.note should not be present in results when adding a new index: ' +
+                  tojson(res));
+
+    // Collection does not exist, but database does
+    var t = dbTest.create_indexes;
     var res = assert.commandWorked(t.runCommand('createIndexes',
                                                 {indexes: [{key: {x: 1}, name: 'x_1'}]}));
     res = extractResult( res );
@@ -45,10 +59,12 @@
                   'createIndexes.note should not be present in results when adding a new index: ' +
                   tojson(res));
 
+    // Both database and collection exist
     res = assert.commandWorked(t.runCommand('createIndexes',
                                             {indexes: [{key: {x: 1}, name: 'x_1'}]}));
     res = extractResult( res );
-    assert.eq( 2, res.numIndexesBefore );
+    assert(!res.createdCollectionAutomatically);
+    assert.eq(2, res.numIndexesBefore);
     assert.eq(2, res.numIndexesAfter,
               'numIndexesAfter missing from createIndexes result when adding a duplicate index: ' +
               tojson(res));
@@ -110,20 +126,12 @@
 
     assert.eq( 6, t.getIndexes().length );
 
-    //
-    // Test that v0 indexes can only be created with mmapv1
-    //
-    res = t.runCommand('createIndexes',
-                       {indexes: [{key: {d: 1}, name: 'd_1', v: 0}]});
+    // Test that v0 indexes cannot be created.
+    res = t.runCommand('createIndexes', {indexes: [{key: {d: 1}, name: 'd_1', v: 0}]});
+    assert.commandFailed(res, 'v0 index creation should fail');
 
-    if (!isMongos) {
-        var status = db.serverStatus();
-        assert.commandWorked(status);
-        if (status.storageEngine.name === 'mmapv1') {
-            assert.commandWorked(res, 'v0 index creation should work for mmapv1');
-        } else {
-            assert.commandFailed(res, 'v0 index creation should fail for non-mmapv1 storage engines');
-        }
-    }
+    // Test that v1 indexes can be created explicitly.
+    res = t.runCommand('createIndexes', {indexes: [{key: {d: 1}, name: 'd_1', v: 1}]});
+    assert.commandWorked(res, 'v1 index creation should succeed');
 
 }());

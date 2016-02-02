@@ -66,12 +66,12 @@ struct JHeader {
     char n1;           // '\n'
     char ts[20];       // ascii timestamp of file generation.  for user reading, not used by code.
     char n2;           // '\n'
-    char dbpath[128];  // path/filename of this file for human reading and diagnostics.  not used by
-                       // code.
+    char dbpath[128];  // path/filename of this file for human reading and diagnostics.  not used
+                       // by code.
     char n3, n4;       // '\n', '\n'
 
-    // unique identifier that will be in each JSectHeader. important as we recycle prealloced files
-    unsigned long long fileId;
+    unsigned long long fileId;  // unique identifier that will be in each JSectHeader.
+                                // important as we recycle prealloced files
 
     char reserved3[8026];  // 8KB total for the file header
     char txt2[2];          // "\n\n" at the end

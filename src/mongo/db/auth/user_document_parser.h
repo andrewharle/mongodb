@@ -47,7 +47,7 @@ public:
 
     Status initializeUserRolesFromUserDocument(User* user,
                                                const BSONObj& privDoc,
-                                               const StringData& dbname) const;
+                                               StringData dbname) const;
 };
 
 class V2UserDocumentParser {

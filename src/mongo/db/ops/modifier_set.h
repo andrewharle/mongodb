@@ -28,7 +28,6 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
 #include <string>
 
 #include "mongo/base/disallow_copying.h"
@@ -69,9 +68,7 @@ public:
      * whether it is an in-place candidate. Otherwise, returns a status describing the
      * error.
      */
-    virtual Status prepare(mutablebson::Element root,
-                           const StringData& matchedField,
-                           ExecInfo* execInfo);
+    virtual Status prepare(mutablebson::Element root, StringData matchedField, ExecInfo* execInfo);
 
     /**
      * Applies the prepared mod over the element 'root' specified in the prepare()
@@ -105,7 +102,7 @@ private:
     // prepare() was issued and until a log() is issued. The document this mod is
     // being prepared against must be live throughout all the calls.
     struct PreparedState;
-    boost::scoped_ptr<PreparedState> _preparedState;
+    std::unique_ptr<PreparedState> _preparedState;
 };
 
 }  // namespace mongo

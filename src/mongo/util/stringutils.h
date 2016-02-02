@@ -31,10 +31,10 @@
 
 #include <ctype.h>
 
+#include <memory>
 #include <string>
 #include <vector>
 
-#include <boost/scoped_array.hpp>
 
 #include "mongo/base/string_data.h"
 
@@ -50,7 +50,7 @@ void joinStringDelim(const std::vector<std::string>& strs, std::string* res, cha
 inline std::string tolowerString(StringData input) {
     std::string::size_type sz = input.size();
 
-    boost::scoped_array<char> line(new char[sz + 1]);
+    std::unique_ptr<char[]> line(new char[sz + 1]);
     char* copy = line.get();
 
     for (std::string::size_type i = 0; i < sz; i++) {
@@ -72,9 +72,9 @@ public:
      * For convenience, character 255 is greater than anything else.
      * @param lexOnly - compare all characters lexically, including digits.
      */
-    static int cmp(const StringData& s1, const StringData& s2, bool lexOnly);
-    int cmp(const StringData& s1, const StringData& s2) const;
-    bool operator()(const StringData& s1, const StringData& s2) const;
+    static int cmp(StringData s1, StringData s2, bool lexOnly);
+    int cmp(StringData s1, StringData s2) const;
+    bool operator()(StringData s1, StringData s2) const;
 
 private:
     bool _lexOnly;

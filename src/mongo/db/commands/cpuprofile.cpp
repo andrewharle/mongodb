@@ -58,6 +58,7 @@
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/db_raii.h"
 #include "mongo/db/jsobj.h"
 
 namespace mongo {
@@ -107,8 +108,7 @@ public:
                      BSONObj& cmdObj,
                      int options,
                      std::string& errmsg,
-                     BSONObjBuilder& result,
-                     bool fromRepl);
+                     BSONObjBuilder& result);
 
     static char const* const commandName;
 } cpuProfilerStartCommandInstance;
@@ -125,8 +125,7 @@ public:
                      BSONObj& cmdObj,
                      int options,
                      std::string& errmsg,
-                     BSONObjBuilder& result,
-                     bool fromRepl);
+                     BSONObjBuilder& result);
 
     static char const* const commandName;
 } cpuProfilerStopCommandInstance;
@@ -139,12 +138,11 @@ bool CpuProfilerStartCommand::run(OperationContext* txn,
                                   BSONObj& cmdObj,
                                   int options,
                                   std::string& errmsg,
-                                  BSONObjBuilder& result,
-                                  bool fromRepl) {
+                                  BSONObjBuilder& result) {
     ScopedTransaction transaction(txn, MODE_IX);
     Lock::DBLock dbXLock(txn->lockState(), db, MODE_X);
     // The lock here is just to prevent concurrency, nothing will write.
-    Client::Context ctx(txn, db);
+    OldClientContext ctx(txn, db);
 
     std::string profileFilename = cmdObj[commandName]["profileFilename"].String();
     if (!::ProfilerStart(profileFilename.c_str())) {
@@ -159,11 +157,10 @@ bool CpuProfilerStopCommand::run(OperationContext* txn,
                                  BSONObj& cmdObj,
                                  int options,
                                  std::string& errmsg,
-                                 BSONObjBuilder& result,
-                                 bool fromRepl) {
+                                 BSONObjBuilder& result) {
     ScopedTransaction transaction(txn, MODE_IX);
     Lock::DBLock dbXLock(txn->lockState(), db, MODE_X);
-    Client::Context ctx(txn, db);
+    OldClientContext ctx(txn, db);
 
     ::ProfilerStop();
     return true;

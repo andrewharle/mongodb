@@ -53,33 +53,27 @@ class MergeSortStageParams;
  * Preconditions: For each field in 'pattern' all inputs in the child must handle a
  * getFieldDotted for that field.
  */
-class MergeSortStage : public PlanStage {
+class MergeSortStage final : public PlanStage {
 public:
-    MergeSortStage(const MergeSortStageParams& params,
+    MergeSortStage(OperationContext* opCtx,
+                   const MergeSortStageParams& params,
                    WorkingSet* ws,
                    const Collection* collection);
-    virtual ~MergeSortStage();
 
     void addChild(PlanStage* child);
 
-    virtual bool isEOF();
-    virtual StageState work(WorkingSetID* out);
+    bool isEOF() final;
+    StageState work(WorkingSetID* out) final;
 
-    virtual void saveState();
-    virtual void restoreState(OperationContext* opCtx);
-    virtual void invalidate(OperationContext* txn, const RecordId& dl, InvalidationType type);
+    void doInvalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) final;
 
-    virtual std::vector<PlanStage*> getChildren() const;
-
-    virtual StageType stageType() const {
+    StageType stageType() const final {
         return STAGE_SORT_MERGE;
     }
 
-    PlanStageStats* getStats();
+    std::unique_ptr<PlanStageStats> getStats();
 
-    virtual const CommonStats* getCommonStats();
-
-    virtual const SpecificStats* getSpecificStats();
+    const SpecificStats* getSpecificStats() const final;
 
     static const char* kStageType;
 
@@ -98,9 +92,6 @@ private:
 
     // Which RecordIds have we seen?
     unordered_set<RecordId, RecordId::Hasher> _seen;
-
-    // Owned by us.  All the children we're reading from.
-    std::vector<PlanStage*> _children;
 
     // In order to pick the next smallest value, we need each child work(...) until it produces
     // a result.  This is the queue of children that haven't given us a result yet.
@@ -149,7 +140,6 @@ private:
     std::list<StageWithValue> _mergingData;
 
     // Stats
-    CommonStats _commonStats;
     MergeSortStats _specificStats;
 };
 

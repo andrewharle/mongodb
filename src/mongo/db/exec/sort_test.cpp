@@ -34,23 +34,24 @@
 
 #include "mongo/db/exec/queued_data_stage.h"
 #include "mongo/db/json.h"
+#include "mongo/stdx/memory.h"
 #include "mongo/unittest/unittest.h"
 
 using namespace mongo;
 
 namespace {
 
-
 TEST(SortStageTest, SortEmptyWorkingSet) {
     WorkingSet ws;
 
     // QueuedDataStage will be owned by SortStage.
-    QueuedDataStage* ms = new QueuedDataStage(&ws);
+    auto queuedDataStage = stdx::make_unique<QueuedDataStage>(nullptr, &ws);
+    auto sortKeyGen = stdx::make_unique<SortKeyGeneratorStage>(
+        nullptr, queuedDataStage.release(), &ws, BSONObj(), BSONObj());
     SortStageParams params;
-    SortStage sort(params, &ws, ms);
+    SortStage sort(nullptr, params, &ws, sortKeyGen.release());
 
     // Check initial EOF state.
-    ASSERT_TRUE(ms->isEOF());
     ASSERT_FALSE(sort.isEOF());
 
     // First call to work() initializes sort key generator.
@@ -87,7 +88,7 @@ void testWork(const char* patternStr,
     WorkingSet ws;
 
     // QueuedDataStage will be owned by SortStage.
-    QueuedDataStage* ms = new QueuedDataStage(&ws);
+    auto queuedDataStage = stdx::make_unique<QueuedDataStage>(nullptr, &ws);
     BSONObj inputObj = fromjson(inputStr);
     BSONElement inputElt = inputObj.getField("input");
     ASSERT(inputElt.isABSONObj());
@@ -95,23 +96,26 @@ void testWork(const char* patternStr,
     while (inputIt.more()) {
         BSONElement elt = inputIt.next();
         ASSERT(elt.isABSONObj());
-        BSONObj obj = elt.embeddedObject();
+        BSONObj obj = elt.embeddedObject().getOwned();
 
         // Insert obj from input array into working set.
-        WorkingSetMember wsm;
-        wsm.state = WorkingSetMember::OWNED_OBJ;
-        wsm.obj = Snapshotted<BSONObj>(SnapshotId(), obj);
-        ms->pushBack(wsm);
+        WorkingSetID id = ws.allocate();
+        WorkingSetMember* wsm = ws.get(id);
+        wsm->obj = Snapshotted<BSONObj>(SnapshotId(), obj);
+        wsm->transitionToOwnedObj();
+        queuedDataStage->pushBack(id);
     }
 
     // Initialize SortStageParams
     // Setting limit to 0 means no limit
     SortStageParams params;
     params.pattern = fromjson(patternStr);
-    params.query = fromjson(queryStr);
     params.limit = limit;
 
-    SortStage sort(params, &ws, ms);
+    auto sortKeyGen = stdx::make_unique<SortKeyGeneratorStage>(
+        nullptr, queuedDataStage.release(), &ws, params.pattern, fromjson(queryStr));
+
+    SortStage sort(nullptr, params, &ws, sortKeyGen.release());
 
     WorkingSetID id = WorkingSet::INVALID_ID;
     PlanStage::StageState state = PlanStage::NEED_TIME;
@@ -121,8 +125,8 @@ void testWork(const char* patternStr,
         state = sort.work(&id);
     }
 
-    // Child's state should be EOF when sort is ready to advance.
-    ASSERT_TRUE(ms->isEOF());
+    // QueuedDataStage's state should be EOF when sort is ready to advance.
+    ASSERT_TRUE(sort.child()->child()->isEOF());
 
     // While there's data to be retrieved, state should be equal to ADVANCED.
     // Insert documents into BSON document in this format:

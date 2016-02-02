@@ -28,7 +28,6 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
 #include <string>
 
 #include "mongo/base/disallow_copying.h"
@@ -58,9 +57,7 @@ public:
      */
     virtual Status init(const BSONElement& modExpr, const Options& opts, bool* positional = NULL);
 
-    virtual Status prepare(mutablebson::Element root,
-                           const StringData& matchedField,
-                           ExecInfo* execInfo);
+    virtual Status prepare(mutablebson::Element root, StringData matchedField, ExecInfo* execInfo);
 
 
     virtual Status apply() const;
@@ -80,7 +77,7 @@ private:
     // The instance of the field in the provided doc.
     // This data is valid after prepare, for use by log and apply
     struct PreparedState;
-    boost::scoped_ptr<PreparedState> _preparedState;
+    std::unique_ptr<PreparedState> _preparedState;
 };
 
 }  // namespace mongo

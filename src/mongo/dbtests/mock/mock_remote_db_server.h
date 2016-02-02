@@ -27,14 +27,13 @@
 
 #pragma once
 
-#include <boost/shared_ptr.hpp>
 #include <string>
 #include <vector>
 
-#include "mongo/bson/bson_field.h"
-#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/client/dbclientinterface.h"
+#include "mongo/db/jsobj.h"
 #include "mongo/platform/unordered_map.h"
+#include "mongo/rpc/unique_message.h"
 #include "mongo/util/concurrency/spin_lock.h"
 
 namespace mongo {
@@ -155,6 +154,12 @@ public:
                     mongo::BSONObj& info,
                     int options = 0);
 
+    rpc::UniqueReply runCommandWithMetadata(InstanceID id,
+                                            StringData database,
+                                            StringData commandName,
+                                            const BSONObj& metadata,
+                                            const BSONObj& commandArgs);
+
     mongo::BSONArray query(InstanceID id,
                            const std::string& ns,
                            mongo::Query query = mongo::Query(),
@@ -212,7 +217,7 @@ private:
      */
     void checkIfUp(InstanceID id) const;
 
-    typedef unordered_map<std::string, boost::shared_ptr<CircularBSONIterator>> CmdToReplyObj;
+    typedef unordered_map<std::string, std::shared_ptr<CircularBSONIterator>> CmdToReplyObj;
     typedef unordered_map<std::string, std::vector<BSONObj>> MockDataMgr;
 
     bool _isRunning;

@@ -30,27 +30,28 @@
  * This file tests db/exec/collection_scan.cpp.
  */
 
-#include <boost/scoped_ptr.hpp>
 
 #include "mongo/client/dbclientcursor.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/database.h"
+#include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/exec/collection_scan.h"
 #include "mongo/db/exec/plan_stage.h"
 #include "mongo/db/json.h"
 #include "mongo/db/matcher/expression_parser.h"
-#include "mongo/db/query/plan_executor.h"
 #include "mongo/db/operation_context_impl.h"
+#include "mongo/db/query/plan_executor.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/dbtests/dbtests.h"
+#include "mongo/stdx/memory.h"
 #include "mongo/util/fail_point_service.h"
 
 namespace QueryStageCollectionScan {
 
-using boost::scoped_ptr;
-using std::auto_ptr;
+using std::unique_ptr;
 using std::vector;
+using stdx::make_unique;
 
 //
 // Stage-specific tests.
@@ -59,7 +60,7 @@ using std::vector;
 class QueryStageCollectionScanBase {
 public:
     QueryStageCollectionScanBase() : _client(&_txn) {
-        Client::WriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_txn, ns());
 
         for (int i = 0; i < numObj(); ++i) {
             BSONObjBuilder bob;
@@ -69,7 +70,7 @@ public:
     }
 
     virtual ~QueryStageCollectionScanBase() {
-        Client::WriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_txn, ns());
         _client.dropCollection(ns());
     }
 
@@ -87,19 +88,19 @@ public:
         params.tailable = false;
 
         // Make the filter.
-        StatusWithMatchExpression swme = MatchExpressionParser::parse(filterObj);
-        verify(swme.isOK());
-        auto_ptr<MatchExpression> filterExpr(swme.getValue());
+        StatusWithMatchExpression statusWithMatcher = MatchExpressionParser::parse(filterObj);
+        verify(statusWithMatcher.isOK());
+        unique_ptr<MatchExpression> filterExpr = std::move(statusWithMatcher.getValue());
 
         // Make a scan and have the runner own it.
-        WorkingSet* ws = new WorkingSet();
-        PlanStage* ps = new CollectionScan(&_txn, params, ws, filterExpr.get());
+        unique_ptr<WorkingSet> ws = make_unique<WorkingSet>();
+        unique_ptr<PlanStage> ps =
+            make_unique<CollectionScan>(&_txn, params, ws.get(), filterExpr.get());
 
-        PlanExecutor* rawExec;
-        Status status = PlanExecutor::make(
-            &_txn, ws, ps, params.collection, PlanExecutor::YIELD_MANUAL, &rawExec);
-        ASSERT_OK(status);
-        boost::scoped_ptr<PlanExecutor> exec(rawExec);
+        auto statusWithPlanExecutor = PlanExecutor::make(
+            &_txn, std::move(ws), std::move(ps), params.collection, PlanExecutor::YIELD_MANUAL);
+        ASSERT_OK(statusWithPlanExecutor.getStatus());
+        unique_ptr<PlanExecutor> exec = std::move(statusWithPlanExecutor.getValue());
 
         // Use the runner to count the number of objects scanned.
         int count = 0;
@@ -119,7 +120,7 @@ public:
         params.direction = direction;
         params.tailable = false;
 
-        scoped_ptr<CollectionScan> scan(new CollectionScan(&_txn, params, &ws, NULL));
+        unique_ptr<CollectionScan> scan(new CollectionScan(&_txn, params, &ws, NULL));
         while (!scan->isEOF()) {
             WorkingSetID id = WorkingSet::INVALID_ID;
             PlanStage::StageState state = scan->work(&id);
@@ -208,14 +209,13 @@ public:
         params.tailable = false;
 
         // Make a scan and have the runner own it.
-        WorkingSet* ws = new WorkingSet();
-        PlanStage* ps = new CollectionScan(&_txn, params, ws, NULL);
+        unique_ptr<WorkingSet> ws = make_unique<WorkingSet>();
+        unique_ptr<PlanStage> ps = make_unique<CollectionScan>(&_txn, params, ws.get(), nullptr);
 
-        PlanExecutor* rawExec;
-        Status status = PlanExecutor::make(
-            &_txn, ws, ps, params.collection, PlanExecutor::YIELD_MANUAL, &rawExec);
-        ASSERT_OK(status);
-        boost::scoped_ptr<PlanExecutor> exec(rawExec);
+        auto statusWithPlanExecutor = PlanExecutor::make(
+            &_txn, std::move(ws), std::move(ps), params.collection, PlanExecutor::YIELD_MANUAL);
+        ASSERT_OK(statusWithPlanExecutor.getStatus());
+        unique_ptr<PlanExecutor> exec = std::move(statusWithPlanExecutor.getValue());
 
         int count = 0;
         for (BSONObj obj; PlanExecutor::ADVANCED == exec->getNext(&obj, NULL);) {
@@ -242,14 +242,13 @@ public:
         params.direction = CollectionScanParams::BACKWARD;
         params.tailable = false;
 
-        WorkingSet* ws = new WorkingSet();
-        PlanStage* ps = new CollectionScan(&_txn, params, ws, NULL);
+        unique_ptr<WorkingSet> ws = make_unique<WorkingSet>();
+        unique_ptr<PlanStage> ps = make_unique<CollectionScan>(&_txn, params, ws.get(), nullptr);
 
-        PlanExecutor* rawExec;
-        Status status = PlanExecutor::make(
-            &_txn, ws, ps, params.collection, PlanExecutor::YIELD_MANUAL, &rawExec);
-        ASSERT_OK(status);
-        boost::scoped_ptr<PlanExecutor> exec(rawExec);
+        auto statusWithPlanExecutor = PlanExecutor::make(
+            &_txn, std::move(ws), std::move(ps), params.collection, PlanExecutor::YIELD_MANUAL);
+        ASSERT_OK(statusWithPlanExecutor.getStatus());
+        unique_ptr<PlanExecutor> exec = std::move(statusWithPlanExecutor.getValue());
 
         int count = 0;
         for (BSONObj obj; PlanExecutor::ADVANCED == exec->getNext(&obj, NULL);) {
@@ -269,7 +268,7 @@ public:
 class QueryStageCollscanInvalidateUpcomingObject : public QueryStageCollectionScanBase {
 public:
     void run() {
-        Client::WriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_txn, ns());
 
         Collection* coll = ctx.getCollection();
 
@@ -284,7 +283,7 @@ public:
         params.tailable = false;
 
         WorkingSet ws;
-        scoped_ptr<CollectionScan> scan(new CollectionScan(&_txn, params, &ws, NULL));
+        unique_ptr<CollectionScan> scan(new CollectionScan(&_txn, params, &ws, NULL));
 
         int count = 0;
         while (count < 10) {
@@ -300,9 +299,13 @@ public:
 
         // Remove locs[count].
         scan->saveState();
-        scan->invalidate(&_txn, locs[count], INVALIDATION_DELETION);
+        {
+            WriteUnitOfWork wunit(&_txn);
+            scan->invalidate(&_txn, locs[count], INVALIDATION_DELETION);
+            wunit.commit();  // to avoid rollback of the invalidate
+        }
         remove(coll->docFor(&_txn, locs[count]).value());
-        scan->restoreState(&_txn);
+        scan->restoreState();
 
         // Skip over locs[count].
         ++count;
@@ -331,7 +334,7 @@ public:
 class QueryStageCollscanInvalidateUpcomingObjectBackward : public QueryStageCollectionScanBase {
 public:
     void run() {
-        Client::WriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_txn, ns());
         Collection* coll = ctx.getCollection();
 
         // Get the RecordIds that would be returned by an in-order scan.
@@ -345,7 +348,7 @@ public:
         params.tailable = false;
 
         WorkingSet ws;
-        scoped_ptr<CollectionScan> scan(new CollectionScan(&_txn, params, &ws, NULL));
+        unique_ptr<CollectionScan> scan(new CollectionScan(&_txn, params, &ws, NULL));
 
         int count = 0;
         while (count < 10) {
@@ -361,9 +364,13 @@ public:
 
         // Remove locs[count].
         scan->saveState();
-        scan->invalidate(&_txn, locs[count], INVALIDATION_DELETION);
+        {
+            WriteUnitOfWork wunit(&_txn);
+            scan->invalidate(&_txn, locs[count], INVALIDATION_DELETION);
+            wunit.commit();  // to avoid rollback of the invalidate
+        }
         remove(coll->docFor(&_txn, locs[count]).value());
-        scan->restoreState(&_txn);
+        scan->restoreState();
 
         // Skip over locs[count].
         ++count;

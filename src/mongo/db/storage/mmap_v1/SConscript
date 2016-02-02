@@ -26,14 +26,37 @@ env.Library(
                "mmap_v1_engine.cpp",
                "mmap_v1_extent_manager.cpp",
                "mmap_v1_init.cpp",
-               "mmap_v1_options.cpp",
                "repair_database.cpp",
              ],
     LIBDEPS = [
         'record_store_v1',
         'record_access_tracker',
-        'btree']
+        'btree',
+        'file_allocator',
+        'logfile',
+        'compress',
+        '$BUILD_DIR/mongo/db/catalog/collection_options',
+        '$BUILD_DIR/mongo/db/storage/paths',
+    ],
+    LIBDEPS_TAGS=[
+        # Many undefined symbols
+        'incomplete',
+    ],
     )
+
+compressEnv = env.Clone()
+compressEnv.InjectThirdPartyIncludePaths(libraries=['snappy'])
+compressEnv
+compressEnv.Library(
+    target='compress',
+    source=[
+        'compress.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/db/storage/paths',
+        '$BUILD_DIR/third_party/shim_snappy',
+    ],
+)
 
 env.Library(
     target= 'extent',
@@ -42,10 +65,47 @@ env.Library(
         'extent_manager.cpp',
         ],
     LIBDEPS= [
-        '$BUILD_DIR/mongo/bson',
-        '$BUILD_DIR/mongo/foundation',
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/util/foundation',
         ]
     )
+
+env.Library(
+    target='file_allocator',
+    source=[
+        'file_allocator.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/db/storage/paths',
+        '$BUILD_DIR/mongo/util/fail_point',
+        '$BUILD_DIR/mongo/util/foundation',
+        '$BUILD_DIR/mongo/util/processinfo',
+    ],
+)
+
+env.Library(
+    target='logfile',
+    source=[
+        'logfile.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/db/storage/paths',
+        'mmap',
+    ],
+)
+
+env.Library(
+    target='mmap',
+    source=[
+        'mmap.cpp',
+        'mmap_${TARGET_OS_FAMILY}.cpp',
+    ],
+    LIBDEPS=[
+        'file_allocator',
+        '$BUILD_DIR/mongo/util/foundation',
+        '$BUILD_DIR/mongo/util/progress_meter',
+    ],
+)
 
 env.Library(
     target= 'record_store_v1',
@@ -59,8 +119,10 @@ env.Library(
         ],
     LIBDEPS= [
         'extent',
-        '$BUILD_DIR/mongo/mongocommon',  # for ProgressMeter
         '$BUILD_DIR/mongo/db/commands/server_status_core',
+        '$BUILD_DIR/mongo/db/service_context',
+        '$BUILD_DIR/mongo/util/concurrency/spin_lock',
+        '$BUILD_DIR/mongo/util/progress_meter',
         ]
     )
 
@@ -69,6 +131,7 @@ env.Library(
     source=['record_store_v1_test_help.cpp',
             ],
     LIBDEPS=[
+        '$BUILD_DIR/mongo/unittest/unittest',
         'record_store_v1'
         ]
     )
@@ -78,6 +141,9 @@ env.Library(
     source=['record_access_tracker.cpp',
             ],
     LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/util/net/network',
+        '$BUILD_DIR/mongo/util/processinfo',
         ]
     )
 
@@ -86,10 +152,8 @@ env.CppUnitTest(
     source=['mmap_v1_init_test.cpp',
             ],
     LIBDEPS=[
-        '$BUILD_DIR/mongo/serveronly',
-        '$BUILD_DIR/mongo/coreserver',
-        '$BUILD_DIR/mongo/coredb',
-        '$BUILD_DIR/mongo/ntservice_mock',
+        '$BUILD_DIR/mongo/db/serveronly',
+        '$BUILD_DIR/mongo/util/ntservice_mock',
         ],
     NO_CRUTCH=True,
     )
@@ -97,18 +161,19 @@ env.CppUnitTest(
 env.CppUnitTest(target = 'record_access_tracker_test',
                 source = ['record_access_tracker_test.cpp'],
                 LIBDEPS = ['record_access_tracker',
-                           '$BUILD_DIR/mongo/processinfo',
-                           '$BUILD_DIR/mongo/network'])
+                           '$BUILD_DIR/mongo/util/processinfo',
+                           '$BUILD_DIR/mongo/util/net/network'])
 
 env.CppUnitTest(target = 'namespace_test',
                 source = ['catalog/namespace_test.cpp'],
-                LIBDEPS = ['$BUILD_DIR/mongo/foundation'])
+                LIBDEPS = ['$BUILD_DIR/mongo/util/foundation'])
 
 env.CppUnitTest(
     target='record_store_v1_simple_test',
     source=['record_store_v1_simple_test.cpp',
             ],
     LIBDEPS=[
+        '$BUILD_DIR/mongo/util/decorable',
         'record_store_v1_test_help'
         ]
     )
@@ -118,6 +183,7 @@ env.CppUnitTest(
     source=['record_store_v1_capped_test.cpp',
             ],
     LIBDEPS=[
+        '$BUILD_DIR/mongo/util/decorable',
         'record_store_v1_test_help'
         ]
     )
@@ -143,7 +209,9 @@ env.Library(
         'btree/key.cpp'
         ],
     LIBDEPS= [
-        '$BUILD_DIR/mongo/bson'
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/service_context',
+        'record_store_v1',
         ]
     )
 
@@ -155,8 +223,7 @@ env.Library(
         ],
     LIBDEPS= [
         'btree',
-        '$BUILD_DIR/mongo/mongocommon',  # for ProgressMeter
-        '$BUILD_DIR/mongo/db/storage/mmap_v1/record_store_v1_test_help',
+        'record_store_v1_test_help',
         ]
     )
 
@@ -165,6 +232,7 @@ env.CppUnitTest(
     source=['btree/btree_logic_test.cpp'
             ],
     LIBDEPS=[
+        '$BUILD_DIR/mongo/util/decorable',
         'btree_test_help'
         ]
     )

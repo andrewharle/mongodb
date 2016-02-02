@@ -30,59 +30,59 @@
 
 #include "mongo/db/storage/sorted_data_interface_test_harness.h"
 
-#include <boost/scoped_ptr.hpp>
+#include <memory>
 
 #include "mongo/db/storage/sorted_data_interface.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo {
 
-using boost::scoped_ptr;
-
 // Add a key using a bulk builder.
 TEST(SortedDataInterface, BuilderAddKey) {
-    scoped_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
-    scoped_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
+    const std::unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT(sorted->isEmpty(opCtx.get()));
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
-        scoped_ptr<SortedDataBuilderInterface> builder(sorted->getBulkBuilder(opCtx.get(), true));
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<SortedDataBuilderInterface> builder(
+            sorted->getBulkBuilder(opCtx.get(), true));
 
         ASSERT_OK(builder->addKey(key1, loc1));
         builder->commit(false);
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(1, sorted->numEntries(opCtx.get()));
     }
 }
 
 // Add a compound key using a bulk builder.
 TEST(SortedDataInterface, BuilderAddCompoundKey) {
-    scoped_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
-    scoped_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
+    const std::unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT(sorted->isEmpty(opCtx.get()));
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
-        scoped_ptr<SortedDataBuilderInterface> builder(sorted->getBulkBuilder(opCtx.get(), true));
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<SortedDataBuilderInterface> builder(
+            sorted->getBulkBuilder(opCtx.get(), true));
 
         ASSERT_OK(builder->addKey(compoundKey1a, loc1));
         builder->commit(false);
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(1, sorted->numEntries(opCtx.get()));
     }
 }
@@ -91,17 +91,18 @@ TEST(SortedDataInterface, BuilderAddCompoundKey) {
 // the returned status is ErrorCodes::DuplicateKey when duplicates are
 // not allowed.
 TEST(SortedDataInterface, BuilderAddSameKey) {
-    scoped_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
-    scoped_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(true));
+    const std::unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(true));
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT(sorted->isEmpty(opCtx.get()));
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
-        scoped_ptr<SortedDataBuilderInterface> builder(sorted->getBulkBuilder(opCtx.get(), false));
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<SortedDataBuilderInterface> builder(
+            sorted->getBulkBuilder(opCtx.get(), false));
 
         ASSERT_OK(builder->addKey(key1, loc1));
         ASSERT_EQUALS(ErrorCodes::DuplicateKey, builder->addKey(key1, loc2));
@@ -109,7 +110,7 @@ TEST(SortedDataInterface, BuilderAddSameKey) {
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(1, sorted->numEntries(opCtx.get()));
     }
 }
@@ -117,17 +118,17 @@ TEST(SortedDataInterface, BuilderAddSameKey) {
 // Add the same key multiple times using a bulk builder and verify that
 // the returned status is OK when duplicates are allowed.
 TEST(SortedDataInterface, BuilderAddSameKeyWithDupsAllowed) {
-    scoped_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
-    scoped_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
+    const std::unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT(sorted->isEmpty(opCtx.get()));
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
-        scoped_ptr<SortedDataBuilderInterface> builder(
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<SortedDataBuilderInterface> builder(
             sorted->getBulkBuilder(opCtx.get(), true /* allow duplicates */));
 
         ASSERT_OK(builder->addKey(key1, loc1));
@@ -136,24 +137,25 @@ TEST(SortedDataInterface, BuilderAddSameKeyWithDupsAllowed) {
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(2, sorted->numEntries(opCtx.get()));
     }
 }
 
 // Add multiple keys using a bulk builder.
 TEST(SortedDataInterface, BuilderAddMultipleKeys) {
-    scoped_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
-    scoped_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
+    const std::unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT(sorted->isEmpty(opCtx.get()));
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
-        scoped_ptr<SortedDataBuilderInterface> builder(sorted->getBulkBuilder(opCtx.get(), true));
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<SortedDataBuilderInterface> builder(
+            sorted->getBulkBuilder(opCtx.get(), true));
 
         ASSERT_OK(builder->addKey(key1, loc1));
         ASSERT_OK(builder->addKey(key2, loc2));
@@ -162,24 +164,25 @@ TEST(SortedDataInterface, BuilderAddMultipleKeys) {
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(3, sorted->numEntries(opCtx.get()));
     }
 }
 
 // Add multiple compound keys using a bulk builder.
 TEST(SortedDataInterface, BuilderAddMultipleCompoundKeys) {
-    scoped_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
-    scoped_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
+    const std::unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT(sorted->isEmpty(opCtx.get()));
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
-        scoped_ptr<SortedDataBuilderInterface> builder(sorted->getBulkBuilder(opCtx.get(), true));
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<SortedDataBuilderInterface> builder(
+            sorted->getBulkBuilder(opCtx.get(), true));
 
         ASSERT_OK(builder->addKey(compoundKey1a, loc1));
         ASSERT_OK(builder->addKey(compoundKey1b, loc2));
@@ -190,7 +193,7 @@ TEST(SortedDataInterface, BuilderAddMultipleCompoundKeys) {
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(5, sorted->numEntries(opCtx.get()));
     }
 }

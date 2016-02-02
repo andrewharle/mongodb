@@ -249,16 +249,23 @@ Status MemberConfig::validate() const {
     if (_slaveDelay < Seconds(0) || _slaveDelay > kMaxSlaveDelay) {
         return Status(ErrorCodes::BadValue,
                       str::stream() << kSlaveDelayFieldName << " field value of "
-                                    << _slaveDelay.total_seconds() << " seconds is out of range");
+                                    << durationCount<Seconds>(_slaveDelay)
+                                    << " seconds is out of range");
     }
-    if (_slaveDelay > Seconds(0) && _priority != 0) {
-        return Status(ErrorCodes::BadValue, "slaveDelay requires priority be zero");
-    }
-    if (_hidden && _priority != 0) {
-        return Status(ErrorCodes::BadValue, "priority must be 0 when hidden=true");
-    }
-    if (!_buildIndexes && _priority != 0) {
-        return Status(ErrorCodes::BadValue, "priority must be 0 when buildIndexes=false");
+    // Check for additional electable requirements, when priority is non zero
+    if (_priority != 0) {
+        if (_votes == 0) {
+            return Status(ErrorCodes::BadValue, "priority must be 0 when non-voting (votes:0)");
+        }
+        if (_slaveDelay > Seconds(0)) {
+            return Status(ErrorCodes::BadValue, "priority must be 0 when slaveDelay is used");
+        }
+        if (_hidden) {
+            return Status(ErrorCodes::BadValue, "priority must be 0 when hidden=true");
+        }
+        if (!_buildIndexes) {
+            return Status(ErrorCodes::BadValue, "priority must be 0 when buildIndexes=false");
+        }
     }
     return Status::OK();
 }
@@ -297,7 +304,7 @@ BSONObj MemberConfig::toBSON(const ReplicaSetTagConfig& tagConfig) const {
     }
     tags.done();
 
-    configBuilder.append("slaveDelay", _slaveDelay.total_seconds());
+    configBuilder.append("slaveDelay", durationCount<Seconds>(_slaveDelay));
     configBuilder.append("votes", getNumVotes());
     return configBuilder.obj();
 }

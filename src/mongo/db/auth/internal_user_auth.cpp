@@ -34,8 +34,6 @@
 
 #include "mongo/bson/mutable/document.h"
 #include "mongo/bson/mutable/element.h"
-#include "mongo/client/dbclientinterface.h"
-#include "mongo/db/server_options.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
@@ -49,7 +47,7 @@ static bool authParamsSet = false;
 // guarded by the authParams mutex
 static BSONObj authParams;
 
-static boost::mutex authParamMutex;
+static stdx::mutex authParamMutex;
 
 bool isInternalAuthSet() {
     return authParamsSet;
@@ -59,7 +57,7 @@ void setInternalUserAuthParams(const BSONObj& authParamsIn) {
     if (!isInternalAuthSet()) {
         authParamsSet = true;
     }
-    boost::mutex::scoped_lock lk(authParamMutex);
+    stdx::lock_guard<stdx::mutex> lk(authParamMutex);
 
     if (authParamsIn["mechanism"].String() != "SCRAM-SHA-1") {
         authParams = authParamsIn.copy();
@@ -83,34 +81,8 @@ BSONObj getInternalUserAuthParamsWithFallback() {
         return BSONObj();
     }
 
-    boost::mutex::scoped_lock lk(authParamMutex);
+    stdx::lock_guard<stdx::mutex> lk(authParamMutex);
     return authParams.copy();
 }
 
-BSONObj getFallbackAuthParams(BSONObj params) {
-    if (params["fallbackParams"].type() != Object) {
-        return BSONObj();
-    }
-    return params["fallbackParams"].Obj();
-}
-
-bool authenticateInternalUser(DBClientWithCommands* conn) {
-    if (!isInternalAuthSet()) {
-        if (!serverGlobalParams.quiet) {
-            log() << "ERROR: No authentication parameters set for internal user";
-        }
-        return false;
-    }
-
-    try {
-        conn->auth(getInternalUserAuthParamsWithFallback());
-        return true;
-    } catch (const UserException& ex) {
-        if (!serverGlobalParams.quiet) {
-            log() << "can't authenticate to " << conn->toString()
-                  << " as internal user, error: " << ex.what();
-        }
-        return false;
-    }
-}
 }  // namespace mongo

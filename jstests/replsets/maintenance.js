@@ -2,10 +2,13 @@
 
 var replTest = new ReplSetTest( {name: 'unicomplex', nodes: 2} );
 var conns = replTest.startSet({ verbose: 1 });
-replTest.initiate();
+var config = replTest.getReplSetConfig();
+config.members[0].priority = 2;
+replTest.initiate(config);
+replTest.waitForState(replTest.nodes[0], ReplSetTest.State.PRIMARY, 60000);
 
 // Make sure we have a master
-var master = replTest.getMaster();
+var master = replTest.getPrimary();
 
 for (i = 0; i < 20; i++) {
     master.getDB("bar").foo.insert({x:1,y:i,abc:123,str:"foo bar baz"});

@@ -9,6 +9,13 @@
  *  7. writes on former slave (now primary)
  *  8. start up master
  *  9. check master does not rollback
+ *
+ * If all data-bearing nodes in a replica set are using an ephemeral storage engine, the set will
+ * not be able to survive a scenario where all data-bearing nodes are down simultaneously. In such a
+ * scenario, none of the members will have any data, and upon restart will each look for a member to
+ * initial sync from, so no primary will be elected. This test induces such a scenario, so cannot be
+ * run on ephemeral storage engines.
+ * @tags: [requires_persistence]
  */
 
 print("1. make 3-member set w/arb (2)");
@@ -23,7 +30,7 @@ replTest.initiate({_id : name, members : [
     {_id : 2, host : host+":"+replTest.ports[2], arbiterOnly : true}
 ]});
 var slaves = replTest.liveNodes.slaves;
-var master = replTest.getMaster();
+var master = replTest.getPrimary();
 var masterId = replTest.getNodeId(master);
 var slave = slaves[0];
 var slaveId = replTest.getNodeId(slave);
@@ -55,7 +62,7 @@ print("6: start up slave");
 replTest.restart(slaveId);
 
 print("7: writes on former slave")
-master = replTest.getMaster();
+master = replTest.getPrimary();
 mdb1 = master.getDB("foo");
 mdb1.foo.save({a:1002});
 
@@ -65,7 +72,7 @@ replTest.restart(masterId);
 
 print("9: check former master does not roll back");
 assert.soon(function(){
-    return rawMongoProgramOutput().match("replSet need to rollback, but in inconsistent state");
+    return rawMongoProgramOutput().match("need to rollback, but in inconsistent state");
 });
 
 replTest.stopSet(15);

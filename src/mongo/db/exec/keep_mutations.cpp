@@ -30,24 +30,28 @@
 
 #include "mongo/db/exec/filter.h"
 #include "mongo/db/exec/scoped_timer.h"
+#include "mongo/stdx/memory.h"
 
 namespace mongo {
 
-using std::auto_ptr;
+using std::unique_ptr;
 using std::vector;
+using stdx::make_unique;
 
 // static
 const char* KeepMutationsStage::kStageType = "KEEP_MUTATIONS";
 
-KeepMutationsStage::KeepMutationsStage(const MatchExpression* filter,
+KeepMutationsStage::KeepMutationsStage(OperationContext* opCtx,
+                                       const MatchExpression* filter,
                                        WorkingSet* ws,
                                        PlanStage* child)
-    : _workingSet(ws),
-      _child(child),
+    : PlanStage(kStageType, opCtx),
+      _workingSet(ws),
       _filter(filter),
       _doneReadingChild(false),
-      _doneReturningFlagged(false),
-      _commonStats(kStageType) {}
+      _doneReturningFlagged(false) {
+    _children.emplace_back(child);
+}
 
 KeepMutationsStage::~KeepMutationsStage() {}
 
@@ -68,7 +72,7 @@ PlanStage::StageState KeepMutationsStage::work(WorkingSetID* out) {
 
     // Stream child results until the child is all done.
     if (!_doneReadingChild) {
-        StageState status = _child->work(out);
+        StageState status = child()->work(out);
 
         // Child is still returning results.  Pass them through.
         if (PlanStage::IS_EOF != status) {
@@ -76,8 +80,8 @@ PlanStage::StageState KeepMutationsStage::work(WorkingSetID* out) {
                 ++_commonStats.advanced;
             } else if (PlanStage::NEED_TIME == status) {
                 ++_commonStats.needTime;
-            } else if (PlanStage::NEED_FETCH == status) {
-                ++_commonStats.needFetch;
+            } else if (PlanStage::NEED_YIELD == status) {
+                ++_commonStats.needYield;
             }
 
             return status;
@@ -117,42 +121,15 @@ PlanStage::StageState KeepMutationsStage::work(WorkingSetID* out) {
     }
 }
 
-void KeepMutationsStage::saveState() {
-    ++_commonStats.yields;
-    _child->saveState();
-}
-
-void KeepMutationsStage::restoreState(OperationContext* opCtx) {
-    ++_commonStats.unyields;
-    _child->restoreState(opCtx);
-}
-
-void KeepMutationsStage::invalidate(OperationContext* txn,
-                                    const RecordId& dl,
-                                    InvalidationType type) {
-    ++_commonStats.invalidates;
-    _child->invalidate(txn, dl, type);
-}
-
-vector<PlanStage*> KeepMutationsStage::getChildren() const {
-    vector<PlanStage*> children;
-    children.push_back(_child.get());
-    return children;
-}
-
-PlanStageStats* KeepMutationsStage::getStats() {
+unique_ptr<PlanStageStats> KeepMutationsStage::getStats() {
     _commonStats.isEOF = isEOF();
-    auto_ptr<PlanStageStats> ret(new PlanStageStats(_commonStats, STAGE_KEEP_MUTATIONS));
-    // Takes ownership of the object returned from _child->getStats().
-    ret->children.push_back(_child->getStats());
-    return ret.release();
+    unique_ptr<PlanStageStats> ret =
+        make_unique<PlanStageStats>(_commonStats, STAGE_KEEP_MUTATIONS);
+    ret->children.emplace_back(child()->getStats());
+    return ret;
 }
 
-const CommonStats* KeepMutationsStage::getCommonStats() {
-    return &_commonStats;
-}
-
-const SpecificStats* KeepMutationsStage::getSpecificStats() {
+const SpecificStats* KeepMutationsStage::getSpecificStats() const {
     return NULL;
 }
 

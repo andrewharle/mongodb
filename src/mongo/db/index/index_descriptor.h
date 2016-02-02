@@ -68,6 +68,7 @@ public:
           _isIdIndex(isIdIndexPattern(_keyPattern)),
           _sparse(infoObj["sparse"].trueValue()),
           _unique(_isIdIndex || infoObj["unique"].trueValue()),
+          _partial(!infoObj["partialFilterExpression"].eoo()),
           _cachedEntry(NULL) {
         _indexNamespace = makeIndexNamespace(_parentNS, _indexName);
 
@@ -146,6 +147,11 @@ public:
         return _sparse;
     }
 
+    // Is this a partial index?
+    bool isPartial() const {
+        return _partial;
+    }
+
     // Is this index multikey?
     bool isMultikey(OperationContext* txn) const {
         _checkOk();
@@ -204,7 +210,7 @@ public:
         return i.next().eoo();
     }
 
-    static std::string makeIndexNamespace(const StringData& ns, const StringData& name) {
+    static std::string makeIndexNamespace(StringData ns, StringData name) {
         return ns.toString() + ".$" + name.toString();
     }
 
@@ -232,6 +238,7 @@ private:
     bool _isIdIndex;
     bool _sparse;
     bool _unique;
+    bool _partial;
     int _version;
 
     // only used by IndexCatalogEntryContainer to do caching for perf

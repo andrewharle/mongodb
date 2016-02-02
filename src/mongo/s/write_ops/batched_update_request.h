@@ -28,16 +28,12 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
 #include <string>
 #include <vector>
 
 #include "mongo/base/string_data.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/s/bson_serializable.h"
-#include "mongo/s/chunk_version.h"
-#include "mongo/s/write_ops/batched_request_metadata.h"
 #include "mongo/s/write_ops/batched_update_document.h"
 
 namespace mongo {
@@ -46,7 +42,7 @@ namespace mongo {
  * This class represents the layout and content of a batched update runCommand,
  * the request side.
  */
-class BatchedUpdateRequest : public BSONSerializable {
+class BatchedUpdateRequest {
     MONGO_DISALLOW_COPYING(BatchedUpdateRequest);
 
 public:
@@ -62,38 +58,29 @@ public:
     static const BSONField<std::vector<BatchedUpdateDocument*>> updates;
     static const BSONField<BSONObj> writeConcern;
     static const BSONField<bool> ordered;
-    static const BSONField<BSONObj> metadata;
 
     //
     // construction / destruction
     //
 
     BatchedUpdateRequest();
-    virtual ~BatchedUpdateRequest();
+    ~BatchedUpdateRequest();
 
     /** Copies all the fields present in 'this' to 'other'. */
     void cloneTo(BatchedUpdateRequest* other) const;
 
-    //
-    // bson serializable interface implementation
-    //
-
-    virtual bool isValid(std::string* errMsg) const;
-    virtual BSONObj toBSON() const;
-    virtual bool parseBSON(const BSONObj& source, std::string* errMsg);
-    virtual void clear();
-    virtual std::string toString() const;
+    bool isValid(std::string* errMsg) const;
+    BSONObj toBSON() const;
+    bool parseBSON(StringData dbName, const BSONObj& source, std::string* errMsg);
+    void clear();
+    std::string toString() const;
 
     //
     // individual field accessors
     //
 
-    void setCollName(const StringData& collName);
-    void setCollNameNS(const NamespaceString& collName);
-    const std::string& getCollName() const;
-    const NamespaceString& getCollNameNS() const;
-
-    const NamespaceString& getTargetingNSS() const;
+    void setNS(NamespaceString ns);
+    const NamespaceString& getNS() const;
 
     void setUpdates(const std::vector<BatchedUpdateDocument*>& updates);
 
@@ -117,20 +104,19 @@ public:
     bool isOrderedSet() const;
     bool getOrdered() const;
 
-    /*
-    * metadata ownership will be transferred to this.
-    */
-    void setMetadata(BatchedRequestMetadata* metadata);
-    void unsetMetadata();
-    bool isMetadataSet() const;
-    BatchedRequestMetadata* getMetadata() const;
+    void setShouldBypassValidation(bool newVal) {
+        _shouldBypassValidation = newVal;
+    }
+    bool shouldBypassValidation() const {
+        return _shouldBypassValidation;
+    }
 
 private:
     // Convention: (M)andatory, (O)ptional
 
     // (M)  collection we're updating from
-    NamespaceString _collName;
-    bool _isCollNameSet;
+    NamespaceString _ns;
+    bool _isNSSet;
 
     // (M)  array of individual updates
     std::vector<BatchedUpdateDocument*> _updates;
@@ -144,8 +130,8 @@ private:
     bool _ordered;
     bool _isOrderedSet;
 
-    // (O)  metadata associated with this request for internal use.
-    boost::scoped_ptr<BatchedRequestMetadata> _metadata;
+    // (O)  should document validation be bypassed (default false)
+    bool _shouldBypassValidation;
 };
 
 }  // namespace mongo

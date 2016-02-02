@@ -33,18 +33,15 @@
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/bson/optime.h"
-#include "mongo/client/dbclientinterface.h"
-#include "mongo/s/multi_command_dispatch.h"
+#include "mongo/bson/timestamp.h"
 #include "mongo/s/write_ops/batch_write_exec.h"
-#include "mongo/s/write_ops/batch_write_op.h"
 #include "mongo/s/write_ops/batched_command_request.h"
 #include "mongo/s/write_ops/batched_command_response.h"
 #include "mongo/s/write_ops/write_error_detail.h"
 
-// TODO: Remove post-2.6
-
 namespace mongo {
+
+class MultiCommandDispatch;
 
 // Used for reporting legacy write concern responses
 struct LegacyWCResponse {
@@ -61,7 +58,7 @@ struct LegacyWCResponse {
  * Returns !OK if there was an error getting a GLE response
  */
 Status enforceLegacyWriteConcern(MultiCommandDispatch* dispatcher,
-                                 const StringData& dbName,
+                                 StringData dbName,
                                  const BSONObj& options,
                                  const HostOpTimeMap& hostOpTimes,
                                  std::vector<LegacyWCResponse>* wcResponses);
@@ -72,8 +69,8 @@ Status enforceLegacyWriteConcern(MultiCommandDispatch* dispatcher,
 
 // Helper that acts as an auto-ptr for write and wc errors
 struct GLEErrors {
-    std::auto_ptr<WriteErrorDetail> writeError;
-    std::auto_ptr<WCErrorDetail> wcError;
+    std::unique_ptr<WriteErrorDetail> writeError;
+    std::unique_ptr<WCErrorDetail> wcError;
 };
 
 /**
@@ -88,4 +85,5 @@ Status extractGLEErrors(const BSONObj& gleResponse, GLEErrors* errors);
  * Given a GLE response, strips out all non-write-concern related information
  */
 BSONObj stripNonWCInfo(const BSONObj& gleResponse);
-}
+
+}  // namespace mongo

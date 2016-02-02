@@ -28,27 +28,28 @@
 
 #include "mongo/platform/basic.h"
 
-#include <boost/scoped_ptr.hpp>
-#include <boost/thread.hpp>
-
 #include "mongo/base/status.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/db/repl/elect_cmd_runner.h"
 #include "mongo/db/repl/member_heartbeat_data.h"
-#include "mongo/db/repl/network_interface_mock.h"
 #include "mongo/db/repl/replica_set_config.h"
 #include "mongo/db/repl/replication_executor.h"
-#include "mongo/db/repl/elect_cmd_runner.h"
+#include "mongo/db/repl/storage_interface_mock.h"
+#include "mongo/executor/network_interface_mock.h"
 #include "mongo/stdx/functional.h"
+#include "mongo/stdx/thread.h"
 #include "mongo/unittest/unittest.h"
 
 
-using boost::scoped_ptr;
+using std::unique_ptr;
 
 namespace mongo {
 namespace repl {
 namespace {
 
-typedef ReplicationExecutor::RemoteCommandRequest RemoteCommandRequest;
+using executor::NetworkInterfaceMock;
+using executor::RemoteCommandRequest;
+using executor::RemoteCommandResponse;
 
 class ElectCmdRunnerTest : public mongo::unittest::Test {
 public:
@@ -59,7 +60,7 @@ public:
 
     void waitForTest();
 
-    void electCmdRunnerRunner(const ReplicationExecutor::CallbackData& data,
+    void electCmdRunnerRunner(const ReplicationExecutor::CallbackArgs& data,
                               ElectCmdRunner* electCmdRunner,
                               StatusWith<ReplicationExecutor::EventHandle>* evh,
                               const ReplicaSetConfig& currentConfig,
@@ -67,8 +68,9 @@ public:
                               const std::vector<HostAndPort>& hosts);
 
     NetworkInterfaceMock* _net;
-    boost::scoped_ptr<ReplicationExecutor> _executor;
-    boost::scoped_ptr<boost::thread> _executorThread;
+    StorageInterfaceMock* _storage;
+    std::unique_ptr<ReplicationExecutor> _executor;
+    std::unique_ptr<stdx::thread> _executorThread;
 
 private:
     void setUp();
@@ -79,9 +81,9 @@ private:
 
 void ElectCmdRunnerTest::setUp() {
     _net = new NetworkInterfaceMock;
-    _executor.reset(new ReplicationExecutor(_net, 1 /* prng seed */));
-    _executorThread.reset(
-        new boost::thread(stdx::bind(&ReplicationExecutor::run, _executor.get())));
+    _storage = new StorageInterfaceMock;
+    _executor.reset(new ReplicationExecutor(_net, _storage, 1 /* prng seed */));
+    _executorThread.reset(new stdx::thread(stdx::bind(&ReplicationExecutor::run, _executor.get())));
 }
 
 void ElectCmdRunnerTest::tearDown() {
@@ -118,14 +120,16 @@ BSONObj stripRound(const BSONObj& orig) {
 
 // This is necessary because the run method must be scheduled in the Replication Executor
 // for correct concurrency operation.
-void ElectCmdRunnerTest::electCmdRunnerRunner(const ReplicationExecutor::CallbackData& data,
+void ElectCmdRunnerTest::electCmdRunnerRunner(const ReplicationExecutor::CallbackArgs& data,
                                               ElectCmdRunner* electCmdRunner,
                                               StatusWith<ReplicationExecutor::EventHandle>* evh,
                                               const ReplicaSetConfig& currentConfig,
                                               int selfIndex,
                                               const std::vector<HostAndPort>& hosts) {
     invariant(data.status.isOK());
-    *evh = electCmdRunner->start(data.executor, currentConfig, selfIndex, hosts);
+    ReplicationExecutor* executor = dynamic_cast<ReplicationExecutor*>(data.executor);
+    ASSERT(executor);
+    *evh = electCmdRunner->start(executor, currentConfig, selfIndex, hosts);
 }
 
 void ElectCmdRunnerTest::startTest(ElectCmdRunner* electCmdRunner,
@@ -191,14 +195,15 @@ TEST_F(ElectCmdRunnerTest, TwoNodes) {
     ASSERT_EQUALS("admin", noi->getRequest().dbname);
     ASSERT_EQUALS(stripRound(electRequest), stripRound(noi->getRequest().cmdObj));
     ASSERT_EQUALS(HostAndPort("h1"), noi->getRequest().target);
-    _net->scheduleResponse(
-        noi,
-        startDate + 10,
-        ResponseStatus(ReplicationExecutor::RemoteCommandResponse(
-            BSON("ok" << 1 << "vote" << 1 << "round" << 380865962699346850ll), Milliseconds(8))));
-    _net->runUntil(startDate + 10);
+    _net->scheduleResponse(noi,
+                           startDate + Milliseconds(10),
+                           ResponseStatus(RemoteCommandResponse(
+                               BSON("ok" << 1 << "vote" << 1 << "round" << 380865962699346850ll),
+                               BSONObj(),
+                               Milliseconds(8))));
+    _net->runUntil(startDate + Milliseconds(10));
     _net->exitNetwork();
-    ASSERT_EQUALS(startDate + 10, _net->now());
+    ASSERT_EQUALS(startDate + Milliseconds(10), _net->now());
     waitForTest();
     ASSERT_EQUALS(electCmdRunner.getReceivedVotes(), 2);
 }
@@ -282,21 +287,23 @@ protected:
     }
 
     ResponseStatus wrongTypeForVoteField() {
-        return ResponseStatus(
-            NetworkInterfaceMock::Response(BSON("vote" << std::string("yea")), Milliseconds(10)));
+        return ResponseStatus(NetworkInterfaceMock::Response(
+            BSON("vote" << std::string("yea")), BSONObj(), Milliseconds(10)));
     }
 
     ResponseStatus voteYea() {
-        return ResponseStatus(NetworkInterfaceMock::Response(BSON("vote" << 1), Milliseconds(10)));
+        return ResponseStatus(
+            NetworkInterfaceMock::Response(BSON("vote" << 1), BSONObj(), Milliseconds(10)));
     }
 
     ResponseStatus voteNay() {
         return ResponseStatus(
-            NetworkInterfaceMock::Response(BSON("vote" << -10000), Milliseconds(10)));
+            NetworkInterfaceMock::Response(BSON("vote" << -10000), BSONObj(), Milliseconds(10)));
     }
 
     ResponseStatus abstainFromVoting() {
-        return ResponseStatus(NetworkInterfaceMock::Response(BSON("vote" << 0), Milliseconds(10)));
+        return ResponseStatus(
+            NetworkInterfaceMock::Response(BSON("vote" << 0), BSONObj(), Milliseconds(10)));
     }
 
     BSONObj threeNodesTwoArbitersConfig() {
@@ -325,7 +332,7 @@ protected:
     }
 
 private:
-    scoped_ptr<ElectCmdRunner::Algorithm> _checker;
+    unique_ptr<ElectCmdRunner::Algorithm> _checker;
 };
 
 TEST_F(ElectScatterGatherTest, NodeRespondsWithBadVoteType) {

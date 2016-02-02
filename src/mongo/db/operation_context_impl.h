@@ -27,11 +27,9 @@
  */
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
 #include <string>
 
 #include "mongo/db/operation_context.h"
-
 
 namespace mongo {
 
@@ -41,36 +39,32 @@ public:
 
     virtual ~OperationContextImpl();
 
-    virtual RecoveryUnit* recoveryUnit() const;
+    virtual RecoveryUnit* recoveryUnit() const override;
 
-    virtual RecoveryUnit* releaseRecoveryUnit();
+    virtual RecoveryUnit* releaseRecoveryUnit() override;
 
-    virtual void setRecoveryUnit(RecoveryUnit* unit);
+    virtual RecoveryUnitState setRecoveryUnit(RecoveryUnit* unit, RecoveryUnitState state) override;
 
-    virtual Locker* lockState() const;
+    virtual ProgressMeter* setMessage_inlock(const char* msg,
+                                             const std::string& name,
+                                             unsigned long long progressMeterTotal,
+                                             int secondsBetween) override;
 
-    virtual ProgressMeter* setMessage(const char* msg,
-                                      const std::string& name,
-                                      unsigned long long progressMeterTotal,
-                                      int secondsBetween);
+    virtual std::string getNS() const override;
 
-    virtual std::string getNS() const;
+    virtual uint64_t getRemainingMaxTimeMicros() const override;
 
-    virtual Client* getClient() const;
+    virtual void checkForInterrupt() override;
+    virtual Status checkForInterruptNoAssert() override;
 
-    virtual CurOp* getCurOp() const;
+    virtual bool isPrimaryFor(StringData ns) override;
 
-    virtual unsigned int getOpID() const;
-
-    virtual void checkForInterrupt() const;
-    virtual Status checkForInterruptNoAssert() const;
-
-    virtual bool isPrimaryFor(const StringData& ns);
+    virtual void setReplicatedWrites(bool writesAreReplicated = true) override;
+    virtual bool writesAreReplicated() const override;
 
 private:
-    std::auto_ptr<RecoveryUnit> _recovery;
-    Client* const _client;  // cached, not owned
-    Locker* const _locker;  // cached, not owned
+    std::unique_ptr<RecoveryUnit> _recovery;
+    bool _writesAreReplicated;
 };
 
 }  // namespace mongo

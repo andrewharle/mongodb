@@ -42,22 +42,22 @@
 #include <iostream>
 
 #include <boost/filesystem/operations.hpp>
-#include <boost/thread/thread.hpp>
 
 #include "mongo/db/jsobj.h"
 #include "mongo/db/json.h"
+#include "mongo/db/storage/mmap_v1/logfile.h"
+#include "mongo/db/storage/mmap_v1/mmap.h"
 #include "mongo/platform/atomic_word.h"
+#include "mongo/stdx/thread.h"
 #include "mongo/util/allocator.h"
-#include "mongo/util/logfile.h"
-#include "mongo/util/mmap.h"
 #include "mongo/util/mongoutils/str.h"
+#include "mongo/util/processinfo.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/timer.h"
-#include "mongo/util/processinfo.h"
-
 
 using namespace std;
 using namespace mongo;
+using namespace mongoutils::str;
 
 int dummy;
 unsigned recSizeKB;
@@ -73,7 +73,7 @@ unsigned nThreadsRunning = 0;
 // cache) things are happening.
 AtomicUInt32 iops;
 
-SimpleMutex m("mperf");
+SimpleMutex m;
 
 int syncDelaySecs = 0;
 
@@ -85,6 +85,21 @@ void syncThread() {
              << "ms" << endl;
         sleepsecs(syncDelaySecs);
     }
+}
+
+void stripTrailing(std::string& s, const char* chars) {
+    std::string::iterator to = s.begin();
+    for (std::string::iterator i = s.begin(); i != s.end(); i++) {
+        // During each iteration if i finds a non-"chars" character it writes it to the
+        // position of t. So the part of the string left from the "to" iterator is already
+        // "cleared" string.
+        if (!contains(chars, *i)) {
+            if (i != to)
+                s.replace(to, to + 1, 1, *i);
+            to++;
+        }
+    }
+    s.erase(to, s.end());
 }
 
 char* round(char* x) {
@@ -200,7 +215,8 @@ void go() {
 
         syncDelaySecs = options["syncDelay"].numberInt();
         if (syncDelaySecs) {
-            boost::thread t(syncThread);
+            stdx::thread t(syncThread);
+            t.detach();
         }
     }
 
@@ -225,7 +241,8 @@ void go() {
             if (nthr < wthr) {
                 while (nthr < wthr && nthr < d) {
                     nthr++;
-                    boost::thread w(workerThread);
+                    stdx::thread w(workerThread);
+                    w.detach();
                 }
                 cout << "new thread, total running : " << nthr << endl;
                 d *= 2;
@@ -294,7 +311,7 @@ int main(int argc, char* argv[]) {
         }
 
         string s = input;
-        mongoutils::str::stripTrailing(s, " \n\r\0x1a");
+        stripTrailing(s, " \n\r\0x1a");
         try {
             options = fromjson(s);
         } catch (...) {

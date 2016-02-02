@@ -84,13 +84,8 @@ public:
         out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
     }
 
-    virtual bool run(OperationContext* opCtx,
-                     const string&,
-                     BSONObj&,
-                     int,
-                     string&,
-                     BSONObjBuilder& result,
-                     bool) {
+    virtual bool run(
+        OperationContext* opCtx, const string&, BSONObj&, int, string&, BSONObjBuilder& result) {
         string errMsg = stream() << "Writeback functionality is no longer present in v3.0 mongod, "
                                  << "a v2.6 mongos may be running in the v3.0 cluster at "
                                  << opCtx->getClient()->clientAddress(false);

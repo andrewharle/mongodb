@@ -1,23 +1,22 @@
-/* Tests count and distinct using slaveOk. Also tests a scenario querying a set
- * where only one secondary is up.
- */
+// Tests count and distinct using slaveOk. Also tests a scenario querying a set where only one
+// secondary is up.
+(function() {
+'use strict';
 
-var st = new ShardingTest( testName = "countSlaveOk",
-                           numShards = 1,
-                           verboseLevel = 0,
-                           numMongos = 1,
-                           { rs : true, 
-                             rs0 : { nodes : 2 }
-                           })
+var st = new ShardingTest({ name: "countSlaveOk",
+                            shards: 1,
+                            mongos: 1,
+                            other: { rs: true,
+                                     rs0: { nodes: 2 } } });
 
-var rst = st._rs[0].test
+var rst = st._rs[0].test;
 
 // Insert data into replica set
-var conn = new Mongo( st.s.host )
-conn.setLogLevel( 3 )
+var conn = new Mongo(st.s.host);
+conn.setLogLevel(3);
 
-var coll = conn.getCollection( "test.countSlaveOk" )
-coll.drop()
+var coll = conn.getCollection('test.countSlaveOk');
+coll.drop();
 
 var bulk = coll.initializeUnorderedBulkOp();
 for( var i = 0; i < 300; i++ ){
@@ -38,7 +37,7 @@ var primary = rst.getPrimary()
 var sec = rst.getSecondary()
 
 // Data now inserted... stop the master, since only two in set, other will still be secondary
-rst.stop(rst.getMaster());
+rst.stop(rst.getPrimary());
 printjson( rst.status() )
 
 // Wait for the mongos to recognize the slave
@@ -70,5 +69,6 @@ catch( e ){
     print( "Non-slaveOk'd connection failed." )
 }
 
-// Finish
-st.stop()
+st.stop();
+
+})();

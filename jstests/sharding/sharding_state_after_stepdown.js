@@ -1,13 +1,19 @@
-//
 // Tests the state of sharding data after a replica set reconfig
 //
+// This test involves restarting a single-node replica set, so cannot be run on ephemeral storage
+// engines. A single node replica set that is using an ephemeral engine will have no knowledge of
+// the replica set configuration once restarted, so will not elect itself as primary.
+// @tags: [requires_persistence]
 
-var options = { separateConfig : true,
-                rs : true,
-                rsOptions : { nodes : 1 } };
+(function() {
 
-var st = new ShardingTest({ shards : 2, mongos : 1, other : options });
-st.stopBalancer();
+var st = new ShardingTest({ shards: 2,
+                            mongos: 1,
+                            other: {
+                                rs: true,
+                                rsOptions: { nodes : 1 }
+                            }
+                          });
 
 var mongos = st.s0;
 var admin = mongos.getDB("admin");
@@ -32,7 +38,6 @@ st.printShardingStatus();
 
 // Restart both primaries to reset our sharding data
 var restartPrimaries = function() {
-
     var rs0Primary = st.rs0.getPrimary();
     var rs1Primary = st.rs1.getPrimary();
 
@@ -49,20 +54,24 @@ var restartPrimaries = function() {
 
 restartPrimaries();
 
-//
-//
-// No sharding data until shards are hit by a query
-assert.eq("",
-          st.rs0.getPrimary().adminCommand({ getShardVersion : coll.toString() }).configServer);
+// Sharding data gets initialized either when shards are hit by an unsharded query or if some
+// metadata operation was run before the step down, which wrote a minOpTime recovery record (CSRS
+// only). In this case we did a moveChunk above from shard0 to shard1, so we will have this record
+// on shard0.
+if (st.configRS) {
+    assert.neq("",
+               st.rs0.getPrimary().adminCommand({ getShardVersion: coll.toString() }).configServer);
+}
+else {
+    assert.eq("",
+              st.rs0.getPrimary().adminCommand({ getShardVersion: coll.toString() }).configServer);
+}
 assert.eq("",
           st.rs1.getPrimary().adminCommand({ getShardVersion : coll.toString() }).configServer);
 
-//
-//
-// Sharding data initialized when shards are hit by an unsharded query
+// Doing a find only accesses the primary (rs0), which is already recovered. Ensure that the
+// secondary still has no sharding knowledge.
 assert.neq(null, coll.findOne({}));
-assert.neq("",
-          st.rs0.getPrimary().adminCommand({ getShardVersion : coll.toString() }).configServer);
 assert.eq("",
           st.rs1.getPrimary().adminCommand({ getShardVersion : coll.toString() }).configServer);
 
@@ -117,31 +126,39 @@ stepDownPrimaries();
 
 //
 //
-// No sharding data until shards are hit by a metadata operation
-assert.eq("",
-          st.rs0.getPrimary().adminCommand({ getShardVersion : coll.toString() }).configServer);
-assert.eq("",
-          st.rs1.getPrimary().adminCommand({ getShardVersion : coll.toString() }).configServer);
+// No sharding metadata until shards are hit by a metadata operation
+assert.eq({},
+          st.rs0.getPrimary().adminCommand(
+            { getShardVersion : collSharded.toString(), fullMetadata : true }).metadata);
+assert.eq({},
+          st.rs1.getPrimary().adminCommand(
+            { getShardVersion : collSharded.toString(), fullMetadata : true }).metadata);
 
 //
 //
 // Metadata commands should enable sharding data implicitly
 assert.commandWorked(mongos.adminCommand({ split : collSharded.toString(), middle : { _id : 0 }}));
-assert.eq("",
-           st.rs0.getPrimary().adminCommand({ getShardVersion : coll.toString() }).configServer);
-assert.neq("",
-          st.rs1.getPrimary().adminCommand({ getShardVersion : coll.toString() }).configServer);
+assert.eq({},
+          st.rs0.getPrimary().adminCommand(
+            { getShardVersion : collSharded.toString(), fullMetadata : true }).metadata);
+assert.neq({},
+           st.rs1.getPrimary().adminCommand(
+            { getShardVersion : collSharded.toString(), fullMetadata : true }).metadata);
 
 //
 //
 // MoveChunk command should enable sharding data implicitly on TO-shard
 assert.commandWorked(mongos.adminCommand({ moveChunk : collSharded.toString(), find : { _id : 0 },
                                            to : shards[0]._id }));
-assert.neq("",
-           st.rs0.getPrimary().adminCommand({ getShardVersion : coll.toString() }).configServer);
-assert.neq("",
-           st.rs1.getPrimary().adminCommand({ getShardVersion : coll.toString() }).configServer);
+assert.neq({},
+           st.rs0.getPrimary().adminCommand(
+                { getShardVersion : collSharded.toString(), fullMetadata : true }).metadata);
+assert.neq({},
+           st.rs1.getPrimary().adminCommand(
+                { getShardVersion : collSharded.toString(), fullMetadata : true }).metadata);
 
 jsTest.log( "DONE!" );
 
 st.stop();
+
+})();

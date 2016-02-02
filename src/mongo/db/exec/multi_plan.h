@@ -28,7 +28,6 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
 
 #include "mongo/db/jsobj.h"
 #include "mongo/db/catalog/collection.h"
@@ -50,8 +49,26 @@ namespace mongo {
  *
  * Owns the query solutions and PlanStage roots for all candidate plans.
  */
-class MultiPlanStage : public PlanStage {
+class MultiPlanStage final : public PlanStage {
 public:
+    /**
+     * Callers use this to specify how the MultiPlanStage should interact with the plan cache.
+     */
+    enum class CachingMode {
+        // Always write a cache entry for the winning plan to the plan cache, overwriting any
+        // previously existing cache entry for the query shape.
+        AlwaysCache,
+
+        // Write a cache entry for the query shape *unless* we encounter one of the following edge
+        // cases:
+        //  - Two or more plans tied for the win.
+        //  - The winning plan returned zero query results during the plan ranking trial period.
+        SometimesCache,
+
+        // Do not write to the plan cache.
+        NeverCache,
+    };
+
     /**
      * Takes no ownership.
      *
@@ -61,31 +78,22 @@ public:
     MultiPlanStage(OperationContext* txn,
                    const Collection* collection,
                    CanonicalQuery* cq,
-                   bool shouldCache = true);
+                   CachingMode cachingMode = CachingMode::AlwaysCache);
 
-    virtual ~MultiPlanStage();
+    bool isEOF() final;
 
-    virtual bool isEOF();
+    StageState work(WorkingSetID* out) final;
 
-    virtual StageState work(WorkingSetID* out);
+    void doInvalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) final;
 
-    virtual void saveState();
-
-    virtual void restoreState(OperationContext* opCtx);
-
-    virtual void invalidate(OperationContext* txn, const RecordId& dl, InvalidationType type);
-
-    virtual std::vector<PlanStage*> getChildren() const;
-
-    virtual StageType stageType() const {
+    StageType stageType() const final {
         return STAGE_MULTI_PLAN;
     }
 
-    virtual PlanStageStats* getStats();
+    std::unique_ptr<PlanStageStats> getStats() final;
 
-    virtual const CommonStats* getCommonStats();
 
-    virtual const SpecificStats* getSpecificStats();
+    const SpecificStats* getSpecificStats() const final;
 
     /**
      * Takes ownership of QuerySolution and PlanStage. not of WorkingSet
@@ -103,6 +111,13 @@ public:
      * Returns a non-OK status if the plan was killed during yield.
      */
     Status pickBestPlan(PlanYieldPolicy* yieldPolicy);
+
+    /**
+     * Returns the number of times that we are willing to work a plan during a trial period.
+     *
+     * Calculated based on a fixed query knob and the size of the collection.
+     */
+    static size_t getTrialPeriodWorks(OperationContext* txn, const Collection* collection);
 
     /**
      * Returns the max number of documents which we should allow any plan to return during the
@@ -135,12 +150,6 @@ public:
     // Used by explain.
     //
 
-    /**
-     * Gathers execution stats for all losing plans. Caller takes ownership of
-     * all pointers in the returned vector.
-     */
-    std::vector<PlanStageStats*> generateCandidateStats();
-
     static const char* kStageType;
 
 private:
@@ -168,20 +177,20 @@ private:
 
     static const int kNoSuchPlan = -1;
 
-    // not owned here
-    OperationContext* _txn;
+    // Not owned here. Must be non-null.
     const Collection* _collection;
 
-    // Whether or not we should try to cache the winning plan in the plan cache.
-    const bool _shouldCache;
+    // Describes the cases in which we should write an entry for the winning plan to the plan cache.
+    const CachingMode _cachingMode;
 
     // The query that we're trying to figure out the best solution to.
     // not owned here
     CanonicalQuery* _query;
 
-    // Candidate plans. Each candidate includes a child PlanStage tree and QuerySolution which
-    // are owned here. Ownership of all QuerySolutions is retained here, and will *not* be
-    // tranferred to the PlanExecutor that wraps this stage.
+    // Candidate plans. Each candidate includes a child PlanStage tree and QuerySolution. Ownership
+    // of all QuerySolutions is retained here, and will *not* be tranferred to the PlanExecutor that
+    // wraps this stage. Ownership of the PlanStages will be in PlanStage::_children which maps
+    // one-to-one with _candidates.
     std::vector<CandidatePlan> _candidates;
 
     // index into _candidates, of the winner of the plan competition
@@ -216,10 +225,9 @@ private:
     // to use to pull the record into memory. We take ownership of the RecordFetcher here,
     // deleting it after we've had a chance to do the fetch. For timing-based yields, we
     // just pass a NULL fetcher.
-    boost::scoped_ptr<RecordFetcher> _fetcher;
+    std::unique_ptr<RecordFetcher> _fetcher;
 
     // Stats
-    CommonStats _commonStats;
     MultiPlanStats _specificStats;
 };
 

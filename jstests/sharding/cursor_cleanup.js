@@ -2,7 +2,7 @@
 // Tests cleanup of sharded and unsharded cursors
 //
 
-var st = new ShardingTest({ shards : 2, mongos : 1, other : { separateConfig : true } });
+var st = new ShardingTest({ shards : 2, mongos : 1 });
 st.stopBalancer();
 
 var mongos = st.s0;
@@ -43,22 +43,20 @@ assert.neq(null, unshardedCursor.next());
 
 jsTest.log("Check whether the cursor is registered in the cursor info.");
 
-var cursorInfo = admin.runCommand({ cursorInfo : true });
+var cursorInfo = admin.serverStatus().metrics.cursor;
 printjson(cursorInfo);
 
-assert.eq(cursorInfo.sharded, 1);
-assert.eq(cursorInfo.refs, 1);
+assert.eq(cursorInfo.open.multiTarget, 1);
 
 jsTest.log("End the cursors.");
 
 shardedCursor.itcount();
 unshardedCursor.itcount();
 
-var cursorInfo = admin.runCommand({ cursorInfo : true });
+var cursorInfo = admin.serverStatus().metrics.cursor;;
 printjson(cursorInfo);
 
-assert.eq(cursorInfo.sharded, 0);
-assert.eq(cursorInfo.refs, 0);
+assert.eq(cursorInfo.open.multiTarget, 0);
 
 jsTest.log("DONE!");
 

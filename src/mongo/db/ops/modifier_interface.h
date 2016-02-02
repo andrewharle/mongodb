@@ -115,7 +115,7 @@ public:
      */
     struct ExecInfo;
     virtual Status prepare(mutablebson::Element root,
-                           const StringData& matchedField,
+                           StringData matchedField,
                            /* IN-OUT */ ExecInfo* execInfo) = 0;
 
     /**

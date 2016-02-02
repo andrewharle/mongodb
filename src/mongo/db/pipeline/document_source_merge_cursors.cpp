@@ -30,7 +30,6 @@
 
 #include "mongo/db/pipeline/document_source.h"
 
-#include <boost/make_shared.hpp>
 
 namespace mongo {
 
@@ -39,20 +38,15 @@ using std::make_pair;
 using std::string;
 using std::vector;
 
-const char DocumentSourceMergeCursors::name[] = "$mergeCursors";
-
-const char* DocumentSourceMergeCursors::getSourceName() const {
-    return name;
-}
-
-void DocumentSourceMergeCursors::setSource(DocumentSource* pSource) {
-    /* this doesn't take a source */
-    verify(false);
-}
-
 DocumentSourceMergeCursors::DocumentSourceMergeCursors(
     const CursorIds& cursorIds, const intrusive_ptr<ExpressionContext>& pExpCtx)
     : DocumentSource(pExpCtx), _cursorIds(cursorIds), _unstarted(true) {}
+
+REGISTER_DOCUMENT_SOURCE(mergeCursors, DocumentSourceMergeCursors::createFromBson);
+
+const char* DocumentSourceMergeCursors::getSourceName() const {
+    return "$mergeCursors";
+}
 
 intrusive_ptr<DocumentSource> DocumentSourceMergeCursors::create(
     const CursorIds& cursorIds, const intrusive_ptr<ExpressionContext>& pExpCtx) {
@@ -89,9 +83,9 @@ Value DocumentSourceMergeCursors::serialize(bool explain) const {
 }
 
 DocumentSourceMergeCursors::CursorAndConnection::CursorAndConnection(ConnectionString host,
-                                                                     NamespaceString ns,
+                                                                     NamespaceString nss,
                                                                      CursorId id)
-    : connection(host), cursor(connection.get(), ns, id, 0, 0) {}
+    : connection(host), cursor(connection.get(), nss.ns(), id, 0, 0) {}
 
 vector<DBClientCursor*> DocumentSourceMergeCursors::getCursors() {
     verify(_unstarted);
@@ -110,7 +104,7 @@ void DocumentSourceMergeCursors::start() {
     // open each cursor and send message asking for a batch
     for (CursorIds::const_iterator it = _cursorIds.begin(); it != _cursorIds.end(); ++it) {
         _cursors.push_back(
-            boost::make_shared<CursorAndConnection>(it->first, pExpCtx->ns, it->second));
+            std::make_shared<CursorAndConnection>(it->first, pExpCtx->ns, it->second));
         verify(_cursors.back()->connection->lazySupported());
         _cursors.back()->cursor.initLazy();  // shouldn't block
     }

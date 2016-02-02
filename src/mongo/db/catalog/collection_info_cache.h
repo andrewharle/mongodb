@@ -30,8 +30,7 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
-
+#include "mongo/db/collection_index_usage_tracker.h"
 #include "mongo/db/query/plan_cache.h"
 #include "mongo/db/query/query_settings.h"
 #include "mongo/db/update_index_data.h"
@@ -39,6 +38,8 @@
 namespace mongo {
 
 class Collection;
+class IndexDescriptor;
+class OperationContext;
 
 /**
  * this is for storing things that you want to cache about a single collection
@@ -47,15 +48,6 @@ class Collection;
 class CollectionInfoCache {
 public:
     CollectionInfoCache(Collection* collection);
-
-    /*
-     * Resets entire cache state. Must be called under exclusive DB lock.
-     */
-    void reset(OperationContext* txn);
-
-    //
-    // New Query Execution
-    //
 
     /**
      * Get the PlanCache for this collection.
@@ -67,23 +59,51 @@ public:
      */
     QuerySettings* getQuerySettings() const;
 
-    // -------------------
-
     /* get set of index keys for this namespace.  handy to quickly check if a given
        field is indexed (Note it might be a secondary component of a compound index.)
     */
-    const UpdateIndexData& indexKeys(OperationContext* txn) const;
-
-    // ---------------------
+    const UpdateIndexData& getIndexKeys(OperationContext* txn) const;
 
     /**
-     * Called when an index is added to this collection.
+     * Returns cached index usage statistics for this collection.  The map returned will contain
+     * entry for each index in the collection along with both a usage counter and a timestamp
+     * representing the date/time the counter is valid from.
+     *
+     * Note for performance that this method returns a copy of a StringMap.
      */
-    void addedIndex(OperationContext* txn) {
-        reset(txn);
-    }
+    CollectionIndexUsageMap getIndexUsageStats() const;
 
+    /**
+     * Builds internal cache state based on the current state of the Collection's IndexCatalog
+     */
+    void init(OperationContext* txn);
+
+    /**
+     * Register a newly-created index with the cache.  Must be called whenever an index is
+     * built on the associated collection.
+     *
+     * Must be called under exclusive collection lock.
+     */
+    void addedIndex(OperationContext* txn, const IndexDescriptor* desc);
+
+    /**
+     * Deregister a newly-dropped index with the cache.  Must be called whenever an index is
+     * dropped on the associated collection.
+     *
+     * Must be called under exclusive collection lock.
+     */
+    void droppedIndex(OperationContext* txn, StringData indexName);
+
+    /**
+     * Removes all cached query plans.
+     */
     void clearQueryCache();
+
+    /**
+     * Signal to the cache that a query operation has completed.  'indexesUsed' should list the
+     * set of indexes used by the winning plan, if any.
+     */
+    void notifyOfQuery(OperationContext* txn, const std::set<std::string>& indexesUsed);
 
 private:
     Collection* _collection;  // not owned
@@ -93,16 +113,23 @@ private:
     UpdateIndexData _indexedPaths;
 
     // A cache for query plans.
-    boost::scoped_ptr<PlanCache> _planCache;
+    std::unique_ptr<PlanCache> _planCache;
 
     // Query settings.
     // Includes index filters.
-    boost::scoped_ptr<QuerySettings> _querySettings;
+    std::unique_ptr<QuerySettings> _querySettings;
+
+    // Tracks index usage statistics for this collection.
+    CollectionIndexUsageTracker _indexUsageTracker;
+
+    void computeIndexKeys(OperationContext* txn);
+    void updatePlanCacheIndexEntries(OperationContext* txn);
 
     /**
-     * Must be called under exclusive DB lock.
+     * Rebuilds cached information that is dependent on index composition. Must be called
+     * when index composition changes.
      */
-    void computeIndexKeys(OperationContext* txn);
+    void rebuildIndexData(OperationContext* txn);
 };
 
 }  // namespace mongo

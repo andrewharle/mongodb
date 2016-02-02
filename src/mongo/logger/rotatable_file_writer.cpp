@@ -30,7 +30,6 @@
 #include "mongo/logger/rotatable_file_writer.h"
 
 #include <boost/filesystem/operations.hpp>
-#include <boost/scoped_array.hpp>
 #include <cstdio>
 #include <fstream>
 
@@ -55,13 +54,13 @@ namespace {
 /**
  * Converts UTF-8 encoded "utf8Str" to std::wstring.
  */
-std::wstring utf8ToWide(const StringData& utf8Str) {
+std::wstring utf8ToWide(StringData utf8Str) {
     if (utf8Str.empty())
         return std::wstring();
 
     // A Windows wchar_t encoding of a unicode codepoint never takes more instances of wchar_t
     // than the UTF-8 encoding takes instances of char.
-    boost::scoped_array<wchar_t> tempBuffer(new wchar_t[utf8Str.size()]);
+    std::unique_ptr<wchar_t[]> tempBuffer(new wchar_t[utf8Str.size()]);
     tempBuffer[0] = L'\0';
     int finalSize = MultiByteToWideChar(CP_UTF8,            // Code page
                                         0,                  // Flags
@@ -89,7 +88,7 @@ public:
     Win32FileStreambuf();
     virtual ~Win32FileStreambuf();
 
-    bool open(const StringData& fileName, bool append);
+    bool open(StringData fileName, bool append);
     bool is_open() {
         return _fileHandle != INVALID_HANDLE_VALUE;
     }
@@ -133,7 +132,7 @@ Win32FileStreambuf::~Win32FileStreambuf() {
     }
 }
 
-bool Win32FileStreambuf::open(const StringData& fileName, bool append) {
+bool Win32FileStreambuf::open(StringData fileName, bool append) {
     _fileHandle = CreateFileW(utf8ToWide(fileName).c_str(),         // lpFileName
                               GENERIC_WRITE,                        // dwDesiredAccess
                               FILE_SHARE_DELETE | FILE_SHARE_READ,  // dwShareMode
@@ -231,7 +230,7 @@ int renameFile(const std::string& oldName, const std::string& newName) {
 }  // namespace
 #endif
 
-RotatableFileWriter::RotatableFileWriter() : _stream(NULL) {}
+RotatableFileWriter::RotatableFileWriter() : _stream(nullptr) {}
 
 RotatableFileWriter::Use::Use(RotatableFileWriter* writer)
     : _writer(writer), _lock(writer->_mutex) {}
@@ -293,7 +292,7 @@ Status RotatableFileWriter::Use::_openFileStream(bool append) {
     using std::swap;
 
 #ifdef _WIN32
-    boost::scoped_ptr<std::ostream> newStream(new Win32FileOStream(_writer->_fileName, append));
+    std::unique_ptr<std::ostream> newStream(new Win32FileOStream(_writer->_fileName, append));
 #else
     std::ios::openmode mode = std::ios::out;
     if (append) {
@@ -301,7 +300,7 @@ Status RotatableFileWriter::Use::_openFileStream(bool append) {
     } else {
         mode |= std::ios::trunc;
     }
-    boost::scoped_ptr<std::ostream> newStream(new std::ofstream(_writer->_fileName.c_str(), mode));
+    std::unique_ptr<std::ostream> newStream(new std::ofstream(_writer->_fileName.c_str(), mode));
 #endif
 
     if (newStream->fail()) {

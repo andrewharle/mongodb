@@ -33,9 +33,12 @@
 #include "mongo/base/disallow_copying.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/oid.h"
-#include "mongo/bson/optime.h"
+#include "mongo/bson/timestamp.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/db/repl/last_vote.h"
 #include "mongo/db/repl/replication_coordinator_external_state.h"
+#include "mongo/stdx/condition_variable.h"
+#include "mongo/stdx/thread.h"
 #include "mongo/util/net/hostandport.h"
 
 namespace mongo {
@@ -49,25 +52,39 @@ public:
 
     ReplicationCoordinatorExternalStateMock();
     virtual ~ReplicationCoordinatorExternalStateMock();
-    virtual void startThreads();
+    virtual void startThreads(const ReplSettings& settings) override;
     virtual void startMasterSlave(OperationContext*);
     virtual void shutdown();
-    virtual void initiateOplog(OperationContext* txn);
-    virtual void forwardSlaveHandshake();
+    virtual Status initializeReplSetStorage(OperationContext* txn,
+                                            const BSONObj& config,
+                                            bool updateReplOpTime);
+    virtual void logTransitionToPrimaryToOplog(OperationContext* txn);
     virtual void forwardSlaveProgress();
     virtual OID ensureMe(OperationContext*);
     virtual bool isSelf(const HostAndPort& host);
     virtual HostAndPort getClientHostAndPort(const OperationContext* txn);
     virtual StatusWith<BSONObj> loadLocalConfigDocument(OperationContext* txn);
     virtual Status storeLocalConfigDocument(OperationContext* txn, const BSONObj& config);
-    virtual void setGlobalOpTime(const OpTime& newTime);
+    virtual StatusWith<LastVote> loadLocalLastVoteDocument(OperationContext* txn);
+    virtual Status storeLocalLastVoteDocument(OperationContext* txn, const LastVote& lastVote);
+    virtual void setGlobalTimestamp(const Timestamp& newTime);
     virtual StatusWith<OpTime> loadLastOpTime(OperationContext* txn);
+    virtual void cleanUpLastApplyBatch(OperationContext* txn);
     virtual void closeConnections();
     virtual void killAllUserOperations(OperationContext* txn);
     virtual void clearShardingState();
+    virtual void recoverShardingState(OperationContext* txn);
     virtual void signalApplierToChooseNewSyncSource();
+    virtual void signalApplierToCancelFetcher();
     virtual OperationContext* createOperationContext(const std::string& threadName);
     virtual void dropAllTempCollections(OperationContext* txn);
+    virtual void dropAllSnapshots();
+    virtual void updateCommittedSnapshot(SnapshotName newCommitPoint);
+    virtual void forceSnapshotCreation();
+    virtual bool snapshotsEnabled() const;
+    virtual void notifyOplogMetadataWaiters();
+    virtual double getElectionTimeoutOffsetLimitFraction() const;
+    virtual bool isReadCommittedSupportedByStorageEngine(OperationContext* txn) const;
 
     /**
      * Adds "host" to the list of hosts that this mock will match when responding to "isSelf"
@@ -79,6 +96,11 @@ public:
      * Sets the return value for subsequent calls to loadLocalConfigDocument().
      */
     void setLocalConfigDocument(const StatusWith<BSONObj>& localConfigDocument);
+
+    /**
+     * Sets the return value for subsequent calls to loadLocalLastVoteDocument().
+     */
+    void setLocalLastVoteDocument(const StatusWith<LastVote>& localLastVoteDocument);
 
     /**
      * Sets the return value for subsequent calls to getClientHostAndPort().
@@ -102,18 +124,48 @@ public:
      */
     void setStoreLocalConfigDocumentToHang(bool hang);
 
+    /**
+     * Sets the return value for subsequent calls to storeLocalLastVoteDocument().
+     * If "status" is Status::OK(), the subsequent calls will call the underlying funtion.
+     */
+    void setStoreLocalLastVoteDocumentStatus(Status status);
+
+    /**
+     * Sets whether or not subsequent calls to storeLocalLastVoteDocument() should hang
+     * indefinitely or not based on the value of "hang".
+     */
+    void setStoreLocalLastVoteDocumentToHang(bool hang);
+
+    /**
+     * Returns true if applier was signaled to cancel fetcher.
+     */
+    bool isApplierSignaledToCancelFetcher() const;
+
+    /**
+     * Returns true if startThreads() has been called.
+     */
+    bool threadsStarted() const;
+
 private:
     StatusWith<BSONObj> _localRsConfigDocument;
+    StatusWith<LastVote> _localRsLastVoteDocument;
     StatusWith<OpTime> _lastOpTime;
     std::vector<HostAndPort> _selfHosts;
     bool _canAcquireGlobalSharedLock;
     Status _storeLocalConfigDocumentStatus;
+    Status _storeLocalLastVoteDocumentStatus;
     // mutex and cond var for controlling stroeLocalConfigDocument()'s hanging
-    boost::mutex _shouldHangMutex;
-    boost::condition _shouldHangCondVar;
+    stdx::mutex _shouldHangConfigMutex;
+    stdx::condition_variable _shouldHangConfigCondVar;
+    // mutex and cond var for controlling stroeLocalLastVoteDocument()'s hanging
+    stdx::mutex _shouldHangLastVoteMutex;
+    stdx::condition_variable _shouldHangLastVoteCondVar;
     bool _storeLocalConfigDocumentShouldHang;
+    bool _storeLocalLastVoteDocumentShouldHang;
+    bool _isApplierSignaledToCancelFetcher;
     bool _connectionsClosed;
     HostAndPort _clientHostAndPort;
+    bool _threadsStarted;
 };
 
 }  // namespace repl

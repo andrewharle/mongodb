@@ -45,7 +45,7 @@ public:
     ArrayMatchingMatchExpression(MatchType matchType) : MatchExpression(matchType) {}
     virtual ~ArrayMatchingMatchExpression() {}
 
-    Status initPath(const StringData& path);
+    Status initPath(StringData path);
 
     virtual bool matches(const MatchableDocument* doc, MatchDetails* details) const;
 
@@ -70,17 +70,18 @@ private:
 class ElemMatchObjectMatchExpression : public ArrayMatchingMatchExpression {
 public:
     ElemMatchObjectMatchExpression() : ArrayMatchingMatchExpression(ELEM_MATCH_OBJECT) {}
-    Status init(const StringData& path, MatchExpression* sub);
+    Status init(StringData path, MatchExpression* sub);
 
     bool matchesArray(const BSONObj& anArray, MatchDetails* details) const;
 
-    virtual ElemMatchObjectMatchExpression* shallowClone() const {
-        ElemMatchObjectMatchExpression* e = new ElemMatchObjectMatchExpression();
-        e->init(path(), _sub->shallowClone());
+    virtual std::unique_ptr<MatchExpression> shallowClone() const {
+        std::unique_ptr<ElemMatchObjectMatchExpression> e =
+            stdx::make_unique<ElemMatchObjectMatchExpression>();
+        e->init(path(), _sub->shallowClone().release());
         if (getTag()) {
             e->setTag(getTag()->clone());
         }
-        return e;
+        return std::move(e);
     }
 
     virtual void debugString(StringBuilder& debug, int level) const;
@@ -96,7 +97,7 @@ public:
     }
 
 private:
-    boost::scoped_ptr<MatchExpression> _sub;
+    std::unique_ptr<MatchExpression> _sub;
 };
 
 class ElemMatchValueMatchExpression : public ArrayMatchingMatchExpression {
@@ -104,22 +105,23 @@ public:
     ElemMatchValueMatchExpression() : ArrayMatchingMatchExpression(ELEM_MATCH_VALUE) {}
     virtual ~ElemMatchValueMatchExpression();
 
-    Status init(const StringData& path);
-    Status init(const StringData& path, MatchExpression* sub);
+    Status init(StringData path);
+    Status init(StringData path, MatchExpression* sub);
     void add(MatchExpression* sub);
 
     bool matchesArray(const BSONObj& anArray, MatchDetails* details) const;
 
-    virtual ElemMatchValueMatchExpression* shallowClone() const {
-        ElemMatchValueMatchExpression* e = new ElemMatchValueMatchExpression();
+    virtual std::unique_ptr<MatchExpression> shallowClone() const {
+        std::unique_ptr<ElemMatchValueMatchExpression> e =
+            stdx::make_unique<ElemMatchValueMatchExpression>();
         e->init(path());
         for (size_t i = 0; i < _subs.size(); ++i) {
-            e->add(_subs[i]->shallowClone());
+            e->add(_subs[i]->shallowClone().release());
         }
         if (getTag()) {
             e->setTag(getTag()->clone());
         }
-        return e;
+        return std::move(e);
     }
 
     virtual void debugString(StringBuilder& debug, int level) const;
@@ -147,15 +149,15 @@ private:
 class SizeMatchExpression : public ArrayMatchingMatchExpression {
 public:
     SizeMatchExpression() : ArrayMatchingMatchExpression(SIZE) {}
-    Status init(const StringData& path, int size);
+    Status init(StringData path, int size);
 
-    virtual SizeMatchExpression* shallowClone() const {
-        SizeMatchExpression* e = new SizeMatchExpression();
+    virtual std::unique_ptr<MatchExpression> shallowClone() const {
+        std::unique_ptr<SizeMatchExpression> e = stdx::make_unique<SizeMatchExpression>();
         e->init(path(), _size);
         if (getTag()) {
             e->setTag(getTag()->clone());
         }
-        return e;
+        return std::move(e);
     }
 
     virtual bool matchesArray(const BSONObj& anArray, MatchDetails* details) const;

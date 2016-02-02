@@ -42,6 +42,8 @@
 namespace mongo {
 namespace repl {
 
+using executor::RemoteCommandRequest;
+
 ElectCmdRunner::Algorithm::Algorithm(const ReplicaSetConfig& rsConfig,
                                      int selfIndex,
                                      const std::vector<HostAndPort>& targets,
@@ -58,10 +60,9 @@ ElectCmdRunner::Algorithm::Algorithm(const ReplicaSetConfig& rsConfig,
 
 ElectCmdRunner::Algorithm::~Algorithm() {}
 
-std::vector<ReplicationExecutor::RemoteCommandRequest> ElectCmdRunner::Algorithm::getRequests()
-    const {
+std::vector<RemoteCommandRequest> ElectCmdRunner::Algorithm::getRequests() const {
     const MemberConfig& selfConfig = _rsConfig.getMemberAt(_selfIndex);
-    std::vector<ReplicationExecutor::RemoteCommandRequest> requests;
+    std::vector<RemoteCommandRequest> requests;
     BSONObjBuilder electCmdBuilder;
     electCmdBuilder.append("replSetElect", 1);
     electCmdBuilder.append("set", _rsConfig.getReplSetName());
@@ -75,7 +76,7 @@ std::vector<ReplicationExecutor::RemoteCommandRequest> ElectCmdRunner::Algorithm
     for (std::vector<HostAndPort>::const_iterator it = _targets.begin(); it != _targets.end();
          ++it) {
         invariant(*it != selfConfig.getHostAndPort());
-        requests.push_back(ReplicationExecutor::RemoteCommandRequest(
+        requests.push_back(RemoteCommandRequest(
             *it,
             "admin",
             replSetElectCmd,
@@ -101,8 +102,8 @@ bool ElectCmdRunner::Algorithm::hasReceivedSufficientResponses() const {
     return false;
 }
 
-void ElectCmdRunner::Algorithm::processResponse(
-    const ReplicationExecutor::RemoteCommandRequest& request, const ResponseStatus& response) {
+void ElectCmdRunner::Algorithm::processResponse(const RemoteCommandRequest& request,
+                                                const ResponseStatus& response) {
     ++_actualResponses;
 
     if (response.isOK()) {

@@ -28,7 +28,6 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
 #include <set>
 #include <vector>
 
@@ -45,6 +44,7 @@
 
 namespace mongo {
 
+class OperationContext;
 class TargetedWriteBatch;
 struct ShardError;
 struct ShardWCError;
@@ -106,7 +106,8 @@ public:
      *
      * Returned TargetedWriteBatches are owned by the caller.
      */
-    Status targetBatch(const NSTargeter& targeter,
+    Status targetBatch(OperationContext* txn,
+                       const NSTargeter& targeter,
                        bool recordTargetErrors,
                        std::vector<TargetedWriteBatch*>* targetedBatches);
 
@@ -178,7 +179,7 @@ private:
     OwnedPointerVector<BatchedUpsertDetail> _upsertedIds;
 
     // Stats for the entire batch op
-    boost::scoped_ptr<BatchWriteStats> _stats;
+    std::unique_ptr<BatchWriteStats> _stats;
 };
 
 struct BatchWriteStats {

@@ -55,35 +55,27 @@ public:
         int numWaitingWrite = 0;
 
         // This returns the blocked lock states
-        {
-            boost::mutex::scoped_lock scopedLock(Client::clientsMutex);
+        for (ServiceContext::LockedClientsCursor cursor(txn->getClient()->getServiceContext());
+             Client* client = cursor.next();) {
+            invariant(client);
+            ++numTotal;
+            stdx::unique_lock<Client> uniqueLock(*client);
 
-            // Count all clients
-            numTotal = Client::clients.size();
+            const OperationContext* opCtx = client->getOperationContext();
+            if (opCtx == NULL)
+                continue;
 
-            ClientSet::const_iterator it = Client::clients.begin();
-            for (; it != Client::clients.end(); it++) {
-                Client* client = *it;
-                invariant(client);
+            if (opCtx->lockState()->isWriteLocked()) {
+                numWriteLocked++;
 
-                boost::unique_lock<Client> uniqueLock(*client);
+                if (opCtx->lockState()->getWaitingResource().isValid()) {
+                    numWaitingWrite++;
+                }
+            } else if (opCtx->lockState()->isReadLocked()) {
+                numReadLocked++;
 
-                const OperationContext* opCtx = client->getOperationContext();
-                if (opCtx == NULL)
-                    continue;
-
-                if (opCtx->lockState()->isWriteLocked()) {
-                    numWriteLocked++;
-
-                    if (opCtx->lockState()->getWaitingResource().isValid()) {
-                        numWaitingWrite++;
-                    }
-                } else if (opCtx->lockState()->isReadLocked()) {
-                    numReadLocked++;
-
-                    if (opCtx->lockState()->getWaitingResource().isValid()) {
-                        numWaitingRead++;
-                    }
+                if (opCtx->lockState()->getWaitingResource().isValid()) {
+                    numWaitingRead++;
                 }
             }
         }

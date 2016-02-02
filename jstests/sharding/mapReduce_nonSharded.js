@@ -6,10 +6,11 @@ var verifyOutput = function(out) {
     assert.eq(out.counts.output, 512, "output count is wrong");
 }
 
-var st = new ShardingTest({ shards : 2, verbose : 1, mongos : 1, other : { chunksize : 1 } });
+var st = new ShardingTest({ shards : 2, verbose : 1, mongos : 1, other : { chunkSize: 1 } });
 st.startBalancer();
 
 st.adminCommand( { enablesharding : "mrShard" } )
+st.ensurePrimaryShard('mrShard', 'shard0001');
 st.adminCommand( { shardcollection : "mrShard.srcSharded", key : { "_id" : 1 } } )
 
 var db = st.getDB( "mrShard" );

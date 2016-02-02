@@ -28,12 +28,12 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
 #include <string>
 #include <vector>
 
 #include "mongo/base/string_data.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/db/repl/optime.h"
 #include "mongo/s/bson_serializable.h"
 #include "mongo/s/write_ops/write_error_detail.h"
 #include "mongo/s/write_ops/batched_upsert_detail.h"
@@ -59,7 +59,6 @@ public:
     static const BSONField<long long> n;
     static const BSONField<long long> nModified;
     static const BSONField<std::vector<BatchedUpsertDetail*>> upsertDetails;
-    static const BSONField<OpTime> lastOp;
     static const BSONField<OID> electionId;
     static const BSONField<std::vector<WriteErrorDetail*>> writeErrors;
     static const BSONField<WCErrorDetail*> writeConcernError;
@@ -89,8 +88,6 @@ public:
     //
 
     void setOk(int ok);
-    void unsetOk();
-    bool isOkSet() const;
     int getOk() const;
 
     void setErrCode(int errCode);
@@ -98,7 +95,7 @@ public:
     bool isErrCodeSet() const;
     int getErrCode() const;
 
-    void setErrMessage(const StringData& errMessage);
+    void setErrMessage(StringData errMessage);
     void unsetErrMessage();
     bool isErrMessageSet() const;
     const std::string& getErrMessage() const;
@@ -121,10 +118,10 @@ public:
     const std::vector<BatchedUpsertDetail*>& getUpsertDetails() const;
     const BatchedUpsertDetail* getUpsertDetailsAt(std::size_t pos) const;
 
-    void setLastOp(OpTime lastOp);
+    void setLastOp(repl::OpTime lastOp);
     void unsetLastOp();
     bool isLastOpSet() const;
-    OpTime getLastOp() const;
+    repl::OpTime getLastOp() const;
 
     void setElectionId(const OID& electionId);
     void unsetElectionId();
@@ -144,6 +141,11 @@ public:
     void unsetWriteConcernError();
     bool isWriteConcernErrorSet() const;
     const WCErrorDetail* getWriteConcernError() const;
+
+    /**
+     * Converts the specified command response into a status, based on its contents.
+     */
+    Status toStatus() const;
 
 private:
     // Convention: (M)andatory, (O)ptional
@@ -175,16 +177,16 @@ private:
 
     // (O)  Array of upserted items' _id's
     //      Should only be present if _singleUpserted is not.
-    boost::scoped_ptr<std::vector<BatchedUpsertDetail*>> _upsertDetails;
+    std::unique_ptr<std::vector<BatchedUpsertDetail*>> _upsertDetails;
 
-    // (O)  Timestamp assigned to the write op when it was written to the oplog.
+    // (O)  repl::OpTime assigned to the write op when it was written to the oplog.
     //      Normally, getLastError can use Client::_lastOp, but this is not valid for
     //      mongos which loses track of the session due to RCAR.  Therefore, we must
     //      keep track of the lastOp manually ourselves.
-    OpTime _lastOp;
+    repl::OpTime _lastOp;
     bool _isLastOpSet;
 
-    // (O)  In addition to keeping track of the above lastOp timestamp, we must also keep
+    // (O)  In addition to keeping track of the above lastOp repl::OpTime, we must also keep
     //      track of the primary we talked to.  This is because if the primary moves,
     //      subsequent calls to getLastError are invalid.  The only way we know if an
     //      election has occurred is to use the unique electionId.
@@ -192,10 +194,10 @@ private:
     bool _isElectionIdSet;
 
     // (O)  Array of item-level error information
-    boost::scoped_ptr<std::vector<WriteErrorDetail*>> _writeErrorDetails;
+    std::unique_ptr<std::vector<WriteErrorDetail*>> _writeErrorDetails;
 
     // (O)  errors that occurred while trying to satisfy the write concern.
-    boost::scoped_ptr<WCErrorDetail> _wcErrDetails;
+    std::unique_ptr<WCErrorDetail> _wcErrDetails;
 };
 
 }  // namespace mongo

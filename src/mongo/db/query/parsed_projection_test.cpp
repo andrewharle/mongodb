@@ -35,7 +35,7 @@
 
 namespace {
 
-using std::auto_ptr;
+using std::unique_ptr;
 using std::string;
 using std::vector;
 
@@ -45,10 +45,10 @@ using namespace mongo;
 // creation function
 //
 
-auto_ptr<ParsedProjection> createParsedProjection(const BSONObj& query, const BSONObj& projObj) {
-    StatusWithMatchExpression swme = MatchExpressionParser::parse(query);
-    ASSERT(swme.isOK());
-    boost::scoped_ptr<MatchExpression> queryMatchExpr(swme.getValue());
+unique_ptr<ParsedProjection> createParsedProjection(const BSONObj& query, const BSONObj& projObj) {
+    StatusWithMatchExpression statusWithMatcher = MatchExpressionParser::parse(query);
+    ASSERT(statusWithMatcher.isOK());
+    std::unique_ptr<MatchExpression> queryMatchExpr = std::move(statusWithMatcher.getValue());
     ParsedProjection* out = NULL;
     Status status = ParsedProjection::make(projObj, queryMatchExpr.get(), &out);
     if (!status.isOK()) {
@@ -56,10 +56,10 @@ auto_ptr<ParsedProjection> createParsedProjection(const BSONObj& query, const BS
                                        << " (query: " << query << "): " << status.toString());
     }
     ASSERT(out);
-    return auto_ptr<ParsedProjection>(out);
+    return unique_ptr<ParsedProjection>(out);
 }
 
-auto_ptr<ParsedProjection> createParsedProjection(const char* queryStr, const char* projStr) {
+unique_ptr<ParsedProjection> createParsedProjection(const char* queryStr, const char* projStr) {
     BSONObj query = fromjson(queryStr);
     BSONObj projObj = fromjson(projStr);
     return createParsedProjection(query, projObj);
@@ -72,12 +72,12 @@ auto_ptr<ParsedProjection> createParsedProjection(const char* queryStr, const ch
 void assertInvalidProjection(const char* queryStr, const char* projStr) {
     BSONObj query = fromjson(queryStr);
     BSONObj projObj = fromjson(projStr);
-    StatusWithMatchExpression swme = MatchExpressionParser::parse(query);
-    ASSERT(swme.isOK());
-    boost::scoped_ptr<MatchExpression> queryMatchExpr(swme.getValue());
+    StatusWithMatchExpression statusWithMatcher = MatchExpressionParser::parse(query);
+    ASSERT(statusWithMatcher.isOK());
+    std::unique_ptr<MatchExpression> queryMatchExpr = std::move(statusWithMatcher.getValue());
     ParsedProjection* out = NULL;
     Status status = ParsedProjection::make(projObj, queryMatchExpr.get(), &out);
-    boost::scoped_ptr<ParsedProjection> destroy(out);
+    std::unique_ptr<ParsedProjection> destroy(out);
     ASSERT(!status.isOK());
 }
 
@@ -85,17 +85,17 @@ void assertInvalidProjection(const char* queryStr, const char* projStr) {
 // the projection spec is non-empty. This test case is included for
 // completeness and do not reflect actual usage.
 TEST(ParsedProjectionTest, MakeId) {
-    auto_ptr<ParsedProjection> parsedProj(createParsedProjection("{}", "{}"));
+    unique_ptr<ParsedProjection> parsedProj(createParsedProjection("{}", "{}"));
     ASSERT(parsedProj->requiresDocument());
 }
 
 TEST(ParsedProjectionTest, MakeEmpty) {
-    auto_ptr<ParsedProjection> parsedProj(createParsedProjection("{}", "{_id: 0}"));
+    unique_ptr<ParsedProjection> parsedProj(createParsedProjection("{}", "{_id: 0}"));
     ASSERT(parsedProj->requiresDocument());
 }
 
 TEST(ParsedProjectionTest, MakeSingleField) {
-    auto_ptr<ParsedProjection> parsedProj(createParsedProjection("{}", "{a: 1}"));
+    unique_ptr<ParsedProjection> parsedProj(createParsedProjection("{}", "{a: 1}"));
     ASSERT(!parsedProj->requiresDocument());
     const vector<string>& fields = parsedProj->getRequiredFields();
     ASSERT_EQUALS(fields.size(), 2U);
@@ -104,7 +104,7 @@ TEST(ParsedProjectionTest, MakeSingleField) {
 }
 
 TEST(ParsedProjectionTest, MakeSingleFieldCovered) {
-    auto_ptr<ParsedProjection> parsedProj(createParsedProjection("{}", "{_id: 0, a: 1}"));
+    unique_ptr<ParsedProjection> parsedProj(createParsedProjection("{}", "{_id: 0, a: 1}"));
     ASSERT(!parsedProj->requiresDocument());
     const vector<string>& fields = parsedProj->getRequiredFields();
     ASSERT_EQUALS(fields.size(), 1U);
@@ -112,7 +112,7 @@ TEST(ParsedProjectionTest, MakeSingleFieldCovered) {
 }
 
 TEST(ParsedProjectionTest, MakeSingleFieldIDCovered) {
-    auto_ptr<ParsedProjection> parsedProj(createParsedProjection("{}", "{_id: 1}"));
+    unique_ptr<ParsedProjection> parsedProj(createParsedProjection("{}", "{_id: 1}"));
     ASSERT(!parsedProj->requiresDocument());
     const vector<string>& fields = parsedProj->getRequiredFields();
     ASSERT_EQUALS(fields.size(), 1U);
@@ -121,7 +121,7 @@ TEST(ParsedProjectionTest, MakeSingleFieldIDCovered) {
 
 // boolean support is undocumented
 TEST(ParsedProjectionTest, MakeSingleFieldCoveredBoolean) {
-    auto_ptr<ParsedProjection> parsedProj(createParsedProjection("{}", "{_id: 0, a: true}"));
+    unique_ptr<ParsedProjection> parsedProj(createParsedProjection("{}", "{_id: 0, a: true}"));
     ASSERT(!parsedProj->requiresDocument());
     const vector<string>& fields = parsedProj->getRequiredFields();
     ASSERT_EQUALS(fields.size(), 1U);
@@ -130,7 +130,7 @@ TEST(ParsedProjectionTest, MakeSingleFieldCoveredBoolean) {
 
 // boolean support is undocumented
 TEST(ParsedProjectionTest, MakeSingleFieldCoveredIdBoolean) {
-    auto_ptr<ParsedProjection> parsedProj(createParsedProjection("{}", "{_id: false, a: 1}"));
+    unique_ptr<ParsedProjection> parsedProj(createParsedProjection("{}", "{_id: false, a: 1}"));
     ASSERT(!parsedProj->requiresDocument());
     const vector<string>& fields = parsedProj->getRequiredFields();
     ASSERT_EQUALS(fields.size(), 1U);
@@ -176,19 +176,99 @@ TEST(ParsedProjectionTest, ValidPositionalOperatorProjections) {
 // to achieve the same effect.
 // Projection parser should handle this the same way as an empty path.
 TEST(ParsedProjectionTest, InvalidPositionalProjectionDefaultPathMatchExpression) {
-    auto_ptr<MatchExpression> queryMatchExpr(new FalseMatchExpression());
+    unique_ptr<MatchExpression> queryMatchExpr(new FalseMatchExpression());
     ASSERT(NULL == queryMatchExpr->path().rawData());
 
     ParsedProjection* out = NULL;
     BSONObj projObj = fromjson("{'a.$': 1}");
     Status status = ParsedProjection::make(projObj, queryMatchExpr.get(), &out);
     ASSERT(!status.isOK());
-    boost::scoped_ptr<ParsedProjection> destroy(out);
+    std::unique_ptr<ParsedProjection> destroy(out);
 
     // Projecting onto empty field should fail.
     BSONObj emptyFieldProjObj = fromjson("{'.$': 1}");
     status = ParsedProjection::make(emptyFieldProjObj, queryMatchExpr.get(), &out);
     ASSERT(!status.isOK());
+}
+
+TEST(ParsedProjectionTest, ParsedProjectionDefaults) {
+    auto parsedProjection = createParsedProjection("{}", "{}");
+
+    ASSERT_FALSE(parsedProjection->wantSortKey());
+    ASSERT_TRUE(parsedProjection->requiresDocument());
+    ASSERT_FALSE(parsedProjection->requiresMatchDetails());
+    ASSERT_FALSE(parsedProjection->wantGeoNearDistance());
+    ASSERT_FALSE(parsedProjection->wantGeoNearPoint());
+    ASSERT_FALSE(parsedProjection->wantIndexKey());
+}
+
+TEST(ParsedProjectionTest, SortKeyMetaProjection) {
+    auto parsedProjection = createParsedProjection("{}", "{foo: {$meta: 'sortKey'}}");
+
+    ASSERT_EQ(parsedProjection->getProjObj(), fromjson("{foo: {$meta: 'sortKey'}}"));
+    ASSERT_TRUE(parsedProjection->wantSortKey());
+    ASSERT_TRUE(parsedProjection->requiresDocument());
+
+    ASSERT_FALSE(parsedProjection->requiresMatchDetails());
+    ASSERT_FALSE(parsedProjection->wantGeoNearDistance());
+    ASSERT_FALSE(parsedProjection->wantGeoNearPoint());
+    ASSERT_FALSE(parsedProjection->wantIndexKey());
+}
+
+TEST(ParsedProjectionTest, SortKeyMetaProjectionCovered) {
+    auto parsedProjection = createParsedProjection("{}", "{a: 1, foo: {$meta: 'sortKey'}, _id: 0}");
+
+    ASSERT_EQ(parsedProjection->getProjObj(), fromjson("{a: 1, foo: {$meta: 'sortKey'}, _id: 0}"));
+    ASSERT_TRUE(parsedProjection->wantSortKey());
+
+    ASSERT_FALSE(parsedProjection->requiresDocument());
+    ASSERT_FALSE(parsedProjection->requiresMatchDetails());
+    ASSERT_FALSE(parsedProjection->wantGeoNearDistance());
+    ASSERT_FALSE(parsedProjection->wantGeoNearPoint());
+    ASSERT_FALSE(parsedProjection->wantIndexKey());
+}
+
+TEST(ParsedProjectionTest, SortKeyMetaAndSlice) {
+    auto parsedProjection =
+        createParsedProjection("{}", "{a: 1, foo: {$meta: 'sortKey'}, _id: 0, b: {$slice: 1}}");
+
+    ASSERT_EQ(parsedProjection->getProjObj(),
+              fromjson("{a: 1, foo: {$meta: 'sortKey'}, _id: 0, b: {$slice: 1}}"));
+    ASSERT_TRUE(parsedProjection->wantSortKey());
+    ASSERT_TRUE(parsedProjection->requiresDocument());
+
+    ASSERT_FALSE(parsedProjection->requiresMatchDetails());
+    ASSERT_FALSE(parsedProjection->wantGeoNearDistance());
+    ASSERT_FALSE(parsedProjection->wantGeoNearPoint());
+    ASSERT_FALSE(parsedProjection->wantIndexKey());
+}
+
+TEST(ParsedProjectionTest, SortKeyMetaAndElemMatch) {
+    auto parsedProjection = createParsedProjection(
+        "{}", "{a: 1, foo: {$meta: 'sortKey'}, _id: 0, b: {$elemMatch: {a: 1}}}");
+
+    ASSERT_EQ(parsedProjection->getProjObj(),
+              fromjson("{a: 1, foo: {$meta: 'sortKey'}, _id: 0, b: {$elemMatch: {a: 1}}}"));
+    ASSERT_TRUE(parsedProjection->wantSortKey());
+    ASSERT_TRUE(parsedProjection->requiresDocument());
+
+    ASSERT_FALSE(parsedProjection->requiresMatchDetails());
+    ASSERT_FALSE(parsedProjection->wantGeoNearDistance());
+    ASSERT_FALSE(parsedProjection->wantGeoNearPoint());
+    ASSERT_FALSE(parsedProjection->wantIndexKey());
+}
+
+TEST(ParsedProjectionTest, SortKeyMetaAndExclusion) {
+    auto parsedProjection = createParsedProjection("{}", "{a: 0, foo: {$meta: 'sortKey'}, _id: 0}");
+
+    ASSERT_EQ(parsedProjection->getProjObj(), fromjson("{a: 0, foo: {$meta: 'sortKey'}, _id: 0}"));
+    ASSERT_TRUE(parsedProjection->wantSortKey());
+    ASSERT_TRUE(parsedProjection->requiresDocument());
+
+    ASSERT_FALSE(parsedProjection->requiresMatchDetails());
+    ASSERT_FALSE(parsedProjection->wantGeoNearDistance());
+    ASSERT_FALSE(parsedProjection->wantGeoNearPoint());
+    ASSERT_FALSE(parsedProjection->wantIndexKey());
 }
 
 //

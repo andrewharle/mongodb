@@ -29,10 +29,11 @@
 
 #include <string>
 
-#include "mongo/base/status.h"
 #include "mongo/db/jsobj.h"
 
 namespace mongo {
+
+class Status;
 
 struct WriteConcernOptions {
 public:
@@ -43,8 +44,10 @@ public:
 
     static const BSONObj Default;
     static const BSONObj Acknowledged;
-    static const BSONObj AllConfigs;
     static const BSONObj Unacknowledged;
+    static const BSONObj Majority;
+
+    static const char kMajority[];  // = "majority"
 
     WriteConcernOptions() {
         reset();
@@ -53,6 +56,8 @@ public:
     WriteConcernOptions(int numNodes, SyncMode sync, int timeout);
 
     WriteConcernOptions(const std::string& mode, SyncMode sync, int timeout);
+
+    WriteConcernOptions(const std::string& mode, SyncMode sync, Milliseconds timeout);
 
     Status parse(const BSONObj& obj);
 
@@ -81,6 +86,12 @@ public:
      * write concern setting. Errs on the false positive for non-empty wMode.
      */
     bool shouldWaitForOtherNodes() const;
+
+    /**
+     * Returns true if this is a valid write concern to use against a config server.
+     * TODO(spencer): Once we stop supporting SCCC config servers, forbid this from allowing w:1
+     */
+    bool validForConfigServers() const;
 
     void reset() {
         syncMode = NONE;

@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -40,7 +41,7 @@
 namespace mongo {
 
 class DataFile;
-class Record;
+class MmapV1RecordHeader;
 class RecordFetcher;
 class OperationContext;
 
@@ -103,28 +104,30 @@ public:
                                int64_t* totalFreeSizeBytes) const = 0;
 
     /**
-     * @param loc - has to be for a specific Record
+     * @param loc - has to be for a specific MmapV1RecordHeader
      * Note(erh): this sadly cannot be removed.
-     * A Record DiskLoc has an offset from a file, while a RecordStore really wants an offset
-     * from an extent.  This intrinsically links an original record store to the original extent
-     * manager.
+     * A MmapV1RecordHeader DiskLoc has an offset from a file, while a RecordStore really wants an
+     * offset from an extent.  This intrinsically links an original record store to the original
+     * extent manager.
      */
-    virtual Record* recordForV1(const DiskLoc& loc) const = 0;
+    virtual MmapV1RecordHeader* recordForV1(const DiskLoc& loc) const = 0;
 
     /**
      * The extent manager tracks accesses to DiskLocs. This returns non-NULL if the DiskLoc has
      * been recently accessed, and therefore has likely been paged into physical memory.
+     * Returns nullptr if the DiskLoc is Null.
+     *
      */
-    virtual RecordFetcher* recordNeedsFetch(const DiskLoc& loc) const = 0;
+    virtual std::unique_ptr<RecordFetcher> recordNeedsFetch(const DiskLoc& loc) const = 0;
 
     /**
-     * @param loc - has to be for a specific Record (not an Extent)
+     * @param loc - has to be for a specific MmapV1RecordHeader (not an Extent)
      * Note(erh) see comment on recordFor
      */
     virtual Extent* extentForV1(const DiskLoc& loc) const = 0;
 
     /**
-     * @param loc - has to be for a specific Record (not an Extent)
+     * @param loc - has to be for a specific MmapV1RecordHeader (not an Extent)
      * Note(erh) see comment on recordFor
      */
     virtual DiskLoc extentLocForV1(const DiskLoc& loc) const = 0;

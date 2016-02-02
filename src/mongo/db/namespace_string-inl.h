@@ -40,21 +40,21 @@ inline StringData NamespaceString::coll() const {
                                                                       _ns.size() - 1 - _dotIndex);
 }
 
-inline bool NamespaceString::normal(const StringData& ns) {
+inline bool NamespaceString::normal(StringData ns) {
     if (ns.find('$') == std::string::npos)
         return true;
     return oplog(ns);
 }
 
-inline bool NamespaceString::oplog(const StringData& ns) {
+inline bool NamespaceString::oplog(StringData ns) {
     return ns.startsWith("local.oplog.");
 }
 
-inline bool NamespaceString::special(const StringData& ns) {
+inline bool NamespaceString::special(StringData ns) {
     return !normal(ns) || ns.substr(ns.find('.')).startsWith(".system.");
 }
 
-inline bool NamespaceString::validDBName(const StringData& db) {
+inline bool NamespaceString::validDBName(StringData db) {
     if (db.size() == 0 || db.size() > 64)
         return false;
 
@@ -84,7 +84,7 @@ inline bool NamespaceString::validDBName(const StringData& db) {
     return true;
 }
 
-inline bool NamespaceString::validCollectionComponent(const StringData& ns) {
+inline bool NamespaceString::validCollectionComponent(StringData ns) {
     size_t idx = ns.find('.');
     if (idx == std::string::npos)
         return false;
@@ -92,7 +92,7 @@ inline bool NamespaceString::validCollectionComponent(const StringData& ns) {
     return validCollectionName(ns.substr(idx + 1)) || oplog(ns);
 }
 
-inline bool NamespaceString::validCollectionName(const StringData& coll) {
+inline bool NamespaceString::validCollectionName(StringData coll) {
     if (coll.empty())
         return false;
 
@@ -113,12 +113,12 @@ inline bool NamespaceString::validCollectionName(const StringData& coll) {
 }
 
 inline NamespaceString::NamespaceString() : _ns(), _dotIndex(0) {}
-inline NamespaceString::NamespaceString(const StringData& nsIn) {
+inline NamespaceString::NamespaceString(StringData nsIn) {
     _ns = nsIn.toString();  // copy to our buffer
     _dotIndex = _ns.find('.');
 }
 
-inline NamespaceString::NamespaceString(const StringData& dbName, const StringData& collectionName)
+inline NamespaceString::NamespaceString(StringData dbName, StringData collectionName)
     : _ns(dbName.size() + collectionName.size() + 1, '\0') {
     uassert(17235,
             "'.' is an invalid character in a database name",
@@ -180,7 +180,7 @@ inline bool nsDBEquals(const std::string& a, const std::string& b) {
 }
 
 /* future : this doesn't need to be an inline. */
-inline std::string NamespaceString::getSisterNS(const StringData& local) const {
+inline std::string NamespaceString::getSisterNS(StringData local) const {
     verify(local.size() && local[0] != '.');
     return db().toString() + "." + local.toString();
 }

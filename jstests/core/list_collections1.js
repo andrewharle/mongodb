@@ -27,6 +27,7 @@
     assert.eq('string', typeof(res.cursor.ns));
     collObj = res.cursor.firstBatch.filter(function(c) { return c.name === "foo"; })[0];
     assert(collObj);
+    assert.eq('object', typeof(collObj.options));
 
     //
     // Test basic usage with DBCommandCursor.
@@ -56,25 +57,10 @@
     assert.commandWorked(mydb.createCollection("bar", {temp: true}));
     assert.eq(1, cursorCountMatching(getListCollectionsCursor(),
                                      function(c) { return c.name === "foo" &&
-                                                          (c.options === undefined ||
-                                                           c.options.temp === undefined); }));
+                                                          c.options.temp === undefined; }));
     assert.eq(1, cursorCountMatching(getListCollectionsCursor(),
                                      function(c) { return c.name === "bar" &&
                                                           c.options.temp === true; }));
-
-    //
-    // Test that collections are returned in sorted name order.
-    //
-
-    assert.commandWorked(mydb.dropDatabase());
-    assert.commandWorked(mydb.createCollection("baz"));
-    assert.commandWorked(mydb.createCollection("foo"));
-    assert.commandWorked(mydb.createCollection("quux"));
-    assert.commandWorked(mydb.createCollection("bar"));
-    var collectionNames = getListCollectionsCursor().toArray().filter(function(c) {
-        return c.name === "foo" || c.name === "bar" || c.name === "baz" || c.name === "quux";
-    }).map(function(c) { return c.name; });
-    assert.eq(["bar", "baz", "foo", "quux"], collectionNames);
 
     //
     // Test basic usage of "filter" option.
@@ -152,8 +138,8 @@
     // Ensure that the server accepts an empty object for "cursor".  This is equivalent to not
     // specifying "cursor" at all.
     //
-    // We do not test for objsLeftInBatch() here, since the default batch size for this command is
-    // not specified.
+    // We do not test for objsLeftInBatch() here, since the default batch size for this command
+    // is not specified.
     cursor = getListCollectionsCursor({cursor: {}});
     assert.eq(2, cursorCountMatching(cursor, function(c) { return c.name === "foo" ||
                                                                   c.name === "bar"; }));

@@ -31,7 +31,6 @@
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/client_basic.h"
 #include "mongo/db/commands.h"
-#include "mongo/s/client_info.h"
 #include "mongo/s/config.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/stale_exception.h"
@@ -73,7 +72,7 @@ public:
     Status checkAuthForCommand(ClientBasic* client,
                                const std::string& dbname,
                                const BSONObj& cmdObj) {
-        AuthorizationSession* authzSession = client->getAuthorizationSession();
+        AuthorizationSession* authzSession = AuthorizationSession::get(client);
         ResourcePattern pattern = parseResourcePattern(dbname, cmdObj);
 
         if (authzSession->isAuthorizedForActionsOnResource(pattern, _actionType)) {
@@ -89,8 +88,7 @@ public:
              BSONObj& cmdObj,
              int options,
              std::string& errmsg,
-             BSONObjBuilder& result,
-             bool fromRepl);
+             BSONObjBuilder& result);
 
 public:
     /**
@@ -114,8 +112,7 @@ bool ClusterPlanCacheCmd::run(OperationContext* txn,
                               BSONObj& cmdObj,
                               int options,
                               std::string& errMsg,
-                              BSONObjBuilder& result,
-                              bool) {
+                              BSONObjBuilder& result) {
     const std::string fullns = parseNs(dbName, cmdObj);
     NamespaceString nss(fullns);
 
@@ -123,7 +120,7 @@ bool ClusterPlanCacheCmd::run(OperationContext* txn,
     // Targeted shard commands are generally data-dependent but plan cache
     // commands are tied to query shape (data has no effect on query shape).
     vector<Strategy::CommandResult> results;
-    STRATEGY->commandOp(dbName, cmdObj, options, nss.ns(), BSONObj(), &results);
+    Strategy::commandOp(txn, dbName, cmdObj, options, nss.ns(), BSONObj(), &results);
 
     // Set value of first shard result's "ok" field.
     bool clusterCmdResult = true;
@@ -141,7 +138,7 @@ bool ClusterPlanCacheCmd::run(OperationContext* txn,
 
         // Append shard result as a sub object.
         // Name the field after the shard.
-        string shardName = cmdResult.shardTarget.getName();
+        string shardName = cmdResult.shardTargetId;
         result.append(shardName, cmdResult.result);
     }
 

@@ -28,6 +28,9 @@
 
 #pragma once
 
+#include <memory>
+#include <vector>
+
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/exec/plan_stage.h"
 #include "mongo/db/exec/plan_stats.h"
@@ -36,69 +39,56 @@
 namespace mongo {
 
 /**
- * Iterates over a collection using multiple underlying RecordIterators.
+ * Iterates over a collection using multiple underlying RecordCursors.
  *
  * This is a special stage which is not used automatically by queries. It is intended for
- * special commands that work with RecordIterators. For example, it is used by the
+ * special commands that work with RecordCursors. For example, it is used by the
  * parallelCollectionScan and repairCursor commands
  */
-class MultiIteratorStage : public PlanStage {
+class MultiIteratorStage final : public PlanStage {
 public:
     MultiIteratorStage(OperationContext* txn, WorkingSet* ws, Collection* collection);
 
-    ~MultiIteratorStage() {}
+    void addIterator(std::unique_ptr<RecordCursor> it);
 
-    /**
-     * Takes ownership of 'it'.
-     */
-    void addIterator(RecordIterator* it);
+    PlanStage::StageState work(WorkingSetID* out) final;
 
-    virtual PlanStage::StageState work(WorkingSetID* out);
-
-    virtual bool isEOF();
+    bool isEOF() final;
 
     void kill();
 
-    virtual void saveState();
-    virtual void restoreState(OperationContext* opCtx);
+    void doSaveState() final;
+    void doRestoreState() final;
+    void doDetachFromOperationContext() final;
+    void doReattachToOperationContext() final;
+    void doInvalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) final;
 
-    virtual void invalidate(OperationContext* txn, const RecordId& dl, InvalidationType type);
+    // Returns empty PlanStageStats object
+    std::unique_ptr<PlanStageStats> getStats() final;
 
-    //
-    // These should not be used.
-    //
-
-    virtual PlanStageStats* getStats() {
-        return NULL;
-    }
-    virtual CommonStats* getCommonStats() {
-        return NULL;
-    }
-    virtual SpecificStats* getSpecificStats() {
+    // Not used.
+    SpecificStats* getSpecificStats() const final {
         return NULL;
     }
 
-    virtual std::vector<PlanStage*> getChildren() const;
-
-    virtual StageType stageType() const {
+    // Not used.
+    StageType stageType() const final {
         return STAGE_MULTI_ITERATOR;
     }
 
-private:
-    /**
-     * @return if more data
-     */
-    RecordId _advance();
+    static const char* kStageType;
 
+private:
     OperationContext* _txn;
     Collection* _collection;
-    OwnedPointerVector<RecordIterator> _iterators;
+    std::vector<std::unique_ptr<RecordCursor>> _iterators;
 
     // Not owned by us.
     WorkingSet* _ws;
 
-    // We allocate a working set member with this id on construction of the stage. It gets
-    // used for all fetch requests, changing the RecordId as appropriate.
+    // We allocate a working set member with this id on construction of the stage. It gets used for
+    // all fetch requests. This should only be used for passing up the Fetcher for a NEED_YIELD, and
+    // should remain in the INVALID state.
     const WorkingSetID _wsidForFetch;
 };
 

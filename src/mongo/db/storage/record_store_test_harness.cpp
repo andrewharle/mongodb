@@ -30,22 +30,21 @@
 
 #include "mongo/db/storage/record_store_test_harness.h"
 
-#include <boost/scoped_ptr.hpp>
 
 #include "mongo/db/storage/record_store.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo {
 
-using boost::scoped_ptr;
+using std::unique_ptr;
 using std::string;
 
 TEST(RecordStoreTestHarness, Simple1) {
-    scoped_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
-    scoped_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
+    unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    unique_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(0, rs->numRecords(opCtx.get()));
     }
 
@@ -54,7 +53,7 @@ TEST(RecordStoreTestHarness, Simple1) {
     RecordId loc1;
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             StatusWith<RecordId> res =
@@ -68,7 +67,7 @@ TEST(RecordStoreTestHarness, Simple1) {
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(s, rs->dataFor(opCtx.get(), loc1).data());
         ASSERT_EQUALS(1, rs->numRecords(opCtx.get()));
 
@@ -81,7 +80,7 @@ TEST(RecordStoreTestHarness, Simple1) {
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             StatusWith<RecordId> res =
@@ -92,7 +91,7 @@ TEST(RecordStoreTestHarness, Simple1) {
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(2, rs->numRecords(opCtx.get()));
     }
 }
@@ -115,13 +114,13 @@ public:
 
 
 TEST(RecordStoreTestHarness, Simple1InsertDocWroter) {
-    scoped_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
-    scoped_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
+    unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    unique_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
 
     RecordId loc1;
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
 
         {
             WriteUnitOfWork uow(opCtx.get());
@@ -137,11 +136,11 @@ TEST(RecordStoreTestHarness, Simple1InsertDocWroter) {
 }
 
 TEST(RecordStoreTestHarness, Delete1) {
-    scoped_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
-    scoped_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
+    unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    unique_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(0, rs->numRecords(opCtx.get()));
     }
 
@@ -149,7 +148,7 @@ TEST(RecordStoreTestHarness, Delete1) {
 
     RecordId loc;
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
 
         {
             WriteUnitOfWork uow(opCtx.get());
@@ -164,12 +163,12 @@ TEST(RecordStoreTestHarness, Delete1) {
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(1, rs->numRecords(opCtx.get()));
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
 
         {
             WriteUnitOfWork uow(opCtx.get());
@@ -182,11 +181,11 @@ TEST(RecordStoreTestHarness, Delete1) {
 }
 
 TEST(RecordStoreTestHarness, Delete2) {
-    scoped_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
-    scoped_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
+    unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    unique_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(0, rs->numRecords(opCtx.get()));
     }
 
@@ -194,7 +193,7 @@ TEST(RecordStoreTestHarness, Delete2) {
 
     RecordId loc;
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
 
         {
             WriteUnitOfWork uow(opCtx.get());
@@ -209,13 +208,13 @@ TEST(RecordStoreTestHarness, Delete2) {
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(s, rs->dataFor(opCtx.get(), loc).data());
         ASSERT_EQUALS(2, rs->numRecords(opCtx.get()));
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             rs->deleteRecord(opCtx.get(), loc);
@@ -225,11 +224,11 @@ TEST(RecordStoreTestHarness, Delete2) {
 }
 
 TEST(RecordStoreTestHarness, Update1) {
-    scoped_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
-    scoped_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
+    unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    unique_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(0, rs->numRecords(opCtx.get()));
     }
 
@@ -238,7 +237,7 @@ TEST(RecordStoreTestHarness, Update1) {
 
     RecordId loc;
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             StatusWith<RecordId> res =
@@ -250,12 +249,12 @@ TEST(RecordStoreTestHarness, Update1) {
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(s1, rs->dataFor(opCtx.get(), loc).data());
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             StatusWith<RecordId> res =
@@ -267,15 +266,15 @@ TEST(RecordStoreTestHarness, Update1) {
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(1, rs->numRecords(opCtx.get()));
         ASSERT_EQUALS(s2, rs->dataFor(opCtx.get(), loc).data());
     }
 }
 
 TEST(RecordStoreTestHarness, UpdateInPlace1) {
-    scoped_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
-    scoped_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
+    unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    unique_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
 
     if (!rs->updateWithDamagesSupported())
         return;
@@ -286,7 +285,7 @@ TEST(RecordStoreTestHarness, UpdateInPlace1) {
     RecordId loc;
     const RecordData s1Rec(s1.c_str(), s1.size() + 1);
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             StatusWith<RecordId> res =
@@ -298,12 +297,12 @@ TEST(RecordStoreTestHarness, UpdateInPlace1) {
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(s1, rs->dataFor(opCtx.get(), loc).data());
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             const char* damageSource = "222";
@@ -312,25 +311,27 @@ TEST(RecordStoreTestHarness, UpdateInPlace1) {
             dv[0].sourceOffset = 0;
             dv[0].targetOffset = 3;
             dv[0].size = 3;
-            Status res = rs->updateWithDamages(opCtx.get(), loc, s1Rec, damageSource, dv);
-            ASSERT_OK(res);
+
+            auto newRecStatus = rs->updateWithDamages(opCtx.get(), loc, s1Rec, damageSource, dv);
+            ASSERT_OK(newRecStatus.getStatus());
+            ASSERT_EQUALS(s2, newRecStatus.getValue().data());
             uow.commit();
         }
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(s2, rs->dataFor(opCtx.get(), loc).data());
     }
 }
 
 
 TEST(RecordStoreTestHarness, Truncate1) {
-    scoped_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
-    scoped_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
+    unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    unique_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(0, rs->numRecords(opCtx.get()));
     }
 
@@ -338,7 +339,7 @@ TEST(RecordStoreTestHarness, Truncate1) {
 
     RecordId loc;
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             StatusWith<RecordId> res =
@@ -351,17 +352,17 @@ TEST(RecordStoreTestHarness, Truncate1) {
 
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(s, rs->dataFor(opCtx.get(), loc).data());
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(1, rs->numRecords(opCtx.get()));
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             rs->truncate(opCtx.get());
@@ -370,7 +371,7 @@ TEST(RecordStoreTestHarness, Truncate1) {
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(0, rs->numRecords(opCtx.get()));
     }
 }
@@ -378,16 +379,16 @@ TEST(RecordStoreTestHarness, Truncate1) {
 TEST(RecordStoreTestHarness, Cursor1) {
     const int N = 10;
 
-    scoped_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
-    scoped_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
+    unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    unique_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(0, rs->numRecords(opCtx.get()));
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             for (int i = 0; i < N; i++) {
@@ -400,35 +401,32 @@ TEST(RecordStoreTestHarness, Cursor1) {
     }
 
     {
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(N, rs->numRecords(opCtx.get()));
     }
 
     {
         int x = 0;
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
-        scoped_ptr<RecordIterator> it(rs->getIterator(opCtx.get()));
-        while (!it->isEOF()) {
-            RecordId loc = it->getNext();
-            RecordData data = it->dataFor(loc);
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        auto cursor = rs->getCursor(opCtx.get());
+        while (auto record = cursor->next()) {
             string s = str::stream() << "eliot" << x++;
-            ASSERT_EQUALS(s, data.data());
+            ASSERT_EQUALS(s, record->data.data());
         }
         ASSERT_EQUALS(N, x);
+        ASSERT(!cursor->next());
     }
 
     {
         int x = N;
-        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
-        scoped_ptr<RecordIterator> it(
-            rs->getIterator(opCtx.get(), RecordId(), CollectionScanParams::BACKWARD));
-        while (!it->isEOF()) {
-            RecordId loc = it->getNext();
-            RecordData data = it->dataFor(loc);
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        auto cursor = rs->getCursor(opCtx.get(), false);
+        while (auto record = cursor->next()) {
             string s = str::stream() << "eliot" << --x;
-            ASSERT_EQUALS(s, data.data());
+            ASSERT_EQUALS(s, record->data.data());
         }
         ASSERT_EQUALS(0, x);
+        ASSERT(!cursor->next());
     }
 }
 }

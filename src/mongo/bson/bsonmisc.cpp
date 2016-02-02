@@ -72,6 +72,11 @@ BSONObjBuilderValueStream::BSONObjBuilderValueStream(BSONObjBuilder* builder) {
     _builder = builder;
 }
 
+void BSONObjBuilderValueStream::reset() {
+    _fieldName = StringData();
+    _subobj.reset();
+}
+
 BSONObjBuilder& BSONObjBuilderValueStream::operator<<(const BSONElement& e) {
     _builder->appendAs(e, _fieldName);
     _fieldName = StringData();
@@ -94,7 +99,7 @@ Labeler BSONObjBuilderValueStream::operator<<(const Labeler::Label& l) {
     return Labeler(l, this);
 }
 
-void BSONObjBuilderValueStream::endField(const StringData& nextFieldName) {
+void BSONObjBuilderValueStream::endField(StringData nextFieldName) {
     if (haveSubobj()) {
         verify(_fieldName.rawData());
         _builder->append(_fieldName, subobj()->done());

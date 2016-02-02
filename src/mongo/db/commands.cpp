@@ -39,7 +39,6 @@
 #include <vector>
 
 #include "mongo/bson/mutable/document.h"
-#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/audit.h"
 #include "mongo/db/auth/action_set.h"
 #include "mongo/db/auth/action_type.h"
@@ -47,10 +46,14 @@
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/client.h"
-#include "mongo/db/get_status_from_command_result.h"
+#include "mongo/db/curop.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/server_parameters.h"
+#include "mongo/rpc/get_status_from_command_result.h"
+#include "mongo/rpc/metadata.h"
+#include "mongo/s/stale_exception.h"
+#include "mongo/s/write_ops/wc_error_detail.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
@@ -65,19 +68,16 @@ Command::CommandMap* Command::_commandsByBestName;
 Command::CommandMap* Command::_webCommands;
 Command::CommandMap* Command::_commands;
 
-int Command::testCommandsEnabled = 0;
-
 Counter64 Command::unknownCommands;
 static ServerStatusMetricField<Counter64> displayUnknownCommands("commands.<UNKNOWN>",
                                                                  &Command::unknownCommands);
 
 namespace {
-ExportedServerParameter<int> testCommandsParameter(ServerParameterSet::getGlobal(),
-                                                   "enableTestCommands",
-                                                   &Command::testCommandsEnabled,
-                                                   true,
-                                                   false);
+ExportedServerParameter<bool, ServerParameterType::kStartupOnly> testCommandsParameter(
+    ServerParameterSet::getGlobal(), "enableTestCommands", &Command::testCommandsEnabled);
 }
+
+Command::~Command() = default;
 
 string Command::parseNsFullyQualified(const string& dbname, const BSONObj& cmdObj) const {
     BSONElement first = cmdObj.firstElement();
@@ -228,7 +228,7 @@ void Command::help(stringstream& help) const {
     help << "no help defined";
 }
 
-Command* Command::findCommand(const StringData& name) {
+Command* Command::findCommand(StringData name) {
     CommandMap::const_iterator i = _commands->find(name);
     if (i == _commands->end())
         return 0;
@@ -254,6 +254,15 @@ void Command::appendCommandStatus(BSONObjBuilder& result, bool ok, const std::st
 
     if (!ok && !have_errmsg) {
         result.append("errmsg", errmsg);
+    }
+}
+
+void Command::appendCommandWCStatus(BSONObjBuilder& result, const Status& status) {
+    if (!status.isOK()) {
+        WCErrorDetail wcError;
+        wcError.setErrCode(status.code());
+        wcError.setErrMessage(status.reason());
+        result.append("writeConcernError", wcError.toBSON());
     }
 }
 
@@ -303,23 +312,12 @@ Status Command::parseCommandCursorOptions(const BSONObj& cmdObj,
     return Status::OK();
 }
 
-void Command::appendCursorResponseObject(long long cursorId,
-                                         StringData cursorNamespace,
-                                         BSONArray firstBatch,
-                                         BSONObjBuilder* builder) {
-    BSONObjBuilder cursorObj(builder->subobjStart("cursor"));
-    cursorObj.append("id", cursorId);
-    cursorObj.append("ns", cursorNamespace);
-    cursorObj.append("firstBatch", firstBatch);
-    cursorObj.done();
-}
-
 Status Command::checkAuthForCommand(ClientBasic* client,
                                     const std::string& dbname,
                                     const BSONObj& cmdObj) {
     std::vector<Privilege> privileges;
     this->addRequiredPrivileges(dbname, cmdObj, &privileges);
-    if (client->getAuthorizationSession()->isAuthorizedForPrivileges(privileges))
+    if (AuthorizationSession::get(client)->isAuthorizedForPrivileges(privileges))
         return Status::OK();
     return Status(ErrorCodes::Unauthorized, "unauthorized");
 }
@@ -345,14 +343,13 @@ void Command::logIfSlow(const Timer& timer, const string& msg) {
 static Status _checkAuthorizationImpl(Command* c,
                                       ClientBasic* client,
                                       const std::string& dbname,
-                                      const BSONObj& cmdObj,
-                                      bool fromRepl) {
+                                      const BSONObj& cmdObj) {
     namespace mmb = mutablebson;
-    if (c->adminOnly() && !fromRepl && dbname != "admin") {
+    if (c->adminOnly() && dbname != "admin") {
         return Status(ErrorCodes::Unauthorized,
                       str::stream() << c->name << " may only be run against the admin database.");
     }
-    if (client->getAuthorizationSession()->getAuthorizationManager().isAuthEnabled()) {
+    if (AuthorizationSession::get(client)->getAuthorizationManager().isAuthEnabled()) {
         Status status = c->checkAuthForCommand(client, dbname, cmdObj);
         if (status == ErrorCodes::Unauthorized) {
             mmb::Document cmdToLog(cmdObj, mmb::Document::kInPlaceDisabled);
@@ -376,92 +373,134 @@ static Status _checkAuthorizationImpl(Command* c,
 Status Command::_checkAuthorization(Command* c,
                                     ClientBasic* client,
                                     const std::string& dbname,
-                                    const BSONObj& cmdObj,
-                                    bool fromRepl) {
+                                    const BSONObj& cmdObj) {
     namespace mmb = mutablebson;
-    Status status = _checkAuthorizationImpl(c, client, dbname, cmdObj, fromRepl);
+    Status status = _checkAuthorizationImpl(c, client, dbname, cmdObj);
     if (!status.isOK()) {
         log(LogComponent::kAccessControl) << status << std::endl;
     }
     audit::logCommandAuthzCheck(client, dbname, cmdObj, c, status.code());
     return status;
 }
+
+bool Command::isHelpRequest(const BSONElement& helpElem) {
+    return !helpElem.eoo() && helpElem.trueValue();
 }
 
-#include "mongo/client/connpool.h"
+const char Command::kHelpFieldName[] = "help";
 
-namespace mongo {
+void Command::generateHelpResponse(OperationContext* txn,
+                                   const rpc::RequestInterface& request,
+                                   rpc::ReplyBuilderInterface* replyBuilder,
+                                   const Command& command) {
+    std::stringstream ss;
+    BSONObjBuilder helpBuilder;
+    ss << "help for: " << command.name << " ";
+    command.help(ss);
+    helpBuilder.append("help", ss.str());
+    helpBuilder.append("lockType", command.isWriteCommandForConfigServer() ? 1 : 0);
 
-extern DBConnectionPool pool;
-// This is mainly used by the internal writes using write commands.
-extern DBConnectionPool shardConnectionPool;
+    replyBuilder->setCommandReply(helpBuilder.done());
+    replyBuilder->setMetadata(rpc::makeEmptyMetadata());
+}
 
-class PoolFlushCmd : public Command {
-public:
-    PoolFlushCmd() : Command("connPoolSync", false, "connpoolsync") {}
-    virtual void help(stringstream& help) const {
-        help << "internal";
-    }
-    virtual bool isWriteCommandForConfigServer() const {
-        return false;
-    }
-    virtual void addRequiredPrivileges(const std::string& dbname,
-                                       const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
-        ActionSet actions;
-        actions.addAction(ActionType::connPoolSync);
-        out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
-    }
+namespace {
 
-    virtual bool run(OperationContext* txn,
-                     const string&,
-                     mongo::BSONObj&,
-                     int,
-                     std::string&,
-                     mongo::BSONObjBuilder& result,
-                     bool) {
-        shardConnectionPool.flush();
-        pool.flush();
-        return true;
-    }
-    virtual bool slaveOk() const {
-        return true;
-    }
+void _generateErrorResponse(OperationContext* txn,
+                            rpc::ReplyBuilderInterface* replyBuilder,
+                            const DBException& exception,
+                            const BSONObj& metadata) {
+    Command::registerError(txn, exception);
 
-} poolFlushCmd;
+    // We could have thrown an exception after setting fields in the builder,
+    // so we need to reset it to a clean state just to be sure.
+    replyBuilder->reset();
 
-class PoolStats : public Command {
-public:
-    PoolStats() : Command("connPoolStats") {}
-    virtual void help(stringstream& help) const {
-        help << "stats about connection pool";
-    }
-    virtual bool isWriteCommandForConfigServer() const {
-        return false;
-    }
-    virtual void addRequiredPrivileges(const std::string& dbname,
-                                       const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
-        ActionSet actions;
-        actions.addAction(ActionType::connPoolStats);
-        out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
-    }
-    virtual bool run(OperationContext* txn,
-                     const string&,
-                     mongo::BSONObj&,
-                     int,
-                     std::string&,
-                     mongo::BSONObjBuilder& result,
-                     bool) {
-        pool.appendInfo(result);
-        result.append("numDBClientConnection", DBClientConnection::getNumConnections());
-        result.append("numAScopedConnection", AScopedConnection::getNumConnections());
-        return true;
-    }
-    virtual bool slaveOk() const {
-        return true;
+    // We need to include some extra information for SendStaleConfig.
+    if (exception.getCode() == ErrorCodes::SendStaleConfig) {
+        const SendStaleConfigException& scex =
+            static_cast<const SendStaleConfigException&>(exception);
+        replyBuilder->setCommandReply(scex.toStatus(),
+                                      BSON("ns" << scex.getns() << "vReceived"
+                                                << BSONArray(scex.getVersionReceived().toBSON())
+                                                << "vWanted"
+                                                << BSONArray(scex.getVersionWanted().toBSON())));
+    } else {
+        replyBuilder->setCommandReply(exception.toStatus());
     }
 
-} poolStatsCmd;
+    replyBuilder->setMetadata(metadata);
+}
+
+}  // namespace
+
+void Command::generateErrorResponse(OperationContext* txn,
+                                    rpc::ReplyBuilderInterface* replyBuilder,
+                                    const DBException& exception,
+                                    const rpc::RequestInterface& request,
+                                    Command* command,
+                                    const BSONObj& metadata) {
+    LOG(1) << "assertion while executing command '" << request.getCommandName() << "' "
+           << "on database '" << request.getDatabase() << "' "
+           << "with arguments '" << command->getRedactedCopyForLogging(request.getCommandArgs())
+           << "' "
+           << "and metadata '" << request.getMetadata() << "': " << exception.toString();
+
+    _generateErrorResponse(txn, replyBuilder, exception, metadata);
+}
+
+void Command::generateErrorResponse(OperationContext* txn,
+                                    rpc::ReplyBuilderInterface* replyBuilder,
+                                    const DBException& exception,
+                                    const rpc::RequestInterface& request) {
+    LOG(1) << "assertion while executing command '" << request.getCommandName() << "' "
+           << "on database '" << request.getDatabase() << "': " << exception.toString();
+
+    _generateErrorResponse(txn, replyBuilder, exception, rpc::makeEmptyMetadata());
+}
+
+void Command::generateErrorResponse(OperationContext* txn,
+                                    rpc::ReplyBuilderInterface* replyBuilder,
+                                    const DBException& exception) {
+    LOG(1) << "assertion while executing command: " << exception.toString();
+    _generateErrorResponse(txn, replyBuilder, exception, rpc::makeEmptyMetadata());
+}
+
+void runCommands(OperationContext* txn,
+                 const rpc::RequestInterface& request,
+                 rpc::ReplyBuilderInterface* replyBuilder) {
+    try {
+        dassert(replyBuilder->getState() == rpc::ReplyBuilderInterface::State::kCommandReply);
+
+        Command* c = nullptr;
+        // In the absence of a Command object, no redaction is possible. Therefore
+        // to avoid displaying potentially sensitive information in the logs,
+        // we restrict the log message to the name of the unrecognized command.
+        // However, the complete command object will still be echoed to the client.
+        if (!(c = Command::findCommand(request.getCommandName()))) {
+            Command::unknownCommands.increment();
+            std::string msg = str::stream() << "no such command: '" << request.getCommandName()
+                                            << "'";
+            LOG(2) << msg;
+            uasserted(ErrorCodes::CommandNotFound,
+                      str::stream() << msg << ", bad cmd: '" << request.getCommandArgs() << "'");
+        }
+
+        LOG(2) << "run command " << request.getDatabase() << ".$cmd" << ' '
+               << c->getRedactedCopyForLogging(request.getCommandArgs());
+
+        {
+            // Try to set this as early as possible, as soon as we have figured out the command.
+            stdx::lock_guard<Client> lk(*txn->getClient());
+            CurOp::get(txn)->setLogicalOp_inlock(c->getLogicalOp());
+        }
+
+        Command::execCommand(txn, c, request, replyBuilder);
+    }
+
+    catch (const DBException& ex) {
+        Command::generateErrorResponse(txn, replyBuilder, ex, request);
+    }
+}
 
 }  // namespace mongo

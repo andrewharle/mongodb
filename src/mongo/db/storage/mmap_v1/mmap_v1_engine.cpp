@@ -37,6 +37,7 @@
 #include <fstream>
 
 #include "mongo/db/mongod_options.h"
+#include "mongo/db/storage/mmap_v1/mmap.h"
 #include "mongo/db/storage/mmap_v1/data_file_sync.h"
 #include "mongo/db/storage/mmap_v1/dur.h"
 #include "mongo/db/storage/mmap_v1/dur_journal.h"
@@ -45,10 +46,9 @@
 #include "mongo/db/storage/mmap_v1/mmap_v1_database_catalog_entry.h"
 #include "mongo/db/storage/mmap_v1/mmap_v1_options.h"
 #include "mongo/db/storage/storage_engine_lock_file.h"
-#include "mongo/db/storage_options.h"
-#include "mongo/util/file_allocator.h"
+#include "mongo/db/storage/storage_options.h"
+#include "mongo/db/storage/mmap_v1/file_allocator.h"
 #include "mongo/util/log.h"
-#include "mongo/util/mmap.h"
 
 
 namespace mongo {
@@ -59,9 +59,11 @@ using std::string;
 using std::stringstream;
 using std::vector;
 
+MMAPV1Options mmapv1GlobalOptions;
+
 namespace {
 
-#if !defined(__sunos__)
+#if !defined(__sun)
 // if doingRepair is true don't consider unclean shutdown an error
 void acquirePathLock(MMAPV1Engine* storageEngine,
                      bool doingRepair,
@@ -155,7 +157,7 @@ void acquirePathLock(MMAPV1Engine* storageEngine,
         uasserted(13618, "can't start without --journal enabled when journal/ files are present");
     }
 }
-#endif  //  !defined(__sunos__)
+#endif  //  !defined(__sun)
 
 
 /// warn if readahead > 256KB (gridfs chunk size)
@@ -253,9 +255,9 @@ void MMAPV1Engine::listDatabases(std::vector<std::string>* out) const {
 }
 
 DatabaseCatalogEntry* MMAPV1Engine::getDatabaseCatalogEntry(OperationContext* opCtx,
-                                                            const StringData& db) {
+                                                            StringData db) {
     {
-        boost::mutex::scoped_lock lk(_entryMapMutex);
+        stdx::lock_guard<stdx::mutex> lk(_entryMapMutex);
         EntryMap::const_iterator iter = _entryMap.find(db.toString());
         if (iter != _entryMap.end()) {
             return iter->second;
@@ -269,7 +271,7 @@ DatabaseCatalogEntry* MMAPV1Engine::getDatabaseCatalogEntry(OperationContext* op
     MMAPV1DatabaseCatalogEntry* entry = new MMAPV1DatabaseCatalogEntry(
         opCtx, db, storageGlobalParams.dbpath, storageGlobalParams.directoryperdb, false);
 
-    boost::mutex::scoped_lock lk(_entryMapMutex);
+    stdx::lock_guard<stdx::mutex> lk(_entryMapMutex);
 
     // Sanity check that we are not overwriting something
     invariant(_entryMap.insert(EntryMap::value_type(db.toString(), entry)).second);
@@ -277,20 +279,20 @@ DatabaseCatalogEntry* MMAPV1Engine::getDatabaseCatalogEntry(OperationContext* op
     return entry;
 }
 
-Status MMAPV1Engine::closeDatabase(OperationContext* txn, const StringData& db) {
+Status MMAPV1Engine::closeDatabase(OperationContext* txn, StringData db) {
     // Before the files are closed, flush any potentially outstanding changes, which might
     // reference this database. Otherwise we will assert when subsequent applications of the
     // global journal entries occur, which happen to have write intents for the removed files.
     getDur().syncDataAndTruncateJournal(txn);
 
-    boost::mutex::scoped_lock lk(_entryMapMutex);
+    stdx::lock_guard<stdx::mutex> lk(_entryMapMutex);
     MMAPV1DatabaseCatalogEntry* entry = _entryMap[db.toString()];
     delete entry;
     _entryMap.erase(db.toString());
     return Status::OK();
 }
 
-Status MMAPV1Engine::dropDatabase(OperationContext* txn, const StringData& db) {
+Status MMAPV1Engine::dropDatabase(OperationContext* txn, StringData db) {
     Status status = closeDatabase(txn, db);
     if (!status.isOK())
         return status;
@@ -321,6 +323,14 @@ void MMAPV1Engine::_listDatabases(const std::string& directory, std::vector<std:
 
 int MMAPV1Engine::flushAllFiles(bool sync) {
     return MongoFile::flushAll(sync);
+}
+
+Status MMAPV1Engine::beginBackup(OperationContext* txn) {
+    return Status::OK();
+}
+
+void MMAPV1Engine::endBackup(OperationContext* txn) {
+    return;
 }
 
 bool MMAPV1Engine::isDurable() const {

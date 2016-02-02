@@ -28,7 +28,6 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
 
 #include "mongo/db/exec/plan_stage.h"
 #include "mongo/scripting/engine.h"
@@ -79,7 +78,7 @@ struct GroupRequest {
  *
  * Only created through the getExecutorGroup path.
  */
-class GroupStage : public PlanStage {
+class GroupStage final : public PlanStage {
     MONGO_DISALLOW_COPYING(GroupStage);
 
 public:
@@ -87,25 +86,17 @@ public:
                const GroupRequest& request,
                WorkingSet* workingSet,
                PlanStage* child);
-    virtual ~GroupStage() {}
 
-    virtual StageState work(WorkingSetID* out);
-    virtual bool isEOF();
-    virtual void saveState();
-    virtual void restoreState(OperationContext* opCtx);
-    virtual void invalidate(OperationContext* txn, const RecordId& dl, InvalidationType type);
+    StageState work(WorkingSetID* out) final;
+    bool isEOF() final;
 
-    virtual std::vector<PlanStage*> getChildren() const;
-
-    virtual StageType stageType() const {
+    StageType stageType() const final {
         return STAGE_GROUP;
     }
 
-    virtual PlanStageStats* getStats();
+    std::unique_ptr<PlanStageStats> getStats() final;
 
-    virtual const CommonStats* getCommonStats();
-
-    virtual const SpecificStats* getSpecificStats();
+    const SpecificStats* getSpecificStats() const final;
 
     static const char* kStageType;
 
@@ -126,35 +117,29 @@ private:
     };
 
     // Initializes _scope, _reduceFunction and _keyFunction using the global scripting engine.
-    void initGroupScripting();
+    Status initGroupScripting();
 
     // Updates _groupMap and _scope to account for the group key associated with this object.
     // Returns an error status if an error occurred, else Status::OK().
     Status processObject(const BSONObj& obj);
 
-    // Finalize the results for this group operation.  Returns an owned BSONObj with the results
-    // array.
-    BSONObj finalizeResults();
-
-    // Transactional context for read locks.  Not owned by us.
-    OperationContext* _txn;
+    // Finalize the results for this group operation. On success, returns with a BSONObj with
+    // the results array. On failure, returns a non-OK status. Does not throw.
+    StatusWith<BSONObj> finalizeResults();
 
     GroupRequest _request;
 
     // The WorkingSet we annotate with results.  Not owned by us.
     WorkingSet* _ws;
 
-    CommonStats _commonStats;
     GroupStats _specificStats;
-
-    boost::scoped_ptr<PlanStage> _child;
 
     // Current state for this stage.
     GroupState _groupState;
 
     // The Scope object that all script operations for this group stage will use.  Initialized
     // by initGroupScripting().  Owned here.
-    std::auto_ptr<Scope> _scope;
+    std::unique_ptr<Scope> _scope;
 
     // The reduce function for the group operation.  Initialized by initGroupScripting().  Owned
     // by _scope.

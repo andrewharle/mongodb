@@ -29,6 +29,8 @@
 
 #include "mongo/db/ops/modifier_unset.h"
 
+#include <cstdint>
+
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/mutable/algorithm.h"
@@ -37,7 +39,6 @@
 #include "mongo/db/jsobj.h"
 #include "mongo/db/json.h"
 #include "mongo/db/ops/log_builder.h"
-#include "mongo/platform/cstdint.h"
 #include "mongo/unittest/unittest.h"
 
 namespace {
@@ -64,9 +65,7 @@ public:
                             ModifierInterface::Options::normal()));
     }
 
-    Status prepare(Element root,
-                   const StringData& matchedField,
-                   ModifierInterface::ExecInfo* execInfo) {
+    Status prepare(Element root, StringData matchedField, ModifierInterface::ExecInfo* execInfo) {
         return _mod.prepare(root, matchedField, execInfo);
     }
 

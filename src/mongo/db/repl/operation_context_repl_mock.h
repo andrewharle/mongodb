@@ -28,7 +28,6 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
 
 #include "mongo/db/operation_context_noop.h"
 
@@ -40,18 +39,34 @@ namespace repl {
 
 /**
  * Mock implementation of OperationContext that can be used with real instances of LockManager.
+ * Note this is not thread safe and the setter methods should only be called in the context
+ * where access to this object is guaranteed to be serialized.
  */
 class OperationContextReplMock : public OperationContextNoop {
 public:
     OperationContextReplMock();
+    explicit OperationContextReplMock(unsigned int opNum);
+    OperationContextReplMock(Client* client, unsigned int opNum);
     virtual ~OperationContextReplMock();
 
-    virtual Locker* lockState() const {
-        return _lockState.get();
-    }
+    virtual void checkForInterrupt() override;
+
+    virtual Status checkForInterruptNoAssert() override;
+
+    void setCheckForInterruptStatus(Status status);
+
+    virtual uint64_t getRemainingMaxTimeMicros() const override;
+
+    void setRemainingMaxTimeMicros(uint64_t micros);
+
+    void setReplicatedWrites(bool writesAreReplicated = true) override;
+
+    bool writesAreReplicated() const override;
 
 private:
-    boost::scoped_ptr<Locker> _lockState;
+    Status _checkForInterruptStatus;
+    uint64_t _maxTimeMicrosRemaining;
+    bool _writesAreReplicated;
 };
 
 }  // namespace repl

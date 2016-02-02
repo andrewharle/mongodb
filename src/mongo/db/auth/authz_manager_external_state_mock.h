@@ -57,6 +57,9 @@ public:
     void setAuthorizationManager(AuthorizationManager* authzManager);
     void setAuthzVersion(int version);
 
+    std::unique_ptr<AuthzSessionExternalState> makeAuthzSessionExternalState(
+        AuthorizationManager* authzManager) override;
+
     virtual Status findOne(OperationContext* txn,
                            const NamespaceString& collectionName,
                            const BSONObj& query,
@@ -67,6 +70,13 @@ public:
                          const BSONObj& query,
                          const BSONObj& projection,  // Currently unused in mock
                          const stdx::function<void(const BSONObj&)>& resultProcessor);
+
+    /**
+     * Inserts the given user object into the "admin" database.
+     */
+    Status insertPrivilegeDocument(OperationContext* txn,
+                                   const BSONObj& userObj,
+                                   const BSONObj& writeConcern);
 
     // This implementation does not understand uniqueness constraints.
     virtual Status insert(OperationContext* txn,
@@ -95,8 +105,6 @@ public:
                           const BSONObj& query,
                           const BSONObj& writeConcern,
                           int* numRemoved);
-    virtual bool tryAcquireAuthzUpdateLock(const StringData& why);
-    virtual void releaseAuthzUpdateLock();
 
     std::vector<BSONObj> getCollectionContents(const NamespaceString& collectionName);
 

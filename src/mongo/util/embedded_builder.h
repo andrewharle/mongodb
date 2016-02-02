@@ -29,7 +29,6 @@
 
 #pragma once
 
-#include <boost/shared_ptr.hpp>
 
 namespace mongo {
 
@@ -86,7 +85,7 @@ public:
 
 private:
     void addBuilder(const std::string& name) {
-        boost::shared_ptr<BSONObjBuilder> newBuilder(new BSONObjBuilder(back()->subobjStart(name)));
+        std::shared_ptr<BSONObjBuilder> newBuilder(new BSONObjBuilder(back()->subobjStart(name)));
         _builders.push_back(std::make_pair(name, newBuilder.get()));
         _builderStorage.push_back(newBuilder);
     }
@@ -101,7 +100,7 @@ private:
     }
 
     std::vector<std::pair<std::string, BSONObjBuilder*>> _builders;
-    std::vector<boost::shared_ptr<BSONObjBuilder>> _builderStorage;
+    std::vector<std::shared_ptr<BSONObjBuilder>> _builderStorage;
 };
 
 }  // namespace mongo

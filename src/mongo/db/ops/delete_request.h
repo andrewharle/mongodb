@@ -43,20 +43,23 @@ public:
     explicit DeleteRequest(const NamespaceString& nsString)
         : _nsString(nsString),
           _multi(false),
-          _logop(false),
           _god(false),
           _fromMigrate(false),
           _isExplain(false),
+          _returnDeleted(false),
           _yieldPolicy(PlanExecutor::YIELD_MANUAL) {}
 
     void setQuery(const BSONObj& query) {
         _query = query;
     }
+    void setProj(const BSONObj& proj) {
+        _proj = proj;
+    }
+    void setSort(const BSONObj& sort) {
+        _sort = sort;
+    }
     void setMulti(bool multi = true) {
         _multi = multi;
-    }
-    void setUpdateOpLog(bool logop = true) {
-        _logop = logop;
     }
     void setGod(bool god = true) {
         _god = god;
@@ -66,6 +69,9 @@ public:
     }
     void setExplain(bool isExplain = true) {
         _isExplain = isExplain;
+    }
+    void setReturnDeleted(bool returnDeleted = true) {
+        _returnDeleted = returnDeleted;
     }
     void setYieldPolicy(PlanExecutor::YieldPolicy yieldPolicy) {
         _yieldPolicy = yieldPolicy;
@@ -77,11 +83,14 @@ public:
     const BSONObj& getQuery() const {
         return _query;
     }
+    const BSONObj& getProj() const {
+        return _proj;
+    }
+    const BSONObj& getSort() const {
+        return _sort;
+    }
     bool isMulti() const {
         return _multi;
-    }
-    bool shouldCallLogOp() const {
-        return _logop;
     }
     bool isGod() const {
         return _god;
@@ -92,6 +101,9 @@ public:
     bool isExplain() const {
         return _isExplain;
     }
+    bool shouldReturnDeleted() const {
+        return _returnDeleted;
+    }
     PlanExecutor::YieldPolicy getYieldPolicy() const {
         return _yieldPolicy;
     }
@@ -101,11 +113,13 @@ public:
 private:
     const NamespaceString& _nsString;
     BSONObj _query;
+    BSONObj _proj;
+    BSONObj _sort;
     bool _multi;
-    bool _logop;
     bool _god;
     bool _fromMigrate;
     bool _isExplain;
+    bool _returnDeleted;
     PlanExecutor::YieldPolicy _yieldPolicy;
 };
 

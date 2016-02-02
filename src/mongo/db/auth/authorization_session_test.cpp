@@ -28,8 +28,6 @@
 /**
  * Unit tests of the AuthorizationSession type.
  */
-#include <boost/scoped_ptr.hpp>
-
 #include "mongo/base/status.h"
 #include "mongo/db/auth/authz_session_external_state_mock.h"
 #include "mongo/db/auth/authz_manager_external_state_mock.h"
@@ -38,6 +36,7 @@
 #include "mongo/db/jsobj.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context_noop.h"
+#include "mongo/stdx/memory.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/map_util.h"
 
@@ -46,8 +45,6 @@
 
 namespace mongo {
 namespace {
-
-using boost::scoped_ptr;
 
 class FailureCapableAuthzManagerExternalStateMock : public AuthzManagerExternalStateMock {
 public:
@@ -78,15 +75,18 @@ public:
     FailureCapableAuthzManagerExternalStateMock* managerState;
     OperationContextNoop _txn;
     AuthzSessionExternalStateMock* sessionState;
-    scoped_ptr<AuthorizationManager> authzManager;
-    scoped_ptr<AuthorizationSession> authzSession;
+    std::unique_ptr<AuthorizationManager> authzManager;
+    std::unique_ptr<AuthorizationSession> authzSession;
 
     void setUp() {
-        managerState = new FailureCapableAuthzManagerExternalStateMock();
+        auto localManagerState = stdx::make_unique<FailureCapableAuthzManagerExternalStateMock>();
+        managerState = localManagerState.get();
         managerState->setAuthzVersion(AuthorizationManager::schemaVersion26Final);
-        authzManager.reset(new AuthorizationManager(managerState));
-        sessionState = new AuthzSessionExternalStateMock(authzManager.get());
-        authzSession.reset(new AuthorizationSession(sessionState));
+        authzManager = stdx::make_unique<AuthorizationManager>(std::move(localManagerState));
+        auto localSessionState =
+            stdx::make_unique<AuthzSessionExternalStateMock>(authzManager.get());
+        sessionState = localSessionState.get();
+        authzSession = stdx::make_unique<AuthorizationSession>(std::move(localSessionState));
         authzManager->setAuthEnabled(true);
     }
 };
@@ -138,7 +138,6 @@ TEST_F(AuthorizationSessionTest, AddUserAndCheckAuthorization) {
 
     // Add a user with readWrite and dbAdmin on the test DB
     ASSERT_OK(managerState->insertPrivilegeDocument(&_txn,
-                                                    "admin",
                                                     BSON("user"
                                                          << "spencer"
                                                          << "db"
@@ -166,7 +165,6 @@ TEST_F(AuthorizationSessionTest, AddUserAndCheckAuthorization) {
     // Add an admin user with readWriteAnyDatabase
     ASSERT_OK(
         managerState->insertPrivilegeDocument(&_txn,
-                                              "admin",
                                               BSON("user"
                                                    << "admin"
                                                    << "db"
@@ -212,7 +210,6 @@ TEST_F(AuthorizationSessionTest, AddUserAndCheckAuthorization) {
 TEST_F(AuthorizationSessionTest, DuplicateRolesOK) {
     // Add a user with doubled-up readWrite and single dbAdmin on the test DB
     ASSERT_OK(managerState->insertPrivilegeDocument(&_txn,
-                                                    "admin",
                                                     BSON("user"
                                                          << "spencer"
                                                          << "db"
@@ -244,7 +241,6 @@ TEST_F(AuthorizationSessionTest, DuplicateRolesOK) {
 
 TEST_F(AuthorizationSessionTest, SystemCollectionsAccessControl) {
     ASSERT_OK(managerState->insertPrivilegeDocument(&_txn,
-                                                    "admin",
                                                     BSON("user"
                                                          << "rw"
                                                          << "db"
@@ -261,7 +257,6 @@ TEST_F(AuthorizationSessionTest, SystemCollectionsAccessControl) {
                                                                                << "test"))),
                                                     BSONObj()));
     ASSERT_OK(managerState->insertPrivilegeDocument(&_txn,
-                                                    "admin",
                                                     BSON("user"
                                                          << "useradmin"
                                                          << "db"
@@ -275,7 +270,6 @@ TEST_F(AuthorizationSessionTest, SystemCollectionsAccessControl) {
                                                     BSONObj()));
     ASSERT_OK(
         managerState->insertPrivilegeDocument(&_txn,
-                                              "admin",
                                               BSON("user"
                                                    << "rwany"
                                                    << "db"
@@ -293,7 +287,6 @@ TEST_F(AuthorizationSessionTest, SystemCollectionsAccessControl) {
                                               BSONObj()));
     ASSERT_OK(
         managerState->insertPrivilegeDocument(&_txn,
-                                              "admin",
                                               BSON("user"
                                                    << "useradminany"
                                                    << "db"
@@ -388,7 +381,6 @@ TEST_F(AuthorizationSessionTest, SystemCollectionsAccessControl) {
 TEST_F(AuthorizationSessionTest, InvalidateUser) {
     // Add a readWrite user
     ASSERT_OK(managerState->insertPrivilegeDocument(&_txn,
-                                                    "admin",
                                                     BSON("user"
                                                          << "spencer"
                                                          << "db"
@@ -415,7 +407,6 @@ TEST_F(AuthorizationSessionTest, InvalidateUser) {
     managerState->remove(
         &_txn, AuthorizationManager::usersCollectionNamespace, BSONObj(), BSONObj(), &ignored);
     ASSERT_OK(managerState->insertPrivilegeDocument(&_txn,
-                                                    "admin",
                                                     BSON("user"
                                                          << "spencer"
                                                          << "db"
@@ -455,7 +446,6 @@ TEST_F(AuthorizationSessionTest, InvalidateUser) {
 TEST_F(AuthorizationSessionTest, UseOldUserInfoInFaceOfConnectivityProblems) {
     // Add a readWrite user
     ASSERT_OK(managerState->insertPrivilegeDocument(&_txn,
-                                                    "admin",
                                                     BSON("user"
                                                          << "spencer"
                                                          << "db"
@@ -483,7 +473,6 @@ TEST_F(AuthorizationSessionTest, UseOldUserInfoInFaceOfConnectivityProblems) {
     managerState->remove(
         &_txn, AuthorizationManager::usersCollectionNamespace, BSONObj(), BSONObj(), &ignored);
     ASSERT_OK(managerState->insertPrivilegeDocument(&_txn,
-                                                    "admin",
                                                     BSON("user"
                                                          << "spencer"
                                                          << "db"

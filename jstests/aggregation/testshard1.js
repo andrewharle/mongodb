@@ -15,20 +15,18 @@ function aggregateNoOrder(coll, pipeline) {
     return coll.aggregate(pipeline).toArray();
 }
 
-/*
-> ShardingTest
-function (testName, numShards, verboseLevel, numMongos, otherParams) {
-*/
+jsTestLog("Creating sharded cluster");
 var shardedAggTest = new ShardingTest({
-    shards: 2,
-    verbose: 2,
-    mongos: 1,
-    other: { chunksize : 1, separateConfig : true }
-    }
-);
+        shards: 2,
+        mongos: 1,
+        other: { chunkSize: 1, enableBalancer: true }
+    });
 
+jsTestLog("Setting up sharded cluster");
 shardedAggTest.adminCommand( { enablesharding : "aggShard" } );
 db = shardedAggTest.getDB( "aggShard" );
+assert.commandWorked(db.adminCommand({setParameter: 1, logComponentVerbosity: { network: 0 }}));
+shardedAggTest.ensurePrimaryShard('aggShard', 'shard0000');
 
 /* make sure its cleaned up */
 db.ts1.drop();
@@ -73,6 +71,7 @@ var strings = [
     "twenty"
 ];
 
+jsTestLog("Bulk inserting data");
 var nItems = 200000;
 var bulk = db.ts1.initializeUnorderedBulkOp();
 for(i = 1; i <= nItems; ++i) {
@@ -94,7 +93,7 @@ for ( var i = 0; i < shards.length; i++ ) {
     printjson(shardConn.getDB( "admin" ).runCommand({ setParameter : 1, traceExceptions : true }));
 }
 
-// a project and group in shards, result combined in mongos
+jsTestLog('a project and group in shards, result combined in mongos');
 var a1 = aggregateNoOrder(db.ts1, [
     { $project: {
         cMod10: {$mod:["$counter", 10]},
@@ -116,7 +115,7 @@ for(i = 0 ; i < 10; ++i) {
            'agg sharded test numberSet length failed');
 }
 
-// an initial group starts the group in the shards, and combines them in mongos
+jsTestLog('an initial group starts the group in the shards, and combines them in mongos');
 var a2 = aggregateOrdered(db.ts1 , [
     { $group: {
         _id: "all",
@@ -124,11 +123,15 @@ var a2 = aggregateOrdered(db.ts1 , [
     }}
 ]);
 
-// sum of an arithmetic progression S(n) = (n/2)(a(1) + a(n));
+jsTestLog('sum of an arithmetic progression S(n) = (n/2)(a(1) + a(n));');
 assert.eq(a2[0].total, (nItems/2)*(1 + nItems),
        'agg sharded test counter sum failed');
 
-// an initial group starts the group in the shards, and combines them in mongos
+jsTestLog('A group combining all documents into one, averaging a null field.');
+assert.eq(aggregateOrdered(db.ts1, [{$group: {_id: null, avg: {$avg: "$missing"}}}]),
+          [{_id: null, avg: null}]);
+
+jsTestLog('an initial group starts the group in the shards, and combines them in mongos');
 var a3 = aggregateOrdered(db.ts1, [
     { $group: {
         _id: "$number",
@@ -142,7 +145,7 @@ for(i = 0 ; i < strings.length; ++i) {
            'agg sharded test sum numbers failed');
 }
 
-// a match takes place in the shards; just returning the results from mongos
+jsTestLog('a match takes place in the shards; just returning the results from mongos');
 var a4 = aggregateNoOrder(db.ts1, [
     { $match: {$or:[{counter:55}, {counter:1111},
                     {counter: 2222}, {counter: 33333},
@@ -160,6 +163,7 @@ for(i = 0; i < 6; ++i) {
 }
 
 function testSkipLimit(ops, expectedCount) {
+    jsTestLog('testSkipLimit(' + tojson(ops) + ', ' + expectedCount + ')');
     if (expectedCount > 10) {
         // make shard -> mongos intermediate results less than 16MB
         ops.unshift({$project: {_id:1}})
@@ -182,6 +186,7 @@ testSkipLimit([{$limit:10}, {$skip:5}, {$skip: 3}], 10 - 3 - 5);
 
 // test sort + limit (using random to pull from both shards)
 function testSortLimit(limit, direction) {
+    jsTestLog('testSortLimit(' + limit + ', ' + direction + ')');
     shardedAggTest.stopBalancer(); // TODO: remove after fixing SERVER-9622
     var from_cursor = db.ts1.find({},{random:1, _id:0})
                             .sort({random: direction})
@@ -201,7 +206,34 @@ testSortLimit(10, -1);
 testSortLimit(100,  1);
 testSortLimit(100, -1);
 
-// test $out by copying source collection verbatim to output
+function testAvgStdDev() {
+    jsTestLog('testing $avg and $stdDevPop in sharded $group');
+    // Note: not using aggregateOrdered since it requires exact results. $stdDevPop can vary
+    // slightly between runs if a migration occurs. This is why we use assert.close below.
+    var res = db.ts1.aggregate([{$group: {_id: null,
+                                          avg: {$avg: '$counter'},
+                                          stdDevPop: {$stdDevPop: '$counter'},
+                                         }}]).toArray()
+    // http://en.wikipedia.org/wiki/Arithmetic_progression#Sum
+    var avg = (1 + nItems) / 2
+    assert.close(res[0].avg, avg, '', 10 /*decimal places*/);
+
+    // http://en.wikipedia.org/wiki/Arithmetic_progression#Standard_deviation
+    var stdDev = Math.sqrt(((nItems - 1) * (nItems + 1)) / 12);
+    assert.close(res[0].stdDevPop, stdDev, '', 10 /*decimal places*/);
+}
+testAvgStdDev();
+
+function testSample() {
+    jsTestLog('testing $sample');
+    [0, 1, 10, nItems, nItems + 1].forEach(function(size) {
+        var res = db.ts1.aggregate([{$sample: {size: size}}]).toArray();
+        assert.eq(res.length, Math.min(nItems, size));
+    });
+}
+testSample();
+
+jsTestLog('test $out by copying source collection verbatim to output');
 var outCollection = db.ts1_out;
 var res = aggregateOrdered(db.ts1, [{$out: outCollection.getName()}]);
 shardedAggTest.stopBalancer(); // TODO: remove after fixing SERVER-9622
@@ -220,7 +252,8 @@ result = aggregateOrdered(db.literal,
 
 assert.eq([{cost:'$.99'}], result);
 
-// Do a basic sharded explain. This just makes sure that it doesn't error and has the right fields.
+jsTestLog("Do a basic sharded explain. This just makes sure that it doesn't error and has " +
+          "the right fields.");
 var res = db.ts1.aggregate([{$project: {a: 1}}], {explain:true});
 assert.commandWorked(res);
 printjson(res);
@@ -272,8 +305,10 @@ for (var shardName in res.shards) {
 // Call sub-tests designed to work sharded and unsharded.
 // They check for this variable to know to shard their collections.
 RUNNING_IN_SHARDED_AGG_TEST = true; // global
+jsTestLog('running jstests/aggregation/bugs/server9444.js');
 load("jstests/aggregation/bugs/server9444.js"); // external sort
+jsTestLog('running jstests/aggregation/bugs/server11675.js');
 load("jstests/aggregation/bugs/server11675.js"); // text support
 
-// shut everything down
+jsTestLog('shut everything down');
 shardedAggTest.stop();

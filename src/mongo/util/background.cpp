@@ -33,11 +33,11 @@
 
 #include "mongo/util/background.h"
 
-#include <boost/thread/condition.hpp>
-#include <boost/thread/once.hpp>
-#include <boost/thread/thread.hpp>
-
+#include "mongo/config.h"
+#include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/functional.h"
+#include "mongo/stdx/mutex.h"
+#include "mongo/stdx/thread.h"
 #include "mongo/util/concurrency/mutex.h"
 #include "mongo/util/concurrency/spin_lock.h"
 #include "mongo/util/concurrency/thread_name.h"
@@ -45,7 +45,6 @@
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
 #include "mongo/util/net/ssl_manager.h"
-#include "mongo/util/time_support.h"
 #include "mongo/util/timer.h"
 
 using namespace std;
@@ -55,7 +54,7 @@ namespace {
 
 class PeriodicTaskRunner : public BackgroundJob {
 public:
-    PeriodicTaskRunner() : _mutex("PeriodicTaskRunner"), _shutdownRequested(false) {}
+    PeriodicTaskRunner() : _shutdownRequested(false) {}
 
     void add(PeriodicTask* task);
     void remove(PeriodicTask* task);
@@ -81,11 +80,11 @@ private:
     void _runTask(PeriodicTask* task);
 
     // _mutex protects the _shutdownRequested flag and the _tasks vector.
-    mongo::mutex _mutex;
+    stdx::mutex _mutex;
 
     // The condition variable is used to sleep for the interval between task
     // executions, and is notified when the _shutdownRequested flag is toggled.
-    boost::condition _cond;
+    stdx::condition_variable _cond;
 
     // Used to break the loop. You should notify _cond after changing this to true
     // so that shutdown proceeds promptly.
@@ -102,7 +101,7 @@ private:
 // completed. In the former case, we assume no threads are present, so we do not need
 // to use the mutex. When present, the mutex protects 'runner' and 'runnerDestroyed'
 // below.
-SimpleMutex* const runnerMutex = new SimpleMutex("PeriodicTaskRunner");
+SimpleMutex* const runnerMutex = new SimpleMutex;
 
 // A scoped lock like object that only locks/unlocks the mutex if it exists.
 class ConditionalScopedLock {
@@ -130,10 +129,10 @@ bool runnerDestroyed;
 
 // both the BackgroundJob and the internal thread point to JobStatus
 struct BackgroundJob::JobStatus {
-    JobStatus() : mutex("backgroundJob"), state(NotStarted) {}
+    JobStatus() : state(NotStarted) {}
 
-    mongo::mutex mutex;
-    boost::condition done;
+    stdx::mutex mutex;
+    stdx::condition_variable done;
     State state;
 };
 
@@ -159,7 +158,7 @@ void BackgroundJob::jobBody() {
     // We must cache this value so that we can use it after we leave the following scope.
     const bool selfDelete = _selfDelete;
 
-#ifdef MONGO_SSL
+#ifdef MONGO_CONFIG_SSL
     // TODO(sverch): Allow people who use the BackgroundJob to also specify cleanup tasks.
     // Currently the networking code depends on this class and this class depends on the
     // networking code because of this ad hoc cleanup.
@@ -171,7 +170,7 @@ void BackgroundJob::jobBody() {
     {
         // It is illegal to access any state owned by this BackgroundJob after leaving this
         // scope, with the exception of the call to 'delete this' below.
-        scoped_lock l(_status->mutex);
+        stdx::unique_lock<stdx::mutex> l(_status->mutex);
         _status->state = Done;
         _status->done.notify_all();
     }
@@ -181,7 +180,7 @@ void BackgroundJob::jobBody() {
 }
 
 void BackgroundJob::go() {
-    scoped_lock l(_status->mutex);
+    stdx::unique_lock<stdx::mutex> l(_status->mutex);
     massert(17234,
             mongoutils::str::stream() << "backgroundJob already running: " << name(),
             _status->state != Running);
@@ -189,13 +188,14 @@ void BackgroundJob::go() {
     // If the job is already 'done', for instance because it was cancelled or already
     // finished, ignore additional requests to run the job.
     if (_status->state == NotStarted) {
-        boost::thread t(stdx::bind(&BackgroundJob::jobBody, this));
+        stdx::thread t(stdx::bind(&BackgroundJob::jobBody, this));
+        t.detach();
         _status->state = Running;
     }
 }
 
 Status BackgroundJob::cancel() {
-    scoped_lock l(_status->mutex);
+    stdx::unique_lock<stdx::mutex> l(_status->mutex);
 
     if (_status->state == Running)
         return Status(ErrorCodes::IllegalOperation, "Cannot cancel a running BackgroundJob");
@@ -210,26 +210,26 @@ Status BackgroundJob::cancel() {
 
 bool BackgroundJob::wait(unsigned msTimeOut) {
     verify(!_selfDelete);  // you cannot call wait on a self-deleting job
-    scoped_lock l(_status->mutex);
+    const auto deadline = stdx::chrono::system_clock::now() + stdx::chrono::milliseconds(msTimeOut);
+    stdx::unique_lock<stdx::mutex> l(_status->mutex);
     while (_status->state != Done) {
         if (msTimeOut) {
-            boost::xtime deadline = incxtimemillis(msTimeOut);
-            if (!_status->done.timed_wait(l.boost(), deadline))
+            if (stdx::cv_status::timeout == _status->done.wait_until(l, deadline))
                 return false;
         } else {
-            _status->done.wait(l.boost());
+            _status->done.wait(l);
         }
     }
     return true;
 }
 
 BackgroundJob::State BackgroundJob::getState() const {
-    scoped_lock l(_status->mutex);
+    stdx::unique_lock<stdx::mutex> l(_status->mutex);
     return _status->state;
 }
 
 bool BackgroundJob::running() const {
-    scoped_lock l(_status->mutex);
+    stdx::unique_lock<stdx::mutex> l(_status->mutex);
     return _status->state == Running;
 }
 
@@ -284,12 +284,12 @@ Status PeriodicTask::stopRunningPeriodicTasks(int gracePeriodMillis) {
 }
 
 void PeriodicTaskRunner::add(PeriodicTask* task) {
-    mutex::scoped_lock lock(_mutex);
+    stdx::lock_guard<stdx::mutex> lock(_mutex);
     _tasks.push_back(task);
 }
 
 void PeriodicTaskRunner::remove(PeriodicTask* task) {
-    mutex::scoped_lock lock(_mutex);
+    stdx::lock_guard<stdx::mutex> lock(_mutex);
     for (size_t i = 0; i != _tasks.size(); i++) {
         if (_tasks[i] == task) {
             _tasks[i] = NULL;
@@ -300,7 +300,7 @@ void PeriodicTaskRunner::remove(PeriodicTask* task) {
 
 Status PeriodicTaskRunner::stop(int gracePeriodMillis) {
     {
-        mutex::scoped_lock lock(_mutex);
+        stdx::lock_guard<stdx::mutex> lock(_mutex);
         _shutdownRequested = true;
         _cond.notify_one();
     }
@@ -314,15 +314,11 @@ Status PeriodicTaskRunner::stop(int gracePeriodMillis) {
 
 void PeriodicTaskRunner::run() {
     // Use a shorter cycle time in debug mode to help catch race conditions.
-    const size_t waitMillis = (debug ? 5 : 60) * 1000;
+    const stdx::chrono::seconds waitTime(kDebugBuild ? 5 : 60);
 
-    const stdx::function<bool()> predicate =
-        stdx::bind(&PeriodicTaskRunner::_isShutdownRequested, this);
-
-    mutex::scoped_lock lock(_mutex);
-    while (!predicate()) {
-        const boost::xtime deadline = incxtimemillis(waitMillis);
-        if (!_cond.timed_wait(lock.boost(), deadline, predicate))
+    stdx::unique_lock<stdx::mutex> lock(_mutex);
+    while (!_shutdownRequested) {
+        if (stdx::cv_status::timeout == _cond.wait_for(lock, waitTime))
             _runTasks();
     }
 }

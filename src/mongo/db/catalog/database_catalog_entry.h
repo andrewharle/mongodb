@@ -49,7 +49,7 @@ struct CollectionOptions;
 
 class DatabaseCatalogEntry {
 public:
-    DatabaseCatalogEntry(const StringData& name) : _name(name.toString()) {}
+    DatabaseCatalogEntry(StringData name) : _name(name.toString()) {}
 
     virtual ~DatabaseCatalogEntry() {}
 
@@ -82,10 +82,10 @@ public:
     virtual void getCollectionNamespaces(std::list<std::string>* out) const = 0;
 
     // The DatabaseCatalogEntry owns this, do not delete
-    virtual CollectionCatalogEntry* getCollectionCatalogEntry(const StringData& ns) const = 0;
+    virtual CollectionCatalogEntry* getCollectionCatalogEntry(StringData ns) const = 0;
 
     // The DatabaseCatalogEntry owns this, do not delete
-    virtual RecordStore* getRecordStore(const StringData& ns) const = 0;
+    virtual RecordStore* getRecordStore(StringData ns) const = 0;
 
     // Ownership passes to caller
     virtual IndexAccessMethod* getIndex(OperationContext* txn,
@@ -93,16 +93,16 @@ public:
                                         IndexCatalogEntry* index) = 0;
 
     virtual Status createCollection(OperationContext* txn,
-                                    const StringData& ns,
+                                    StringData ns,
                                     const CollectionOptions& options,
                                     bool allocateDefaultSpace) = 0;
 
     virtual Status renameCollection(OperationContext* txn,
-                                    const StringData& fromNS,
-                                    const StringData& toNS,
+                                    StringData fromNS,
+                                    StringData toNS,
                                     bool stayTemp) = 0;
 
-    virtual Status dropCollection(OperationContext* opCtx, const StringData& ns) = 0;
+    virtual Status dropCollection(OperationContext* opCtx, StringData ns) = 0;
 
 private:
     std::string _name;

@@ -8,7 +8,7 @@ var c = replTest.getReplSetConfig();
 c.members[1].priority = 0; // not electable
 replTest.initiate(c);
 
-var master = replTest.getMaster();
+var master = replTest.getPrimary();
 var testDB = master.getDB('test');
 var firstPrimary = testDB.isMaster().primary
 
@@ -23,7 +23,8 @@ assert(master.getDB("a").isMaster().ismaster, "not master")
 
 // step down the primary asyncronously so it doesn't kill this test
 var wait = startParallelShell("db.adminCommand({replSetStepDown:1000, force:true})", master.port);
-wait();
+var exitCode = wait({checkExitSuccess: false});
+assert.neq(0, exitCode, "expected replSetStepDown to close the shell's connection");
 
 // check that the old primary is no longer master
 assert.soon( function() {

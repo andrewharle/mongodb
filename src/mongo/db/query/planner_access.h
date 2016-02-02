@@ -106,12 +106,12 @@ public:
             : root(theRoot),
               inArrayOperator(inArrayOp),
               indices(indexList),
-              currentScan(NULL),
+              currentScan(nullptr),
               curChild(0),
               currentIndexNumber(IndexTag::kNoIndex),
               ixtag(NULL),
               tightness(IndexBoundsBuilder::INEXACT_FETCH),
-              curOr(NULL),
+              curOr(nullptr),
               loosestBounds(IndexBoundsBuilder::EXACT) {}
 
         /**
@@ -142,7 +142,7 @@ public:
 
         // The index access node that we are currently constructing. We may merge
         // multiple tagged predicates into a single index scan.
-        std::auto_ptr<QuerySolutionNode> currentScan;
+        std::unique_ptr<QuerySolutionNode> currentScan;
 
         // An index into the child vector of 'root'. Indicates the child MatchExpression
         // for which we are currently either constructing a new scan or which we are about
@@ -163,8 +163,8 @@ public:
 
         // If 'root' is an $or, the child predicates which are tagged with the same index are
         // detached from the original root and added here. 'curOr' may be attached as a filter
-        // later on, or ignored and cleaned up by the auto_ptr.
-        std::auto_ptr<MatchExpression> curOr;
+        // later on, or ignored and cleaned up by the unique_ptr.
+        std::unique_ptr<MatchExpression> curOr;
 
         // The values of BoundsTightness range from loosest to tightest in this order:
         //
@@ -218,8 +218,8 @@ public:
     //    a filter on the entire tree.
     // 2. No fetches performed.  There will be a final fetch by the caller of buildIndexedDataAccess
     //    who set the value of inArrayOperator to true.
-    // 3. No compound indices are used and no bounds are combined.  These are incorrect in the
-    //    context of these operators.
+    // 3. No compound indices are used and no bounds are combined.  These are
+    //    incorrect in the context of these operators.
     //
 
     /**
@@ -263,6 +263,28 @@ public:
     static void findElemMatchChildren(const MatchExpression* node,
                                       std::vector<MatchExpression*>* out,
                                       std::vector<MatchExpression*>* subnodesOut);
+
+    /**
+     * Given a list of OR-related subtrees returned by processIndexScans(), looks for logically
+     * equivalent IndexScanNodes and combines them. This is an optimization to avoid creating
+     * plans that repeat index access work.
+     *
+     * Example:
+     *  Suppose processIndexScans() returns a list of the following three query solutions:
+     *    1) IXSCAN (bounds: {b: [[2,2]]})
+     *    2) FETCH (filter: {d:1}) -> IXSCAN (bounds: {c: [[3,3]]})
+     *    3) FETCH (filter: {e:1}) -> IXSCAN (bounds: {c: [[3,3]]})
+     *  This method would collapse scans #2 and #3, resulting in the following output:
+     *    1) IXSCAN (bounds: {b: [[2,2]]})
+     *    2) FETCH (filter: {$or:[{d:1}, {e:1}]}) -> IXSCAN (bounds: {c: [[3,3]]})
+     *
+     * Used as a helper for buildIndexedOr().
+     *
+     * Takes ownership of 'scans'. The caller assumes ownership of the pointers in the returned
+     * list of QuerySolutionNode*.
+     */
+    static std::vector<QuerySolutionNode*> collapseEquivalentScans(
+        const std::vector<QuerySolutionNode*> scans);
 
     /**
      * Helper used by buildIndexedAnd and buildIndexedOr.

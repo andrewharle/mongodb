@@ -39,6 +39,7 @@
 #include "mongo/db/commands/server_status.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/catalog/database.h"
+#include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/catalog/index_key_validate.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/operation_context.h"
@@ -101,6 +102,8 @@ StatusWith<CompactStats> Collection::compact(OperationContext* txn,
                                              const CompactOptions* compactOptions) {
     dassert(txn->lockState()->isCollectionLockedForMode(ns().toString(), MODE_X));
 
+    DisableDocumentValidation validationDisabler(txn);
+
     if (!_recordStore->compactSupported())
         return StatusWith<CompactStats>(ErrorCodes::CommandNotSupported,
                                         str::stream()
@@ -121,10 +124,6 @@ StatusWith<CompactStats> Collection::compact(OperationContext* txn,
     if (_indexCatalog.numIndexesInProgress(txn))
         return StatusWith<CompactStats>(ErrorCodes::BadValue,
                                         "cannot compact when indexes in progress");
-
-
-    // same data, but might perform a little different after compact?
-    _infoCache.reset(txn);
 
     vector<BSONObj> indexSpecs;
     {

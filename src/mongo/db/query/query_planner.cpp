@@ -35,6 +35,7 @@
 #include <vector>
 
 #include "mongo/client/dbclientinterface.h"  // For QueryOption_foobar
+#include "mongo/db/matcher/expression_algo.h"
 #include "mongo/db/matcher/expression_geo.h"
 #include "mongo/db/matcher/expression_text.h"
 #include "mongo/db/query/canonical_query.h"
@@ -43,16 +44,14 @@
 #include "mongo/db/query/planner_analysis.h"
 #include "mongo/db/query/planner_ixselect.h"
 #include "mongo/db/query/plan_enumerator.h"
-#include "mongo/db/query/qlog.h"
 #include "mongo/db/query/query_planner_common.h"
 #include "mongo/db/query/query_solution.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
 
-using std::auto_ptr;
-using std::numeric_limits;
 using std::unique_ptr;
+using std::numeric_limits;
 
 // Copied verbatim from db/index.h
 static bool isIdIndex(const BSONObj& pattern) {
@@ -246,7 +245,7 @@ Status QueryPlanner::cacheDataFromTaggedTree(const MatchExpression* const tagged
         return Status(ErrorCodes::BadValue, "Cannot produce cache data: tree is NULL.");
     }
 
-    auto_ptr<PlanCacheIndexTree> indexTree(new PlanCacheIndexTree());
+    unique_ptr<PlanCacheIndexTree> indexTree(new PlanCacheIndexTree());
 
     if (NULL != taggedTree->getTag()) {
         IndexTag* itag = static_cast<IndexTag*>(taggedTree->getTag());
@@ -333,12 +332,21 @@ Status QueryPlanner::tagAccordingToCache(MatchExpression* filter,
 // static
 Status QueryPlanner::planFromCache(const CanonicalQuery& query,
                                    const QueryPlannerParams& params,
-                                   const SolutionCacheData& cacheData,
+                                   const CachedSolution& cachedSoln,
                                    QuerySolution** out) {
-    if (SolutionCacheData::WHOLE_IXSCAN_SOLN == cacheData.solnType) {
+    invariant(!cachedSoln.plannerData.empty());
+    invariant(out);
+
+    // A query not suitable for caching should not have made its way into the cache.
+    invariant(PlanCache::shouldCacheQuery(query));
+
+    // Look up winning solution in cached solution's array.
+    const SolutionCacheData& winnerCacheData = *cachedSoln.plannerData[0];
+
+    if (SolutionCacheData::WHOLE_IXSCAN_SOLN == winnerCacheData.solnType) {
         // The solution can be constructed by a scan over the entire index.
-        QuerySolution* soln =
-            buildWholeIXSoln(*cacheData.tree->entry, query, params, cacheData.wholeIXSolnDir);
+        QuerySolution* soln = buildWholeIXSoln(
+            *winnerCacheData.tree->entry, query, params, winnerCacheData.wholeIXSolnDir);
         if (soln == NULL) {
             return Status(ErrorCodes::BadValue,
                           "plan cache error: soln that uses index to provide sort");
@@ -346,7 +354,7 @@ Status QueryPlanner::planFromCache(const CanonicalQuery& query,
             *out = soln;
             return Status::OK();
         }
-    } else if (SolutionCacheData::COLLSCAN_SOLN == cacheData.solnType) {
+    } else if (SolutionCacheData::COLLSCAN_SOLN == winnerCacheData.solnType) {
         // The cached solution is a collection scan. We don't cache collscans
         // with tailable==true, hence the false below.
         QuerySolution* soln = buildCollscanSoln(query, false, params);
@@ -363,12 +371,12 @@ Status QueryPlanner::planFromCache(const CanonicalQuery& query,
     // cases, and we proceed by using the PlanCacheIndexTree to tag the query tree.
 
     // Create a copy of the expression tree.  We use cachedSoln to annotate this with indices.
-    unique_ptr<MatchExpression> clone(query.root()->shallowClone());
+    unique_ptr<MatchExpression> clone = query.root()->shallowClone();
 
-    QLOG() << "Tagging the match expression according to cache data: " << endl
+    LOG(5) << "Tagging the match expression according to cache data: " << endl
            << "Filter:" << endl
            << clone->toString() << "Cache data:" << endl
-           << cacheData.toString();
+           << winnerCacheData.toString();
 
     // Map from index name to index number.
     // TODO: can we assume that the index numbering has the same lifetime
@@ -377,10 +385,10 @@ Status QueryPlanner::planFromCache(const CanonicalQuery& query,
     for (size_t i = 0; i < params.indices.size(); ++i) {
         const IndexEntry& ie = params.indices[i];
         indexMap[ie.keyPattern] = i;
-        QLOG() << "Index " << i << ": " << ie.keyPattern.toString() << endl;
+        LOG(5) << "Index " << i << ": " << ie.keyPattern.toString() << endl;
     }
 
-    Status s = tagAccordingToCache(clone.get(), cacheData.tree.get(), indexMap);
+    Status s = tagAccordingToCache(clone.get(), winnerCacheData.tree.get(), indexMap);
     if (!s.isOK()) {
         return s;
     }
@@ -388,59 +396,29 @@ Status QueryPlanner::planFromCache(const CanonicalQuery& query,
     // The planner requires a defined sort order.
     sortUsingTags(clone.get());
 
-    QLOG() << "Tagged tree:" << endl
+    LOG(5) << "Tagged tree:" << endl
            << clone->toString();
 
     // Use the cached index assignments to build solnRoot.
     QuerySolutionNode* solnRoot = QueryPlannerAccess::buildIndexedDataAccess(
         query, clone.release(), false, params.indices, params);
 
-    if (NULL != solnRoot) {
-        // Takes ownership of 'solnRoot'.
-        QuerySolution* soln = QueryPlannerAnalysis::analyzeDataAccess(query, params, solnRoot);
-        if (NULL != soln) {
-            QLOG() << "Planner: solution constructed from the cache:\n" << soln->toString() << endl;
-            *out = soln;
-            return Status::OK();
-        }
+    if (!solnRoot) {
+        return Status(ErrorCodes::BadValue,
+                      str::stream() << "Failed to create data access plan from cache. Query: "
+                                    << query.toStringShort());
     }
 
-    return Status(ErrorCodes::BadValue, "couldn't plan from cache");
-}
-
-// static
-Status QueryPlanner::planFromCache(const CanonicalQuery& query,
-                                   const QueryPlannerParams& params,
-                                   const CachedSolution& cachedSoln,
-                                   QuerySolution** out,
-                                   QuerySolution** backupOut) {
-    verify(!cachedSoln.plannerData.empty());
-    verify(out);
-    verify(backupOut);
-    verify(PlanCache::shouldCacheQuery(query));
-
-    // If there is no backup solution, then return NULL through
-    // the 'backupOut' out-parameter.
-    *backupOut = NULL;
-
-    // Queries not suitable for caching are filtered
-    // in multi plan runner using PlanCache::shouldCacheQuery().
-
-    // Look up winning solution in cached solution's array.
-    SolutionCacheData* winnerCacheData = cachedSoln.plannerData[0];
-    Status s = planFromCache(query, params, *winnerCacheData, out);
-    if (!s.isOK()) {
-        return s;
+    // Takes ownership of 'solnRoot'.
+    QuerySolution* soln = QueryPlannerAnalysis::analyzeDataAccess(query, params, solnRoot);
+    if (!soln) {
+        return Status(ErrorCodes::BadValue,
+                      str::stream()
+                          << "Failed to analyze plan from cache. Query: " << query.toStringShort());
     }
 
-    if (cachedSoln.backupSoln) {
-        SolutionCacheData* backupCacheData = cachedSoln.plannerData[*cachedSoln.backupSoln];
-        Status backupStatus = planFromCache(query, params, *backupCacheData, backupOut);
-        if (!backupStatus.isOK()) {
-            return backupStatus;
-        }
-    }
-
+    LOG(5) << "Planner: solution constructed from the cache:\n" << soln->toString();
+    *out = soln;
     return Status::OK();
 }
 
@@ -448,25 +426,26 @@ Status QueryPlanner::planFromCache(const CanonicalQuery& query,
 Status QueryPlanner::plan(const CanonicalQuery& query,
                           const QueryPlannerParams& params,
                           std::vector<QuerySolution*>* out) {
-    QLOG() << "Beginning planning..." << endl
+    LOG(5) << "Beginning planning..." << endl
            << "=============================" << endl
            << "Options = " << optionString(params.options) << endl
            << "Canonical query:" << endl
            << query.toString() << "=============================" << endl;
 
     for (size_t i = 0; i < params.indices.size(); ++i) {
-        QLOG() << "Index " << i << " is " << params.indices[i].toString() << endl;
+        LOG(5) << "Index " << i << " is " << params.indices[i].toString() << endl;
     }
 
-    bool canTableScan = !(params.options & QueryPlannerParams::NO_TABLE_SCAN);
+    const bool canTableScan = !(params.options & QueryPlannerParams::NO_TABLE_SCAN);
+    const bool isTailable = query.getParsed().isTailable();
 
     // If the query requests a tailable cursor, the only solution is a collscan + filter with
     // tailable set on the collscan.  TODO: This is a policy departure.  Previously I think you
     // could ask for a tailable cursor and it just tried to give you one.  Now, we fail if we
     // can't provide one.  Is this what we want?
-    if (query.getParsed().getOptions().tailable) {
+    if (isTailable) {
         if (!QueryPlannerCommon::hasNode(query.root(), MatchExpression::GEO_NEAR) && canTableScan) {
-            QuerySolution* soln = buildCollscanSoln(query, true, params);
+            QuerySolution* soln = buildCollscanSoln(query, isTailable, params);
             if (NULL != soln) {
                 out->push_back(soln);
             }
@@ -486,11 +465,11 @@ Status QueryPlanner::plan(const CanonicalQuery& query,
         // A hint overrides a $natural sort. This means that we don't force a table
         // scan if there is a $natural sort with a non-$natural hint.
         if (!naturalHint.eoo() || (!naturalSort.eoo() && hintObj.isEmpty())) {
-            QLOG() << "Forcing a table scan due to hinted $natural\n";
+            LOG(5) << "Forcing a table scan due to hinted $natural\n";
             // min/max are incompatible with $natural.
             if (canTableScan && query.getParsed().getMin().isEmpty() &&
                 query.getParsed().getMax().isEmpty()) {
-                QuerySolution* soln = buildCollscanSoln(query, false, params);
+                QuerySolution* soln = buildCollscanSoln(query, isTailable, params);
                 if (NULL != soln) {
                     out->push_back(soln);
                 }
@@ -504,7 +483,7 @@ Status QueryPlanner::plan(const CanonicalQuery& query,
     QueryPlannerIXSelect::getFields(query.root(), "", &fields);
 
     for (unordered_set<string>::const_iterator it = fields.begin(); it != fields.end(); ++it) {
-        QLOG() << "Predicate over field '" << *it << "'" << endl;
+        LOG(5) << "Predicate over field '" << *it << "'" << endl;
     }
 
     // Filter our indices so we only look at indices that are over our predicates.
@@ -519,14 +498,30 @@ Status QueryPlanner::plan(const CanonicalQuery& query,
         hintIndex = query.getParsed().getHint();
     }
 
-    // Snapshot is a form of a hint.  If snapshot is set, try to use _id index to make a real
-    // plan.  If that fails, just scan the _id index.
-    if (query.getParsed().isSnapshot()) {
-        // Find the ID index in indexKeyPatterns.  It's our hint.
-        for (size_t i = 0; i < params.indices.size(); ++i) {
-            if (isIdIndex(params.indices[i].keyPattern)) {
-                hintIndex = params.indices[i].keyPattern;
-                break;
+    // If snapshot is set, default to collscanning. If the query param SNAPSHOT_USE_ID is set,
+    // snapshot is a form of a hint, so try to use _id index to make a real plan. If that fails,
+    // just scan the _id index.
+    //
+    // Don't do this if the query is a geonear or text as as text search queries must be answered
+    // using full text indices and geoNear queries must be answered using geospatial indices.
+    if (query.getParsed().isSnapshot() &&
+        !QueryPlannerCommon::hasNode(query.root(), MatchExpression::GEO_NEAR) &&
+        !QueryPlannerCommon::hasNode(query.root(), MatchExpression::TEXT)) {
+        const bool useIXScan = params.options & QueryPlannerParams::SNAPSHOT_USE_ID;
+
+        if (!useIXScan) {
+            QuerySolution* soln = buildCollscanSoln(query, isTailable, params);
+            if (soln) {
+                out->push_back(soln);
+            }
+            return Status::OK();
+        } else {
+            // Find the ID index in indexKeyPatterns. It's our hint.
+            for (size_t i = 0; i < params.indices.size(); ++i) {
+                if (isIdIndex(params.indices[i].keyPattern)) {
+                    hintIndex = params.indices[i].keyPattern;
+                    break;
+                }
             }
         }
     }
@@ -542,7 +537,7 @@ Status QueryPlanner::plan(const CanonicalQuery& query,
             string hintName = firstHintElt.String();
             for (size_t i = 0; i < params.indices.size(); ++i) {
                 if (params.indices[i].name == hintName) {
-                    QLOG() << "Hint by name specified, restricting indices to "
+                    LOG(5) << "Hint by name specified, restricting indices to "
                            << params.indices[i].keyPattern.toString() << endl;
                     relevantIndices.clear();
                     relevantIndices.push_back(params.indices[i]);
@@ -556,7 +551,7 @@ Status QueryPlanner::plan(const CanonicalQuery& query,
                 if (0 == params.indices[i].keyPattern.woCompare(hintIndex)) {
                     relevantIndices.clear();
                     relevantIndices.push_back(params.indices[i]);
-                    QLOG() << "Hint specified, restricting indices to " << hintIndex.toString()
+                    LOG(5) << "Hint specified, restricting indices to " << hintIndex.toString()
                            << endl;
                     hintIndexNumber = i;
                     break;
@@ -588,12 +583,12 @@ Status QueryPlanner::plan(const CanonicalQuery& query,
         // If there's an index hinted we need to be able to use it.
         if (!hintIndex.isEmpty()) {
             if (!minObj.isEmpty() && !indexCompatibleMaxMin(minObj, hintIndex)) {
-                QLOG() << "Minobj doesn't work with hint";
+                LOG(5) << "Minobj doesn't work with hint";
                 return Status(ErrorCodes::BadValue, "hint provided does not work with min query");
             }
 
             if (!maxObj.isEmpty() && !indexCompatibleMaxMin(maxObj, hintIndex)) {
-                QLOG() << "Maxobj doesn't work with hint";
+                LOG(5) << "Maxobj doesn't work with hint";
                 return Status(ErrorCodes::BadValue, "hint provided does not work with max query");
             }
 
@@ -603,7 +598,7 @@ Status QueryPlanner::plan(const CanonicalQuery& query,
 
             // The min must be less than the max for the hinted index ordering.
             if (0 <= finishedMinObj.woCompare(finishedMaxObj, kp, false)) {
-                QLOG() << "Minobj/Maxobj don't work with hint";
+                LOG(5) << "Minobj/Maxobj don't work with hint";
                 return Status(ErrorCodes::BadValue,
                               "hint provided does not work with min/max query");
             }
@@ -638,12 +633,12 @@ Status QueryPlanner::plan(const CanonicalQuery& query,
         }
 
         if (idxNo == numeric_limits<size_t>::max()) {
-            QLOG() << "Can't find relevant index to use for max/min query";
+            LOG(5) << "Can't find relevant index to use for max/min query";
             // Can't find an index to use, bail out.
             return Status(ErrorCodes::BadValue, "unable to find relevant index for max/min query");
         }
 
-        QLOG() << "Max/min query using index " << params.indices[idxNo].toString() << endl;
+        LOG(5) << "Max/min query using index " << params.indices[idxNo].toString() << endl;
 
         // Make our scan and output.
         QuerySolutionNode* solnRoot = QueryPlannerAccess::makeIndexScan(
@@ -658,7 +653,6 @@ Status QueryPlanner::plan(const CanonicalQuery& query,
     }
 
     for (size_t i = 0; i < relevantIndices.size(); ++i) {
-        QLOG() << "Relevant index " << i << " is " << relevantIndices[i].toString() << endl;
         LOG(2) << "Relevant index " << i << " is " << relevantIndices[i].toString() << endl;
     }
 
@@ -681,26 +675,26 @@ Status QueryPlanner::plan(const CanonicalQuery& query,
     }
 
     // query.root() is now annotated with RelevantTag(s).
-    QLOG() << "Rated tree:" << endl
+    LOG(5) << "Rated tree:" << endl
            << query.root()->toString();
 
     // If there is a GEO_NEAR it must have an index it can use directly.
-    MatchExpression* gnNode = NULL;
+    const MatchExpression* gnNode = NULL;
     if (QueryPlannerCommon::hasNode(query.root(), MatchExpression::GEO_NEAR, &gnNode)) {
         // No index for GEO_NEAR?  No query.
         RelevantTag* tag = static_cast<RelevantTag*>(gnNode->getTag());
         if (!tag || (0 == tag->first.size() && 0 == tag->notFirst.size())) {
-            QLOG() << "Unable to find index for $geoNear query." << endl;
+            LOG(5) << "Unable to find index for $geoNear query." << endl;
             // Don't leave tags on query tree.
             query.root()->resetTag();
             return Status(ErrorCodes::BadValue, "unable to find index for $geoNear query");
         }
 
-        QLOG() << "Rated tree after geonear processing:" << query.root()->toString();
+        LOG(5) << "Rated tree after geonear processing:" << query.root()->toString();
     }
 
     // Likewise, if there is a TEXT it must have an index it can use directly.
-    MatchExpression* textNode = NULL;
+    const MatchExpression* textNode = NULL;
     if (QueryPlannerCommon::hasNode(query.root(), MatchExpression::TEXT, &textNode)) {
         RelevantTag* tag = static_cast<RelevantTag*>(textNode->getTag());
 
@@ -732,7 +726,7 @@ Status QueryPlanner::plan(const CanonicalQuery& query,
         // assigned to it.
         invariant(1 == tag->first.size() + tag->notFirst.size());
 
-        QLOG() << "Rated tree after text processing:" << query.root()->toString();
+        LOG(5) << "Rated tree after text processing:" << query.root()->toString();
     }
 
     // If we have any relevant indices, we try to create indexed plans.
@@ -748,22 +742,22 @@ Status QueryPlanner::plan(const CanonicalQuery& query,
 
         MatchExpression* rawTree;
         while (isp.getNext(&rawTree) && (out->size() < params.maxIndexedSolutions)) {
-            QLOG() << "About to build solntree from tagged tree:" << endl
+            LOG(5) << "About to build solntree from tagged tree:" << endl
                    << rawTree->toString();
 
             // The tagged tree produced by the plan enumerator is not guaranteed
             // to be canonically sorted. In order to be compatible with the cached
             // data, sort the tagged tree according to CanonicalQuery ordering.
-            boost::scoped_ptr<MatchExpression> clone(rawTree->shallowClone());
+            std::unique_ptr<MatchExpression> clone(rawTree->shallowClone());
             CanonicalQuery::sortTree(clone.get());
 
             PlanCacheIndexTree* cacheData;
             Status indexTreeStatus =
                 cacheDataFromTaggedTree(clone.get(), relevantIndices, &cacheData);
             if (!indexTreeStatus.isOK()) {
-                QLOG() << "Query is not cachable: " << indexTreeStatus.reason() << endl;
+                LOG(5) << "Query is not cachable: " << indexTreeStatus.reason() << endl;
             }
-            auto_ptr<PlanCacheIndexTree> autoData(cacheData);
+            unique_ptr<PlanCacheIndexTree> autoData(cacheData);
 
             // This can fail if enumeration makes a mistake.
             QuerySolutionNode* solnRoot = QueryPlannerAccess::buildIndexedDataAccess(
@@ -775,7 +769,7 @@ Status QueryPlanner::plan(const CanonicalQuery& query,
 
             QuerySolution* soln = QueryPlannerAnalysis::analyzeDataAccess(query, params, solnRoot);
             if (NULL != soln) {
-                QLOG() << "Planner: adding solution:" << endl
+                LOG(5) << "Planner: adding solution:" << endl
                        << soln->toString();
                 if (indexTreeStatus.isOK()) {
                     SolutionCacheData* scd = new SolutionCacheData();
@@ -790,7 +784,7 @@ Status QueryPlanner::plan(const CanonicalQuery& query,
     // Don't leave tags on query tree.
     query.root()->resetTag();
 
-    QLOG() << "Planner: outputted " << out->size() << " indexed solutions.\n";
+    LOG(5) << "Planner: outputted " << out->size() << " indexed solutions.\n";
 
     // Produce legible error message for failed OR planning with a TEXT child.
     // TODO: support collection scan for non-TEXT children of OR.
@@ -812,7 +806,7 @@ Status QueryPlanner::plan(const CanonicalQuery& query,
         if (0 == out->size()) {
             QuerySolution* soln = buildWholeIXSoln(params.indices[hintIndexNumber], query, params);
             verify(NULL != soln);
-            QLOG() << "Planner: outputting soln that uses hinted index as scan." << endl;
+            LOG(5) << "Planner: outputting soln that uses hinted index as scan." << endl;
             out->push_back(soln);
         }
         return Status::OK();
@@ -838,15 +832,9 @@ Status QueryPlanner::plan(const CanonicalQuery& query,
         if (!usingIndexToSort) {
             for (size_t i = 0; i < params.indices.size(); ++i) {
                 const IndexEntry& index = params.indices[i];
-                // Only regular (non-plugin) indexes can be used to provide a sort.
-                if (index.type != INDEX_BTREE) {
-                    continue;
-                }
-                // Only non-sparse indexes can be used to provide a sort.
-                if (index.sparse) {
-                    continue;
-                }
-
+                // Only regular (non-plugin) indexes can be used to provide a sort, and only
+                // non-sparse indexes can be used to provide a sort.
+                //
                 // TODO: Sparse indexes can't normally provide a sort, because non-indexed
                 // documents could potentially be missing from the result set.  However, if the
                 // query predicate can be used to guarantee that all documents to be returned
@@ -858,10 +846,22 @@ Status QueryPlanner::plan(const CanonicalQuery& query,
                 // - Index {a: 1, b: "2dsphere"} (which is "geo-sparse", if
                 //   2dsphereIndexVersion=2) should be able to provide a sort for
                 //   find({b: GEO}).sort({a:1}).  SERVER-10801.
+                if (index.type != INDEX_BTREE) {
+                    continue;
+                }
+                if (index.sparse) {
+                    continue;
+                }
+
+                // Partial indexes can only be used to provide a sort only if the query predicate is
+                // compatible.
+                if (index.filterExpr && !expression::isSubsetOf(query.root(), index.filterExpr)) {
+                    continue;
+                }
 
                 const BSONObj kp = QueryPlannerAnalysis::getSortPattern(index.keyPattern);
                 if (providesSort(query, kp)) {
-                    QLOG() << "Planner: outputting soln that uses index to provide sort." << endl;
+                    LOG(5) << "Planner: outputting soln that uses index to provide sort." << endl;
                     QuerySolution* soln = buildWholeIXSoln(params.indices[i], query, params);
                     if (NULL != soln) {
                         PlanCacheIndexTree* indexTree = new PlanCacheIndexTree();
@@ -877,7 +877,7 @@ Status QueryPlanner::plan(const CanonicalQuery& query,
                     }
                 }
                 if (providesSort(query, QueryPlannerCommon::reverseSortObj(kp))) {
-                    QLOG() << "Planner: outputting soln that uses (reverse) index "
+                    LOG(5) << "Planner: outputting soln that uses (reverse) index "
                            << "to provide sort." << endl;
                     QuerySolution* soln = buildWholeIXSoln(params.indices[i], query, params, -1);
                     if (NULL != soln) {
@@ -910,13 +910,13 @@ Status QueryPlanner::plan(const CanonicalQuery& query,
     bool collscanNeeded = (0 == out->size() && canTableScan);
 
     if (possibleToCollscan && (collscanRequested || collscanNeeded)) {
-        QuerySolution* collscan = buildCollscanSoln(query, false, params);
+        QuerySolution* collscan = buildCollscanSoln(query, isTailable, params);
         if (NULL != collscan) {
             SolutionCacheData* scd = new SolutionCacheData();
             scd->solnType = SolutionCacheData::COLLSCAN_SOLN;
             collscan->cacheData.reset(scd);
             out->push_back(collscan);
-            QLOG() << "Planner: outputting a collscan:" << endl
+            LOG(5) << "Planner: outputting a collscan:" << endl
                    << collscan->toString();
         }
     }

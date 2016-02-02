@@ -52,11 +52,11 @@ using std::list;
 using std::string;
 
 NamespaceIndex::NamespaceIndex(const std::string& dir, const std::string& database)
-    : _dir(dir), _database(database), _ht(NULL) {}
+    : _dir(dir), _database(database), _ht(nullptr) {}
 
 NamespaceIndex::~NamespaceIndex() {}
 
-NamespaceDetails* NamespaceIndex::details(const StringData& ns) const {
+NamespaceDetails* NamespaceIndex::details(StringData ns) const {
     const Namespace n(ns);
     return details(n);
 }
@@ -65,17 +65,12 @@ NamespaceDetails* NamespaceIndex::details(const Namespace& ns) const {
     return _ht->get(ns);
 }
 
-void NamespaceIndex::add_ns(OperationContext* txn,
-                            const StringData& ns,
-                            const DiskLoc& loc,
-                            bool capped) {
+void NamespaceIndex::add_ns(OperationContext* txn, StringData ns, const DiskLoc& loc, bool capped) {
     NamespaceDetails details(loc, capped);
     add_ns(txn, ns, &details);
 }
 
-void NamespaceIndex::add_ns(OperationContext* txn,
-                            const StringData& ns,
-                            const NamespaceDetails* details) {
+void NamespaceIndex::add_ns(OperationContext* txn, StringData ns, const NamespaceDetails* details) {
     Namespace n(ns);
     add_ns(txn, n, details);
 }
@@ -91,7 +86,7 @@ void NamespaceIndex::add_ns(OperationContext* txn,
     uassert(10081, "too many namespaces/collections", _ht->put(txn, ns, *details));
 }
 
-void NamespaceIndex::kill_ns(OperationContext* txn, const StringData& ns) {
+void NamespaceIndex::kill_ns(OperationContext* txn, StringData ns) {
     const NamespaceString nss(ns.toString());
     invariant(txn->lockState()->isDbLockedForMode(nss.db(), MODE_X));
 

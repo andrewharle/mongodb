@@ -83,11 +83,16 @@ __wt_block_checkpoint_load(WT_SESSION_IMPL *session, WT_BLOCK *block,
 		WT_ERR(__wt_block_ckpt_init(session, ci, "checkpoint"));
 	} else {
 		/*
-		 * We depend on the btree level for locking: things will go
-		 * bad fast should we open the live system in two handles, or
-		 * if we create, salvage, truncate or verify the live/running
-		 * file, for that matter.
+		 * We depend on the btree level for locking: things will go bad
+		 * fast if we open the live system in two handles, or salvage,
+		 * truncate or verify the live/running file.
 		 */
+#ifdef HAVE_DIAGNOSTIC
+		__wt_spin_lock(session, &block->live_lock);
+		WT_ASSERT(session, block->live_open == false);
+		block->live_open = true;
+		__wt_spin_unlock(session, &block->live_lock);
+#endif
 		ci = &block->live;
 		WT_ERR(__wt_block_ckpt_init(session, ci, "live"));
 	}
@@ -178,8 +183,8 @@ __wt_block_checkpoint_unload(
 	/*
 	 * If it's the live system, truncate to discard any extended blocks and
 	 * discard the active extent lists.  Hold the lock even though we're
-	 * unloading the live checkpoint, there could be readers active in
-	 * other checkpoints.
+	 * unloading the live checkpoint, there could be readers active in other
+	 * checkpoints.
 	 */
 	if (!checkpoint) {
 		/*
@@ -191,6 +196,9 @@ __wt_block_checkpoint_unload(
 
 		__wt_spin_lock(session, &block->live_lock);
 		__wt_block_ckpt_destroy(session, &block->live);
+#ifdef HAVE_DIAGNOSTIC
+		block->live_open = false;
+#endif
 		__wt_spin_unlock(session, &block->live_lock);
 	}
 
@@ -311,7 +319,7 @@ __ckpt_extlist_fblocks(
 
 	/*
 	 * Free blocks used to write checkpoint extents into the live system's
-	 * checkpoint avail list (they were never on any alloc list).   Do not
+	 * checkpoint avail list (they were never on any alloc list). Do not
 	 * use the live system's avail list because that list is used to decide
 	 * if the file can be truncated, and we can't truncate any part of the
 	 * file that contains a previous checkpoint's extents.
@@ -405,7 +413,8 @@ __ckpt_process(WT_SESSION_IMPL *session, WT_BLOCK *block, WT_CKPT *ckptbase)
 	 */
 	if (block->ckpt_inprogress) {
 		__wt_errx(session,
-		    "%s: checkpointed without the checkpoint being resolved",
+		    "%s: checkpointed without first resolving the previous "
+		    "checkpoint",
 		    block->name);
 
 		WT_RET(__wt_block_checkpoint_resolve(session, block));
@@ -648,12 +657,10 @@ live_update:
 			break;
 	if ((a = ckpt->bpriv) == NULL)
 		a = &block->live;
-	if (a->discard.entries != 0) {
-		__wt_errx(session,
+	if (a->discard.entries != 0)
+		WT_ERR_MSG(session, WT_ERROR,
 		    "first checkpoint incorrectly has blocks on the discard "
 		    "list");
-		WT_ERR(WT_ERROR);
-	}
 #endif
 
 	block->ckpt_inprogress = true;

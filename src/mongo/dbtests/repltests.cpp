@@ -35,26 +35,26 @@
 
 #include "mongo/bson/mutable/document.h"
 #include "mongo/bson/mutable/mutable_bson_test_utils.h"
+#include "mongo/db/catalog/collection.h"
 #include "mongo/db/db.h"
+#include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/json.h"
+#include "mongo/db/operation_context_impl.h"
+#include "mongo/db/ops/update.h"
 #include "mongo/db/repl/master_slave.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/replication_coordinator_global.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
-#include "mongo/db/repl/sync.h"
-#include "mongo/db/ops/update.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/operation_context_impl.h"
-#include "mongo/util/log.h"
-
+#include "mongo/db/repl/sync_tail.h"
 #include "mongo/dbtests/dbtests.h"
+#include "mongo/util/log.h"
 
 using namespace mongo::repl;
 
 namespace ReplTests {
 
-using std::auto_ptr;
+using std::unique_ptr;
 using std::endl;
 using std::string;
 using std::stringstream;
@@ -66,27 +66,25 @@ BSONObj f(const char* s) {
 
 class Base {
 protected:
-    repl::ReplicationCoordinator* _prevGlobGoordinator;
     mutable OperationContextImpl _txn;
     mutable DBDirectClient _client;
 
 public:
-    Base() : _prevGlobGoordinator(getGlobalReplicationCoordinator()), _client(&_txn) {
+    Base() : _client(&_txn) {
         ReplSettings replSettings;
-        replSettings.oplogSize = 5 * 1024 * 1024;
+        replSettings.oplogSize = 10 * 1024 * 1024;
         replSettings.master = true;
-        ReplicationCoordinatorMock* replCoord = new ReplicationCoordinatorMock(replSettings);
-        setGlobalReplicationCoordinator(replCoord);
+        setGlobalReplicationCoordinator(new repl::ReplicationCoordinatorMock(replSettings));
 
-        oldRepl();
+        setOplogCollectionName();
         createOplog(&_txn);
 
-        Client::WriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_txn, ns());
         WriteUnitOfWork wuow(&_txn);
 
-        Collection* c = ctx.ctx().db()->getCollection(ns());
+        Collection* c = ctx.db()->getCollection(ns());
         if (!c) {
-            c = ctx.ctx().db()->createCollection(&_txn, ns());
+            c = ctx.db()->createCollection(&_txn, ns());
         }
 
         ASSERT(c->getIndexCatalog()->haveIdIndex(&_txn));
@@ -94,12 +92,11 @@ public:
     }
     ~Base() {
         try {
-            delete getGlobalReplicationCoordinator();
-            setGlobalReplicationCoordinator(_prevGlobGoordinator);
-            _prevGlobGoordinator = NULL;
-
             deleteAll(ns());
             deleteAll(cllNS());
+            ReplSettings replSettings;
+            replSettings.oplogSize = 10 * 1024 * 1024;
+            setGlobalReplicationCoordinator(new repl::ReplicationCoordinatorMock(replSettings));
         } catch (...) {
             FAIL("Exception while cleaning up test");
         }
@@ -119,7 +116,7 @@ protected:
         check(o, one(o));
     }
     void checkAll(const BSONObj& o) const {
-        auto_ptr<DBClientCursor> c = _client.query(ns(), o);
+        unique_ptr<DBClientCursor> c = _client.query(ns(), o);
         verify(c->more());
         while (c->more()) {
             check(o, c->next());
@@ -138,7 +135,7 @@ protected:
     int count() const {
         ScopedTransaction transaction(&_txn, MODE_X);
         Lock::GlobalWrite lk(_txn.lockState());
-        Client::Context ctx(&_txn, ns());
+        OldClientContext ctx(&_txn, ns());
         Database* db = ctx.db();
         Collection* coll = db->getCollection(ns());
         if (!coll) {
@@ -148,17 +145,16 @@ protected:
         }
 
         int count = 0;
-        RecordIterator* it = coll->getIterator(&_txn);
-        for (; !it->isEOF(); it->getNext()) {
+        auto cursor = coll->getCursor(&_txn);
+        while (auto record = cursor->next()) {
             ++count;
         }
-        delete it;
         return count;
     }
     int opCount() {
         ScopedTransaction transaction(&_txn, MODE_X);
         Lock::GlobalWrite lk(_txn.lockState());
-        Client::Context ctx(&_txn, cllNS());
+        OldClientContext ctx(&_txn, cllNS());
 
         Database* db = ctx.db();
         Collection* coll = db->getCollection(cllNS());
@@ -169,11 +165,10 @@ protected:
         }
 
         int count = 0;
-        RecordIterator* it = coll->getIterator(&_txn);
-        for (; !it->isEOF(); it->getNext()) {
+        auto cursor = coll->getCursor(&_txn);
+        while (auto record = cursor->next()) {
             ++count;
         }
-        delete it;
         return count;
     }
     void applyAllOperations() {
@@ -181,19 +176,17 @@ protected:
         Lock::GlobalWrite lk(_txn.lockState());
         vector<BSONObj> ops;
         {
-            Client::Context ctx(&_txn, cllNS());
+            OldClientContext ctx(&_txn, cllNS());
             Database* db = ctx.db();
             Collection* coll = db->getCollection(cllNS());
 
-            RecordIterator* it = coll->getIterator(&_txn);
-            while (!it->isEOF()) {
-                RecordId currLoc = it->getNext();
-                ops.push_back(coll->docFor(&_txn, currLoc).value());
+            auto cursor = coll->getCursor(&_txn);
+            while (auto record = cursor->next()) {
+                ops.push_back(record->data.releaseToBson().getOwned());
             }
-            delete it;
         }
         {
-            Client::Context ctx(&_txn, ns());
+            OldClientContext ctx(&_txn, ns());
             BSONObjBuilder b;
             b.append("host", "localhost");
             b.appendTimestamp("syncedTo", 0);
@@ -202,14 +195,16 @@ protected:
                 if (0) {
                     mongo::unittest::log() << "op: " << *i << endl;
                 }
+                _txn.setReplicatedWrites(false);
                 a.applyOperation(&_txn, ctx.db(), *i);
+                _txn.setReplicatedWrites(true);
             }
         }
     }
     void printAll(const char* ns) {
         ScopedTransaction transaction(&_txn, MODE_X);
         Lock::GlobalWrite lk(_txn.lockState());
-        Client::Context ctx(&_txn, ns);
+        OldClientContext ctx(&_txn, ns);
 
         Database* db = ctx.db();
         Collection* coll = db->getCollection(ns);
@@ -219,19 +214,17 @@ protected:
             wunit.commit();
         }
 
-        RecordIterator* it = coll->getIterator(&_txn);
+        auto cursor = coll->getCursor(&_txn);
         ::mongo::log() << "all for " << ns << endl;
-        while (!it->isEOF()) {
-            RecordId currLoc = it->getNext();
-            ::mongo::log() << coll->docFor(&_txn, currLoc).value().toString() << endl;
+        while (auto record = cursor->next()) {
+            ::mongo::log() << record->data.releaseToBson() << endl;
         }
-        delete it;
     }
     // These deletes don't get logged.
     void deleteAll(const char* ns) const {
         ScopedTransaction transaction(&_txn, MODE_X);
         Lock::GlobalWrite lk(_txn.lockState());
-        Client::Context ctx(&_txn, ns);
+        OldClientContext ctx(&_txn, ns);
         WriteUnitOfWork wunit(&_txn);
         Database* db = ctx.db();
         Collection* coll = db->getCollection(ns);
@@ -239,21 +232,13 @@ protected:
             coll = db->createCollection(&_txn, ns);
         }
 
-        vector<RecordId> toDelete;
-        RecordIterator* it = coll->getIterator(&_txn);
-        while (!it->isEOF()) {
-            toDelete.push_back(it->getNext());
-        }
-        delete it;
-        for (vector<RecordId>::iterator i = toDelete.begin(); i != toDelete.end(); ++i) {
-            coll->deleteDocument(&_txn, *i, true);
-        }
+        ASSERT_OK(coll->truncate(&_txn));
         wunit.commit();
     }
     void insert(const BSONObj& o) const {
         ScopedTransaction transaction(&_txn, MODE_X);
         Lock::GlobalWrite lk(_txn.lockState());
-        Client::Context ctx(&_txn, ns());
+        OldClientContext ctx(&_txn, ns());
         WriteUnitOfWork wunit(&_txn);
         Database* db = ctx.db();
         Collection* coll = db->getCollection(ns());
@@ -262,7 +247,9 @@ protected:
         }
 
         if (o.hasField("_id")) {
+            _txn.setReplicatedWrites(false);
             coll->insertDocument(&_txn, o, true);
+            _txn.setReplicatedWrites(true);
             wunit.commit();
             return;
         }
@@ -272,7 +259,9 @@ protected:
         id.init();
         b.appendOID("_id", &id);
         b.appendElements(o);
+        _txn.setReplicatedWrites(false);
         coll->insertDocument(&_txn, b.obj(), true);
+        _txn.setReplicatedWrites(true);
         wunit.commit();
     }
     static BSONObj wid(const char* json) {
@@ -289,9 +278,9 @@ protected:
 class LogBasic : public Base {
 public:
     void run() {
-        ASSERT_EQUALS(1, opCount());
-        _client.insert(ns(), fromjson("{\"a\":\"b\"}"));
         ASSERT_EQUALS(2, opCount());
+        _client.insert(ns(), fromjson("{\"a\":\"b\"}"));
+        ASSERT_EQUALS(3, opCount());
     }
 };
 
@@ -335,7 +324,7 @@ public:
     }
     void check() const {
         BSONObj o = _client.findOne(ns(), QUERY("a" << 1));
-        ASSERT(0 != o.getField("t").date());
+        ASSERT(Date_t{} != o.getField("t").date());
         ASSERT_EQUALS(date_, o.getField("t").date());
     }
     void reset() const {
@@ -426,7 +415,7 @@ public:
     }
     void check() const {
         BSONObj o = _client.findOne(ns(), QUERY("_id" << 1));
-        ASSERT(0 != o.getField("t").date());
+        ASSERT(Date_t{} != o.getField("t").date());
         ASSERT_EQUALS(date_, o.getField("t").date());
     }
     void reset() const {
@@ -721,7 +710,7 @@ class MultiInc : public Base {
 public:
     string s() const {
         stringstream ss;
-        auto_ptr<DBClientCursor> cc = _client.query(ns(), Query().sort(BSON("_id" << 1)));
+        unique_ptr<DBClientCursor> cc = _client.query(ns(), Query().sort(BSON("_id" << 1)));
         bool first = true;
         while (cc->more()) {
             if (first)
@@ -1363,15 +1352,15 @@ class DatabaseIgnorerBasic {
 public:
     void run() {
         DatabaseIgnorer d;
-        ASSERT(!d.ignoreAt("a", OpTime(4, 0)));
-        d.doIgnoreUntilAfter("a", OpTime(5, 0));
-        ASSERT(d.ignoreAt("a", OpTime(4, 0)));
-        ASSERT(!d.ignoreAt("b", OpTime(4, 0)));
-        ASSERT(d.ignoreAt("a", OpTime(4, 10)));
-        ASSERT(d.ignoreAt("a", OpTime(5, 0)));
-        ASSERT(!d.ignoreAt("a", OpTime(5, 1)));
+        ASSERT(!d.ignoreAt("a", Timestamp(4, 0)));
+        d.doIgnoreUntilAfter("a", Timestamp(5, 0));
+        ASSERT(d.ignoreAt("a", Timestamp(4, 0)));
+        ASSERT(!d.ignoreAt("b", Timestamp(4, 0)));
+        ASSERT(d.ignoreAt("a", Timestamp(4, 10)));
+        ASSERT(d.ignoreAt("a", Timestamp(5, 0)));
+        ASSERT(!d.ignoreAt("a", Timestamp(5, 1)));
         // Ignore state is expired.
-        ASSERT(!d.ignoreAt("a", OpTime(4, 0)));
+        ASSERT(!d.ignoreAt("a", Timestamp(4, 0)));
     }
 };
 
@@ -1379,26 +1368,26 @@ class DatabaseIgnorerUpdate {
 public:
     void run() {
         DatabaseIgnorer d;
-        d.doIgnoreUntilAfter("a", OpTime(5, 0));
-        d.doIgnoreUntilAfter("a", OpTime(6, 0));
-        ASSERT(d.ignoreAt("a", OpTime(5, 5)));
-        ASSERT(d.ignoreAt("a", OpTime(6, 0)));
-        ASSERT(!d.ignoreAt("a", OpTime(6, 1)));
+        d.doIgnoreUntilAfter("a", Timestamp(5, 0));
+        d.doIgnoreUntilAfter("a", Timestamp(6, 0));
+        ASSERT(d.ignoreAt("a", Timestamp(5, 5)));
+        ASSERT(d.ignoreAt("a", Timestamp(6, 0)));
+        ASSERT(!d.ignoreAt("a", Timestamp(6, 1)));
 
-        d.doIgnoreUntilAfter("a", OpTime(5, 0));
-        d.doIgnoreUntilAfter("a", OpTime(6, 0));
-        d.doIgnoreUntilAfter("a", OpTime(6, 0));
-        d.doIgnoreUntilAfter("a", OpTime(5, 0));
-        ASSERT(d.ignoreAt("a", OpTime(5, 5)));
-        ASSERT(d.ignoreAt("a", OpTime(6, 0)));
-        ASSERT(!d.ignoreAt("a", OpTime(6, 1)));
+        d.doIgnoreUntilAfter("a", Timestamp(5, 0));
+        d.doIgnoreUntilAfter("a", Timestamp(6, 0));
+        d.doIgnoreUntilAfter("a", Timestamp(6, 0));
+        d.doIgnoreUntilAfter("a", Timestamp(5, 0));
+        ASSERT(d.ignoreAt("a", Timestamp(5, 5)));
+        ASSERT(d.ignoreAt("a", Timestamp(6, 0)));
+        ASSERT(!d.ignoreAt("a", Timestamp(6, 1)));
     }
 };
 
-class SyncTest : public Sync {
+class SyncTest : public SyncTail {
 public:
     bool returnEmpty;
-    SyncTest() : Sync(""), returnEmpty(false) {}
+    SyncTest() : SyncTail(nullptr, SyncTail::MultiSyncApplyFunc()), returnEmpty(false) {}
     virtual ~SyncTest() {}
     virtual BSONObj getMissingDoc(OperationContext* txn, Database* db, const BSONObj& o) {
         if (returnEmpty) {
@@ -1427,9 +1416,10 @@ public:
 
         // this should fail because we can't connect
         try {
-            Sync badSource("localhost:123");
+            SyncTail badSource(nullptr, SyncTail::MultiSyncApplyFunc());
+            badSource.setHostname("localhost:123");
 
-            Client::Context ctx(&_txn, ns());
+            OldClientContext ctx(&_txn, ns());
             badSource.getMissingDoc(&_txn, ctx.db(), o);
         } catch (DBException&) {
             threw = true;

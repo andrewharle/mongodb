@@ -32,31 +32,32 @@
 
 #include "mongo/db/auth/authz_manager_external_state_d.h"
 
-#include <boost/thread/mutex.hpp>
-#include <boost/date_time/time_duration.hpp>
-#include <string>
-
 #include "mongo/base/status.h"
 #include "mongo/db/auth/authorization_manager.h"
+#include "mongo/db/auth/authz_session_external_state_d.h"
 #include "mongo/db/auth/user_name.h"
 #include "mongo/db/client.h"
-#include "mongo/db/dbhelpers.h"
+#include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
-#include "mongo/db/global_environment_experiment.h"
+#include "mongo/db/dbhelpers.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/storage/storage_engine.h"
+#include "mongo/stdx/memory.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
 
-using std::endl;
-using std::string;
+AuthzManagerExternalStateMongod::AuthzManagerExternalStateMongod() = default;
+AuthzManagerExternalStateMongod::~AuthzManagerExternalStateMongod() = default;
 
-AuthzManagerExternalStateMongod::AuthzManagerExternalStateMongod() {}
-AuthzManagerExternalStateMongod::~AuthzManagerExternalStateMongod() {}
+std::unique_ptr<AuthzSessionExternalState>
+AuthzManagerExternalStateMongod::makeAuthzSessionExternalState(AuthorizationManager* authzManager) {
+    return stdx::make_unique<AuthzSessionExternalStateMongod>(authzManager);
+}
 
 Status AuthzManagerExternalStateMongod::query(
     OperationContext* txn,
@@ -87,100 +88,6 @@ Status AuthzManagerExternalStateMongod::findOne(OperationContext* txn,
     return Status(ErrorCodes::NoMatchingDocument,
                   mongoutils::str::stream() << "No document in " << collectionName.ns()
                                             << " matches " << query);
-}
-
-Status AuthzManagerExternalStateMongod::insert(OperationContext* txn,
-                                               const NamespaceString& collectionName,
-                                               const BSONObj& document,
-                                               const BSONObj& writeConcern) {
-    try {
-        DBDirectClient client(txn);
-        client.insert(collectionName, document);
-
-        // Handle write concern
-        BSONObjBuilder gleBuilder;
-        gleBuilder.append("getLastError", 1);
-        gleBuilder.appendElements(writeConcern);
-        BSONObj res;
-        client.runCommand("admin", gleBuilder.done(), res);
-        string errstr = client.getLastErrorString(res);
-        if (errstr.empty()) {
-            return Status::OK();
-        }
-        if (res.hasField("code") && res["code"].Int() == ASSERT_ID_DUPKEY) {
-            return Status(ErrorCodes::DuplicateKey, errstr);
-        }
-        return Status(ErrorCodes::UnknownError, errstr);
-    } catch (const DBException& e) {
-        return e.toStatus();
-    }
-}
-
-Status AuthzManagerExternalStateMongod::update(OperationContext* txn,
-                                               const NamespaceString& collectionName,
-                                               const BSONObj& query,
-                                               const BSONObj& updatePattern,
-                                               bool upsert,
-                                               bool multi,
-                                               const BSONObj& writeConcern,
-                                               int* nMatched) {
-    try {
-        DBDirectClient client(txn);
-        client.update(collectionName, query, updatePattern, upsert, multi);
-
-        // Handle write concern
-        BSONObjBuilder gleBuilder;
-        gleBuilder.append("getLastError", 1);
-        gleBuilder.appendElements(writeConcern);
-        BSONObj res;
-        client.runCommand("admin", gleBuilder.done(), res);
-        string err = client.getLastErrorString(res);
-        if (!err.empty()) {
-            return Status(ErrorCodes::UnknownError, err);
-        }
-
-        *nMatched = res["n"].numberInt();
-        return Status::OK();
-    } catch (const DBException& e) {
-        return e.toStatus();
-    }
-}
-
-Status AuthzManagerExternalStateMongod::remove(OperationContext* txn,
-                                               const NamespaceString& collectionName,
-                                               const BSONObj& query,
-                                               const BSONObj& writeConcern,
-                                               int* numRemoved) {
-    try {
-        DBDirectClient client(txn);
-        client.remove(collectionName, query);
-
-        // Handle write concern
-        BSONObjBuilder gleBuilder;
-        gleBuilder.append("getLastError", 1);
-        gleBuilder.appendElements(writeConcern);
-        BSONObj res;
-        client.runCommand("admin", gleBuilder.done(), res);
-        string errstr = client.getLastErrorString(res);
-        if (!errstr.empty()) {
-            return Status(ErrorCodes::UnknownError, errstr);
-        }
-
-        *numRemoved = res["n"].numberInt();
-        return Status::OK();
-    } catch (const DBException& e) {
-        return e.toStatus();
-    }
-}
-
-bool AuthzManagerExternalStateMongod::tryAcquireAuthzUpdateLock(const StringData& why) {
-    LOG(2) << "Attempting to lock user data for: " << why << endl;
-    return _authzDataUpdateLock.timed_lock(
-        boost::posix_time::milliseconds(_authzUpdateLockAcquisitionTimeoutMillis));
-}
-
-void AuthzManagerExternalStateMongod::releaseAuthzUpdateLock() {
-    return _authzDataUpdateLock.unlock();
 }
 
 }  // namespace mongo

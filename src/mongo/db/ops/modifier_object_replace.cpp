@@ -30,7 +30,7 @@
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/mutable/document.h"
-#include "mongo/db/global_optime.h"
+#include "mongo/db/global_timestamp.h"
 #include "mongo/db/ops/log_builder.h"
 #include "mongo/util/mongoutils/str.h"
 
@@ -47,13 +47,14 @@ Status fixupTimestamps(const BSONObj& obj) {
         BSONElement e = i.next();
 
         // Skip _id field -- we do not replace it
-        if (e.type() == Timestamp && e.fieldNameStringData() != idFieldName) {
-            // performance note, this locks a mutex:
+        if (e.type() == bsonTimestamp && e.fieldNameStringData() != idFieldName) {
+            // TODO(emilkie): This is not endian-safe.
             unsigned long long& timestamp =
                 *(reinterpret_cast<unsigned long long*>(const_cast<char*>(e.value())));
             if (timestamp == 0) {
-                OpTime ts(getNextGlobalOptime());
-                timestamp = ts.asDate();
+                // performance note, this locks a mutex:
+                Timestamp ts(getNextGlobalTimestamp());
+                timestamp = ts.asULL();
             }
         }
     }
@@ -97,7 +98,7 @@ Status ModifierObjectReplace::init(const BSONElement& modExpr,
 }
 
 Status ModifierObjectReplace::prepare(mutablebson::Element root,
-                                      const StringData& matchedField,
+                                      StringData matchedField,
                                       ExecInfo* execInfo) {
     _preparedState.reset(new PreparedState(&root.getDocument()));
 

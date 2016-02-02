@@ -31,13 +31,13 @@
 
 #pragma once
 
-#include <boost/thread/mutex.hpp>
 #include <map>
 #include <string>
 #include <wiredtiger.h>
 
 #include "mongo/base/string_data.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_session_cache.h"
+#include "mongo/stdx/mutex.h"
 
 namespace mongo {
 
@@ -52,9 +52,9 @@ public:
     void onCreate(WiredTigerRecordStore* rs, long long nr, long long ds);
     void onDestroy(WiredTigerRecordStore* rs);
 
-    void storeToCache(const StringData& uri, long long numRecords, long long dataSize);
+    void storeToCache(StringData uri, long long numRecords, long long dataSize);
 
-    void loadFromCache(const StringData& uri, long long* numRecords, long long* dataSize) const;
+    void loadFromCache(StringData uri, long long* numRecords, long long* dataSize) const;
 
     /**
      * Loads from the underlying table.
@@ -80,12 +80,12 @@ private:
     int _magic;
 
     // Guards _cursor. Acquire *before* _entriesMutex.
-    mutable boost::mutex _cursorMutex;
+    mutable stdx::mutex _cursorMutex;
     const WiredTigerSession _session;
     WT_CURSOR* _cursor;  // pointer is const after constructor
 
     typedef std::map<std::string, Entry> Map;
     Map _entries;
-    mutable boost::mutex _entriesMutex;
+    mutable stdx::mutex _entriesMutex;
 };
 }

@@ -64,15 +64,15 @@ inline ConstElement ConstElement::operator[](size_t n) const {
     return _basis[n];
 }
 
-inline ConstElement ConstElement::findFirstChildNamed(const StringData& name) const {
+inline ConstElement ConstElement::findFirstChildNamed(StringData name) const {
     return _basis.findFirstChildNamed(name);
 }
 
-inline ConstElement ConstElement::operator[](const StringData& name) const {
+inline ConstElement ConstElement::operator[](StringData name) const {
     return _basis[name];
 }
 
-inline ConstElement ConstElement::findElementNamed(const StringData& name) const {
+inline ConstElement ConstElement::findElementNamed(StringData name) const {
     return _basis.findElementNamed(name);
 }
 
@@ -140,12 +140,16 @@ inline int32_t ConstElement::getValueInt() const {
     return _basis.getValueInt();
 }
 
-inline OpTime ConstElement::getValueTimestamp() const {
+inline Timestamp ConstElement::getValueTimestamp() const {
     return _basis.getValueTimestamp();
 }
 
 inline int64_t ConstElement::getValueLong() const {
     return _basis.getValueLong();
+}
+
+inline Decimal128 ConstElement::getValueDecimal() const {
+    return _basis.getValueDecimal();
 }
 
 inline bool ConstElement::isValueMinKey() const {

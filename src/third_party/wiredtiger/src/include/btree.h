@@ -88,7 +88,8 @@ struct __wt_btree {
 	uint32_t maxleafpage;		/* Leaf page max size */
 	uint32_t maxleafkey;		/* Leaf page max key size */
 	uint32_t maxleafvalue;		/* Leaf page max value size */
-	uint64_t maxmempage;		/* In memory page max size */
+	uint64_t maxmempage;		/* In-memory page max size */
+	uint64_t splitmempage;		/* In-memory split trigger size */
 
 	void *huffman_key;		/* Key huffman encoding */
 	void *huffman_value;		/* Value huffman encoding */
@@ -112,6 +113,7 @@ struct __wt_btree {
 	u_int split_deepen_per_child;	/* Entries per child when deepened */
 	int   split_pct;		/* Split page percent */
 	WT_COMPRESSOR *compressor;	/* Page compressor */
+	WT_KEYED_ENCRYPTOR *kencryptor;	/* Page encryptor */
 	WT_RWLOCK *ovfl_lock;		/* Overflow lock */
 
 	uint64_t last_recno;		/* Column-store last record number */
@@ -133,7 +135,9 @@ struct __wt_btree {
 	u_int    evict_walk_skips;	/* Number of walks skipped */
 	volatile uint32_t evict_busy;	/* Count of threads in eviction */
 
-	int checkpointing;		/* Checkpoint in progress */
+	enum {
+		WT_CKPT_OFF, WT_CKPT_PREPARE, WT_CKPT_RUNNING
+	} checkpointing;		/* Checkpoint in progress */
 
 	/*
 	 * We flush pages from the tree (in order to make checkpoint faster),
@@ -145,11 +149,14 @@ struct __wt_btree {
 	/* Flags values up to 0xff are reserved for WT_DHANDLE_* */
 #define	WT_BTREE_BULK		0x00100	/* Bulk-load handle */
 #define	WT_BTREE_IN_MEMORY	0x00200	/* Cache-resident object */
-#define	WT_BTREE_NO_EVICTION	0x00400	/* Disable eviction */
-#define	WT_BTREE_SALVAGE	0x00800	/* Handle is for salvage */
-#define	WT_BTREE_SKIP_CKPT	0x01000	/* Handle skipped checkpoint */
-#define	WT_BTREE_UPGRADE	0x02000	/* Handle is for upgrade */
-#define	WT_BTREE_VERIFY		0x04000	/* Handle is for verify */
+#define	WT_BTREE_LOOKASIDE	0x00400	/* Look-aside table */
+#define	WT_BTREE_NO_CHECKPOINT	0x00800	/* Disable checkpoints */
+#define	WT_BTREE_NO_EVICTION	0x01000	/* Disable eviction */
+#define	WT_BTREE_NO_LOGGING	0x02000	/* Disable logging */
+#define	WT_BTREE_SALVAGE	0x04000	/* Handle is for salvage */
+#define	WT_BTREE_SKIP_CKPT	0x08000	/* Handle skipped checkpoint */
+#define	WT_BTREE_UPGRADE	0x10000	/* Handle is for upgrade */
+#define	WT_BTREE_VERIFY		0x20000	/* Handle is for verify */
 	uint32_t flags;
 };
 

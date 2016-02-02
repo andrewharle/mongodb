@@ -34,11 +34,11 @@
 
 #include "mongo/db/storage/key_string.h"
 
-#include <boost/scoped_array.hpp>
 #include <cmath>
 
 #include "mongo/base/data_view.h"
 #include "mongo/platform/bits.h"
+#include "mongo/platform/strnlen.h"
 #include "mongo/util/hex.h"
 #include "mongo/util/log.h"
 
@@ -98,11 +98,12 @@ const uint8_t kNumericPositive6ByteInt = kNumeric + 18;
 const uint8_t kNumericPositive7ByteInt = kNumeric + 19;
 const uint8_t kNumericPositive8ByteInt = kNumeric + 20;
 const uint8_t kNumericPositiveLargeDouble = kNumeric + 21;  // >= 2**63 including +Inf
-BOOST_STATIC_ASSERT(kNumericPositiveLargeDouble < kStringLike);
+static_assert(kNumericPositiveLargeDouble < kStringLike,
+              "kNumericPositiveLargeDouble < kStringLike");
 
 const uint8_t kBoolFalse = kBool + 0;
 const uint8_t kBoolTrue = kBool + 1;
-BOOST_STATIC_ASSERT(kBoolTrue < kDate);
+static_assert(kBoolTrue < kDate, "kBoolTrue < kDate");
 
 size_t numBytesForInt(uint8_t ctype) {
     if (ctype >= kNumericPositive1ByteInt) {
@@ -149,7 +150,7 @@ uint8_t bsonTypeToGenericKeyStringType(BSONType type) {
             return CType::kBool;
         case Date:
             return CType::kDate;
-        case Timestamp:
+        case bsonTimestamp:
             return CType::kTimestamp;
         case RegEx:
             return CType::kRegEx;
@@ -194,7 +195,7 @@ void memcpy_flipBits(void* dst, const void* src, size_t bytes) {
 template <typename T>
 T readType(BufReader* reader, bool inverted) {
     // TODO for C++11 to static_assert that T is integral
-    T t = ConstDataView(static_cast<const char*>(reader->skip(sizeof(T)))).readNative<T>();
+    T t = ConstDataView(static_cast<const char*>(reader->skip(sizeof(T)))).read<T>();
     if (inverted)
         return ~t;
     return t;
@@ -274,22 +275,25 @@ string readInvertedCStringWithNuls(BufReader* reader) {
 
 void KeyString::resetToKey(const BSONObj& obj, Ordering ord, RecordId recordId) {
     resetToEmpty();
-    _appendAllElementsForIndexing(obj, ord);
+    _appendAllElementsForIndexing(obj, ord, kInclusive);
     appendRecordId(recordId);
 }
 
-void KeyString::resetToKey(const BSONObj& obj, Ordering ord) {
+void KeyString::resetToKey(const BSONObj& obj, Ordering ord, Discriminator discriminator) {
     resetToEmpty();
-    _appendAllElementsForIndexing(obj, ord);
+    _appendAllElementsForIndexing(obj, ord, discriminator);
 }
 
 // ----------------------------------------------------------------------
 // -----------   APPEND CODE  -------------------------------------------
 // ----------------------------------------------------------------------
 
-void KeyString::_appendAllElementsForIndexing(const BSONObj& obj, Ordering ord) {
+void KeyString::_appendAllElementsForIndexing(const BSONObj& obj,
+                                              Ordering ord,
+                                              Discriminator discriminator) {
     int elemCount = 0;
-    BSONForEach(elem, obj) {
+    BSONObjIterator it(obj);
+    while (auto elem = it.next()) {
         const int elemIdx = elemCount++;
         const bool invert = (ord.get(elemIdx) == -1);
 
@@ -297,16 +301,35 @@ void KeyString::_appendAllElementsForIndexing(const BSONObj& obj, Ordering ord) 
 
         dassert(elem.fieldNameSize() < 3);  // fieldNameSize includes the NUL
 
-        // These are used in IndexEntryComparison::makeQueryObject()
-        switch (*elem.fieldName()) {
-            case 'l':
-                _append(kLess, false);
-                break;
-            case 'g':
-                _append(kGreater, false);
-                break;
+        // IndexEntryComparison::makeQueryObject() encodes a discriminator in the first byte of
+        // the field name. This discriminator overrides the passed in one. Normal elements only
+        // have the NUL byte terminator. Entries stored in an index are not allowed to have a
+        // discriminator.
+        if (char ch = *elem.fieldName()) {
+            // l for less / g for greater.
+            invariant(ch == 'l' || ch == 'g');
+            discriminator = ch == 'l' ? kExclusiveBefore : kExclusiveAfter;
+            invariant(!it.more());
         }
     }
+
+    // The discriminator forces this KeyString to compare Less/Greater than any KeyString with
+    // the same prefix of keys. As an example, this can be used to land on the first key in the
+    // index with the value "a" regardless of the RecordId. In compound indexes it can use a
+    // prefix of the full key to ignore the later keys.
+    switch (discriminator) {
+        case kExclusiveBefore:
+            _append(kLess, false);
+            break;
+        case kExclusiveAfter:
+            _append(kGreater, false);
+            break;
+        case kInclusive:
+            break;  // No discriminator byte.
+    }
+
+    // TODO consider omitting kEnd when using a discriminator byte. It is not a storage format
+    // change since keystrings with discriminators are not allowed to be stored.
     _append(kEnd, false);
 }
 
@@ -378,7 +401,7 @@ void KeyString::_appendDate(Date_t val, bool invert) {
     _append(endian::nativeToBig(encoded), invert);
 }
 
-void KeyString::_appendTimestamp(OpTime val, bool invert) {
+void KeyString::_appendTimestamp(Timestamp val, bool invert) {
     _append(CType::kTimestamp, invert);
     _append(endian::nativeToBig(val.asLL()), invert);
 }
@@ -464,7 +487,7 @@ void KeyString::_appendNumberDouble(const double num, bool invert) {
 
     // no special cases needed for Inf,
     // see http://en.wikipedia.org/wiki/IEEE_754-1985#Positive_and_negative_infinity
-    if (isNaN(num)) {
+    if (std::isnan(num)) {
         _append(CType::kNumericNaN, invert);
         return;
     }
@@ -592,8 +615,8 @@ void KeyString::_appendBsonValue(const BSONElement& elem, bool invert, const Str
         case NumberInt:
             _appendNumberInt(elem._numberInt(), invert);
             break;
-        case Timestamp:
-            _appendTimestamp(elem._opTime(), invert);
+        case bsonTimestamp:
+            _appendTimestamp(elem.timestamp(), invert);
             break;
         case NumberLong:
             _appendNumberLong(elem._numberLong(), invert);
@@ -634,7 +657,7 @@ void KeyString::_appendBson(const BSONObj& obj, bool invert) {
 }
 
 void KeyString::_appendSmallDouble(double value, bool invert) {
-    dassert(!isNaN(value));
+    dassert(!std::isnan(value));
     dassert(value != 0.0);
 
     uint64_t data;
@@ -650,7 +673,7 @@ void KeyString::_appendSmallDouble(double value, bool invert) {
 }
 
 void KeyString::_appendLargeDouble(double value, bool invert) {
-    dassert(!isNaN(value));
+    dassert(!std::isnan(value));
     dassert(value != 0.0);
 
     uint64_t data;
@@ -777,12 +800,12 @@ void toBsonValue(uint8_t ctype,
             break;
 
         case CType::kDate:
-            *stream << Date_t(endian::bigToNative(readType<uint64_t>(reader, inverted)) ^
-                              (1LL << 63));
+            *stream << Date_t::fromMillisSinceEpoch(
+                endian::bigToNative(readType<uint64_t>(reader, inverted)) ^ (1LL << 63));
             break;
 
         case CType::kTimestamp:
-            *stream << OpTime(endian::bigToNative(readType<uint64_t>(reader, inverted)));
+            *stream << Timestamp(endian::bigToNative(readType<uint64_t>(reader, inverted)));
             break;
 
         case CType::kOID:
@@ -854,7 +877,7 @@ void toBsonValue(uint8_t ctype,
             if (!inverted) {
                 *stream << BSONBinData(ptr, size, subType);
             } else {
-                boost::scoped_array<char> flipped(new char[size]);
+                std::unique_ptr<char[]> flipped(new char[size]);
                 memcpy_flipBits(flipped.get(), ptr, size);
                 *stream << BSONBinData(flipped.get(), size, subType);
             }
@@ -877,7 +900,7 @@ void toBsonValue(uint8_t ctype,
         case CType::kDBRef: {
             size_t size = endian::bigToNative(readType<uint32_t>(reader, inverted));
             if (inverted) {
-                boost::scoped_array<char> ns(new char[size]);
+                std::unique_ptr<char[]> ns(new char[size]);
                 memcpy_flipBits(ns.get(), reader->skip(size), size);
                 char oidBytes[OID::kOIDSize];
                 memcpy_flipBits(oidBytes, reader->skip(OID::kOIDSize), OID::kOIDSize);

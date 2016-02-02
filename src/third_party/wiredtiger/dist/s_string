@@ -15,23 +15,63 @@ type aspell > /dev/null 2>&1 || {
 	exit 0
 }
 
-check() {
+# replace:
+#	Create a replacement list of spelling words. This is here because the
+# words we ignore changes over time and it's worth periodically collapsing
+# the list. Don't it too often, the list is correct for many different aspell
+# catalogs and generating a shorter list on any single system will break other
+# systems.
+replace() {
 	aspell --mode=ccpp --lang=en list < ../$1 |
+	sort -u |
+	comm -12 /dev/stdin s_string.ok
+}
+
+# check:
+#	Check the spelling of an individual file.
+check() {
+	aspell --lang=en $1 list < ../$2 |
 	sort -u |
 	comm -23 /dev/stdin s_string.ok > $t
 	test -s $t && {
-		echo "==== $1"
+		echo "==== $2"
 		cat $t
 	}
 }
 
 # List of files to spellchk.
 l=`(cd .. &&
-    find examples ext src test -name '*.[chisy]' &&
+    find bench examples ext src test -name '*.[chisy]' &&
     find src -name '*.in')`
 
+usage()
+{
+	echo 'usage: s_string [-r]' >&2
+	exit 1
+}
+while :
+	do case "$1" in
+	-r)			# -r builds replacement list of OK words
+		for f in $l; do
+			replace $f
+		done | sort -u > $t
+		cp $t s_string.ok
+		shift;;
+	*)
+		test "$#" -eq 0 || usage
+		break;;
+	esac
+done
+
+# Check source files.
 for f in $l; do
-	check $f
+	check "--mode=ccpp" $f
+done
+
+l="NEWS"
+# Check other files.
+for f in $l; do
+	check "" $f
 done
 
 exit 0

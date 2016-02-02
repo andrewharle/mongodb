@@ -31,6 +31,7 @@
 #pragma once
 
 #include "mongo/db/commands.h"
+#include "mongo/stdx/mutex.h"
 
 namespace mongo {
 
@@ -55,8 +56,7 @@ public:
                      BSONObj& cmdObj,
                      int,
                      std::string& errmsg,
-                     BSONObjBuilder& result,
-                     bool);
+                     BSONObjBuilder& result);
 
     void wipeCacheForCollection(OperationContext* txn, StringData ns);
 
@@ -74,6 +74,6 @@ private:
                                bool* fromCache);
 
     std::map<std::string, std::string> _cachedHashed;
-    mutex _cachedHashedMutex;
+    stdx::mutex _cachedHashedMutex;
 };
 }

@@ -32,13 +32,12 @@
 
 #include "mongo/db/storage/mmap_v1/dur_journal_writer.h"
 
-#include <boost/bind.hpp>
-#include <boost/thread/thread.hpp>
-
 #include "mongo/db/client.h"
 #include "mongo/db/storage/mmap_v1/dur_journal.h"
 #include "mongo/db/storage/mmap_v1/dur_recover.h"
 #include "mongo/db/storage/mmap_v1/dur_stats.h"
+#include "mongo/stdx/functional.h"
+#include "mongo/stdx/thread.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
@@ -134,7 +133,7 @@ void JournalWriter::start() {
     }
 
     // Start the thread
-    boost::thread t(stdx::bind(&JournalWriter::_journalWriterThread, this));
+    stdx::thread t(stdx::bind(&JournalWriter::_journalWriterThread, this));
     _journalWriterThreadHandle.swap(t);
 }
 
@@ -267,8 +266,6 @@ void JournalWriter::_journalWriterThread() {
     }
 
     log() << "Journal writer thread stopped";
-
-    cc().shutdown();
 }
 
 

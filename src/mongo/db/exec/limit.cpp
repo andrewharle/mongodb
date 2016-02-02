@@ -30,23 +30,28 @@
 
 #include "mongo/db/exec/scoped_timer.h"
 #include "mongo/db/exec/working_set_common.h"
+#include "mongo/stdx/memory.h"
 #include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
 
-using std::auto_ptr;
+using std::unique_ptr;
 using std::vector;
+using stdx::make_unique;
 
 // static
 const char* LimitStage::kStageType = "LIMIT";
 
-LimitStage::LimitStage(int limit, WorkingSet* ws, PlanStage* child)
-    : _ws(ws), _child(child), _numToReturn(limit), _commonStats(kStageType) {}
+LimitStage::LimitStage(OperationContext* opCtx, long long limit, WorkingSet* ws, PlanStage* child)
+    : PlanStage(kStageType, opCtx), _ws(ws), _numToReturn(limit) {
+    _specificStats.limit = _numToReturn;
+    _children.emplace_back(child);
+}
 
 LimitStage::~LimitStage() {}
 
 bool LimitStage::isEOF() {
-    return (0 == _numToReturn) || _child->isEOF();
+    return (0 == _numToReturn) || child()->isEOF();
 }
 
 PlanStage::StageState LimitStage::work(WorkingSetID* out) {
@@ -61,14 +66,14 @@ PlanStage::StageState LimitStage::work(WorkingSetID* out) {
     }
 
     WorkingSetID id = WorkingSet::INVALID_ID;
-    StageState status = _child->work(&id);
+    StageState status = child()->work(&id);
 
     if (PlanStage::ADVANCED == status) {
         *out = id;
         --_numToReturn;
         ++_commonStats.advanced;
         return PlanStage::ADVANCED;
-    } else if (PlanStage::FAILURE == status) {
+    } else if (PlanStage::FAILURE == status || PlanStage::DEAD == status) {
         *out = id;
         // If a stage fails, it may create a status WSM to indicate why it
         // failed, in which case 'id' is valid.  If ID is invalid, we
@@ -82,49 +87,23 @@ PlanStage::StageState LimitStage::work(WorkingSetID* out) {
         return status;
     } else if (PlanStage::NEED_TIME == status) {
         ++_commonStats.needTime;
-    } else if (PlanStage::NEED_FETCH == status) {
-        ++_commonStats.needFetch;
+    } else if (PlanStage::NEED_YIELD == status) {
+        ++_commonStats.needYield;
         *out = id;
     }
 
     return status;
 }
 
-void LimitStage::saveState() {
-    ++_commonStats.yields;
-    _child->saveState();
-}
-
-void LimitStage::restoreState(OperationContext* opCtx) {
-    ++_commonStats.unyields;
-    _child->restoreState(opCtx);
-}
-
-void LimitStage::invalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) {
-    ++_commonStats.invalidates;
-    _child->invalidate(txn, dl, type);
-}
-
-vector<PlanStage*> LimitStage::getChildren() const {
-    vector<PlanStage*> children;
-    children.push_back(_child.get());
-    return children;
-}
-
-PlanStageStats* LimitStage::getStats() {
+unique_ptr<PlanStageStats> LimitStage::getStats() {
     _commonStats.isEOF = isEOF();
-    _specificStats.limit = _numToReturn;
-    auto_ptr<PlanStageStats> ret(new PlanStageStats(_commonStats, STAGE_LIMIT));
-    ret->specific.reset(new LimitStats(_specificStats));
-    ret->children.push_back(_child->getStats());
-    return ret.release();
+    unique_ptr<PlanStageStats> ret = make_unique<PlanStageStats>(_commonStats, STAGE_LIMIT);
+    ret->specific = make_unique<LimitStats>(_specificStats);
+    ret->children.emplace_back(child()->getStats());
+    return ret;
 }
 
-const CommonStats* LimitStage::getCommonStats() {
-    return &_commonStats;
-}
-
-const SpecificStats* LimitStage::getSpecificStats() {
+const SpecificStats* LimitStage::getSpecificStats() const {
     return &_specificStats;
 }
 

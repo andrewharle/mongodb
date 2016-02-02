@@ -15,6 +15,7 @@ load('jstests/concurrency/fsm_workload_helpers/drop_utils.js'); // for dropColle
 
 var $config = extendWorkload($config, function($config, $super) {
     $config.data.prefix = 'collmod_separate_collections';
+    $config.data.shardKey = { createdAt: 1 };
 
     $config.states.init = function init(db, collName) {
         this.threadCollName = this.prefix + '_' + this.tid;
@@ -25,7 +26,7 @@ var $config = extendWorkload($config, function($config, $super) {
         init: { collMod: 1 }
     }, $super.transitions);
 
-    $config.setup = function setup(db, collName) {
+    $config.setup = function setup(db, collName, cluster) {
         // no-op: since the init state is used to setup
         // the separate collections on a per-thread basis.
     };

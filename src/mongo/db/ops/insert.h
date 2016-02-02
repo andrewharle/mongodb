@@ -44,13 +44,13 @@ StatusWith<BSONObj> fixDocumentForInsert(const BSONObj& doc);
  * Returns Status::OK() if this namespace is valid for user write operations.  If not, returns
  * an error Status.
  */
-Status userAllowedWriteNS(const StringData& db, const StringData& coll);
-Status userAllowedWriteNS(const StringData& ns);
+Status userAllowedWriteNS(StringData db, StringData coll);
+Status userAllowedWriteNS(StringData ns);
 Status userAllowedWriteNS(const NamespaceString& ns);
 
 /**
  * Returns Status::OK() if the namespace described by (db, coll) is valid for user create
  * operations.  If not, returns an error Status.
  */
-Status userAllowedCreateNS(const StringData& db, const StringData& coll);
+Status userAllowedCreateNS(StringData db, StringData coll);
 }

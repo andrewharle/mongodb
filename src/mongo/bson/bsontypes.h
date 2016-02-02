@@ -29,7 +29,9 @@
 
 #pragma once
 
+#include "mongo/platform/decimal128.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/config.h"
 
 namespace mongo {
 
@@ -43,8 +45,8 @@ class Ordering;
 struct BSONArray;  // empty subclass of BSONObj useful for overloading
 struct BSONElementCmpWithoutField;
 
-extern BSONObj maxKey;
-extern BSONObj minKey;
+extern const BSONObj kMaxBSONKey;
+extern const BSONObj kMinBSONKey;
 
 /**
     the complete list of valid BSON types
@@ -87,12 +89,14 @@ enum BSONType {
     CodeWScope = 15,
     /** 32 bit signed integer */
     NumberInt = 16,
-    /** Updated to a Date with value next OpTime on insert */
-    Timestamp = 17,
+    /** Two 32 bit signed integers */
+    bsonTimestamp = 17,
     /** 64 bit integer */
     NumberLong = 18,
+    /** 128 bit decimal */
+    NumberDecimal = 19,
     /** max type that is not MaxKey */
-    JSTypeMax = 18,
+    JSTypeMax = Decimal128::enabled ? 19 : 18,
     /** larger than all other types */
     MaxKey = 127
 };
@@ -131,6 +135,7 @@ inline int canonicalizeBSONType(BSONType type) {
             return 0;
         case jstNULL:
             return 5;
+        case NumberDecimal:
         case NumberDouble:
         case NumberInt:
         case NumberLong:
@@ -150,7 +155,7 @@ inline int canonicalizeBSONType(BSONType type) {
             return 40;
         case mongo::Date:
             return 45;
-        case Timestamp:
+        case bsonTimestamp:
             return 47;
         case RegEx:
             return 50;

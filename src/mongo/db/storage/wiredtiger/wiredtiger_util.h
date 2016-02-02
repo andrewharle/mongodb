@@ -117,17 +117,16 @@ public:
     /**
      * Gets entire metadata string for collection/index at URI.
      */
-    static StatusWith<std::string> getMetadata(OperationContext* opCtx, const StringData& uri);
+    static StatusWith<std::string> getMetadata(OperationContext* opCtx, StringData uri);
 
     /**
      * Reads app_metadata for collection/index at URI as a BSON document.
      */
     static Status getApplicationMetadata(OperationContext* opCtx,
-                                         const StringData& uri,
+                                         StringData uri,
                                          BSONObjBuilder* bob);
 
-    static StatusWith<BSONObj> getApplicationMetadata(OperationContext* opCtx,
-                                                      const StringData& uri);
+    static StatusWith<BSONObj> getApplicationMetadata(OperationContext* opCtx, StringData uri);
 
     /**
      * Validates formatVersion in application metadata for 'uri'.
@@ -135,9 +134,15 @@ public:
      * URI is used in error messages only.
      */
     static Status checkApplicationMetadataFormatVersion(OperationContext* opCtx,
-                                                        const StringData& uri,
+                                                        StringData uri,
                                                         int64_t minimumVersion,
                                                         int64_t maximumVersion);
+
+    /**
+     * Validates the 'configString' specified as a collection or index creation option.
+     */
+    static Status checkTableCreationOptions(const BSONElement& configElem);
+
     /**
      * Reads individual statistics using URI.
      * List of statistics keys WT_STAT_* can be found in wiredtiger.h.
@@ -180,6 +185,22 @@ public:
      */
     static WT_EVENT_HANDLER defaultEventHandlers();
 
+    class ErrorAccumulator : public WT_EVENT_HANDLER {
+    public:
+        ErrorAccumulator(std::vector<std::string>* errors);
+
+    private:
+        static int onError(WT_EVENT_HANDLER* handler,
+                           WT_SESSION* session,
+                           int error,
+                           const char* message);
+
+        using ErrorHandler = int (*)(WT_EVENT_HANDLER*, WT_SESSION*, int, const char*);
+
+        std::vector<std::string>* const _errors;
+        const ErrorHandler _defaultErrorHandler;
+    };
+
     /**
      * Calls WT_SESSION::validate() on a side-session to ensure that your current transaction
      * isn't left in an invalid state.
@@ -210,7 +231,7 @@ class WiredTigerConfigParser {
     MONGO_DISALLOW_COPYING(WiredTigerConfigParser);
 
 public:
-    WiredTigerConfigParser(const StringData& config) {
+    WiredTigerConfigParser(StringData config) {
         invariantWTOK(
             wiredtiger_config_parser_open(NULL, config.rawData(), config.size(), &_parser));
     }

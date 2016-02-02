@@ -30,28 +30,25 @@
 
 #pragma once
 
-#include "mongo/platform/basic.h"
-
-#include <boost/scoped_ptr.hpp>
-#include <boost/shared_ptr.hpp>
-
-#include "mongo/client/dbclientinterface.h"
-#include "mongo/s/balancer_policy.h"
+#include "mongo/s/catalog/forwarding_catalog_manager.h"
 #include "mongo/util/background.h"
 
 namespace mongo {
 
+class BalancerPolicy;
+struct MigrateInfo;
+class OperationContext;
 struct WriteConcernOptions;
 
 /**
- * The balancer is a background task that tries to keep the number of chunks across all servers of
- * the cluster even. Although every mongos will have one balancer running, only one of them will be
- * active at the any given point in time. The balancer uses a 'DistributedLock' for that
- * coordination.
+ * The balancer is a background task that tries to keep the number of chunks across all
+ * servers of the cluster even. Although every mongos will have one balancer running, only one
+ * of them will be active at the any given point in time. The balancer uses a distributed lock
+ * for that coordination.
  *
- * The balancer does act continuously but in "rounds". At a given round, it would decide if there is
- * an imbalance by checking the difference in chunks between the most and least loaded shards. It
- * would issue a request for a chunk migration per round, if it found so.
+ * The balancer does act continuously but in "rounds". At a given round, it would decide if
+ * there is an imbalance by checking the difference in chunks between the most and least
+ * loaded shards. It would issue a request for a chunk migration per round, if it found so.
  */
 class Balancer : public BackgroundJob {
 public:
@@ -67,9 +64,6 @@ public:
     }
 
 private:
-    typedef MigrateInfo CandidateChunk;
-    typedef boost::shared_ptr<CandidateChunk> CandidateChunkPtr;
-
     // hostname:port of my mongos
     std::string _myid;
 
@@ -80,7 +74,7 @@ private:
     int _balancedLastTime;
 
     // decide which chunks to move; owned here.
-    boost::scoped_ptr<BalancerPolicy> _policy;
+    std::unique_ptr<BalancerPolicy> _policy;
 
     /**
      * Checks that the balancer can connect to all servers it needs to do its job.
@@ -89,7 +83,7 @@ private:
      *
      * This method throws on a network exception
      */
-    bool _init();
+    bool _init(OperationContext* txn);
 
     /**
      * Gathers all the necessary information about shards and chunks, and decides whether there are
@@ -97,9 +91,11 @@ private:
      *
      * @param conn is the connection with the config server(s)
      * @param candidateChunks (IN/OUT) filled with candidate chunks, one per collection, that could
-     *      possibly be moved
+     *                          possibly be moved
      */
-    void _doBalanceRound(DBClientBase& conn, std::vector<CandidateChunkPtr>* candidateChunks);
+    void _doBalanceRound(OperationContext* txn,
+                         ForwardingCatalogManager::ScopedDistLock* distLock,
+                         std::vector<std::shared_ptr<MigrateInfo>>* candidateChunks);
 
     /**
      * Issues chunk migration request, one at a time.
@@ -109,20 +105,21 @@ private:
      * @param waitForDelete wait for deletes to complete after each chunk move
      * @return number of chunks effectively moved
      */
-    int _moveChunks(const std::vector<CandidateChunkPtr>* candidateChunks,
+    int _moveChunks(OperationContext* txn,
+                    const std::vector<std::shared_ptr<MigrateInfo>>& candidateChunks,
                     const WriteConcernOptions* writeConcern,
                     bool waitForDelete);
 
     /**
      * Marks this balancer as being live on the config server(s).
      */
-    void _ping(bool waiting = false);
+    void _ping(OperationContext* txn, bool waiting = false);
 
     /**
      * @return true if all the servers listed in configdb as being shards are reachable and are
-     * distinct processes
+     *         distinct processes
      */
-    bool _checkOIDs();
+    bool _checkOIDs(OperationContext* txn);
 };
 
 extern Balancer balancer;

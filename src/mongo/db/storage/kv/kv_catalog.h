@@ -33,13 +33,11 @@
 #include <map>
 #include <string>
 
-#include <boost/scoped_ptr.hpp>
-#include <boost/thread/mutex.hpp>
-
 #include "mongo/base/string_data.h"
 #include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/storage/bson_collection_catalog_entry.h"
+#include "mongo/stdx/mutex.h"
 
 namespace mongo {
 
@@ -61,46 +59,41 @@ public:
     /**
      * @return error or ident for instance
      */
-    Status newCollection(OperationContext* opCtx,
-                         const StringData& ns,
-                         const CollectionOptions& options);
+    Status newCollection(OperationContext* opCtx, StringData ns, const CollectionOptions& options);
 
-    std::string getCollectionIdent(const StringData& ns) const;
+    std::string getCollectionIdent(StringData ns) const;
 
-    std::string getIndexIdent(OperationContext* opCtx,
-                              const StringData& ns,
-                              const StringData& idName) const;
+    std::string getIndexIdent(OperationContext* opCtx, StringData ns, StringData idName) const;
 
-    const BSONCollectionCatalogEntry::MetaData getMetaData(OperationContext* opCtx,
-                                                           const StringData& ns);
+    const BSONCollectionCatalogEntry::MetaData getMetaData(OperationContext* opCtx, StringData ns);
     void putMetaData(OperationContext* opCtx,
-                     const StringData& ns,
+                     StringData ns,
                      BSONCollectionCatalogEntry::MetaData& md);
 
     Status renameCollection(OperationContext* opCtx,
-                            const StringData& fromNS,
-                            const StringData& toNS,
+                            StringData fromNS,
+                            StringData toNS,
                             bool stayTemp);
 
-    Status dropCollection(OperationContext* opCtx, const StringData& ns);
+    Status dropCollection(OperationContext* opCtx, StringData ns);
 
-    std::vector<std::string> getAllIdentsForDB(const StringData& db) const;
+    std::vector<std::string> getAllIdentsForDB(StringData db) const;
     std::vector<std::string> getAllIdents(OperationContext* opCtx) const;
 
-    bool isUserDataIdent(const StringData& ident) const;
+    bool isUserDataIdent(StringData ident) const;
 
 private:
     class AddIdentChange;
     class RemoveIdentChange;
 
-    BSONObj _findEntry(OperationContext* opCtx, const StringData& ns, RecordId* out = NULL) const;
+    BSONObj _findEntry(OperationContext* opCtx, StringData ns, RecordId* out = NULL) const;
 
     /**
      * Generates a new unique identifier for a new "thing".
      * @param ns - the containing ns
      * @param kind - what this "thing" is, likely collection or index
      */
-    std::string _newUniqueIdent(const StringData& ns, const char* kind);
+    std::string _newUniqueIdent(StringData ns, const char* kind);
 
     // Helpers only used by constructor and init(). Don't call from elsewhere.
     static std::string _newRand();
@@ -123,6 +116,6 @@ private:
     };
     typedef std::map<std::string, Entry> NSToIdentMap;
     NSToIdentMap _idents;
-    mutable boost::mutex _identsLock;
+    mutable stdx::mutex _identsLock;
 };
 }

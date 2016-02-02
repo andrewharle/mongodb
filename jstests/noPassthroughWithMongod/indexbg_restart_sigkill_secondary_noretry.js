@@ -1,6 +1,3 @@
-// SERVER-13922
-if (0) {
-
 // TODO: SERVER-13215 move test back to replSets suite.
 
 /**
@@ -56,7 +53,7 @@ if (0) {
                            {"_id" : 1, "host" : nodenames[1]},
                            {"_id" : 2, "host" : nodenames[2], arbiterOnly: true}]});
 
-    var master = replTest.getMaster();
+    var master = replTest.getPrimary();
     var second = replTest.getSecondary();
 
     var secondId = replTest.getNodeId(second);
@@ -113,5 +110,3 @@ if (0) {
     assert.neq(2, secondDB.jstests_bgsec.getIndexes().length );
     replTest.stopSet();
 }());
-
-}  // if(0)

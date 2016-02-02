@@ -48,8 +48,8 @@ class LoseElectionGuard {
 public:
     LoseElectionGuard(TopologyCoordinator* topCoord,
                       ReplicationExecutor* executor,
-                      boost::scoped_ptr<FreshnessChecker>* freshnessChecker,
-                      boost::scoped_ptr<ElectCmdRunner>* electCmdRunner,
+                      std::unique_ptr<FreshnessChecker>* freshnessChecker,
+                      std::unique_ptr<ElectCmdRunner>* electCmdRunner,
                       ReplicationExecutor::EventHandle* electionFinishedEvent)
         : _topCoord(topCoord),
           _executor(executor),
@@ -77,8 +77,8 @@ public:
 private:
     TopologyCoordinator* const _topCoord;
     ReplicationExecutor* const _executor;
-    boost::scoped_ptr<FreshnessChecker>* const _freshnessChecker;
-    boost::scoped_ptr<ElectCmdRunner>* const _electCmdRunner;
+    std::unique_ptr<FreshnessChecker>* const _freshnessChecker;
+    std::unique_ptr<ElectCmdRunner>* const _electCmdRunner;
     const ReplicationExecutor::EventHandle* _electionFinishedEvent;
     bool _dismissed;
 };
@@ -89,7 +89,7 @@ void ReplicationCoordinatorImpl::_startElectSelf() {
     invariant(!_freshnessChecker);
     invariant(!_electCmdRunner);
 
-    boost::unique_lock<boost::mutex> lk(_mutex);
+    stdx::unique_lock<stdx::mutex> lk(_mutex);
     switch (_rsConfigState) {
         case kConfigSteady:
             break;
@@ -123,8 +123,8 @@ void ReplicationCoordinatorImpl::_startElectSelf() {
     invariant(_rsConfig.getMemberAt(_selfIndex).isElectable());
     OpTime lastOpTimeApplied(_getMyLastOptime_inlock());
 
-    if (lastOpTimeApplied == OpTime()) {
-        log() << "replSet info not trying to elect self, "
+    if (lastOpTimeApplied.isNull()) {
+        log() << "not trying to elect self, "
                  "do not yet have a complete set of data from any point in time";
         return;
     }
@@ -138,7 +138,7 @@ void ReplicationCoordinatorImpl::_startElectSelf() {
 
     StatusWith<ReplicationExecutor::EventHandle> nextPhaseEvh = _freshnessChecker->start(
         &_replExecutor,
-        lastOpTimeApplied,
+        lastOpTimeApplied.getTimestamp(),
         _rsConfig,
         _selfIndex,
         _topCoord->getMaybeUpHostAndPorts(),
@@ -174,9 +174,9 @@ void ReplicationCoordinatorImpl::_onFreshnessCheckComplete() {
             break;
         case FreshnessChecker::FreshnessTie:
             if ((_selfIndex != 0) && !_sleptLastElection) {
-                const long long ms = _replExecutor.nextRandomInt64(1000) + 50;
+                const auto ms = Milliseconds(_replExecutor.nextRandomInt64(1000) + 50);
                 const Date_t nextCandidateTime = now + ms;
-                log() << "replSet possible election tie; sleeping " << ms << "ms until "
+                log() << "possible election tie; sleeping " << ms << " until "
                       << dateToISOStringLocal(nextCandidateTime);
                 _topCoord->setElectionSleepUntil(nextCandidateTime);
                 _replExecutor.scheduleWorkAt(
@@ -201,7 +201,7 @@ void ReplicationCoordinatorImpl::_onFreshnessCheckComplete() {
             return;
     }
 
-    log() << "replSet info electSelf";
+    log() << "running for election";
     // Secure our vote for ourself first
     if (!_topCoord->voteForMyself(now)) {
         return;
@@ -238,11 +238,11 @@ void ReplicationCoordinatorImpl::_onElectCmdRunnerComplete() {
     const int receivedVotes = _electCmdRunner->getReceivedVotes();
 
     if (receivedVotes < _rsConfig.getMajorityVoteCount()) {
-        log() << "replSet couldn't elect self, only received " << receivedVotes
+        log() << "couldn't elect self, only received " << receivedVotes
               << " votes, but needed at least " << _rsConfig.getMajorityVoteCount();
         // Suppress ourselves from standing for election again, giving other nodes a chance
         // to win their elections.
-        const long long ms = _replExecutor.nextRandomInt64(1000) + 50;
+        const auto ms = Milliseconds(_replExecutor.nextRandomInt64(1000) + 50);
         const Date_t now(_replExecutor.now());
         const Date_t nextCandidateTime = now + ms;
         log() << "waiting until " << nextCandidateTime << " before standing for election again";
@@ -256,11 +256,11 @@ void ReplicationCoordinatorImpl::_onElectCmdRunnerComplete() {
     }
 
     if (_rsConfig.getConfigVersion() != _freshnessChecker->getOriginalConfigVersion()) {
-        log() << "replSet config version changed during our election, ignoring result";
+        log() << "config version changed during our election, ignoring result";
         return;
     }
 
-    log() << "replSet election succeeded, assuming primary role";
+    log() << "election succeeded, assuming primary role";
 
     lossGuard.dismiss();
     _freshnessChecker.reset(NULL);
@@ -270,11 +270,14 @@ void ReplicationCoordinatorImpl::_onElectCmdRunnerComplete() {
 }
 
 void ReplicationCoordinatorImpl::_recoverFromElectionTie(
-    const ReplicationExecutor::CallbackData& cbData) {
+    const ReplicationExecutor::CallbackArgs& cbData) {
     if (!cbData.status.isOK()) {
         return;
     }
-    if (_topCoord->checkShouldStandForElection(_replExecutor.now(), getMyLastOptime())) {
+    auto now = _replExecutor.now();
+    auto lastOpApplied = getMyLastOptime();
+    if (_topCoord->checkShouldStandForElection(now, lastOpApplied)) {
+        fassert(28817, _topCoord->becomeCandidateIfElectable(now, lastOpApplied));
         _startElectSelf();
     }
 }

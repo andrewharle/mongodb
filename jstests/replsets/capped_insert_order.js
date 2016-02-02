@@ -8,7 +8,7 @@
     replTest.startSet();
     replTest.initiate();
 
-    var master = replTest.getMaster();
+    var master = replTest.getPrimary();
     var slave = replTest.liveNodes.slaves[0];
 
     var dbName = "db";
@@ -23,7 +23,7 @@
     masterDb.createCollection(collectionName, {capped: true, size: 1024*1024});
 
     // Insert 1000 docs with _id from 0 to 999 inclusive.
-    var nDocuments = 1000;
+    const nDocuments = 1000;
     var batch = masterColl.initializeOrderedBulkOp();
     for (var i = 0; i < nDocuments; i++) {
         batch.insert({_id: i});

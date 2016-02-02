@@ -1,6 +1,6 @@
 // Tests various cases of dropping and recreating collections in the same namespace with multiple mongoses
 
-var st = new ShardingTest({ shards : 3, mongos : 3, verbose : 1, separateConfig : 1  })
+var st = new ShardingTest({ shards : 3, mongos : 3, verbose : 1 })
 // Stop balancer, it'll interfere
 st.stopBalancer()
 
@@ -28,6 +28,7 @@ config.shards.find().forEach( function( doc ){
 jsTest.log( "Enabling sharding for the first time..." )
 
 admin.runCommand({ enableSharding : coll.getDB() + "" })
+st.ensurePrimaryShard(coll.getDB().getName(), 'shard0001');
 admin.runCommand({ shardCollection : coll  + "", key : { _id : 1 } })
 
 var bulk = insertMongos.getCollection( coll + "" ).initializeUnorderedBulkOp();
@@ -47,6 +48,7 @@ coll.drop()
 jsTest.log( "Re-enabling sharding with a different key..." )
 
 admin.runCommand({ enableSharding : coll.getDB() + "" })
+st.ensurePrimaryShard(coll.getDB().getName(), 'shard0001');
 coll.ensureIndex({ notId : 1 })
 admin.runCommand({ shardCollection : coll  + "", key : { notId : 1 } })
 
@@ -73,9 +75,13 @@ var getOtherShard = function( shard ){
     }
 }
 
-admin.runCommand({ movePrimary : coll.getDB() + "", 
-                   to : getOtherShard( config.databases.findOne({ _id : coll.getDB() + "" }).primary ) })
-
+var otherShard = getOtherShard(config.databases.findOne({_id: coll.getDB() + ""}).primary);
+assert.commandWorked(admin.runCommand({movePrimary: coll.getDB() + "", to: otherShard}));
+if (st.configRS) {
+    // If we are in CSRS mode need to make sure that staleMongos will actually get
+    // the most recent config data.
+    st.configRS.awaitLastOpCommitted();
+}
 jsTest.log( "moved primary..." )
 
 bulk = insertMongos.getCollection( coll + "" ).initializeUnorderedBulkOp();

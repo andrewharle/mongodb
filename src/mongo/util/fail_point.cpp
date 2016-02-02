@@ -30,9 +30,8 @@
 
 #include "mongo/util/fail_point.h"
 
-#include <boost/scoped_ptr.hpp>
-
 #include "mongo/platform/random.h"
+#include "mongo/stdx/thread.h"
 #include "mongo/util/concurrency/threadlocal.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
@@ -47,7 +46,7 @@ namespace {
  */
 class FailPointPRNG {
 public:
-    FailPointPRNG() : _prng(boost::scoped_ptr<SecureRandom>(SecureRandom::create())->nextInt64()) {}
+    FailPointPRNG() : _prng(std::unique_ptr<SecureRandom>(SecureRandom::create())->nextInt64()) {}
 
     void resetSeed(int32_t seed) {
         _prng = PseudoRandom(seed);
@@ -79,7 +78,7 @@ void FailPoint::setThreadPRNGSeed(int32_t seed) {
     failPointPrng.getMake()->resetSeed(seed);
 }
 
-FailPoint::FailPoint() : _fpInfo(0), _mode(off), _timesOrPeriod(0), _modMutex("failPointMutex") {}
+FailPoint::FailPoint() : _fpInfo(0), _mode(off), _timesOrPeriod(0) {}
 
 void FailPoint::shouldFailCloseBlock() {
     _fpInfo.subtractAndFetch(1);
@@ -94,7 +93,7 @@ void FailPoint::setMode(Mode mode, ValType val, const BSONObj& extra) {
      * 3. Sets the new mode.
      */
 
-    scoped_lock scoped(_modMutex);
+    stdx::lock_guard<stdx::mutex> scoped(_modMutex);
 
     // Step 1
     disableFailPoint();
@@ -186,7 +185,7 @@ FailPoint::RetCode FailPoint::slowShouldFailOpenBlock() {
 BSONObj FailPoint::toBSON() const {
     BSONObjBuilder builder;
 
-    scoped_lock scoped(_modMutex);
+    stdx::lock_guard<stdx::mutex> scoped(_modMutex);
     builder.append("mode", _mode);
     builder.append("data", _data);
 

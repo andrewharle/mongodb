@@ -45,10 +45,10 @@ namespace mongo {
  */
 class Namespace {
 public:
-    Namespace(const StringData& ns) {
+    Namespace(StringData ns) {
         *this = ns;
     }
-    Namespace& operator=(const StringData& ns);
+    Namespace& operator=(StringData ns);
 
     void kill() {
         buf[0] = 0x7f;

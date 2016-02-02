@@ -96,6 +96,7 @@ config_assign(CONFIG *dest, const CONFIG *src)
 			}
 		}
 
+	TAILQ_INIT(&dest->stone_head);
 	return (0);
 }
 
@@ -114,10 +115,8 @@ config_free(CONFIG *cfg)
 		    config_opts[i].type == CONFIG_STRING_TYPE) {
 			pstr = (char **)
 			    ((unsigned char *)cfg + config_opts[i].offset);
-			if (*pstr != NULL) {
-				free(*pstr);
-				*pstr = NULL;
-			}
+			free(*pstr);
+			*pstr = NULL;
 		}
 	if (cfg->uris != NULL) {
 		for (i = 0; i < cfg->table_count; i++)
@@ -125,6 +124,7 @@ config_free(CONFIG *cfg)
 		free(cfg->uris);
 	}
 
+	cleanup_truncate_config(cfg);
 	free(cfg->ckptthreads);
 	free(cfg->popthreads);
 	free(cfg->base_uri);
@@ -246,6 +246,28 @@ config_threads(CONFIG *cfg, const char *config, size_t len)
 					goto err;
 				continue;
 			}
+			if (STRING_MATCH("truncate", k.str, k.len)) {
+				if ((workp->truncate = v.val) != 1)
+					goto err;
+				/* There can only be one Truncate thread. */
+				if (cfg->has_truncate != 0) {
+					goto err;
+				}
+				cfg->has_truncate = 1;
+				continue;
+			}
+			if (STRING_MATCH("truncate_pct", k.str, k.len)) {
+				if (v.val <= 0)
+					goto err;
+				workp->truncate_pct = (uint64_t)v.val;
+				continue;
+			}
+			if (STRING_MATCH("truncate_count", k.str, k.len)) {
+				if (v.val <= 0)
+					goto err;
+				workp->truncate_count = (uint64_t)v.val;
+				continue;
+			}
 			goto err;
 		}
 		if (ret == WT_NOTFOUND)
@@ -256,9 +278,21 @@ config_threads(CONFIG *cfg, const char *config, size_t len)
 		scan = NULL;
 		if (ret != 0)
 			goto err;
-
-		if (workp->insert == 0 &&
-		    workp->read == 0 && workp->update == 0)
+		if (workp->insert == 0 && workp->read == 0 &&
+		    workp->update == 0 && workp->truncate == 0)
+			goto err;
+		/* Why run with truncate if we don't want any truncation. */
+		if (workp->truncate != 0 &&
+		    workp->truncate_pct == 0 && workp->truncate_count == 0)
+			goto err;
+		if (workp->truncate != 0 &&
+		    (workp->truncate_pct < 1 || workp->truncate_pct > 99))
+			goto err;
+		/* Truncate should have its own exclusive thread. */
+		if (workp->truncate != 0 && workp->threads > 1)
+			goto err;
+		if (workp->truncate != 0 &&
+		    (workp->insert > 0 || workp->read > 0 || workp->update > 0))
 			goto err;
 		cfg->workers_cnt += (u_int)workp->threads;
 	}
@@ -514,8 +548,7 @@ config_opt_file(CONFIG *cfg, const char *filename)
 
 err:	if (fd != -1)
 		(void)close(fd);
-	if (file_buf != NULL)
-		free(file_buf);
+	free(file_buf);
 	return (ret);
 }
 
@@ -590,14 +623,21 @@ config_sanity(CONFIG *cfg)
 		fprintf(stderr, "interval value longer than the run-time\n");
 		return (EINVAL);
 	}
-	if (cfg->table_count < 1 || cfg->table_count > 99) {
+	/* The maximum is here to keep file name construction simple. */
+	if (cfg->table_count < 1 || cfg->table_count > 99999) {
 		fprintf(stderr,
-		    "invalid table count, less than 1 or greater than 99\n");
+		    "invalid table count, less than 1 or greater than 99999\n");
 		return (EINVAL);
 	}
 	if (cfg->database_count < 1 || cfg->database_count > 99) {
 		fprintf(stderr,
 		    "invalid database count, less than 1 or greater than 99\n");
+		return (EINVAL);
+	}
+
+	if (cfg->pareto > 100) {
+		fprintf(stderr,
+		    "Invalid pareto distribution - should be a percentage\n");
 		return (EINVAL);
 	}
 	return (0);
@@ -614,40 +654,42 @@ config_print(CONFIG *cfg)
 	u_int i;
 
 	printf("Workload configuration:\n");
-	printf("\tHome: %s\n", cfg->home);
-	printf("\tTable name: %s\n", cfg->table_name);
-	printf("\tConnection configuration: %s\n", cfg->conn_config);
+	printf("\t" "Home: %s\n", cfg->home);
+	printf("\t" "Table name: %s\n", cfg->table_name);
+	printf("\t" "Connection configuration: %s\n", cfg->conn_config);
 	if (cfg->sess_config != NULL)
-		printf("\tSession configuration: %s\n", cfg->sess_config);
+		printf("\t" "Session configuration: %s\n", cfg->sess_config);
 
 	printf("\t%s table: %s\n",
 	    cfg->create ? "Creating new" : "Using existing",
 	    cfg->table_config);
-	printf("\tKey size: %" PRIu32 ", value size: %" PRIu32 "\n",
+	printf("\t" "Key size: %" PRIu32 ", value size: %" PRIu32 "\n",
 	    cfg->key_sz, cfg->value_sz);
 	if (cfg->create)
-		printf("\tPopulate threads: %" PRIu32 ", inserting %" PRIu32
+		printf("\t" "Populate threads: %" PRIu32 ", inserting %" PRIu32
 		    " rows\n",
 		    cfg->populate_threads, cfg->icount);
 
-	printf("\tWorkload seconds, operations: %" PRIu32 ", %" PRIu32 "\n",
+	printf("\t" "Workload seconds, operations: %" PRIu32 ", %" PRIu32 "\n",
 	    cfg->run_time, cfg->run_ops);
 	if (cfg->workload != NULL) {
-		printf("\tWorkload configuration(s):\n");
+		printf("\t" "Workload configuration(s):\n");
 		for (i = 0, workp = cfg->workload;
 		    i < cfg->workload_cnt; ++i, ++workp)
 			printf("\t\t%" PRId64 " threads (inserts=%" PRId64
-			    ", reads=%" PRId64 ", updates=%" PRId64 ")\n",
+			    ", reads=%" PRId64 ", updates=%" PRId64 
+			    ", truncates=% " PRId64 ")\n",
 			    workp->threads,
-			    workp->insert, workp->read, workp->update);
+			    workp->insert, workp->read,
+			    workp->update, workp->truncate);
 	}
 
-	printf("\tCheckpoint threads, interval: %" PRIu32 ", %" PRIu32 "\n",
+	printf("\t" "Checkpoint threads, interval: %" PRIu32 ", %" PRIu32 "\n",
 	    cfg->checkpoint_threads, cfg->checkpoint_interval);
-	printf("\tReporting interval: %" PRIu32 "\n", cfg->report_interval);
-	printf("\tSampling interval: %" PRIu32 "\n", cfg->sample_interval);
+	printf("\t" "Reporting interval: %" PRIu32 "\n", cfg->report_interval);
+	printf("\t" "Sampling interval: %" PRIu32 "\n", cfg->sample_interval);
 
-	printf("\tVerbosity: %" PRIu32 "\n", cfg->verbose);
+	printf("\t" "Verbosity: %" PRIu32 "\n", cfg->verbose);
 }
 
 /*

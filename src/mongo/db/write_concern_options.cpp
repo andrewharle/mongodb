@@ -25,30 +25,51 @@
  *    it in the license file.
  */
 
+#include "mongo/platform/basic.h"
+
 #include "mongo/db/write_concern_options.h"
 
-#include "mongo/bson/bson_field.h"
-#include "mongo/client/dbclientinterface.h"
+#include "mongo/base/status.h"
 #include "mongo/db/field_parser.h"
 
 namespace mongo {
 
 using std::string;
 
+namespace {
+
+/**
+ * Controls how much a client cares about writes and serves as initializer for the pre-defined
+ * write concern options.
+ *
+ * Default is NORMAL.
+ */
+enum WriteConcern { W_NONE = 0, W_NORMAL = 1 };
+
+const BSONField<bool> mongosSecondaryThrottleField("_secondaryThrottle", true);
+const BSONField<bool> secondaryThrottleField("secondaryThrottle", true);
+const BSONField<BSONObj> writeConcernField("writeConcern");
+
+}  // namespace
+
+const char WriteConcernOptions::kMajority[] = "majority";
+
 const BSONObj WriteConcernOptions::Default = BSONObj();
 const BSONObj WriteConcernOptions::Acknowledged(BSON("w" << W_NORMAL));
-const BSONObj WriteConcernOptions::AllConfigs = BSONObj();
 const BSONObj WriteConcernOptions::Unacknowledged(BSON("w" << W_NONE));
+const BSONObj WriteConcernOptions::Majority(BSON("w" << WriteConcernOptions::kMajority));
 
-static const BSONField<bool> mongosSecondaryThrottleField("_secondaryThrottle", true);
-static const BSONField<bool> secondaryThrottleField("secondaryThrottle", true);
-static const BSONField<BSONObj> writeConcernField("writeConcern");
 
 WriteConcernOptions::WriteConcernOptions(int numNodes, SyncMode sync, int timeout)
     : syncMode(sync), wNumNodes(numNodes), wTimeout(timeout) {}
 
 WriteConcernOptions::WriteConcernOptions(const std::string& mode, SyncMode sync, int timeout)
     : syncMode(sync), wNumNodes(0), wMode(mode), wTimeout(timeout) {}
+
+WriteConcernOptions::WriteConcernOptions(const std::string& mode,
+                                         SyncMode sync,
+                                         Milliseconds timeout)
+    : syncMode(sync), wNumNodes(0), wMode(mode), wTimeout(durationCount<Milliseconds>(timeout)) {}
 
 Status WriteConcernOptions::parse(const BSONObj& obj) {
     if (obj.isEmpty()) {
@@ -165,4 +186,9 @@ BSONObj WriteConcernOptions::toBSON() const {
 bool WriteConcernOptions::shouldWaitForOtherNodes() const {
     return !wMode.empty() || wNumNodes > 1;
 }
+
+bool WriteConcernOptions::validForConfigServers() const {
+    return wNumNodes == 1 || wMode == kMajority;
 }
+
+}  // namespace mongo

@@ -34,6 +34,7 @@
 
 #include <cstdio>
 #include <boost/filesystem.hpp>
+#include <boost/optional.hpp>
 #include <fstream>
 #include <limits>
 #include <ostream>
@@ -62,37 +63,32 @@ bool containsMMapV1LocalNsFile(const std::string& directory) {
 }  // namespace
 
 // static
-std::auto_ptr<StorageEngineMetadata> StorageEngineMetadata::validate(
-    const std::string& dbpath, const std::string& storageEngine) {
-    std::auto_ptr<StorageEngineMetadata> metadata;
-    std::string previousStorageEngine;
+std::unique_ptr<StorageEngineMetadata> StorageEngineMetadata::forPath(const std::string& dbpath) {
+    std::unique_ptr<StorageEngineMetadata> metadata;
     if (boost::filesystem::exists(boost::filesystem::path(dbpath) / kMetadataBasename)) {
         metadata.reset(new StorageEngineMetadata(dbpath));
         Status status = metadata->read();
-        if (status.isOK()) {
-            previousStorageEngine = metadata->getStorageEngine();
-        } else {
-            // The storage metadata file is present but there was an issue
-            // reading its contents.
-            warning() << "Unable to read the existing storage engine metadata: "
-                      << status.toString();
-            return std::auto_ptr<StorageEngineMetadata>();
+        if (!status.isOK()) {
+            error() << "Unable to read the storage engine metadata file: " << status;
+            fassertFailed(28661);
         }
-    } else if (containsMMapV1LocalNsFile(dbpath)) {
-        previousStorageEngine = "mmapv1";
-    } else {
-        // Directory contains neither metadata nor mmapv1 files.
-        // Allow validation to succeed.
-        return metadata;
+    }
+    return metadata;
+}
+
+// static
+boost::optional<std::string> StorageEngineMetadata::getStorageEngineForPath(
+    const std::string& dbpath) {
+    if (auto metadata = StorageEngineMetadata::forPath(dbpath)) {
+        return {metadata->getStorageEngine()};
     }
 
-    uassert(28574,
-            str::stream() << "Cannot start server. Detected data files in " << dbpath
-                          << " created by storage engine '" << previousStorageEngine
-                          << "'. The configured storage engine is '" << storageEngine << "'.",
-            previousStorageEngine == storageEngine);
-
-    return metadata;
+    // Fallback to checking for MMAPv1-specific files to handle upgrades from before the
+    // storage.bson metadata file was introduced in 3.0.
+    if (containsMMapV1LocalNsFile(dbpath)) {
+        return {std::string("mmapv1")};
+    }
+    return {};
 }
 
 StorageEngineMetadata::StorageEngineMetadata(const std::string& dbpath) : _dbpath(dbpath) {
@@ -218,15 +214,17 @@ Status StorageEngineMetadata::write() const {
         std::ofstream ofs(filenameTemp.c_str(), std::ios_base::out | std::ios_base::binary);
         if (!ofs) {
             return Status(ErrorCodes::FileNotOpen,
-                          str::stream() << "Failed to write metadata to " << filenameTemp);
+                          str::stream() << "Failed to write metadata to " << filenameTemp << ": "
+                                        << errnoWithDescription());
         }
 
         BSONObj obj = BSON(
             "storage" << BSON("engine" << _storageEngine << "options" << _storageEngineOptions));
         ofs.write(obj.objdata(), obj.objsize());
         if (!ofs) {
-            return Status(ErrorCodes::InternalError,
-                          str::stream() << "Failed to write BSON data to " << filenameTemp);
+            return Status(ErrorCodes::OperationFailed,
+                          str::stream() << "Failed to write BSON data to " << filenameTemp << ": "
+                                        << errnoWithDescription());
         }
     }
 
@@ -245,7 +243,7 @@ Status StorageEngineMetadata::write() const {
 }
 
 template <>
-Status StorageEngineMetadata::validateStorageEngineOption<bool>(const StringData& fieldName,
+Status StorageEngineMetadata::validateStorageEngineOption<bool>(StringData fieldName,
                                                                 bool expectedValue) const {
     BSONElement element = _storageEngineOptions.getField(fieldName);
     if (element.eoo()) {

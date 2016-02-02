@@ -26,50 +26,42 @@
  *    it in the license file.
  */
 
-#include <boost/thread.hpp>
 #include <string>
 
 #include "mongo/db/field_parser.h"
 #include "mongo/db/range_deleter.h"
 #include "mongo/db/range_deleter_mock_env.h"
 #include "mongo/db/repl/repl_settings.h"
-#include "mongo/db/repl/replication_coordinator_global.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/stdx/functional.h"
+#include "mongo/stdx/future.h"
+#include "mongo/stdx/thread.h"
 #include "mongo/unittest/unittest.h"
+#include "mongo/util/scopeguard.h"
 
+namespace mongo {
 namespace {
 
 using std::string;
-
-using mongo::BSONObj;
-using mongo::CursorId;
-using mongo::DeletedRange;
-using mongo::FieldParser;
-using mongo::KeyRange;
-using mongo::Notification;
-using mongo::RangeDeleter;
-using mongo::RangeDeleterMockEnv;
-using mongo::RangeDeleterOptions;
-using mongo::OperationContext;
 
 OperationContext* const noTxn = NULL;  // MockEnv doesn't need txn XXX SERVER-13931
 
 // Capped sleep interval is 640 mSec, Nyquist frequency is 1280 mSec => round up to 2 sec.
 const int MAX_IMMEDIATE_DELETE_WAIT_SECS = 2;
 
-const mongo::repl::ReplSettings replSettings;
+const mongo::repl::ReplSettings replSettings = {};
 
 // Should not be able to queue deletes if deleter workers were not started.
 TEST(QueueDelete, CantAfterStop) {
-    boost::scoped_ptr<mongo::repl::ReplicationCoordinatorMock> mock(
-        new mongo::repl::ReplicationCoordinatorMock(replSettings));
-
-    mongo::repl::setGlobalReplicationCoordinator(mock.get());
-
     RangeDeleterMockEnv* env = new RangeDeleterMockEnv();
     RangeDeleter deleter(env);
+
+    std::unique_ptr<mongo::repl::ReplicationCoordinatorMock> mock(
+        new mongo::repl::ReplicationCoordinatorMock(replSettings));
+
+    mongo::repl::ReplicationCoordinator::set(mongo::getGlobalServiceContext(), std::move(mock));
 
     deleter.startWorkers();
     deleter.stopWorkers();
@@ -83,8 +75,6 @@ TEST(QueueDelete, CantAfterStop) {
                             &errMsg));
     ASSERT_FALSE(errMsg.empty());
     ASSERT_FALSE(env->deleteOccured());
-
-    mongo::repl::setGlobalReplicationCoordinator(NULL);
 }
 
 // Should not start delete if the set of cursors that were open when the
@@ -92,13 +82,13 @@ TEST(QueueDelete, CantAfterStop) {
 TEST(QueuedDelete, ShouldWaitCursor) {
     const string ns("test.user");
 
-    boost::scoped_ptr<mongo::repl::ReplicationCoordinatorMock> mock(
-        new mongo::repl::ReplicationCoordinatorMock(replSettings));
-
-    mongo::repl::setGlobalReplicationCoordinator(mock.get());
-
     RangeDeleterMockEnv* env = new RangeDeleterMockEnv();
     RangeDeleter deleter(env);
+
+    std::unique_ptr<mongo::repl::ReplicationCoordinatorMock> mock(
+        new mongo::repl::ReplicationCoordinatorMock(replSettings));
+
+    mongo::repl::ReplicationCoordinator::set(mongo::getGlobalServiceContext(), std::move(mock));
 
     deleter.startWorkers();
 
@@ -131,21 +121,19 @@ TEST(QueuedDelete, ShouldWaitCursor) {
     ASSERT_TRUE(deletedChunk.max.equal(BSON("x" << 10)));
 
     deleter.stopWorkers();
-
-    mongo::repl::setGlobalReplicationCoordinator(NULL);
 }
 
 // Should terminate when stop is requested.
 TEST(QueuedDelete, StopWhileWaitingCursor) {
     const string ns("test.user");
 
-    boost::scoped_ptr<mongo::repl::ReplicationCoordinatorMock> mock(
-        new mongo::repl::ReplicationCoordinatorMock(replSettings));
-
-    mongo::repl::setGlobalReplicationCoordinator(mock.get());
-
     RangeDeleterMockEnv* env = new RangeDeleterMockEnv();
     RangeDeleter deleter(env);
+
+    std::unique_ptr<mongo::repl::ReplicationCoordinatorMock> mock(
+        new mongo::repl::ReplicationCoordinatorMock(replSettings));
+
+    mongo::repl::ReplicationCoordinator::set(mongo::getGlobalServiceContext(), std::move(mock));
 
     deleter.startWorkers();
 
@@ -163,15 +151,6 @@ TEST(QueuedDelete, StopWhileWaitingCursor) {
 
     deleter.stopWorkers();
     ASSERT_FALSE(env->deleteOccured());
-
-    mongo::repl::setGlobalReplicationCoordinator(NULL);
-}
-
-static void rangeDeleterDeleteNow(RangeDeleter* deleter,
-                                  OperationContext* txn,
-                                  const RangeDeleterOptions& deleterOptions,
-                                  std::string* errMsg) {
-    deleter->deleteNow(txn, deleterOptions, errMsg);
 }
 
 // Should not start delete if the set of cursors that were open when the
@@ -179,13 +158,13 @@ static void rangeDeleterDeleteNow(RangeDeleter* deleter,
 TEST(ImmediateDelete, ShouldWaitCursor) {
     const string ns("test.user");
 
-    boost::scoped_ptr<mongo::repl::ReplicationCoordinatorMock> mock(
-        new mongo::repl::ReplicationCoordinatorMock(replSettings));
-
-    mongo::repl::setGlobalReplicationCoordinator(mock.get());
-
     RangeDeleterMockEnv* env = new RangeDeleterMockEnv();
     RangeDeleter deleter(env);
+
+    std::unique_ptr<mongo::repl::ReplicationCoordinatorMock> mock(
+        new mongo::repl::ReplicationCoordinatorMock(replSettings));
+
+    mongo::repl::ReplicationCoordinator::set(mongo::getGlobalServiceContext(), std::move(mock));
 
     deleter.startWorkers();
 
@@ -195,8 +174,19 @@ TEST(ImmediateDelete, ShouldWaitCursor) {
     RangeDeleterOptions deleterOption(
         KeyRange(ns, BSON("x" << 0), BSON("x" << 10), BSON("x" << 1)));
     deleterOption.waitForOpenCursors = true;
-    boost::thread deleterThread = boost::thread(
-        mongo::stdx::bind(rangeDeleterDeleteNow, &deleter, noTxn, deleterOption, &errMsg));
+
+    // VS2013 Doesn't support future<void>, so fake it with a bool.
+    stdx::packaged_task<bool()> deleterTask([&] {
+        deleter.deleteNow(noTxn, deleterOption, &errMsg);
+        return true;
+    });
+    stdx::future<bool> deleterFuture = deleterTask.get_future();
+    stdx::thread deleterThread(std::move(deleterTask));
+
+    auto guard = MakeGuard([&] {
+        deleter.stopWorkers();
+        deleterThread.join();
+    });
 
     env->waitForNthGetCursor(1u);
 
@@ -210,8 +200,8 @@ TEST(ImmediateDelete, ShouldWaitCursor) {
     env->addCursorId(ns, 200);
     env->removeCursorId(ns, 345);
 
-    ASSERT_TRUE(
-        deleterThread.timed_join(boost::posix_time::seconds(MAX_IMMEDIATE_DELETE_WAIT_SECS)));
+    ASSERT_TRUE(stdx::future_status::ready ==
+                deleterFuture.wait_for(stdx::chrono::seconds(MAX_IMMEDIATE_DELETE_WAIT_SECS)));
 
     ASSERT_TRUE(env->deleteOccured());
     const DeletedRange deletedChunk(env->getLastDelete());
@@ -220,23 +210,19 @@ TEST(ImmediateDelete, ShouldWaitCursor) {
     ASSERT_TRUE(deletedChunk.min.equal(BSON("x" << 0)));
     ASSERT_TRUE(deletedChunk.max.equal(BSON("x" << 10)));
     ASSERT_TRUE(deletedChunk.shardKeyPattern.equal(BSON("x" << 1)));
-
-    deleter.stopWorkers();
-
-    mongo::repl::setGlobalReplicationCoordinator(NULL);
 }
 
 // Should terminate when stop is requested.
 TEST(ImmediateDelete, StopWhileWaitingCursor) {
     const string ns("test.user");
 
-    boost::scoped_ptr<mongo::repl::ReplicationCoordinatorMock> mock(
-        new mongo::repl::ReplicationCoordinatorMock(replSettings));
-
-    mongo::repl::setGlobalReplicationCoordinator(mock.get());
-
     RangeDeleterMockEnv* env = new RangeDeleterMockEnv();
     RangeDeleter deleter(env);
+
+    std::unique_ptr<mongo::repl::ReplicationCoordinatorMock> mock(
+        new mongo::repl::ReplicationCoordinatorMock(replSettings));
+
+    mongo::repl::ReplicationCoordinator::set(mongo::getGlobalServiceContext(), std::move(mock));
 
     deleter.startWorkers();
 
@@ -246,8 +232,17 @@ TEST(ImmediateDelete, StopWhileWaitingCursor) {
     RangeDeleterOptions deleterOption(
         KeyRange(ns, BSON("x" << 0), BSON("x" << 10), BSON("x" << 1)));
     deleterOption.waitForOpenCursors = true;
-    boost::thread deleterThread = boost::thread(
-        mongo::stdx::bind(rangeDeleterDeleteNow, &deleter, noTxn, deleterOption, &errMsg));
+
+    // VS2013 Doesn't support future<void>, so fake it with a bool.
+    stdx::packaged_task<bool()> deleterTask([&] {
+        deleter.deleteNow(noTxn, deleterOption, &errMsg);
+        return true;
+    });
+    stdx::future<bool> deleterFuture = deleterTask.get_future();
+    stdx::thread deleterThread(std::move(deleterTask));
+
+    auto join_thread_guard = MakeGuard([&] { deleterThread.join(); });
+    auto stop_deleter_guard = MakeGuard([&] { deleter.stopWorkers(); });
 
     env->waitForNthGetCursor(1u);
 
@@ -257,14 +252,12 @@ TEST(ImmediateDelete, StopWhileWaitingCursor) {
 
     ASSERT_FALSE(env->deleteOccured());
 
-    deleter.stopWorkers();
+    stop_deleter_guard.Execute();
 
-    ASSERT_TRUE(
-        deleterThread.timed_join(boost::posix_time::seconds(MAX_IMMEDIATE_DELETE_WAIT_SECS)));
+    ASSERT_TRUE(stdx::future_status::ready ==
+                deleterFuture.wait_for(stdx::chrono::seconds(MAX_IMMEDIATE_DELETE_WAIT_SECS)));
 
     ASSERT_FALSE(env->deleteOccured());
-
-    mongo::repl::setGlobalReplicationCoordinator(NULL);
 }
 
 // Tests the interaction of multiple deletes queued with different states.
@@ -276,13 +269,13 @@ TEST(MixedDeletes, MultipleDeletes) {
     const string blockedNS("foo.bar");
     const string ns("test.user");
 
-    boost::scoped_ptr<mongo::repl::ReplicationCoordinatorMock> mock(
-        new mongo::repl::ReplicationCoordinatorMock(replSettings));
-
-    mongo::repl::setGlobalReplicationCoordinator(mock.get());
-
     RangeDeleterMockEnv* env = new RangeDeleterMockEnv();
     RangeDeleter deleter(env);
+
+    std::unique_ptr<mongo::repl::ReplicationCoordinatorMock> mock(
+        new mongo::repl::ReplicationCoordinatorMock(replSettings));
+
+    mongo::repl::ReplicationCoordinator::set(mongo::getGlobalServiceContext(), std::move(mock));
 
     deleter.startWorkers();
 
@@ -367,8 +360,7 @@ TEST(MixedDeletes, MultipleDeletes) {
     ASSERT_TRUE(deleted3.shardKeyPattern.equal(BSON("x" << 1)));
 
     deleter.stopWorkers();
-
-    mongo::repl::setGlobalReplicationCoordinator(NULL);
 }
 
 }  // unnamed namespace
+}  // namespace mongo

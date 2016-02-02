@@ -26,6 +26,8 @@
  *    it in the license file.
  */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kQuery
+
 #include "mongo/db/exec/sort.h"
 
 #include <algorithm>
@@ -36,230 +38,22 @@
 #include "mongo/db/exec/working_set_common.h"
 #include "mongo/db/exec/working_set_computed_data.h"
 #include "mongo/db/index/btree_key_generator.h"
+#include "mongo/db/query/find_common.h"
 #include "mongo/db/query/lite_parsed_query.h"
-#include "mongo/db/query/qlog.h"
 #include "mongo/db/query/query_knobs.h"
 #include "mongo/db/query/query_planner.h"
+#include "mongo/stdx/memory.h"
+#include "mongo/util/log.h"
 
 namespace mongo {
 
-using std::auto_ptr;
 using std::endl;
+using std::unique_ptr;
 using std::vector;
+using stdx::make_unique;
 
 // static
 const char* SortStage::kStageType = "SORT";
-
-SortStageKeyGenerator::SortStageKeyGenerator(const Collection* collection,
-                                             const BSONObj& sortSpec,
-                                             const BSONObj& queryObj) {
-    _collection = collection;
-    _hasBounds = false;
-    _sortHasMeta = false;
-    _rawSortSpec = sortSpec;
-
-    // 'sortSpec' can be a mix of $meta and index key expressions.  We pick it apart so that
-    // we only generate Btree keys for the index key expressions.
-
-    // The Btree key fields go in here.  We pass this fake index key pattern to the Btree
-    // key generator below as part of generating sort keys for the docs.
-    BSONObjBuilder btreeBob;
-
-    // The pattern we use to woCompare keys.  Each field in 'sortSpec' will go in here with
-    // a value of 1 or -1.  The Btree key fields are verbatim, meta fields have a default.
-    BSONObjBuilder comparatorBob;
-
-    BSONObjIterator it(sortSpec);
-    while (it.more()) {
-        BSONElement elt = it.next();
-        if (elt.isNumber()) {
-            // Btree key.  elt (should be) foo: 1 or foo: -1.
-            comparatorBob.append(elt);
-            btreeBob.append(elt);
-        } else if (LiteParsedQuery::isTextScoreMeta(elt)) {
-            // Sort text score decreasing by default.  Field name doesn't matter but we choose
-            // something that a user shouldn't ever have.
-            comparatorBob.append("$metaTextScore", -1);
-            _sortHasMeta = true;
-        } else {
-            // Sort spec. should have been validated before here.
-            verify(false);
-        }
-    }
-
-    // Our pattern for woComparing keys.
-    _comparatorObj = comparatorBob.obj();
-
-    // The fake index key pattern used to generate Btree keys.
-    _btreeObj = btreeBob.obj();
-
-    // If we're just sorting by meta, don't bother with all the key stuff.
-    if (_btreeObj.isEmpty()) {
-        return;
-    }
-
-    // We'll need to treat arrays as if we were to create an index over them. that is,
-    // we may need to unnest the first level and consider each array element to decide
-    // the sort order.
-    std::vector<const char*> fieldNames;
-    std::vector<BSONElement> fixed;
-    BSONObjIterator btreeIt(_btreeObj);
-    while (btreeIt.more()) {
-        BSONElement patternElt = btreeIt.next();
-        fieldNames.push_back(patternElt.fieldName());
-        fixed.push_back(BSONElement());
-    }
-
-    _keyGen.reset(new BtreeKeyGeneratorV1(fieldNames, fixed, false /* not sparse */));
-
-    // The bounds checker only works on the Btree part of the sort key.
-    getBoundsForSort(queryObj, _btreeObj);
-
-    if (_hasBounds) {
-        _boundsChecker.reset(new IndexBoundsChecker(&_bounds, _btreeObj, 1 /* == order */));
-    }
-}
-
-Status SortStageKeyGenerator::getSortKey(const WorkingSetMember& member, BSONObj* objOut) const {
-    BSONObj btreeKeyToUse;
-
-    Status btreeStatus = getBtreeKey(member.obj.value(), &btreeKeyToUse);
-    if (!btreeStatus.isOK()) {
-        return btreeStatus;
-    }
-
-    if (!_sortHasMeta) {
-        *objOut = btreeKeyToUse;
-        return Status::OK();
-    }
-
-    BSONObjBuilder mergedKeyBob;
-
-    // Merge metadata into the key.
-    BSONObjIterator it(_rawSortSpec);
-    BSONObjIterator btreeIt(btreeKeyToUse);
-    while (it.more()) {
-        BSONElement elt = it.next();
-        if (elt.isNumber()) {
-            // Merge btree key elt.
-            mergedKeyBob.append(btreeIt.next());
-        } else if (LiteParsedQuery::isTextScoreMeta(elt)) {
-            // Add text score metadata
-            double score = 0.0;
-            if (member.hasComputed(WSM_COMPUTED_TEXT_SCORE)) {
-                const TextScoreComputedData* scoreData = static_cast<const TextScoreComputedData*>(
-                    member.getComputed(WSM_COMPUTED_TEXT_SCORE));
-                score = scoreData->getScore();
-            }
-            mergedKeyBob.append("$metaTextScore", score);
-        }
-    }
-
-    *objOut = mergedKeyBob.obj();
-    return Status::OK();
-}
-
-Status SortStageKeyGenerator::getBtreeKey(const BSONObj& memberObj, BSONObj* objOut) const {
-    // Not sorting by anything in the key, just bail out early.
-    if (_btreeObj.isEmpty()) {
-        *objOut = BSONObj();
-        return Status::OK();
-    }
-
-    // We will sort '_data' in the same order an index over '_pattern' would have.  This is
-    // tricky.  Consider the sort pattern {a:1} and the document {a:[1, 10]}. We have
-    // potentially two keys we could use to sort on. Here we extract these keys.
-    BSONObjCmp patternCmp(_btreeObj);
-    BSONObjSet keys(patternCmp);
-
-    try {
-        _keyGen->getKeys(memberObj, &keys);
-    } catch (const UserException& e) {
-        // Probably a parallel array.
-        if (BtreeKeyGenerator::ParallelArraysCode == e.getCode()) {
-            return Status(ErrorCodes::BadValue, "cannot sort with keys that are parallel arrays");
-        } else {
-            return e.toStatus();
-        }
-    } catch (...) {
-        return Status(ErrorCodes::InternalError, "unknown error during sort key generation");
-    }
-
-    // Key generator isn't sparse so we should at least get an all-null key.
-    invariant(!keys.empty());
-
-    // No bounds?  No problem!  Use the first key.
-    if (!_hasBounds) {
-        // Note that we sort 'keys' according to the pattern '_btreeObj'.
-        *objOut = *keys.begin();
-        return Status::OK();
-    }
-
-    // To decide which key to use in sorting, we must consider not only the sort pattern but
-    // the query.  Assume we have the query {a: {$gte: 5}} and a document {a:1}.  That
-    // document wouldn't match the query.  As such, the key '1' in an array {a: [1, 10]}
-    // should not be considered as being part of the result set and thus that array cannot
-    // sort using the key '1'.  To ensure that the keys we sort by are valid w.r.t. the
-    // query we use a bounds checker.
-    verify(NULL != _boundsChecker.get());
-    for (BSONObjSet::const_iterator it = keys.begin(); it != keys.end(); ++it) {
-        if (_boundsChecker->isValidKey(*it)) {
-            *objOut = *it;
-            return Status::OK();
-        }
-    }
-
-    // No key is in our bounds.
-    // TODO: will this ever happen?  don't think it should.
-    *objOut = *keys.begin();
-    return Status::OK();
-}
-
-void SortStageKeyGenerator::getBoundsForSort(const BSONObj& queryObj, const BSONObj& sortObj) {
-    QueryPlannerParams params;
-    params.options = QueryPlannerParams::NO_TABLE_SCAN;
-
-    // We're creating a "virtual index" with key pattern equal to the sort order.
-    IndexEntry sortOrder(
-        sortObj, IndexNames::BTREE, true, false, false, "doesnt_matter", BSONObj());
-    params.indices.push_back(sortOrder);
-
-    CanonicalQuery* rawQueryForSort;
-    verify(CanonicalQuery::canonicalize("fake_ns", queryObj, &rawQueryForSort, WhereCallbackNoop())
-               .isOK());
-    auto_ptr<CanonicalQuery> queryForSort(rawQueryForSort);
-
-    vector<QuerySolution*> solns;
-    QLOG() << "Sort stage: Planning to obtain bounds for sort." << endl;
-    QueryPlanner::plan(*queryForSort, params, &solns);
-
-    // TODO: are there ever > 1 solns?  If so, do we look for a specific soln?
-    if (1 == solns.size()) {
-        IndexScanNode* ixScan = NULL;
-        QuerySolutionNode* rootNode = solns[0]->root.get();
-
-        if (rootNode->getType() == STAGE_FETCH) {
-            FetchNode* fetchNode = static_cast<FetchNode*>(rootNode);
-            if (fetchNode->children[0]->getType() != STAGE_IXSCAN) {
-                delete solns[0];
-                // No bounds.
-                return;
-            }
-            ixScan = static_cast<IndexScanNode*>(fetchNode->children[0]);
-        } else if (rootNode->getType() == STAGE_IXSCAN) {
-            ixScan = static_cast<IndexScanNode*>(rootNode);
-        }
-
-        if (ixScan) {
-            _bounds.fields.swap(ixScan->bounds.fields);
-            _hasBounds = true;
-        }
-    }
-
-    for (size_t i = 0; i < solns.size(); ++i) {
-        delete solns[i];
-    }
-}
 
 SortStage::WorkingSetComparator::WorkingSetComparator(BSONObj p) : pattern(p) {}
 
@@ -274,24 +68,37 @@ bool SortStage::WorkingSetComparator::operator()(const SortableDataItem& lhs,
     return lhs.loc < rhs.loc;
 }
 
-SortStage::SortStage(const SortStageParams& params, WorkingSet* ws, PlanStage* child)
-    : _collection(params.collection),
+SortStage::SortStage(OperationContext* opCtx,
+                     const SortStageParams& params,
+                     WorkingSet* ws,
+                     PlanStage* child)
+    : PlanStage(kStageType, opCtx),
+      _collection(params.collection),
       _ws(ws),
-      _child(child),
       _pattern(params.pattern),
-      _query(params.query),
       _limit(params.limit),
       _sorted(false),
       _resultIterator(_data.end()),
-      _commonStats(kStageType),
-      _memUsage(0) {}
+      _memUsage(0) {
+    _children.emplace_back(child);
+
+    BSONObj sortComparator = FindCommon::transformSortSpec(_pattern);
+    _sortKeyComparator = stdx::make_unique<WorkingSetComparator>(sortComparator);
+
+    // If limit > 1, we need to initialize _dataSet here to maintain ordered set of data items while
+    // fetching from the child stage.
+    if (_limit > 1) {
+        const WorkingSetComparator& cmp = *_sortKeyComparator;
+        _dataSet.reset(new SortableDataItemSet(cmp));
+    }
+}
 
 SortStage::~SortStage() {}
 
 bool SortStage::isEOF() {
     // We're done when our child has no more results, we've sorted the child's results, and
     // we've returned all sorted results.
-    return _child->isEOF() && _sorted && (_data.end() == _resultIterator);
+    return child()->isEOF() && _sorted && (_data.end() == _resultIterator);
 }
 
 PlanStage::StageState SortStage::work(WorkingSetID* out) {
@@ -300,25 +107,12 @@ PlanStage::StageState SortStage::work(WorkingSetID* out) {
     // Adds the amount of time taken by work() to executionTimeMillis.
     ScopedTimer timer(&_commonStats.executionTimeMillis);
 
-    if (NULL == _sortKeyGen) {
-        // This is heavy and should be done as part of work().
-        _sortKeyGen.reset(new SortStageKeyGenerator(_collection, _pattern, _query));
-        _sortKeyComparator.reset(new WorkingSetComparator(_sortKeyGen->getSortComparator()));
-        // If limit > 1, we need to initialize _dataSet here to maintain ordered
-        // set of data items while fetching from the child stage.
-        if (_limit > 1) {
-            const WorkingSetComparator& cmp = *_sortKeyComparator;
-            _dataSet.reset(new SortableDataItemSet(cmp));
-        }
-        return PlanStage::NEED_TIME;
-    }
-
     const size_t maxBytes = static_cast<size_t>(internalQueryExecMaxBlockingSortBytes);
     if (_memUsage > maxBytes) {
         mongoutils::str::stream ss;
-        ss << "sort stage buffered data usage of " << _memUsage
-           << " bytes exceeds internal limit of " << maxBytes << " bytes";
-        Status status(ErrorCodes::Overflow, ss);
+        ss << "Sort operation used more than the maximum " << maxBytes
+           << " bytes of RAM. Add an index, or specify a smaller limit.";
+        Status status(ErrorCodes::OperationFailed, ss);
         *out = WorkingSetCommon::allocateStatusMember(_ws, status);
         return PlanStage::FAILURE;
     }
@@ -330,7 +124,7 @@ PlanStage::StageState SortStage::work(WorkingSetID* out) {
     // Still reading in results to sort.
     if (!_sorted) {
         WorkingSetID id = WorkingSet::INVALID_ID;
-        StageState code = _child->work(&id);
+        StageState code = child()->work(&id);
 
         if (PlanStage::ADVANCED == code) {
             // Add it into the map for quick invalidation if it has a valid RecordId.
@@ -346,14 +140,15 @@ PlanStage::StageState SortStage::work(WorkingSetID* out) {
                 _wsidByDiskLoc[member->loc] = id;
             }
 
-            // The data remains in the WorkingSet and we wrap the WSID with the sort key.
             SortableDataItem item;
-            Status sortKeyStatus = _sortKeyGen->getSortKey(*member, &item.sortKey);
-            if (!_sortKeyGen->getSortKey(*member, &item.sortKey).isOK()) {
-                *out = WorkingSetCommon::allocateStatusMember(_ws, sortKeyStatus);
-                return PlanStage::FAILURE;
-            }
             item.wsid = id;
+
+            // We extract the sort key from the WSM's computed data. This must have been generated
+            // by a SortKeyGeneratorStage descendent in the execution tree.
+            auto sortKeyComputedData =
+                static_cast<const SortKeyComputedData*>(member->getComputed(WSM_SORT_KEY));
+            item.sortKey = sortKeyComputedData->getSortKey();
+
             if (member->hasLoc()) {
                 // The RecordId breaks ties when sorting two WSMs with the same sort key.
                 item.loc = member->loc;
@@ -371,7 +166,7 @@ PlanStage::StageState SortStage::work(WorkingSetID* out) {
             _sorted = true;
             ++_commonStats.needTime;
             return PlanStage::NEED_TIME;
-        } else if (PlanStage::FAILURE == code) {
+        } else if (PlanStage::FAILURE == code || PlanStage::DEAD == code) {
             *out = id;
             // If a stage fails, it may create a status WSM to indicate why it
             // failed, in which case 'id' is valid.  If ID is invalid, we
@@ -385,8 +180,8 @@ PlanStage::StageState SortStage::work(WorkingSetID* out) {
             return code;
         } else if (PlanStage::NEED_TIME == code) {
             ++_commonStats.needTime;
-        } else if (PlanStage::NEED_FETCH == code) {
-            ++_commonStats.needFetch;
+        } else if (PlanStage::NEED_YIELD == code) {
+            ++_commonStats.needYield;
             *out = id;
         }
 
@@ -410,20 +205,7 @@ PlanStage::StageState SortStage::work(WorkingSetID* out) {
     return PlanStage::ADVANCED;
 }
 
-void SortStage::saveState() {
-    ++_commonStats.yields;
-    _child->saveState();
-}
-
-void SortStage::restoreState(OperationContext* opCtx) {
-    ++_commonStats.unyields;
-    _child->restoreState(opCtx);
-}
-
-void SortStage::invalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) {
-    ++_commonStats.invalidates;
-    _child->invalidate(txn, dl, type);
-
+void SortStage::doInvalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) {
     // If we have a deletion, we can fetch and carry on.
     // If we have a mutation, it's easier to fetch and use the previous document.
     // So, no matter what, fetch and keep the doc in play.
@@ -447,13 +229,7 @@ void SortStage::invalidate(OperationContext* txn, const RecordId& dl, Invalidati
     }
 }
 
-vector<PlanStage*> SortStage::getChildren() const {
-    vector<PlanStage*> children;
-    children.push_back(_child.get());
-    return children;
-}
-
-PlanStageStats* SortStage::getStats() {
+unique_ptr<PlanStageStats> SortStage::getStats() {
     _commonStats.isEOF = isEOF();
     const size_t maxBytes = static_cast<size_t>(internalQueryExecMaxBlockingSortBytes);
     _specificStats.memLimit = maxBytes;
@@ -461,17 +237,13 @@ PlanStageStats* SortStage::getStats() {
     _specificStats.limit = _limit;
     _specificStats.sortPattern = _pattern.getOwned();
 
-    auto_ptr<PlanStageStats> ret(new PlanStageStats(_commonStats, STAGE_SORT));
-    ret->specific.reset(new SortStats(_specificStats));
-    ret->children.push_back(_child->getStats());
-    return ret.release();
+    unique_ptr<PlanStageStats> ret = make_unique<PlanStageStats>(_commonStats, STAGE_SORT);
+    ret->specific = make_unique<SortStats>(_specificStats);
+    ret->children.emplace_back(child()->getStats());
+    return ret;
 }
 
-const CommonStats* SortStage::getCommonStats() {
-    return &_commonStats;
-}
-
-const SpecificStats* SortStage::getSpecificStats() {
+const SpecificStats* SortStage::getSpecificStats() const {
     return &_specificStats;
 }
 
@@ -499,13 +271,17 @@ void SortStage::addToBuffer(const SortableDataItem& item) {
     // Holds ID of working set member to be freed at end of this function.
     WorkingSetID wsidToFree = WorkingSet::INVALID_ID;
 
+    WorkingSetMember* member = _ws->get(item.wsid);
     if (_limit == 0) {
+        // Ensure that the BSONObj underlying the WorkingSetMember is owned in case we yield.
+        member->makeObjOwnedIfNeeded();
         _data.push_back(item);
-        _memUsage += _ws->get(item.wsid)->getMemUsage();
+        _memUsage += member->getMemUsage();
     } else if (_limit == 1) {
         if (_data.empty()) {
+            member->makeObjOwnedIfNeeded();
             _data.push_back(item);
-            _memUsage = _ws->get(item.wsid)->getMemUsage();
+            _memUsage = member->getMemUsage();
             return;
         }
         wsidToFree = item.wsid;
@@ -513,16 +289,18 @@ void SortStage::addToBuffer(const SortableDataItem& item) {
         // Compare new item with existing item in vector.
         if (cmp(item, _data[0])) {
             wsidToFree = _data[0].wsid;
+            member->makeObjOwnedIfNeeded();
             _data[0] = item;
-            _memUsage = _ws->get(item.wsid)->getMemUsage();
+            _memUsage = member->getMemUsage();
         }
     } else {
         // Update data item set instead of vector
         // Limit not reached - insert and return
         vector<SortableDataItem>::size_type limit(_limit);
         if (_dataSet->size() < limit) {
+            member->makeObjOwnedIfNeeded();
             _dataSet->insert(item);
-            _memUsage += _ws->get(item.wsid)->getMemUsage();
+            _memUsage += member->getMemUsage();
             return;
         }
         // Limit will be exceeded - compare with item with lowest key
@@ -534,13 +312,14 @@ void SortStage::addToBuffer(const SortableDataItem& item) {
         const WorkingSetComparator& cmp = *_sortKeyComparator;
         if (cmp(item, lastItem)) {
             _memUsage -= _ws->get(lastItem.wsid)->getMemUsage();
-            _memUsage += _ws->get(item.wsid)->getMemUsage();
+            _memUsage += member->getMemUsage();
             wsidToFree = lastItem.wsid;
             // According to std::set iterator validity rules,
             // it does not matter which of erase()/insert() happens first.
             // Here, we choose to erase first to release potential resources
             // used by the last item and to keep the scope of the iterator to a minimum.
             _dataSet->erase(lastItemIt);
+            member->makeObjOwnedIfNeeded();
             _dataSet->insert(item);
         }
     }

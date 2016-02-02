@@ -38,6 +38,7 @@
 #include "mongo/db/auth/resource_pattern.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/catalog/collection.h"
+#include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/cloner.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/copydb.h"
@@ -49,15 +50,14 @@
 #include "mongo/db/jsobj.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/repl/isself.h"
-#include "mongo/db/repl/oplog.h"
 #include "mongo/db/operation_context_impl.h"
 #include "mongo/db/ops/insert.h"
-#include "mongo/db/storage_options.h"
+#include "mongo/db/storage/storage_options.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
 
-using std::auto_ptr;
+using std::unique_ptr;
 using std::string;
 using std::stringstream;
 using std::endl;
@@ -86,8 +86,11 @@ public:
         ActionSet actions;
         actions.addAction(ActionType::insert);
         actions.addAction(ActionType::createIndex);  // SERVER-11418
+        if (shouldBypassDocumentValidationForCommand(cmdObj)) {
+            actions.addAction(ActionType::bypassDocumentValidation);
+        }
 
-        if (!client->getAuthorizationSession()->isAuthorizedForActionsOnResource(
+        if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
                 ResourcePattern::forExactNamespace(NamespaceString(ns)), actions)) {
             return Status(ErrorCodes::Unauthorized, "Unauthorized");
         }
@@ -107,8 +110,11 @@ public:
                      BSONObj& cmdObj,
                      int,
                      string& errmsg,
-                     BSONObjBuilder& result,
-                     bool fromRepl) {
+                     BSONObjBuilder& result) {
+        boost::optional<DisableDocumentValidation> maybeDisableValidation;
+        if (shouldBypassDocumentValidationForCommand(cmdObj))
+            maybeDisableValidation.emplace(txn);
+
         string fromhost = cmdObj.getStringField("from");
         if (fromhost.empty()) {
             errmsg = "missing 'from' parameter";
@@ -141,14 +147,15 @@ public:
               << (copyIndexes ? "" : ", not copying indexes") << endl;
 
         Cloner cloner;
-        auto_ptr<DBClientConnection> myconn;
+        unique_ptr<DBClientConnection> myconn;
         myconn.reset(new DBClientConnection());
         if (!myconn->connect(HostAndPort(fromhost), errmsg))
             return false;
 
         cloner.setConnection(myconn.release());
 
-        return cloner.copyCollection(txn, collection, query, errmsg, true, false, copyIndexes);
+        return cloner.copyCollection(
+            txn, collection, query, errmsg, true, true /* interruptable */, copyIndexes);
     }
 
 } cmdCloneCollection;

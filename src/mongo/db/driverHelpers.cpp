@@ -78,8 +78,7 @@ public:
                      BSONObj& cmdObj,
                      int,
                      string& errmsg,
-                     BSONObjBuilder& result,
-                     bool fromRepl) {
+                     BSONObjBuilder& result) {
         if (cmdObj.firstElement().type() != jstOID) {
             errmsg = "not oid";
             return false;

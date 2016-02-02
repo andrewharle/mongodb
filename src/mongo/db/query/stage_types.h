@@ -51,8 +51,8 @@ enum StageType {
     STAGE_DELETE,
 
     // If we're running a distinct, we only care about one value for each key.  The distinct
-    // stage is an ixscan with some key-skipping behvaior that only distinct uses.
-    STAGE_DISTINCT,
+    // scan stage is an ixscan with some key-skipping behvaior that only distinct uses.
+    STAGE_DISTINCT_SCAN,
 
     // Dummy stage used for receiving notifications of deletions during chunk migration.
     STAGE_NOTIFY_DELETE,
@@ -72,6 +72,10 @@ enum StageType {
     STAGE_GROUP,
 
     STAGE_IDHACK,
+
+    // Simple wrapper to iterate a SortedDataInterface::Cursor.
+    STAGE_INDEX_ITERATOR,
+
     STAGE_IXSCAN,
     STAGE_LIMIT,
 
@@ -90,9 +94,15 @@ enum StageType {
     STAGE_SHARDING_FILTER,
     STAGE_SKIP,
     STAGE_SORT,
+    STAGE_SORT_KEY_GENERATOR,
     STAGE_SORT_MERGE,
     STAGE_SUBPLAN,
+
+    // Stages for running text search.
     STAGE_TEXT,
+    STAGE_TEXT_OR,
+    STAGE_TEXT_MATCH,
+
     STAGE_UNKNOWN,
 
     STAGE_UPDATE,

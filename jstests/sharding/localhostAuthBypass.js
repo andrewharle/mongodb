@@ -6,7 +6,6 @@
 var replSetName = "replsets_server-6591";
 var keyfile = "jstests/libs/key1";
 var numShards = 2;
-var numConfigs = 3;
 var username = "foo";
 var password = "bar";
 
@@ -23,9 +22,15 @@ var addUsersToEachShard = function(st) {
     }
 };
 
-var addShard = function(st, expectedResult) {
-    var m = MongoRunner.runMongod({ auth: "", keyFile: keyfile })
-    assert.eq(st.getDB("admin").runCommand({ addShard: m.host }).ok, expectedResult, "Add shard");
+var addShard = function(st, shouldPass) {
+    var m = MongoRunner.runMongod({ auth: "", keyFile: keyfile, useHostname: false });
+    var res = st.getDB("admin").runCommand({ addShard: m.host });
+    if (shouldPass) {
+        assert.commandWorked(res, "Add shard");
+    }
+    else {
+        assert.commandFailed(res, "Add shard");
+    }
     return m.port;
 };
 
@@ -54,7 +59,7 @@ var assertCannotRunCommands = function(mongo, st) {
     assert.writeError(test.foo.remove({ _id: 0 }));
 
     // Multi-shard
-    assert.throws(function() { 
+    assert.throws(function() {
         test.foo.mapReduce(
             function() { emit(1, 1); }, 
             function(id, count) { return Array.sum(count); },
@@ -145,9 +150,12 @@ var authenticate = function(mongo) {
     mongo.getDB("admin").auth(username, password);
 };
 
-var setupSharding = function(mongo) {
+var setupSharding = function(shardingTest) {
+    var mongo = shardingTest.s;
+
     print("============ enabling sharding on test.foo.");
     mongo.getDB("admin").runCommand({enableSharding : "test"});
+    shardingTest.ensurePrimaryShard('test', 'shard0001');
     mongo.getDB("admin").runCommand({shardCollection : "test.foo", key : {_id : 1}});
 
     var test = mongo.getDB("test");
@@ -156,17 +164,15 @@ var setupSharding = function(mongo) {
     }
 };
 
-var start = function(useHostName) {
+var start = function() {
     return new ShardingTest({
         auth: "",
         keyFile: keyfile, 
         shards: numShards, 
         chunksize: 1, 
-        config: numConfigs, 
-        separateConfig: true,
         other : { 
             nopreallocj: 1, 
-            useHostName: useHostName 
+            useHostname: false // Must use localhost to take advantage of the localhost auth bypass
         } 
     });
 };
@@ -209,11 +215,11 @@ var shutdown = function(st) {
     st.stop();
 };
 
-var runTest = function(useHostName) {
+var runTest = function() {
     print("=====================");
-    print("starting shards: useHostName=" + useHostName);
+    print("starting shards");
     print("=====================");
-    var st = start(useHostName);
+    var st = start();
     var host = st.s.host;
     var extraShards = [];
 
@@ -225,10 +231,10 @@ var runTest = function(useHostName) {
     createUser(mongo);
 
     authenticate(mongo);
-    setupSharding(mongo);
+    authenticate(st.s);
+    setupSharding(st);
 
     addUsersToEachShard(st);
-    authenticate(st.s);
     st.printShardingStatus();
 
     assertCanRunCommands(mongo, st);
@@ -254,5 +260,4 @@ var runTest = function(useHostName) {
     });
 }
 
-runTest(false);
-runTest(true);
+runTest();

@@ -32,7 +32,6 @@ struct __wt_hazard {
 
 /* Get the connection implementation for a session */
 #define	S2C(session)	  ((WT_CONNECTION_IMPL *)(session)->iface.connection)
-#define	S2C_SAFE(session) ((session) == NULL ? NULL : S2C(session))
 
 /* Get the btree for a session */
 #define	S2BT(session)	   ((WT_BTREE *)(session)->dhandle->handle)
@@ -77,6 +76,11 @@ struct WT_COMPILER_TYPE_ALIGN(WT_CACHE_LINE_ALIGNMENT) __wt_session_impl {
 	WT_CURSOR_BACKUP *bkp_cursor;	/* Hot backup cursor */
 	WT_COMPACT	 *compact;	/* Compact state */
 
+	/*
+	 * Lookaside table cursor, sweep and eviction worker threads only.
+	 */
+	WT_CURSOR	*las_cursor;	/* Lookaside table cursor */
+
 	WT_DATA_HANDLE *meta_dhandle;	/* Metadata file */
 	void	*meta_track;		/* Metadata operation tracking */
 	void	*meta_track_next;	/* Current position */
@@ -94,8 +98,8 @@ struct WT_COMPILER_TYPE_ALIGN(WT_CACHE_LINE_ALIGNMENT) __wt_session_impl {
 	TAILQ_HEAD(__tables, __wt_table) tables;
 
 	WT_ITEM	**scratch;		/* Temporary memory for any function */
-	u_int	scratch_alloc;		/* Currently allocated */
-	size_t scratch_cached;		/* Scratch bytes cached */
+	u_int	  scratch_alloc;	/* Currently allocated */
+	size_t	  scratch_cached;	/* Scratch bytes cached */
 #ifdef HAVE_DIAGNOSTIC
 	/*
 	 * It's hard to figure out from where a buffer was allocated after it's
@@ -113,6 +117,7 @@ struct WT_COMPILER_TYPE_ALIGN(WT_CACHE_LINE_ALIGNMENT) __wt_session_impl {
 
 	WT_TXN_ISOLATION isolation;
 	WT_TXN	txn;			/* Transaction state */
+	WT_LSN	bg_sync_lsn;		/* Background sync operation LSN. */
 	u_int	ncursors;		/* Count of active file cursors. */
 
 	void	*block_manager;		/* Block-manager support */

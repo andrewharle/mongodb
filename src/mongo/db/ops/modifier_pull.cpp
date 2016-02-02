@@ -115,20 +115,21 @@ Status ModifierPull::init(const BSONElement& modExpr, const Options& opts, bool*
             _exprObj = _exprElt.wrap("");
         }
 
-        // Build the matcher around the object we built above. Currently, we do not allow
-        // $pull operations to contain $where clauses, so preserving this behaviour.
+        // Build the matcher around the object we built above. Currently, we do not allow $pull
+        // operations to contain $text/$where clauses, so preserving this behaviour.
         StatusWithMatchExpression parseResult =
-            MatchExpressionParser::parse(_exprObj, MatchExpressionParser::WhereCallback());
-        if (!parseResult.isOK())
+            MatchExpressionParser::parse(_exprObj, ExtensionsCallback());
+        if (!parseResult.isOK()) {
             return parseResult.getStatus();
+        }
 
-        _matchExpr.reset(parseResult.getValue());
+        _matchExpr = std::move(parseResult.getValue());
     }
 
     return Status::OK();
 }
 
-Status ModifierPull::prepare(mb::Element root, const StringData& matchedField, ExecInfo* execInfo) {
+Status ModifierPull::prepare(mb::Element root, StringData matchedField, ExecInfo* execInfo) {
     _preparedState.reset(new PreparedState(root.getDocument()));
 
     // If we have a $-positional field, it is time to bind it to an actual field part.

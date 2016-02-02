@@ -17,11 +17,14 @@ __clsm_close_bulk(WT_CURSOR *cursor)
 {
 	WT_CURSOR_LSM *clsm;
 	WT_CURSOR *bulk_cursor;
+	WT_LSM_CHUNK *chunk;
 	WT_LSM_TREE *lsm_tree;
 	WT_SESSION_IMPL *session;
+	uint64_t avg_chunks, total_chunks;
 
 	clsm = (WT_CURSOR_LSM *)cursor;
 	lsm_tree = clsm->lsm_tree;
+	chunk = lsm_tree->chunk[0];
 	session = (WT_SESSION_IMPL *)clsm->iface.session;
 
 	/* Close the bulk cursor to ensure the chunk is written to disk. */
@@ -31,7 +34,18 @@ __clsm_close_bulk(WT_CURSOR *cursor)
 	clsm->nchunks = 0;
 
 	/* Set ondisk, and flush the metadata */
-	F_SET(lsm_tree->chunk[0], WT_LSM_CHUNK_ONDISK);
+	F_SET(chunk, WT_LSM_CHUNK_ONDISK);
+	/*
+	 * Setup a generation in our chunk based on how many chunk_size
+	 * pieces fit into a chunk of a given generation.  This allows future
+	 * LSM merges choose reasonable sets of chunks.
+	 */
+	avg_chunks = (lsm_tree->merge_min + lsm_tree->merge_max) / 2;
+	for (total_chunks = chunk->size / lsm_tree->chunk_size;
+	    total_chunks > 1;
+	    total_chunks /= avg_chunks)
+		++chunk->generation;
+
 	WT_RET(__wt_lsm_meta_write(session, lsm_tree));
 	++lsm_tree->dsk_gen;
 
@@ -49,15 +63,18 @@ __clsm_insert_bulk(WT_CURSOR *cursor)
 {
 	WT_CURSOR *bulk_cursor;
 	WT_CURSOR_LSM *clsm;
+	WT_LSM_CHUNK *chunk;
 	WT_LSM_TREE *lsm_tree;
 	WT_SESSION_IMPL *session;
 
 	clsm = (WT_CURSOR_LSM *)cursor;
 	lsm_tree = clsm->lsm_tree;
+	chunk = lsm_tree->chunk[0];
 	session = (WT_SESSION_IMPL *)clsm->iface.session;
 
 	WT_ASSERT(session, lsm_tree->nchunks == 1 && clsm->nchunks == 1);
-	++lsm_tree->chunk[0]->count;
+	++chunk->count;
+	chunk->size += cursor->key.size + cursor->value.size;
 	bulk_cursor = *clsm->cursors;
 	bulk_cursor->set_key(bulk_cursor, &cursor->key);
 	bulk_cursor->set_value(bulk_cursor, &cursor->value);
@@ -74,6 +91,7 @@ int
 __wt_clsm_open_bulk(WT_CURSOR_LSM *clsm, const char *cfg[])
 {
 	WT_CURSOR *cursor, *bulk_cursor;
+	WT_DECL_RET;
 	WT_LSM_TREE *lsm_tree;
 	WT_SESSION_IMPL *session;
 
@@ -89,17 +107,16 @@ __wt_clsm_open_bulk(WT_CURSOR_LSM *clsm, const char *cfg[])
 	cursor->insert = __clsm_insert_bulk;
 	cursor->close = __clsm_close_bulk;
 
-	/* Setup the first chunk in the tree. */
-	WT_RET(__wt_clsm_request_switch(clsm));
-	WT_RET(__wt_clsm_await_switch(clsm));
-
 	/*
-	 * Grab and release the LSM tree lock to ensure that the first chunk
-	 * has been fully created before proceeding. We have the LSM tree
-	 * open exclusive, so that saves us from needing the lock generally.
+	 * Setup the first chunk in the tree. This is the only time we switch
+	 * without using the LSM worker threads, it's safe to do here since
+	 * we have an exclusive lock on the LSM tree. We need to do this
+	 * switch inline, since switch needs a schema lock and online index
+	 * creation opens a bulk cursor while holding the schema lock.
 	 */
-	WT_RET(__wt_lsm_tree_readlock(session, lsm_tree));
-	WT_RET(__wt_lsm_tree_readunlock(session, lsm_tree));
+	WT_WITH_SCHEMA_LOCK(session,
+	    ret = __wt_lsm_tree_switch(session, lsm_tree));
+	WT_RET(ret);
 
 	/*
 	 * Open a bulk cursor on the first chunk, it's not a regular LSM chunk

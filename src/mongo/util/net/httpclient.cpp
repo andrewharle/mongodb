@@ -32,6 +32,7 @@
 #include "mongo/util/net/httpclient.h"
 
 #include "mongo/bson/util/builder.h"
+#include "mongo/config.h"
 #include "mongo/util/mongoutils/str.h"
 #include "mongo/util/net/message.h"
 #include "mongo/util/net/message_port.h"
@@ -118,7 +119,7 @@ int HttpClient::_go(const char* command, string url, const char* body, Result* r
         return -1;
 
     if (ssl) {
-#ifdef MONGO_SSL
+#ifdef MONGO_CONFIG_SSL
         // pointer to global singleton instance
         SSLManagerInterface* mgr = getSSLManager();
 

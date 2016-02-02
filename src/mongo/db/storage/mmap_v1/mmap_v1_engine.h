@@ -32,10 +32,9 @@
 
 #include <map>
 
-#include <boost/thread/mutex.hpp>
-
-#include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/storage/mmap_v1/record_access_tracker.h"
+#include "mongo/db/storage/storage_engine.h"
+#include "mongo/stdx/mutex.h"
 
 namespace mongo {
 
@@ -50,9 +49,12 @@ public:
 
     RecoveryUnit* newRecoveryUnit();
     void listDatabases(std::vector<std::string>* out) const;
-    int flushAllFiles(bool sync);
 
-    DatabaseCatalogEntry* getDatabaseCatalogEntry(OperationContext* opCtx, const StringData& db);
+    int flushAllFiles(bool sync);
+    Status beginBackup(OperationContext* txn);
+    void endBackup(OperationContext* txn);
+
+    DatabaseCatalogEntry* getDatabaseCatalogEntry(OperationContext* opCtx, StringData db);
 
     virtual bool supportsDocLocking() const {
         return false;
@@ -63,9 +65,9 @@ public:
 
     virtual bool isDurable() const;
 
-    virtual Status closeDatabase(OperationContext* txn, const StringData& db);
+    virtual Status closeDatabase(OperationContext* txn, StringData db);
 
-    virtual Status dropDatabase(OperationContext* txn, const StringData& db);
+    virtual Status dropDatabase(OperationContext* txn, StringData db);
 
     virtual void cleanShutdown();
 
@@ -94,7 +96,7 @@ public:
 private:
     static void _listDatabases(const std::string& directory, std::vector<std::string>* out);
 
-    boost::mutex _entryMapMutex;
+    stdx::mutex _entryMapMutex;
     typedef std::map<std::string, MMAPV1DatabaseCatalogEntry*> EntryMap;
     EntryMap _entryMap;
 

@@ -1,26 +1,35 @@
 // Test that dropping the config database is completely disabled via
 // mongos and via mongod, if started with --configsvr
-var st = new ShardingTest({ shards : 2, config : 1, other : {separateConfig : true}});
+(function() {
+"use strict";
+
+var getConfigsvrToWriteTo = function(st) {
+    if (st.configRS) {
+        return st.configRS.getPrimary();
+    } else {
+        return st._configServers[0];
+    }
+}
+
+var st = new ShardingTest({ shards : 2 });
 var mongos = st.s;
-var config = st._configServers[0].getDB('config');
+var config = getConfigsvrToWriteTo(st).getDB('config');
 
 // Try to drop config db via configsvr
 
 print ( "1: Try to drop config database via configsvr" )
-config.dropDatabase()
-
-print ( "2: Ensure it wasn't dropped" )
-assert.eq( 1, config.databases.find({ _id : "admin", partitioned : false, primary : "config"}).toArray().length )
-
+assert.eq(0, config.dropDatabase().ok);
+assert.eq("Cannot drop 'config' database if mongod started with --configsvr",
+          config.dropDatabase().errmsg);
 
 // Try to drop config db via mongos
-
 var config = mongos.getDB( "config" )
 
 print ( "1: Try to drop config database via mongos" )
-config.dropDatabase()
+assert.eq(0, config.dropDatabase().ok);
 
-print ( "2: Ensure it wasn't dropped" )
-assert.eq( 1, config.databases.find({ _id : "admin", partitioned : false, primary : "config"}).toArray().length )
+// 20 = ErrorCodes::IllegalOperation
+assert.eq(20, config.dropDatabase().code);
 
 st.stop();
+}());

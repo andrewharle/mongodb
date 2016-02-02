@@ -27,15 +27,15 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
+#include <memory>
 #include <sstream>
 #include <string>
 
-#include "mongo/client/export_macros.h"
 #include "mongo/logger/labeled_level.h"
 #include "mongo/logger/log_component.h"
 #include "mongo/logger/log_severity.h"
 #include "mongo/logger/message_log_domain.h"
+#include "mongo/stdx/chrono.h"
 #include "mongo/util/exit_code.h"
 
 namespace mongo {
@@ -46,7 +46,7 @@ class Tee;
 /**
  * Stream-ish object used to build and append log messages.
  */
-class MONGO_CLIENT_API LogstreamBuilder {
+class LogstreamBuilder {
 public:
     static LogSeverity severityCast(int ll) {
         return LogSeverity::cast(ll);
@@ -64,9 +64,7 @@ public:
      * "contextName" is a short name of the thread or other context.
      * "severity" is the logging severity of the message.
      */
-    LogstreamBuilder(MessageLogDomain* domain,
-                     const std::string& contextName,
-                     LogSeverity severity);
+    LogstreamBuilder(MessageLogDomain* domain, std::string contextName, LogSeverity severity);
 
     /**
      * Construct a LogstreamBuilder that writes to "domain" on destruction.
@@ -76,7 +74,7 @@ public:
      * "component" is the primary log component of the message.
      */
     LogstreamBuilder(MessageLogDomain* domain,
-                     const std::string& contextName,
+                     std::string contextName,
                      LogSeverity severity,
                      LogComponent component);
 
@@ -88,13 +86,19 @@ public:
                      LabeledLevel labeledLevel);
 
     /**
-     * Copies a LogstreamBuilder.  LogstreamBuilder instances are copyable only until the first
-     * call to stream() or operator<<.
+     * Move constructor.
      *
-     * TODO(schwerin): After C++11 transition, replace with a move-constructor, and make
-     * LogstreamBuilder movable.
+     * TODO: Replace with = default implementation when minimum MSVC version is bumped to
+     * MSVC2015.
      */
-    LogstreamBuilder(const LogstreamBuilder& other);
+    LogstreamBuilder(LogstreamBuilder&& other);
+
+    /**
+     * Move assignment operator.
+     *
+     * TODO: Replace with =default implementation when minimum MSVC version is bumped to VS2015.
+     */
+    LogstreamBuilder& operator=(LogstreamBuilder&& other);
 
     /**
      * Destroys a LogstreamBuilder().  If anything was written to it via stream() or operator<<,
@@ -112,7 +116,8 @@ public:
     }
 
     std::ostream& stream() {
-        makeStream();
+        if (!_os)
+            makeStream();
         return *_os;
     }
 
@@ -124,7 +129,7 @@ public:
         stream() << x;
         return *this;
     }
-    LogstreamBuilder& operator<<(const StringData& x) {
+    LogstreamBuilder& operator<<(StringData x) {
         stream() << x;
         return *this;
     }
@@ -185,6 +190,15 @@ public:
         return *this;
     }
 
+    template <typename Rep, typename Period>
+    LogstreamBuilder& operator<<(stdx::chrono::duration<Rep, Period> d) {
+        // We can't rely on ADL to find our custom stream out class,
+        // since neither the class (ostream) nor the argument are in
+        // our namespace. Just manually invoke
+        mongo::operator<<(stream(), d);
+        return *this;
+    }
+
     template <typename T>
     LogstreamBuilder& operator<<(const T& x) {
         stream() << x.toString();
@@ -207,8 +221,6 @@ public:
     void operator<<(Tee* tee);
 
 private:
-    LogstreamBuilder& operator=(const LogstreamBuilder& other);
-
     void makeStream();
 
     MessageLogDomain* _domain;
@@ -216,7 +228,7 @@ private:
     LogSeverity _severity;
     LogComponent _component;
     std::string _baseMessage;
-    std::ostringstream* _os;
+    std::unique_ptr<std::ostringstream> _os;
     Tee* _tee;
 };
 

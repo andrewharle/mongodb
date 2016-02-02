@@ -57,10 +57,8 @@ namespace {
 const std::string ADMIN_DBNAME = "admin";
 }  // namespace
 
-AuthorizationSession::AuthorizationSession(AuthzSessionExternalState* externalState)
-    : _impersonationFlag(false) {
-    _externalState.reset(externalState);
-}
+AuthorizationSession::AuthorizationSession(std::unique_ptr<AuthzSessionExternalState> externalState)
+    : _externalState(std::move(externalState)), _impersonationFlag(false) {}
 
 AuthorizationSession::~AuthorizationSession() {
     for (UserSet::iterator it = _authenticatedUsers.begin(); it != _authenticatedUsers.end();
@@ -179,7 +177,7 @@ PrivilegeVector AuthorizationSession::getDefaultPrivileges() {
     return defaultPrivileges;
 }
 
-Status AuthorizationSession::checkAuthForQuery(const NamespaceString& ns, const BSONObj& query) {
+Status AuthorizationSession::checkAuthForFind(const NamespaceString& ns, bool hasTerm) {
     if (MONGO_unlikely(ns.isCommand())) {
         return Status(ErrorCodes::InternalError,
                       str::stream() << "Checking query auth on command namespace " << ns.ns());
@@ -188,13 +186,26 @@ Status AuthorizationSession::checkAuthForQuery(const NamespaceString& ns, const 
         return Status(ErrorCodes::Unauthorized,
                       str::stream() << "not authorized for query on " << ns.ns());
     }
+
+    // Only internal clients (such as other nodes in a replica set) are allowed to use
+    // the 'term' field in a find operation. Use of this field could trigger changes
+    // in the receiving server's replication state and should be protected.
+    if (hasTerm &&
+        !isAuthorizedForActionsOnResource(ResourcePattern::forClusterResource(),
+                                          ActionType::internal)) {
+        return Status(ErrorCodes::Unauthorized,
+                      str::stream() << "not authorized for query with term on " << ns.ns());
+    }
+
     return Status::OK();
 }
 
-Status AuthorizationSession::checkAuthForGetMore(const NamespaceString& ns, long long cursorID) {
+Status AuthorizationSession::checkAuthForGetMore(const NamespaceString& ns,
+                                                 long long cursorID,
+                                                 bool hasTerm) {
     // "ns" can be in one of three formats: "listCollections" format, "listIndexes" format, and
     // normal format.
-    if (ns.isListCollectionsGetMore()) {
+    if (ns.isListCollectionsCursorNS()) {
         // "ns" is of the form "<db>.$cmd.listCollections".  Check if we can perform the
         // listCollections action on the database resource for "<db>".
         if (!isAuthorizedForActionsOnResource(ResourcePattern::forDatabaseName(ns.db()),
@@ -203,10 +214,10 @@ Status AuthorizationSession::checkAuthForGetMore(const NamespaceString& ns, long
                           str::stream() << "not authorized for listCollections getMore on "
                                         << ns.ns());
         }
-    } else if (ns.isListIndexesGetMore()) {
+    } else if (ns.isListIndexesCursorNS()) {
         // "ns" is of the form "<db>.$cmd.listIndexes.<coll>".  Check if we can perform the
         // listIndexes action on the "<db>.<coll>" namespace.
-        NamespaceString targetNS = ns.getTargetNSForListIndexesGetMore();
+        NamespaceString targetNS = ns.getTargetNSForListIndexes();
         if (!isAuthorizedForActionsOnNamespace(targetNS, ActionType::listIndexes)) {
             return Status(ErrorCodes::Unauthorized,
                           str::stream() << "not authorized for listIndexes getMore on " << ns.ns());
@@ -218,6 +229,17 @@ Status AuthorizationSession::checkAuthForGetMore(const NamespaceString& ns, long
                           str::stream() << "not authorized for getMore on " << ns.ns());
         }
     }
+
+    // Only internal clients (such as other nodes in a replica set) are allowed to use
+    // the 'term' field in a getMore operation. Use of this field could trigger changes
+    // in the receiving server's replication state and should be protected.
+    if (hasTerm &&
+        !isAuthorizedForActionsOnResource(ResourcePattern::forClusterResource(),
+                                          ActionType::internal)) {
+        return Status(ErrorCodes::Unauthorized,
+                      str::stream() << "not authorized for getMore with term on " << ns.ns());
+    }
+
     return Status::OK();
 }
 
@@ -277,7 +299,10 @@ Status AuthorizationSession::checkAuthForDelete(const NamespaceString& ns, const
 Status AuthorizationSession::checkAuthForKillCursors(const NamespaceString& ns,
                                                      long long cursorID) {
     // See implementation comments in checkAuthForGetMore().  This method looks very similar.
-    if (ns.isListCollectionsGetMore()) {
+
+    // SERVER-20364 Check for find or killCursor privileges until we have a way of associating
+    // a cursor with an owner.
+    if (ns.isListCollectionsCursorNS()) {
         if (!(isAuthorizedForActionsOnResource(ResourcePattern::forDatabaseName(ns.db()),
                                                ActionType::killCursors) ||
               isAuthorizedForActionsOnResource(ResourcePattern::forDatabaseName(ns.db()),
@@ -286,8 +311,8 @@ Status AuthorizationSession::checkAuthForKillCursors(const NamespaceString& ns,
                           str::stream() << "not authorized to kill listCollections cursor on "
                                         << ns.ns());
         }
-    } else if (ns.isListIndexesGetMore()) {
-        NamespaceString targetNS = ns.getTargetNSForListIndexesGetMore();
+    } else if (ns.isListIndexesCursorNS()) {
+        NamespaceString targetNS = ns.getTargetNSForListIndexes();
         if (!(isAuthorizedForActionsOnNamespace(targetNS, ActionType::killCursors) ||
               isAuthorizedForActionsOnNamespace(targetNS, ActionType::listIndexes))) {
             return Status(ErrorCodes::Unauthorized,
@@ -437,7 +462,8 @@ static int buildResourceSearchList(const ResourcePattern& target,
     return size;
 }
 
-bool AuthorizationSession::isAuthorizedToChangeOwnPasswordAsUser(const UserName& userName) {
+bool AuthorizationSession::isAuthorizedToChangeAsUser(const UserName& userName,
+                                                      ActionType actionType) {
     User* user = lookupUser(userName);
     if (!user) {
         return false;
@@ -450,23 +476,17 @@ bool AuthorizationSession::isAuthorizedToChangeOwnPasswordAsUser(const UserName&
     for (int i = 0; i < resourceSearchListLength; ++i) {
         actions.addAllActionsFromSet(user->getActionsForResource(resourceSearchList[i]));
     }
-    return actions.contains(ActionType::changeOwnPassword);
+    return actions.contains(actionType);
+}
+
+bool AuthorizationSession::isAuthorizedToChangeOwnPasswordAsUser(const UserName& userName) {
+    return AuthorizationSession::isAuthorizedToChangeAsUser(userName,
+                                                            ActionType::changeOwnPassword);
 }
 
 bool AuthorizationSession::isAuthorizedToChangeOwnCustomDataAsUser(const UserName& userName) {
-    User* user = lookupUser(userName);
-    if (!user) {
-        return false;
-    }
-    ResourcePattern resourceSearchList[resourceSearchListCapacity];
-    const int resourceSearchListLength = buildResourceSearchList(
-        ResourcePattern::forDatabaseName(userName.getDB()), resourceSearchList);
-
-    ActionSet actions;
-    for (int i = 0; i < resourceSearchListLength; ++i) {
-        actions.addAllActionsFromSet(user->getActionsForResource(resourceSearchList[i]));
-    }
-    return actions.contains(ActionType::changeOwnCustomData);
+    return AuthorizationSession::isAuthorizedToChangeAsUser(userName,
+                                                            ActionType::changeOwnCustomData);
 }
 
 bool AuthorizationSession::isAuthenticatedAsUserWithRole(const RoleName& roleName) {

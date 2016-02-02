@@ -29,11 +29,12 @@
 
 #pragma once
 
+#include <cstdint>
 #include <string>
 
-#include "mongo/platform/cstdint.h"
-#include "mongo/platform/process_id.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/platform/process_id.h"
+#include "mongo/util/concurrency/mutex.h"
 
 namespace mongo {
 
@@ -221,7 +222,7 @@ private:
     };
 
     ProcessId _pid;
-    static mongo::mutex _sysInfoLock;
+    static stdx::mutex _sysInfoLock;
 
     static bool checkNumaEnabled();
 

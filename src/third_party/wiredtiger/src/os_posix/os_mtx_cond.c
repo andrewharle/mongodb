@@ -41,11 +41,13 @@ err:	__wt_free(session, cond);
 }
 
 /*
- * __wt_cond_wait --
- *	Wait on a mutex, optionally timing out.
+ * __wt_cond_wait_signal --
+ *	Wait on a mutex, optionally timing out.  If we get it
+ *	before the time out period expires, let the caller know.
  */
 int
-__wt_cond_wait(WT_SESSION_IMPL *session, WT_CONDVAR *cond, uint64_t usecs)
+__wt_cond_wait_signal(
+    WT_SESSION_IMPL *session, WT_CONDVAR *cond, uint64_t usecs, bool *signalled)
 {
 	struct timespec ts;
 	WT_DECL_RET;
@@ -54,6 +56,7 @@ __wt_cond_wait(WT_SESSION_IMPL *session, WT_CONDVAR *cond, uint64_t usecs)
 	locked = false;
 
 	/* Fast path if already signalled. */
+	*signalled = true;
 	if (__wt_atomic_addi32(&cond->waiters, 1) == 0)
 		return (0);
 
@@ -73,9 +76,9 @@ __wt_cond_wait(WT_SESSION_IMPL *session, WT_CONDVAR *cond, uint64_t usecs)
 	if (usecs > 0) {
 		WT_ERR(__wt_epoch(session, &ts));
 		ts.tv_sec += (time_t)
-		    (((uint64_t)ts.tv_nsec + 1000 * usecs) / WT_BILLION);
+		    (((uint64_t)ts.tv_nsec + WT_THOUSAND * usecs) / WT_BILLION);
 		ts.tv_nsec = (long)
-		    (((uint64_t)ts.tv_nsec + 1000 * usecs) % WT_BILLION);
+		    (((uint64_t)ts.tv_nsec + WT_THOUSAND * usecs) % WT_BILLION);
 		ret = pthread_cond_timedwait(&cond->cond, &cond->mtx, &ts);
 	} else
 		ret = pthread_cond_wait(&cond->cond, &cond->mtx);
@@ -88,8 +91,10 @@ __wt_cond_wait(WT_SESSION_IMPL *session, WT_CONDVAR *cond, uint64_t usecs)
 #ifdef ETIME
 	    ret == ETIME ||
 #endif
-	    ret == ETIMEDOUT)
+	    ret == ETIMEDOUT) {
+		*signalled = false;
 		ret = 0;
+	}
 
 	(void)__wt_atomic_subi32(&cond->waiters, 1);
 

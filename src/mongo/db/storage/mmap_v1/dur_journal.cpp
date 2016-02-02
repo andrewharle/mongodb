@@ -34,27 +34,28 @@
 
 #include "mongo/db/storage/mmap_v1/dur_journal.h"
 
-#include <boost/static_assert.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/filesystem/operations.hpp>
 
 #include "mongo/base/init.h"
+#include "mongo/config.h"
 #include "mongo/db/client.h"
+#include "mongo/db/storage/mmap_v1/mmap.h"
 #include "mongo/db/storage/mmap_v1/aligned_builder.h"
+#include "mongo/db/storage/mmap_v1/compress.h"
 #include "mongo/db/storage/mmap_v1/dur_journalformat.h"
 #include "mongo/db/storage/mmap_v1/dur_journalimpl.h"
 #include "mongo/db/storage/mmap_v1/dur_stats.h"
+#include "mongo/db/storage/mmap_v1/logfile.h"
 #include "mongo/db/storage/mmap_v1/mmap_v1_options.h"
-#include "mongo/db/storage_options.h"
+#include "mongo/db/storage/paths.h"
+#include "mongo/db/storage/storage_options.h"
 #include "mongo/platform/random.h"
 #include "mongo/util/checksum.h"
-#include "mongo/util/compress.h"
 #include "mongo/util/exit.h"
 #include "mongo/util/file.h"
 #include "mongo/util/hex.h"
 #include "mongo/util/log.h"
-#include "mongo/util/logfile.h"
-#include "mongo/util/mmap.h"
 #include "mongo/util/mongoutils/str.h"
 #include "mongo/util/net/listen.h"  // getelapsedtimemillis
 #include "mongo/util/progress_meter.h"
@@ -77,7 +78,7 @@ namespace dur {
 // work.  (and should as-is)
 // --smallfiles makes the limit small.
 
-#if defined(_DEBUG)
+#if defined(MONGO_CONFIG_DEBUG_BUILD)
 unsigned long long DataLimitPerJournalFile = 128 * 1024 * 1024;
 #elif defined(__APPLE__)
 // assuming a developer box if OS X
@@ -95,12 +96,12 @@ MONGO_INITIALIZER(InitializeJournalingParams)(InitializerContext* context) {
     return Status::OK();
 }
 
-BOOST_STATIC_ASSERT(sizeof(Checksum) == 16);
-BOOST_STATIC_ASSERT(sizeof(JHeader) == 8192);
-BOOST_STATIC_ASSERT(sizeof(JSectHeader) == 20);
-BOOST_STATIC_ASSERT(sizeof(JSectFooter) == 32);
-BOOST_STATIC_ASSERT(sizeof(JEntry) == 12);
-BOOST_STATIC_ASSERT(sizeof(LSNFile) == 88);
+static_assert(sizeof(Checksum) == 16, "sizeof(Checksum) == 16");
+static_assert(sizeof(JHeader) == 8192, "sizeof(JHeader) == 8192");
+static_assert(sizeof(JSectHeader) == 20, "sizeof(JSectHeader) == 20");
+static_assert(sizeof(JSectFooter) == 32, "sizeof(JSectFooter) == 32");
+static_assert(sizeof(JEntry) == 12, "sizeof(JEntry) == 12");
+static_assert(sizeof(LSNFile) == 88, "sizeof(LSNFile) == 88");
 
 bool usingPreallocate = false;
 
@@ -161,9 +162,9 @@ bool JSectFooter::checkHash(const void* begin, int len) const {
 
 namespace {
 SecureRandom* mySecureRandom = NULL;
-mongo::mutex mySecureRandomMutex("JHeader-SecureRandom");
+stdx::mutex mySecureRandomMutex;
 int64_t getMySecureRandomNumber() {
-    scoped_lock lk(mySecureRandomMutex);
+    stdx::lock_guard<stdx::mutex> lk(mySecureRandomMutex);
     if (!mySecureRandom)
         mySecureRandom = SecureRandom::create();
     return mySecureRandom->nextInt64();
@@ -192,7 +193,7 @@ Journal j;
 
 const unsigned long long LsnShutdownSentinel = ~((unsigned long long)0);
 
-Journal::Journal() : _curLogFileMutex("JournalLfMutex") {
+Journal::Journal() {
     _written = 0;
     _nextFileNumber = 0;
     _curLogFile = 0;
@@ -278,7 +279,7 @@ void Journal::cleanup(bool _log) {
     if (_log)
         log() << "journalCleanup..." << endl;
     try {
-        SimpleMutex::scoped_lock lk(_curLogFileMutex);
+        stdx::lock_guard<SimpleMutex> lk(_curLogFileMutex);
         closeCurrentJournalFile();
         removeJournalFiles();
     } catch (std::exception& e) {
@@ -389,11 +390,12 @@ void _preallocateFiles() {
         boost::filesystem::path filepath = preallocPath(i);
 
         unsigned long long limit = DataLimitPerJournalFile;
-        if (debug && i == 1) {
-            // moving 32->64, the prealloc files would be short.  that is "ok", but we want to
-            // exercise that case, so we force exercising here when _DEBUG is set by arbitrarily
-            // stopping prealloc at a low limit for a file.  also we want to be able to change in
-            // the future the constant without a lot of work anyway.
+        if (kDebugBuild && i == 1) {
+            // moving 32->64, the prealloc files would be short.  that is "ok", but we
+            // want to exercise that case, so we force exercising here when
+            // MONGO_CONFIG_DEBUG_BUILD is set by arbitrarily stopping prealloc at a
+            // low limit for a file.  also we want to be able to change in the future
+            // the constant without a lot of work anyway.
             limit = 16 * 1024 * 1024;
         }
         preallocateFile(filepath, limit);
@@ -554,7 +556,7 @@ void Journal::init() {
 
 void Journal::open() {
     verify(MongoFile::notifyPreFlush == preFlush);
-    SimpleMutex::scoped_lock lk(_curLogFileMutex);
+    stdx::lock_guard<SimpleMutex> lk(_curLogFileMutex);
     _open();
 }
 
@@ -692,8 +694,6 @@ void Journal::removeUnneededJournalFiles() {
 }
 
 void Journal::_rotate() {
-    _curLogFileMutex.dassertLocked();
-
     if (inShutdown() || !_curLogFile)
         return;
 
@@ -774,7 +774,7 @@ void Journal::journal(const JSectHeader& h, const AlignedBuilder& uncompressed) 
     }
 
     try {
-        SimpleMutex::scoped_lock lk(_curLogFileMutex);
+        stdx::lock_guard<SimpleMutex> lk(_curLogFileMutex);
 
         // must already be open -- so that _curFileId is correct for previous buffer building
         verify(_curLogFile);

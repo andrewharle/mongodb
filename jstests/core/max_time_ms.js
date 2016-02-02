@@ -31,8 +31,8 @@ assert.doesNotThrow(function() { cursor.itcount(); },
 //
 // Simple positive test for getmore:
 // - Issue a find() that returns 2 batches: a fast batch, then a slow batch.
-// - The find() has a 2-second time limit; the first batch should run "instantly", but the second
-//   batch takes ~6 seconds, so the getmore should be aborted.
+// - The find() has a 1-second time limit; the first batch should run "instantly", but the second
+//   batch takes ~15 seconds, so the getmore should be aborted.
 //
 
 t.drop();
@@ -40,12 +40,12 @@ t.insert([{},{},{}]); // fast batch
 t.insert([{slow: true},{slow: true},{slow: true}]); // slow batch
 cursor = t.find({$where: function() {
     if (this.slow) {
-        sleep(2*1000);
+        sleep(5*1000);
     }
     return true;
 }});
 cursor.batchSize(3);
-cursor.maxTimeMS(2*1000);
+cursor.maxTimeMS(1000);
 assert.doesNotThrow(function() { cursor.next(); cursor.next(); cursor.next(); },
                     [],
                     "expected batch 1 (query) to not hit the time limit");
@@ -205,9 +205,15 @@ cursor._ensureSpecial();
 assert.eq(0, cursor.next().ok);
 
 // Verify that the $maxTimeMS query option can't be sent with $query-wrapped commands.
-cursor = t.getDB().$cmd.find({ping: 1}).limit(-1).maxTimeMS(0);
-cursor._ensureSpecial();
-assert.eq(0, cursor.next().ok);
+// the shell will throw here as it will validate itself when sending the command.
+// The server uses the same logic.
+// TODO: rewrite to use runCommandWithMetadata when we have a shell helper so that
+// we can test server side validation.
+assert.throws(function() {
+  cursor = t.getDB().$cmd.find({ping: 1}).limit(-1).maxTimeMS(0);
+  cursor._ensureSpecial();
+  cursor.next();
+});
 
 //
 // Tests for fail points maxTimeAlwaysTimeOut and maxTimeNeverTimeOut.

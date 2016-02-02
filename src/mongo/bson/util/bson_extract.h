@@ -33,13 +33,15 @@
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsontypes.h"
+#include "mongo/db/repl/optime.h"
+#include "mongo/stdx/functional.h"
 
 namespace mongo {
 
 class BSONObj;
 class BSONElement;
 class OID;
-class OpTime;
+class Timestamp;
 
 /**
  * Finds an element named "fieldName" in "object".
@@ -47,9 +49,7 @@ class OpTime;
  * Returns Status::OK() and sets "*outElement" to the found element on success.  Returns
  * ErrorCodes::NoSuchKey if there are no matches.
  */
-Status bsonExtractField(const BSONObj& object,
-                        const StringData& fieldName,
-                        BSONElement* outElement);
+Status bsonExtractField(const BSONObj& object, StringData fieldName, BSONElement* outElement);
 
 /**
  * Finds an element named "fieldName" in "object".
@@ -60,7 +60,7 @@ Status bsonExtractField(const BSONObj& object,
  * Status::OK(), the resulting value of "*outElement" is undefined.
  */
 Status bsonExtractTypedField(const BSONObj& object,
-                             const StringData& fieldName,
+                             StringData fieldName,
                              BSONType type,
                              BSONElement* outElement);
 
@@ -72,7 +72,7 @@ Status bsonExtractTypedField(const BSONObj& object,
  * if the type of the matching element is not Bool or a number type.  For return values other
  * than Status::OK(), the resulting value of "*out" is undefined.
  */
-Status bsonExtractBooleanField(const BSONObj& object, const StringData& fieldName, bool* out);
+Status bsonExtractBooleanField(const BSONObj& object, StringData fieldName, bool* out);
 
 /**
  * Finds an element named "fieldName" in "object" that represents an integral value.
@@ -84,7 +84,7 @@ Status bsonExtractBooleanField(const BSONObj& object, const StringData& fieldNam
  * representation.  For return values other than Status::OK(), the resulting value of "*out" is
  * undefined.
  */
-Status bsonExtractIntegerField(const BSONObj& object, const StringData& fieldName, long long* out);
+Status bsonExtractIntegerField(const BSONObj& object, StringData fieldName, long long* out);
 
 /**
  * Finds a string-typed element named "fieldName" in "object" and stores its value in "out".
@@ -94,17 +94,31 @@ Status bsonExtractIntegerField(const BSONObj& object, const StringData& fieldNam
  * if the type of the matching element is not String.  For return values other than
  * Status::OK(), the resulting value of "*out" is undefined.
  */
-Status bsonExtractStringField(const BSONObj& object, const StringData& fieldName, std::string* out);
+Status bsonExtractStringField(const BSONObj& object, StringData fieldName, std::string* out);
+
 
 /**
- * Finds an OpTime-typed element named "fieldName" in "object" and stores its value in "out".
+ * Finds an object-typed field named "fieldName" in "object" that represents an OpTime.
+ *
+ * The OpTime objects have two fields, a Timestamp ts and numeric term.
  *
  * Returns Status::OK() and sets *out to the found element's OpTime value on success.  Returns
- * ErrorCodes::NoSuchKey if there are no matches for "fieldName", and ErrorCodes::TypeMismatch
- * if the type of the matching element is not OpTime.  For return values other than
+ * ErrorCodes::NoSuchKey if there are no matches for "fieldName" or either subobject field is
+ * missing, and ErrorCodes::TypeMismatch if the type of the matching element is not Object, the ts
+ * subfield is not Timestamp, or the term subfield is not numeric.  For return values other than
  * Status::OK(), the resulting value of "*out" is undefined.
  */
-Status bsonExtractOpTimeField(const BSONObj& object, const StringData& fieldName, OpTime* out);
+Status bsonExtractOpTimeField(const BSONObj& object, StringData fieldName, repl::OpTime* out);
+
+/**
+ * Finds an Timestamp-typed element named "fieldName" in "object" and stores its value in "out".
+ *
+ * Returns Status::OK() and sets *out to the found element's Timestamp value on success. Returns
+ * ErrorCodes::NoSuchKey if there are no matches for "fieldName", and ErrorCodes::TypeMismatch
+ * if the type of the matching element is not Timestamp.  For return values other than
+ * Status::OK(), the resulting value of "*out" is undefined.
+ */
+Status bsonExtractTimestampField(const BSONObj& object, StringData fieldName, Timestamp* out);
 
 /**
  * Finds an OID-typed element named "fieldName" in "object" and stores its value in "out".
@@ -114,7 +128,7 @@ Status bsonExtractOpTimeField(const BSONObj& object, const StringData& fieldName
  * if the type of the matching element is not OID.  For return values other than Status::OK(),
  * the resulting value of "*out" is undefined.
  */
-Status bsonExtractOIDField(const BSONObj& object, const StringData& fieldName, OID* out);
+Status bsonExtractOIDField(const BSONObj& object, StringData fieldName, OID* out);
 
 /**
  * Finds a bool-like element named "fieldName" in "object".
@@ -127,7 +141,7 @@ Status bsonExtractOIDField(const BSONObj& object, const StringData& fieldName, O
  * boolean or number, returns ErrorCodes::TypeMismatch.
  */
 Status bsonExtractBooleanFieldWithDefault(const BSONObj& object,
-                                          const StringData& fieldName,
+                                          StringData fieldName,
                                           bool defaultValue,
                                           bool* out);
 
@@ -142,7 +156,7 @@ Status bsonExtractBooleanFieldWithDefault(const BSONObj& object,
  * ErrorCodes::BadValue.
  */
 Status bsonExtractIntegerFieldWithDefault(const BSONObj& object,
-                                          const StringData& fieldName,
+                                          StringData fieldName,
                                           long long defaultValue,
                                           long long* out);
 
@@ -157,8 +171,8 @@ Status bsonExtractIntegerFieldWithDefault(const BSONObj& object,
  * string, returns ErrorCodes::TypeMismatch.
  */
 Status bsonExtractStringFieldWithDefault(const BSONObj& object,
-                                         const StringData& fieldName,
-                                         const StringData& defaultValue,
+                                         StringData fieldName,
+                                         StringData defaultValue,
                                          std::string* out);
 
 /**
@@ -170,8 +184,32 @@ Status bsonExtractStringFieldWithDefault(const BSONObj& object,
  * values other than Status::OK(), the resulting value of *out is undefined.
  */
 Status bsonExtractOIDFieldWithDefault(const BSONObj& object,
-                                      const StringData& fieldName,
+                                      StringData fieldName,
                                       const OID& defaultValue,
                                       OID* out);
+
+/**
+ * Finds an element named "fieldName" in "object" that represents an integral value for which
+ * 'pred' is true.
+ *
+ * If a field named "fieldName" is present and is a value of numeric type with an exact 64-bit
+ * integer representation, returns that representation in *out and returns Status::OK().
+ * If there is no field named "fieldName", stores defaultValue into *out and returns Status::OK().
+ * If the field is found, but has non-numeric type, returns ErrorCodes::TypeMismatch.
+ * If the value has numeric type, but cannot be represented as a 64-bit integer, returns BadValue.
+ * If the parsed value (or default) fails the predicate, returns ErrorCodes::BadValue.
+ */
+Status bsonExtractIntegerFieldWithDefaultIf(const BSONObj& object,
+                                            StringData fieldName,
+                                            long long defaultValue,
+                                            stdx::function<bool(long long)> pred,
+                                            const std::string& predDescription,
+                                            long long* out);
+
+Status bsonExtractIntegerFieldWithDefaultIf(const BSONObj& object,
+                                            StringData fieldName,
+                                            long long defaultValue,
+                                            stdx::function<bool(long long)> pred,
+                                            long long* out);
 
 }  // namespace mongo

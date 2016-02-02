@@ -4,6 +4,8 @@
  * from a separate input database while authenticated to both.
  */
 
+(function() {
+
 function doMapReduce(connection, outputDb) {
     // clean output db and run m/r
     outputDb.numbers_out.drop();
@@ -34,7 +36,7 @@ function doMapReduce(connection, outputDb) {
 function assertSuccess(configDb, outputDb) {
     adminDb.printShardingStatus();
     assert.eq(outputDb.numbers_out.count(), 50, "map/reduce failed");
-    assert.eq(configDb.collections.findOne().dropped, false, "no sharded collections");
+    assert( ! configDb.collections.findOne().dropped, "no sharded collections");
 }
 
 function assertFailure(configDb, outputDb) {
@@ -43,14 +45,12 @@ function assertFailure(configDb, outputDb) {
 }
 
 
-var st = new ShardingTest( testName = "mrShardedOutputAuth",
-                           numShards = 1,
-                           verboseLevel = 0,
-                           numMongos = 1,
-                           { extraOptions : {"keyFile" : "jstests/libs/key1"} }
-                         );
+var st = new ShardingTest({ name: "mrShardedOutputAuth",
+                            shards: 1,
+                            mongos: 1,
+                            other: { extraOptions : {"keyFile" : "jstests/libs/key1"} } });
 
-// setup the users to the input, output and admin databases
+// Setup the users to the input, output and admin databases
 var mongos = st.s;
 var adminDb = mongos.getDB("admin");
 adminDb.createUser({user: "user", pwd: "pass", roles: jsTest.adminUserRoles});
@@ -67,14 +67,14 @@ inputDb.createUser({user: "user", pwd: "pass", roles: jsTest.basicUserRoles});
 var outputDb = authenticatedConn.getDB("output");
 outputDb.createUser({user: "user", pwd: "pass", roles: jsTest.basicUserRoles});
 
-// setup the input db
+// Setup the input db
 inputDb.numbers.drop();
 for (var i = 0; i < 50; i++) {
     inputDb.numbers.insert({ num : i }); 
 }
 assert.eq(inputDb.numbers.count(), 50);
 
-// setup a connection authenticated to both input and output db
+// Setup a connection authenticated to both input and output db
 var inputOutputAuthConn = new Mongo(mongos.host);
 inputOutputAuthConn.getDB('input').auth("user", "pass");
 inputOutputAuthConn.getDB('output').auth("user", "pass");
@@ -94,3 +94,5 @@ doMapReduce(outputAuthConn, outputDb);
 assertFailure(configDb, outputDb);
 
 st.stop();
+
+})();

@@ -43,6 +43,10 @@ class UpdateRequest;
  * via the parseRequest() method. A ParsedUpdate can then be used to retrieve a PlanExecutor
  * capable of executing the update.
  *
+ * It is invalid to request that the UpdateStage return the prior or newly-updated version of a
+ * document during a multi-update. It is also invalid to request that a ProjectionStage be
+ * applied to the UpdateStage if the UpdateStage would not return any document.
+ *
  * No locks need to be held during parsing.
  *
  * The query part of the update is parsed to a CanonicalQuery, and the update part is parsed
@@ -103,7 +107,7 @@ public:
     /**
      * Releases ownership of the canonical query to the caller.
      */
-    CanonicalQuery* releaseParsedQuery();
+    std::unique_ptr<CanonicalQuery> releaseParsedQuery();
 
 private:
     /**
@@ -126,7 +130,7 @@ private:
     UpdateDriver _driver;
 
     // Parsed query object, or NULL if the query proves to be an id hack query.
-    std::auto_ptr<CanonicalQuery> _canonicalQuery;
+    std::unique_ptr<CanonicalQuery> _canonicalQuery;
 };
 
 }  // namespace mongo

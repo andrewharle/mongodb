@@ -28,13 +28,14 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
 #include <list>
+#include <memory>
 
 #include "mongo/db/jsobj.h"
 #include "mongo/db/exec/plan_stage.h"
 #include "mongo/db/exec/working_set.h"
 #include "mongo/db/query/canonical_query.h"
+#include "mongo/db/query/query_planner_params.h"
 #include "mongo/db/query/query_solution.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/storage/record_fetcher.h"
@@ -50,61 +51,61 @@ class PlanYieldPolicy;
  * Preconditions: Valid RecordId.
  *
  */
-class CachedPlanStage : public PlanStage {
+class CachedPlanStage final : public PlanStage {
 public:
-    /**
-     * Takes ownership of 'mainChild', 'mainQs', 'backupChild', and 'backupQs'.
-     */
     CachedPlanStage(OperationContext* txn,
                     Collection* collection,
                     WorkingSet* ws,
                     CanonicalQuery* cq,
                     const QueryPlannerParams& params,
                     size_t decisionWorks,
-                    PlanStage* mainChild,
-                    QuerySolution* mainQs,
-                    PlanStage* backupChild = NULL,
-                    QuerySolution* backupQs = NULL);
+                    PlanStage* root);
 
-    virtual ~CachedPlanStage();
+    bool isEOF() final;
 
-    virtual bool isEOF();
+    StageState work(WorkingSetID* out) final;
 
-    virtual StageState work(WorkingSetID* out);
+    void doInvalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) final;
 
-    virtual void saveState();
-    virtual void restoreState(OperationContext* opCtx);
-    virtual void invalidate(OperationContext* txn, const RecordId& dl, InvalidationType type);
-
-    virtual std::vector<PlanStage*> getChildren() const;
-
-    virtual StageType stageType() const {
+    StageType stageType() const final {
         return STAGE_CACHED_PLAN;
     }
 
-    virtual PlanStageStats* getStats();
+    std::unique_ptr<PlanStageStats> getStats() final;
 
-    virtual const CommonStats* getCommonStats();
-
-    virtual const SpecificStats* getSpecificStats();
+    const SpecificStats* getSpecificStats() const final;
 
     static const char* kStageType;
-
-    void kill();
 
     /**
      * Runs the cached plan for a trial period, yielding during the trial period according to
      * 'yieldPolicy'.
      *
-     * If the performance is lower than expected, the old plan is evicted and a new plan is
-     * selected from scratch (again yielding according to 'yieldPolicy'). Otherwise, the cached
-     * plan is run.
+     * Feedback from the trial period is passed to the plan cache. If the performance is lower
+     * than expected, the old plan is evicted and a new plan is selected from scratch (again
+     * yielding according to 'yieldPolicy'). Otherwise, the cached plan is run.
      */
     Status pickBestPlan(PlanYieldPolicy* yieldPolicy);
 
 private:
-    PlanStage* getActiveChild() const;
-    void updateCache();
+    /**
+     * Passes stats from the trial period run of the cached plan to the plan cache.
+     *
+     * If the plan cache entry is deleted before we get a chance to update it, then this
+     * is a no-op.
+     */
+    void updatePlanCache();
+
+    /**
+     * Uses the QueryPlanner and the MultiPlanStage to re-generate candidate plans for this
+     * query and select a new winner.
+     *
+     * We fallback to a new plan if updatePlanCache() tells us that the performance was worse
+     * than anticipated during the trial period.
+     *
+     * We only write the result of re-planning to the plan cache if 'shouldCache' is true.
+     */
+    Status replan(PlanYieldPolicy* yieldPolicy, bool shouldCache);
 
     /**
      * May yield during the cached plan stage's trial period or replanning phases.
@@ -113,61 +114,24 @@ private:
      */
     Status tryYield(PlanYieldPolicy* yieldPolicy);
 
-    /**
-     * Uses the QueryPlanner and the MultiPlanStage to re-generate candidate plans for this
-     * query and select a new winner.
-     *
-     * We fallback to a new plan if, based on the number of works during the trial period that
-     * put the plan in the cache, the performance was worse than anticipated during the trial
-     * period.
-     *
-     * We only write the result of re-planning to the plan cache if 'shouldCache' is true.
-     */
-    Status replan(PlanYieldPolicy* yieldPolicy, bool shouldCache);
-
-    // Not owned here.
-    OperationContext* _txn;
-
-    // Not owned here.
+    // Not owned. Must be non-null.
     Collection* _collection;
 
-    // Not owned here.
+    // Not owned.
     WorkingSet* _ws;
 
-    // Not owned here.
+    // Not owned.
     CanonicalQuery* _canonicalQuery;
 
     QueryPlannerParams _plannerParams;
-
-    // Whether or not the cached plan trial period and replanning is enabled.
-    const bool _replanningEnabled;
 
     // The number of work cycles taken to decide on a winning plan when the plan was first
     // cached.
     size_t _decisionWorks;
 
-    // Owned by us. Must be deleted after the corresponding PlanStage trees, as
-    // those trees point into the query solutions.
-    boost::scoped_ptr<QuerySolution> _mainQs;
-    boost::scoped_ptr<QuerySolution> _backupQs;
-
-    // Owned by us. Must be deleted before the QuerySolutions above, as these
-    // can point into the QuerySolutions.
-    boost::scoped_ptr<PlanStage> _mainChildPlan;
-    boost::scoped_ptr<PlanStage> _backupChildPlan;
-
-    // True if the main plan errors before producing results
-    // and if a backup plan is available (can happen with blocking sorts)
-    bool _usingBackupChild;
-
-    // True if the childPlan has produced results yet.
-    bool _alreadyProduced;
-
-    // Have we updated the cache with our plan stats yet?
-    bool _updatedCache;
-
-    // Has this query been killed?
-    bool _killed;
+    // If we fall back to re-planning the query, and there is just one resulting query solution,
+    // that solution is owned here.
+    std::unique_ptr<QuerySolution> _replannedQs;
 
     // Any results produced during trial period execution are kept here.
     std::list<WorkingSetID> _results;
@@ -176,10 +140,9 @@ private:
     // to use to pull the record into memory. We take ownership of the RecordFetcher here,
     // deleting it after we've had a chance to do the fetch. For timing-based yields, we
     // just pass a NULL fetcher.
-    boost::scoped_ptr<RecordFetcher> _fetcher;
+    std::unique_ptr<RecordFetcher> _fetcher;
 
     // Stats
-    CommonStats _commonStats;
     CachedPlanStats _specificStats;
 };
 

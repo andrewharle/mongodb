@@ -43,6 +43,7 @@
 
 #include "mongo/base/status.h"
 #include "mongo/bson/util/builder.h"
+#include "mongo/config.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/server_parameters.h"
 #include "mongo/logger/log_component.h"
@@ -139,10 +140,9 @@ Status addGeneralServerOptions(moe::OptionSection* options) {
     // Command Line Option | Resulting Verbosity
     // _________________________________________
     // (none)              | 0
-    // --verbose ""        | 0
     // --verbose           | 1
-    // --verbose v         | 1
-    // --verbose vv        | 2 (etc.)
+    // --verbose=v         | 1
+    // --verbose=vv        | 2 (etc.)
     // -v                  | 1
     // -vv                 | 2 (etc.)
     //
@@ -362,14 +362,6 @@ Status addGeneralServerOptions(moe::OptionSection* options) {
                                moe::Switch,
                                "log stack traces for every exception").hidden();
 
-    options->addOptionChaining("enableExperimentalIndexStatsCmd",
-                               "enableExperimentalIndexStatsCmd",
-                               moe::Switch,
-                               "EXPERIMENTAL (UNSUPPORTED). "
-                               "Enable command computing aggregate statistics on indexes.")
-        .hidden()
-        .setSources(moe::SourceAllLegacy);
-
     options->addOptionChaining("enableExperimentalStorageDetailsCmd",
                                "enableExperimentalStorageDetailsCmd",
                                moe::Switch,
@@ -523,12 +515,37 @@ Status validateServerOptions(const moe::Environment& params) {
     }
 #endif
 
-#ifdef MONGO_SSL
+#ifdef MONGO_CONFIG_SSL
     Status ret = validateSSLServerOptions(params);
     if (!ret.isOK()) {
         return ret;
     }
 #endif
+
+    bool haveAuthenticationMechanisms = true;
+    bool hasAuthorizationEnabled = false;
+    if (params.count("security.authenticationMechanisms") &&
+        params["security.authenticationMechanisms"].as<std::vector<std::string>>().empty()) {
+        haveAuthenticationMechanisms = false;
+    }
+    if (params.count("setParameter")) {
+        std::map<std::string, std::string> parameters =
+            params["setParameter"].as<std::map<std::string, std::string>>();
+        auto authMechParameter = parameters.find("authenticationMechanisms");
+        if (authMechParameter != parameters.end() && authMechParameter->second.empty()) {
+            haveAuthenticationMechanisms = false;
+        }
+    }
+    if ((params.count("security.authorization") &&
+         params["security.authorization"].as<std::string>() == "enabled") ||
+        params.count("security.clusterAuthMode") || params.count("security.keyFile") ||
+        params.count("auth")) {
+        hasAuthorizationEnabled = true;
+    }
+    if (hasAuthorizationEnabled && !haveAuthenticationMechanisms) {
+        return Status(ErrorCodes::BadValue,
+                      "Authorization is enabled but no authentication mechanisms are present.");
+    }
 
     return Status::OK();
 }
@@ -729,10 +746,6 @@ Status storeServerOptions(const moe::Environment& params, const std::vector<std:
         }
     }
 
-    if (params.count("enableExperimentalIndexStatsCmd")) {
-        serverGlobalParams.experimental.indexStatsCmdEnabled =
-            params["enableExperimentalIndexStatsCmd"].as<bool>();
-    }
     if (params.count("enableExperimentalStorageDetailsCmd")) {
         serverGlobalParams.experimental.storageDetailsCmdEnabled =
             params["enableExperimentalStorageDetailsCmd"].as<bool>();
@@ -965,7 +978,7 @@ Status storeServerOptions(const moe::Environment& params, const std::vector<std:
         serverGlobalParams.clusterAuthMode.store(ServerGlobalParams::ClusterAuthMode_keyFile);
     }
 
-#ifdef MONGO_SSL
+#ifdef MONGO_CONFIG_SSL
     ret = storeSSLServerOptions(params);
     if (!ret.isOK()) {
         return ret;
@@ -973,11 +986,6 @@ Status storeServerOptions(const moe::Environment& params, const std::vector<std:
 #endif
 
     return Status::OK();
-}
-
-// FIXME: This function will not return the correct value if someone renames the mongos binary
-bool isMongos() {
-    return serverGlobalParams.binaryName == "mongos";
 }
 
 }  // namespace mongo

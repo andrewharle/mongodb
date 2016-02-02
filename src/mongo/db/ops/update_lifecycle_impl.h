@@ -31,9 +31,11 @@
 #include "mongo/base/disallow_copying.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/ops/update_lifecycle.h"
-#include "mongo/db/catalog/collection.h"
+#include "mongo/s/chunk_version.h"
 
 namespace mongo {
+
+class Collection;
 
 class UpdateLifecycleImpl : public UpdateLifecycle {
     MONGO_DISALLOW_COPYING(UpdateLifecycleImpl);
@@ -56,9 +58,10 @@ public:
     virtual const std::vector<FieldRef*>* getImmutableFields() const;
 
 private:
-    Collection* _collection;
     const NamespaceString& _nsString;
-    ChunkVersion _shardVersion;
+    const ChunkVersion _shardVersion;
+
+    Collection* _collection;
 };
 
 } /* namespace mongo */

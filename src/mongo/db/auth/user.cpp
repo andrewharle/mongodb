@@ -84,7 +84,7 @@ const ActionSet User::getActionsForResource(const ResourcePattern& resource) con
 }
 
 User* User::clone() const {
-    std::auto_ptr<User> result(new User(_name));
+    std::unique_ptr<User> result(new User(_name));
     result->_privileges = _privileges;
     result->_roles = _roles;
     result->_credentials = _credentials;

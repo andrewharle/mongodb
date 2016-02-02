@@ -29,22 +29,26 @@
 
 #pragma once
 
+#include <cmath>
+#include <cstdint>
 #include <string.h>  // strlen
 #include <string>
 #include <vector>
 
+#include "mongo/base/data_type_endian.h"
 #include "mongo/base/data_view.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/oid.h"
-#include "mongo/client/export_macros.h"
-#include "mongo/platform/cstdint.h"
-#include "mongo/platform/float_utils.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/config.h"
+#include "mongo/platform/decimal128.h"
+#include "mongo/platform/strnlen.h"
 
 namespace mongo {
-class OpTime;
 class BSONObj;
 class BSONElement;
 class BSONObjBuilder;
+class Timestamp;
 
 typedef BSONElement be;
 typedef BSONObj bo;
@@ -52,7 +56,6 @@ typedef BSONObjBuilder bob;
 
 /* l and r MUST have same type when called: check that first. */
 int compareElementValues(const BSONElement& l, const BSONElement& r);
-
 
 /** BSONElement represents an "element" in a BSONObj.  So for the object { a : 3, b : "abc" },
     'a : 3' is the first element (key+value).
@@ -67,7 +70,7 @@ int compareElementValues(const BSONElement& l, const BSONElement& r);
     value()
     type()
 */
-class MONGO_CLIENT_API BSONElement {
+class BSONElement {
 public:
     /** These functions, which start with a capital letter, throw a MsgAssertionException if the
         element is not of the required type. Example:
@@ -85,6 +88,9 @@ public:
     }
     double Number() const {
         return chk(isNumber()).number();
+    }
+    Decimal128 Decimal() const {
+        return chk(NumberDecimal)._numberDecimal();
     }
     double Double() const {
         return chk(NumberDouble)._numberDouble();
@@ -126,6 +132,9 @@ public:
     void Val(long long& v) const {
         v = Long();
     }
+    void Val(Decimal128& v) const {
+        v = Decimal();
+    }
     void Val(bool& v) const {
         v = Bool();
     }
@@ -150,6 +159,21 @@ public:
         return !eoo();
     }
 
+    /**
+     * True if this element has a value (ie not EOO).
+     *
+     * Makes it easier to check for a field's existence and use it:
+     * if (auto elem = myObj["foo"]) {
+     *     // Use elem
+     * }
+     * else {
+     *     // default behavior
+     * }
+     */
+    explicit operator bool() const {
+        return ok();
+    }
+
     std::string toString(bool includeFieldName = true, bool full = false) const;
     void toString(StringBuilder& s,
                   bool includeFieldName = true,
@@ -164,7 +188,7 @@ public:
 
     /** Returns the type of the element */
     BSONType type() const {
-        const signed char typeByte = ConstDataView(data).readLE<signed char>();
+        const signed char typeByte = ConstDataView(data).read<signed char>();
         return static_cast<BSONType>(typeByte);
     }
 
@@ -195,7 +219,7 @@ public:
     BSONObj wrap() const;
 
     /** Wrap this element up as a singleton object with a new name. */
-    BSONObj wrap(const StringData& newName) const;
+    BSONObj wrap(StringData newName) const;
 
     /** field name of the element.  e.g., for
         name : "Joe"
@@ -249,7 +273,7 @@ public:
         @see Bool(), trueValue()
     */
     Date_t date() const {
-        return Date_t(ConstDataView(value()).readLE<unsigned long long>());
+        return Date_t::fromMillisSinceEpoch(ConstDataView(value()).read<LittleEndian<long long>>());
     }
 
     /** Convert the value to boolean, regardless of its type, in a javascript-like fashion
@@ -265,17 +289,22 @@ public:
 
     /** Return double value for this field. MUST be NumberDouble type. */
     double _numberDouble() const {
-        return ConstDataView(value()).readLE<double>();
+        return ConstDataView(value()).read<LittleEndian<double>>();
     }
 
     /** Return int value for this field. MUST be NumberInt type. */
     int _numberInt() const {
-        return ConstDataView(value()).readLE<int>();
+        return ConstDataView(value()).read<LittleEndian<int>>();
+    }
+
+    /** Return decimal128 value for this field. MUST be NumberDecimal type. */
+    Decimal128 _numberDecimal() const {
+        return Decimal128(ConstDataView(value()).read<LittleEndian<Decimal128::Value>>());
     }
 
     /** Return long long value for this field. MUST be NumberLong type. */
     long long _numberLong() const {
-        return ConstDataView(value()).readLE<long long>();
+        return ConstDataView(value()).read<LittleEndian<long long>>();
     }
 
     /** Retrieve int value for the element safely.  Zero returned if not a number. */
@@ -291,6 +320,9 @@ public:
      *  very large doubles -> LLONG_MAX
      *  very small doubles -> LLONG_MIN  */
     long long safeNumberLong() const;
+
+    /** Retrieve decimal value for the element safely. */
+    Decimal128 numberDecimal() const;
 
     /** Retrieve the numeric value of the element.  If not of a numeric type, returns 0.
         Note: casts to double, data loss may occur with large (>52 bit) NumberLong values.
@@ -319,12 +351,12 @@ public:
         @return std::string size including terminating null
     */
     int valuestrsize() const {
-        return ConstDataView(value()).readLE<int>();
+        return ConstDataView(value()).read<LittleEndian<int>>();
     }
 
     // for objects the size *includes* the size of the size field
     size_t objsize() const {
-        return ConstDataView(value()).readLE<uint32_t>();
+        return ConstDataView(value()).read<LittleEndian<uint32_t>>();
     }
 
     /** Get a string's value.  Also gives you start of the real data for an embedded object.
@@ -362,7 +394,7 @@ public:
      *  This INCLUDES the null char at the end */
     int codeWScopeCodeLen() const {
         massert(16178, "not codeWScope", type() == CodeWScope);
-        return ConstDataView(value() + 4).readLE<int>();
+        return ConstDataView(value() + 4).read<LittleEndian<int>>();
     }
 
     /** Get the scope SavedContext of a CodeWScope data element.
@@ -498,16 +530,23 @@ public:
         }
     }
 
+    Timestamp timestamp() const {
+        if (type() == mongo::Date || type() == bsonTimestamp) {
+            return Timestamp(ConstDataView(value()).read<LittleEndian<unsigned long long>>().value);
+        }
+        return Timestamp();
+    }
+
     Date_t timestampTime() const {
-        unsigned long long t = ConstDataView(value() + 4).readLE<unsigned int>();
-        return t * 1000;
+        unsigned long long t = ConstDataView(value() + 4).read<LittleEndian<unsigned int>>();
+        return Date_t::fromMillisSinceEpoch(t * 1000);
     }
     unsigned int timestampInc() const {
-        return ConstDataView(value()).readLE<unsigned int>();
+        return ConstDataView(value()).read<LittleEndian<unsigned int>>();
     }
 
     unsigned long long timestampValue() const {
-        return ConstDataView(value()).readLE<unsigned long long>();
+        return ConstDataView(value()).read<LittleEndian<unsigned long long>>();
     }
 
     const char* dbrefNS() const {
@@ -518,7 +557,7 @@ public:
     const mongo::OID dbrefOID() const {
         uassert(10064, "not a dbref", type() == DBRef);
         const char* start = value();
-        start += 4 + ConstDataView(start).readLE<int>();
+        start += 4 + ConstDataView(start).read<LittleEndian<int>>();
         return mongo::OID::from(start);
     }
 
@@ -571,7 +610,6 @@ public:
           totalSize(-1) {}
 
     std::string _asCode() const;
-    OpTime _opTime() const;
 
     template <typename T>
     bool coerce(T* out) const;
@@ -608,6 +646,8 @@ inline bool BSONElement::trueValue() const {
             return _numberLong() != 0;
         case NumberDouble:
             return _numberDouble() != 0;
+        case NumberDecimal:
+            return _numberDecimal().isNotEqual(Decimal128(0));
         case NumberInt:
             return _numberInt() != 0;
         case mongo::Bool:
@@ -616,11 +656,9 @@ inline bool BSONElement::trueValue() const {
         case jstNULL:
         case Undefined:
             return false;
-
         default:
-            ;
+            return true;
     }
-    return true;
 }
 
 /** @return true if element is of a numeric type. */
@@ -628,6 +666,9 @@ inline bool BSONElement::isNumber() const {
     switch (type()) {
         case NumberLong:
         case NumberDouble:
+#ifdef MONGO_CONFIG_EXPERIMENTAL_DECIMAL_SUPPORT
+        case NumberDecimal:
+#endif
         case NumberInt:
             return true;
         default:
@@ -640,6 +681,7 @@ inline bool BSONElement::isSimpleType() const {
         case NumberLong:
         case NumberDouble:
         case NumberInt:
+        case NumberDecimal:
         case mongo::String:
         case mongo::Bool:
         case mongo::Date:
@@ -647,6 +689,21 @@ inline bool BSONElement::isSimpleType() const {
             return true;
         default:
             return false;
+    }
+}
+
+inline Decimal128 BSONElement::numberDecimal() const {
+    switch (type()) {
+        case NumberDouble:
+            return Decimal128(_numberDouble());
+        case NumberInt:
+            return Decimal128(_numberInt());
+        case NumberLong:
+            return Decimal128(_numberLong());
+        case NumberDecimal:
+            return _numberDecimal();
+        default:
+            return 0;
     }
 }
 
@@ -658,13 +715,15 @@ inline double BSONElement::numberDouble() const {
             return _numberInt();
         case NumberLong:
             return _numberLong();
+        case NumberDecimal:
+            return _numberDecimal().toDouble();
         default:
             return 0;
     }
 }
 
-/** Retrieve int value for the element safely.  Zero returned if not a number.
- * Converted to int if another numeric type. */
+/** Retrieve int value for the element safely.  Zero returned if not a number. Converted to int if
+ * another numeric type. */
 inline int BSONElement::numberInt() const {
     switch (type()) {
         case NumberDouble:
@@ -673,6 +732,8 @@ inline int BSONElement::numberInt() const {
             return _numberInt();
         case NumberLong:
             return (int)_numberLong();
+        case NumberDecimal:
+            return _numberDecimal().toInt();
         default:
             return 0;
     }
@@ -687,22 +748,23 @@ inline long long BSONElement::numberLong() const {
             return _numberInt();
         case NumberLong:
             return _numberLong();
+        case NumberDecimal:
+            return _numberDecimal().toLong();
         default:
             return 0;
     }
 }
 
-/** Like numberLong() but with well-defined behavior for doubles that
+/** Like numberLong() but with well-defined behavior for doubles and decimals that
  *  are NaNs, or too large/small to be represented as long longs.
  *  NaNs -> 0
- *  very large doubles -> LLONG_MAX
- *  very small doubles -> LLONG_MIN  */
+ *  very large values -> LLONG_MAX
+ *  very small values -> LLONG_MIN  */
 inline long long BSONElement::safeNumberLong() const {
-    double d;
     switch (type()) {
-        case NumberDouble:
-            d = numberDouble();
-            if (isNaN(d)) {
+        case NumberDouble: {
+            double d = numberDouble();
+            if (std::isnan(d)) {
                 return 0;
             }
             if (d > (double)std::numeric_limits<long long>::max()) {
@@ -711,6 +773,21 @@ inline long long BSONElement::safeNumberLong() const {
             if (d < std::numeric_limits<long long>::min()) {
                 return std::numeric_limits<long long>::min();
             }
+            return numberLong();
+        }
+        case NumberDecimal: {
+            Decimal128 d = numberDecimal();
+            if (d.isNaN()) {
+                return 0;
+            }
+            if (d.isGreater(Decimal128(std::numeric_limits<long long>::max()))) {
+                return std::numeric_limits<long long>::max();
+            }
+            if (d.isLess(Decimal128(std::numeric_limits<long long>::min()))) {
+                return std::numeric_limits<long long>::min();
+            }
+            return numberLong();
+        }
         default:
             return numberLong();
     }

@@ -27,7 +27,6 @@
 
 #pragma once
 
-#include <boost/shared_ptr.hpp>
 #include <string>
 #include <vector>
 
@@ -70,13 +69,18 @@ public:
                     mongo::BSONObj& info,
                     int options = 0);
 
-    std::auto_ptr<mongo::DBClientCursor> query(const std::string& ns,
-                                               mongo::Query query = mongo::Query(),
-                                               int nToReturn = 0,
-                                               int nToSkip = 0,
-                                               const mongo::BSONObj* fieldsToReturn = 0,
-                                               int queryOptions = 0,
-                                               int batchSize = 0);
+    rpc::UniqueReply runCommandWithMetadata(StringData database,
+                                            StringData command,
+                                            const BSONObj& metadata,
+                                            const BSONObj& commandArgs) final;
+
+    std::unique_ptr<mongo::DBClientCursor> query(const std::string& ns,
+                                                 mongo::Query query = mongo::Query(),
+                                                 int nToReturn = 0,
+                                                 int nToSkip = 0,
+                                                 const mongo::BSONObj* fieldsToReturn = 0,
+                                                 int queryOptions = 0,
+                                                 int batchSize = 0);
 
     uint64_t getSockCreationMicroSec() const;
 
@@ -124,7 +128,6 @@ public:
               bool assertOk = true,
               std::string* actualServer = 0);
     void say(mongo::Message& toSend, bool isRetry = false, std::string* actualServer = 0);
-    void sayPiggyBack(mongo::Message& toSend);
     bool lazySupported() const;
 
 private:

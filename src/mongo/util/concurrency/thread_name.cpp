@@ -27,61 +27,56 @@
 
 #include "mongo/platform/basic.h"
 
-#include "mongo/platform/compiler.h"
 #include "mongo/util/concurrency/thread_name.h"
 
 #include <boost/thread/tss.hpp>
+
+#include "mongo/base/init.h"
+#include "mongo/platform/atomic_word.h"
+#include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
 
 using std::string;
 
 namespace {
-boost::thread_specific_ptr<std::string> _threadName;
 
-#if defined(_WIN32)
+boost::thread_specific_ptr<std::string> threadName;
+AtomicInt64 nextUnnamedThreadId{1};
 
-#define MS_VC_EXCEPTION 0x406D1388
-#pragma pack(push, 8)
-typedef struct tagTHREADNAME_INFO {
-    DWORD dwType;      // Must be 0x1000.
-    LPCSTR szName;     // Pointer to name (in user addr space).
-    DWORD dwThreadID;  // Thread ID (-1=caller thread).
-    DWORD dwFlags;     // Reserved for future use, must be zero.
-} THREADNAME_INFO;
-#pragma pack(pop)
-
-void setWinThreadName(const char* name) {
-    /* is the sleep here necessary???
-       Sleep(10);
-       */
-    THREADNAME_INFO info;
-    info.dwType = 0x1000;
-    info.szName = name;
-    info.dwThreadID = -1;
-    info.dwFlags = 0;
-    __try {
-        RaiseException(MS_VC_EXCEPTION, 0, sizeof(info) / sizeof(ULONG_PTR), (ULONG_PTR*)&info);
-    }
-    __except(EXCEPTION_EXECUTE_HANDLER) {}
+// It is unsafe to access threadName before its dynamic initialization has completed. Use
+// the execution of mongo initializers (which only happens once we have entered main, and
+// therefore after dynamic initialization is complete) to signal that it is safe to use
+// 'threadName'.
+bool mongoInitializersHaveRun{};
+MONGO_INITIALIZER(ThreadNameInitializer)(InitializerContext*) {
+    mongoInitializersHaveRun = true;
+    // The global initializers should only ever be run from main, so setting thread name
+    // here makes sense.
+    setThreadName("main");
+    return Status::OK();
 }
-#endif
 
 }  // namespace
 
 void setThreadName(StringData name) {
-    _threadName.reset(new string(name.rawData(), name.size()));
-
-#if defined(DEBUG) && defined(_WIN32)
-    // naming might be expensive so don't do "conn*" over and over
-    setWinThreadName(_threadName.get()->c_str());
-#endif
+    invariant(mongoInitializersHaveRun);
+    threadName.reset(new string(name.toString()));
 }
 
-const std::string& getThreadName() {
+const string& getThreadName() {
+    if (MONGO_unlikely(!mongoInitializersHaveRun)) {
+        // 'getThreadName' has been called before dynamic initialization for this
+        // translation unit has completed, so return a fallback value rather than accessing
+        // the 'threadName' variable, which requires dynamic initialization. We assume that
+        // we are in the 'main' thread.
+        static const std::string kFallback = "main";
+        return kFallback;
+    }
+
     std::string* s;
-    while (!(s = _threadName.get())) {
-        setThreadName("");
+    while (!(s = threadName.get())) {
+        setThreadName(std::string(str::stream() << "thread" << nextUnnamedThreadId.fetchAndAdd(1)));
     }
     return *s;
 }

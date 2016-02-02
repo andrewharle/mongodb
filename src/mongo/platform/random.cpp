@@ -26,6 +26,7 @@
  *    delete this exception statement from all source files in the program,
  *    then also delete it in the license file.
  */
+
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kDefault
 
 #include "mongo/platform/basic.h"
@@ -34,16 +35,21 @@
 
 #include <string.h>
 
-#ifndef _WIN32
+#ifdef _WIN32
+#include <bcrypt.h>
+#else
 #include <errno.h>
 #endif
 
 #define _CRT_RAND_S
 #include <cstdlib>
-#include <fstream>
 #include <iostream>
+#include <fstream>
+#include <limits>
 
+#include <mongo/stdx/memory.h>
 #include <mongo/util/log.h>
+#include <mongo/util/assert_util.h>
 
 namespace mongo {
 
@@ -85,43 +91,70 @@ int64_t PseudoRandom::nextInt64() {
     return (a << 32) | b;
 }
 
+double PseudoRandom::nextCanonicalDouble() {
+    double result;
+    do {
+        auto generated = static_cast<uint64_t>(nextInt64());
+        result = static_cast<double>(generated) / std::numeric_limits<uint64_t>::max();
+    } while (result == 1.0);
+    return result;
+}
+
 // --- SecureRandom ----
 
 SecureRandom::~SecureRandom() {}
 
 #ifdef _WIN32
 class WinSecureRandom : public SecureRandom {
-    virtual ~WinSecureRandom() {}
-    int64_t nextInt64() {
-        uint32_t a, b;
-        if (rand_s(&a)) {
-            abort();
+public:
+    WinSecureRandom() {
+        auto ntstatus = ::BCryptOpenAlgorithmProvider(
+            &_algHandle, BCRYPT_RNG_ALGORITHM, MS_PRIMITIVE_PROVIDER, 0);
+        if (ntstatus != STATUS_SUCCESS) {
+            error() << "Failed to open crypto algorithm provider while creating secure random "
+                       "object; NTSTATUS: " << ntstatus;
+            fassertFailed(28815);
         }
-        if (rand_s(&b)) {
-            abort();
-        }
-        return (static_cast<int64_t>(a) << 32) | b;
     }
+
+    virtual ~WinSecureRandom() {
+        auto ntstatus = ::BCryptCloseAlgorithmProvider(_algHandle, 0);
+        if (ntstatus != STATUS_SUCCESS) {
+            warning() << "Failed to close crypto algorithm provider destroying secure random "
+                         "object; NTSTATUS: " << ntstatus;
+        }
+    }
+
+    int64_t nextInt64() {
+        int64_t value;
+        auto ntstatus =
+            ::BCryptGenRandom(_algHandle, reinterpret_cast<PUCHAR>(&value), sizeof(value), 0);
+        if (ntstatus != STATUS_SUCCESS) {
+            error() << "Failed to generate random number from secure random object; NTSTATUS: "
+                    << ntstatus;
+            fassertFailed(28814);
+        }
+        return value;
+    }
+
+private:
+    BCRYPT_ALG_HANDLE _algHandle;
 };
 
 SecureRandom* SecureRandom::create() {
     return new WinSecureRandom();
 }
 
-#elif defined(__linux__) || defined(__sunos__) || defined(__APPLE__) || defined(__freebsd__)
+#elif defined(__linux__) || defined(__sun) || defined(__APPLE__) || defined(__FreeBSD__)
 
 class InputStreamSecureRandom : public SecureRandom {
 public:
     InputStreamSecureRandom(const char* fn) {
-        _in = new std::ifstream(fn, std::ios::binary | std::ios::in);
+        _in = stdx::make_unique<std::ifstream>(fn, std::ios::binary | std::ios::in);
         if (!_in->is_open()) {
             error() << "cannot open " << fn << " " << strerror(errno);
             fassertFailed(28839);
         }
-    }
-
-    ~InputStreamSecureRandom() {
-        delete _in;
     }
 
     int64_t nextInt64() {
@@ -135,14 +168,14 @@ public:
     }
 
 private:
-    std::ifstream* _in;
+    std::unique_ptr<std::ifstream> _in;
 };
 
 SecureRandom* SecureRandom::create() {
     return new InputStreamSecureRandom("/dev/urandom");
 }
 
-#elif defined(__openbsd__)
+#elif defined(__OpenBSD__)
 
 class Arc4SecureRandom : public SecureRandom {
 public:

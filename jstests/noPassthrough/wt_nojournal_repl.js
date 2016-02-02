@@ -26,9 +26,7 @@ var contains = function(logLines, func) {
 }
 
 // This test can only be run if the storageEngine is wiredTiger
-if ( typeof(TestData) != "object" || 
-     !TestData.storageEngine ||
-     TestData.storageEngine != "wiredTiger" ) {
+if (jsTest.options().storageEngine && jsTest.options().storageEngine !== "wiredTiger") {
     jsTestLog("Skipping test because storageEngine is not wiredTiger");
 }
 else {
@@ -42,7 +40,7 @@ else {
     config.members[0].priority = 1;
     replTest.initiate(config);
 
-    var masterDB = replTest.getMaster().getDB("test");
+    var masterDB = replTest.getPrimary().getDB("test");
     var secondary1 = replTest.liveNodes.slaves[0];
 
     jsTestLog("add some data to collection foo");
@@ -56,7 +54,7 @@ else {
     assert.commandWorked(secondary1.getDB("admin").runCommand({fsync : 1}));
 
     jsTestLog("kill -9 secondary 1");
-    stopMongod(secondary1.port, /*signal*/ 9);
+    MongoRunner.stopMongod(secondary1.port, /*signal*/ 9);
 
     jsTestLog("add some data to a new collection bar");
     for (var i=0; i<100; i++) {

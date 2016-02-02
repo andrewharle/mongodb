@@ -30,16 +30,14 @@
 
 #include "mongo/base/disallow_copying.h"
 #include "mongo/base/init.h"
-#include "mongo/client/auth_helpers.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authorization_manager_global.h"
 #include "mongo/db/server_parameters.h"
+#include "mongo/db/service_context.h"
 #include "mongo/util/assert_util.h"
 
 namespace mongo {
 namespace {
-AuthorizationManager* globalAuthManager = NULL;
-
 class AuthzVersionParameter : public ServerParameter {
     MONGO_DISALLOW_COPYING(AuthzVersionParameter);
 
@@ -53,7 +51,7 @@ public:
 MONGO_INITIALIZER_GENERAL(AuthzSchemaParameter,
                           MONGO_NO_PREREQUISITES,
                           ("BeginStartupOptionParsing"))(InitializerContext*) {
-    new AuthzVersionParameter(ServerParameterSet::getGlobal(), auth::schemaVersionServerParameter);
+    new AuthzVersionParameter(ServerParameterSet::getGlobal(), authSchemaVersionServerParameter);
     return Status::OK();
 }
 
@@ -75,21 +73,14 @@ Status AuthzVersionParameter::set(const BSONElement& newValueElement) {
 Status AuthzVersionParameter::setFromString(const std::string& newValueString) {
     return Status(ErrorCodes::InternalError, "set called on unsettable server parameter");
 }
+
 }  // namespace
 
-void setGlobalAuthorizationManager(AuthorizationManager* authManager) {
-    fassert(16841, globalAuthManager == NULL);
-    globalAuthManager = authManager;
-}
-
-void clearGlobalAuthorizationManager() {
-    fassert(16843, globalAuthManager != NULL);
-    delete globalAuthManager;
-    globalAuthManager = NULL;
-}
+const std::string authSchemaVersionServerParameter = "authSchemaVersion";
 
 AuthorizationManager* getGlobalAuthorizationManager() {
-    fassert(16842, globalAuthManager != NULL);
+    AuthorizationManager* globalAuthManager = AuthorizationManager::get(getGlobalServiceContext());
+    fassert(16842, globalAuthManager != nullptr);
     return globalAuthManager;
 }
 

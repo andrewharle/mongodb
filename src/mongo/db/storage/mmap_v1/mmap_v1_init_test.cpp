@@ -28,12 +28,11 @@
 
 #include "mongo/platform/basic.h"
 
-#include <boost/scoped_ptr.hpp>
 
-#include "mongo/db/global_environment_experiment.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/json.h"
 #include "mongo/db/storage/storage_engine_metadata.h"
-#include "mongo/db/storage_options.h"
+#include "mongo/db/storage/storage_options.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/mongoutils/str.h"
 
@@ -44,11 +43,11 @@ using namespace mongo;
 class MMAPV1FactoryTest : public mongo::unittest::Test {
 private:
     virtual void setUp() {
-        GlobalEnvironmentExperiment* globalEnv = getGlobalEnvironment();
+        ServiceContext* globalEnv = getGlobalServiceContext();
         ASSERT_TRUE(globalEnv);
-        ASSERT_TRUE(getGlobalEnvironment()->isRegisteredStorageEngine("mmapv1"));
-        boost::scoped_ptr<StorageFactoriesIterator> sfi(
-            getGlobalEnvironment()->makeStorageFactoriesIterator());
+        ASSERT_TRUE(getGlobalServiceContext()->isRegisteredStorageEngine("mmapv1"));
+        std::unique_ptr<StorageFactoriesIterator> sfi(
+            getGlobalServiceContext()->makeStorageFactoriesIterator());
         ASSERT_TRUE(sfi);
         bool found = false;
         while (sfi->more()) {

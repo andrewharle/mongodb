@@ -28,11 +28,10 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
 #include <vector>
 
 #include "mongo/base/disallow_copying.h"
-#include "mongo/bson/optime.h"
+#include "mongo/bson/timestamp.h"
 #include "mongo/db/repl/replica_set_config.h"
 #include "mongo/db/repl/replication_executor.h"
 #include "mongo/db/repl/scatter_gather_algorithm.h"
@@ -60,13 +59,13 @@ public:
 
     class Algorithm : public ScatterGatherAlgorithm {
     public:
-        Algorithm(OpTime lastOpTimeApplied,
+        Algorithm(Timestamp lastOpTimeApplied,
                   const ReplicaSetConfig& rsConfig,
                   int selfIndex,
                   const std::vector<HostAndPort>& targets);
         virtual ~Algorithm();
-        virtual std::vector<ReplicationExecutor::RemoteCommandRequest> getRequests() const;
-        virtual void processResponse(const ReplicationExecutor::RemoteCommandRequest& request,
+        virtual std::vector<executor::RemoteCommandRequest> getRequests() const;
+        virtual void processResponse(const executor::RemoteCommandRequest& request,
                                      const ResponseStatus& response);
         virtual bool hasReceivedSufficientResponses() const;
         ElectionAbortReason shouldAbortElection() const;
@@ -84,8 +83,8 @@ public:
         // Number of failed voter responses so far.
         int _failedVoterResponses;
 
-        // Last OpTime applied by the caller; used in the Fresh command
-        const OpTime _lastOpTimeApplied;
+        // Last Timestamp applied by the caller; used in the Fresh command
+        const Timestamp _lastOpTimeApplied;
 
         // Config to use for this check
         const ReplicaSetConfig _rsConfig;
@@ -123,7 +122,7 @@ public:
      **/
     StatusWith<ReplicationExecutor::EventHandle> start(
         ReplicationExecutor* executor,
-        const OpTime& lastOpTimeApplied,
+        const Timestamp& lastOpTimeApplied,
         const ReplicaSetConfig& currentConfig,
         int selfIndex,
         const std::vector<HostAndPort>& targets,
@@ -156,8 +155,8 @@ public:
     long long getOriginalConfigVersion() const;
 
 private:
-    boost::scoped_ptr<Algorithm> _algorithm;
-    boost::scoped_ptr<ScatterGatherRunner> _runner;
+    std::unique_ptr<Algorithm> _algorithm;
+    std::unique_ptr<ScatterGatherRunner> _runner;
     long long _originalConfigVersion;
     bool _isCanceled;
 };

@@ -45,8 +45,8 @@ class KVDatabaseCatalogEntry::AddCollectionChange : public RecoveryUnit::Change 
 public:
     AddCollectionChange(OperationContext* opCtx,
                         KVDatabaseCatalogEntry* dce,
-                        const StringData& collection,
-                        const StringData& ident,
+                        StringData collection,
+                        StringData ident,
                         bool dropOnRollback)
         : _opCtx(opCtx),
           _dce(dce),
@@ -79,8 +79,8 @@ class KVDatabaseCatalogEntry::RemoveCollectionChange : public RecoveryUnit::Chan
 public:
     RemoveCollectionChange(OperationContext* opCtx,
                            KVDatabaseCatalogEntry* dce,
-                           const StringData& collection,
-                           const StringData& ident,
+                           StringData collection,
+                           StringData ident,
                            KVCollectionCatalogEntry* entry,
                            bool dropOnCommit)
         : _opCtx(opCtx),
@@ -111,7 +111,7 @@ public:
     const bool _dropOnCommit;
 };
 
-KVDatabaseCatalogEntry::KVDatabaseCatalogEntry(const StringData& db, KVStorageEngine* engine)
+KVDatabaseCatalogEntry::KVDatabaseCatalogEntry(StringData db, KVStorageEngine* engine)
     : DatabaseCatalogEntry(db), _engine(engine) {}
 
 KVDatabaseCatalogEntry::~KVDatabaseCatalogEntry() {
@@ -170,8 +170,7 @@ void KVDatabaseCatalogEntry::getCollectionNamespaces(std::list<std::string>* out
     }
 }
 
-CollectionCatalogEntry* KVDatabaseCatalogEntry::getCollectionCatalogEntry(
-    const StringData& ns) const {
+CollectionCatalogEntry* KVDatabaseCatalogEntry::getCollectionCatalogEntry(StringData ns) const {
     CollectionMap::const_iterator it = _collections.find(ns.toString());
     if (it == _collections.end()) {
         return NULL;
@@ -180,7 +179,7 @@ CollectionCatalogEntry* KVDatabaseCatalogEntry::getCollectionCatalogEntry(
     return it->second;
 }
 
-RecordStore* KVDatabaseCatalogEntry::getRecordStore(const StringData& ns) const {
+RecordStore* KVDatabaseCatalogEntry::getRecordStore(StringData ns) const {
     CollectionMap::const_iterator it = _collections.find(ns.toString());
     if (it == _collections.end()) {
         return NULL;
@@ -190,7 +189,7 @@ RecordStore* KVDatabaseCatalogEntry::getRecordStore(const StringData& ns) const 
 }
 
 Status KVDatabaseCatalogEntry::createCollection(OperationContext* txn,
-                                                const StringData& ns,
+                                                StringData ns,
                                                 const CollectionOptions& options,
                                                 bool allocateDefaultSpace) {
     invariant(txn->lockState()->isDbLockedForMode(name(), MODE_X));
@@ -261,8 +260,8 @@ void KVDatabaseCatalogEntry::reinitCollectionAfterRepair(OperationContext* opCtx
 }
 
 Status KVDatabaseCatalogEntry::renameCollection(OperationContext* txn,
-                                                const StringData& fromNS,
-                                                const StringData& toNS,
+                                                StringData fromNS,
+                                                StringData toNS,
                                                 bool stayTemp) {
     invariant(txn->lockState()->isDbLockedForMode(name(), MODE_X));
 
@@ -310,7 +309,7 @@ Status KVDatabaseCatalogEntry::renameCollection(OperationContext* txn,
     return Status::OK();
 }
 
-Status KVDatabaseCatalogEntry::dropCollection(OperationContext* opCtx, const StringData& ns) {
+Status KVDatabaseCatalogEntry::dropCollection(OperationContext* opCtx, StringData ns) {
     invariant(opCtx->lockState()->isDbLockedForMode(name(), MODE_X));
 
     CollectionMap::const_iterator it = _collections.find(ns.toString());

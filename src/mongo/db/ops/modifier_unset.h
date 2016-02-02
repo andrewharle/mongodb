@@ -28,7 +28,6 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
 #include <string>
 
 #include "mongo/base/disallow_copying.h"
@@ -65,9 +64,7 @@ public:
      * Locates the field to be removed under the 'root' element, if it exist, and fills in
      * 'execInfo' accordingly. Return OK if successful or a status describing the error.
      */
-    virtual Status prepare(mutablebson::Element root,
-                           const StringData& matchedField,
-                           ExecInfo* execInfo);
+    virtual Status prepare(mutablebson::Element root, StringData matchedField, ExecInfo* execInfo);
 
     /**
      * Removes the found element from the document. If such element was inside an array,
@@ -94,7 +91,7 @@ private:
     // prepare() was issued and until a log() is issued. The document this mod is
     // being prepared against must be live throughout all the calls.
     struct PreparedState;
-    boost::scoped_ptr<PreparedState> _preparedState;
+    std::unique_ptr<PreparedState> _preparedState;
 };
 
 }  // namespace mongo

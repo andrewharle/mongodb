@@ -5,6 +5,8 @@
  *  Part 3: Change the TTL expireAfterSeconds field and check successful propogation to secondary.
  */
 
+load("jstests/replsets/rslib.js");
+
 var rt = new ReplSetTest( { name : "ttl_repl" , nodes: 2 } );
 
 /******** Part 1 ***************/
@@ -12,7 +14,7 @@ var rt = new ReplSetTest( { name : "ttl_repl" , nodes: 2 } );
 // setup set
 var nodes = rt.startSet();
 rt.initiate();
-var master = rt.getMaster();
+var master = rt.getPrimary();
 rt.awaitSecondaryNodes();
 var slave1 = rt.liveNodes.slaves[0];
 
@@ -64,8 +66,9 @@ assert.eq( 6 , slave1col.count() , "docs not deleted on secondary" );
 
 // add a new secondary, wait for it to fully join
 var slave = rt.add();
-rt.reInitiate();
-rt.awaitSecondaryNodes();
+var config = rt.getReplSetConfig();
+config.version = 2;
+reconfig(rt, config);
 
 var slave2col = slave.getDB( 'd' )[ 'c' ];
 

@@ -29,25 +29,24 @@
 
 #pragma once
 
-#include <boost/noncopyable.hpp>
+#include <cstdint>
 #include <stack>
 
 #include "mongo/client/dbclientinterface.h"
-#include "mongo/client/export_macros.h"
 #include "mongo/platform/atomic_word.h"
-#include "mongo/platform/cstdint.h"
 #include "mongo/util/background.h"
+#include "mongo/util/concurrency/mutex.h"
 
 namespace mongo {
 
-class Shard;
+class BSONObjBuilder;
 class DBConnectionPool;
 
 /**
  * not thread safe
  * thread safety is handled by DBConnectionPool
  */
-class MONGO_CLIENT_API PoolForHost {
+class PoolForHost {
 public:
     // Sentinel value indicating pool has no cleanup limit
     static const int kPoolSizeUnlimited;
@@ -56,13 +55,15 @@ public:
         : _created(0),
           _minValidCreationTimeMicroSec(0),
           _type(ConnectionString::INVALID),
-          _maxPoolSize(kPoolSizeUnlimited) {}
+          _maxPoolSize(kPoolSizeUnlimited),
+          _checkedOut(0) {}
 
     PoolForHost(const PoolForHost& other)
         : _created(other._created),
           _minValidCreationTimeMicroSec(other._minValidCreationTimeMicroSec),
           _type(other._type),
-          _maxPoolSize(other._maxPoolSize) {
+          _maxPoolSize(other._maxPoolSize),
+          _checkedOut(other._checkedOut) {
         verify(_created == 0);
         verify(other._pool.size() == 0);
     }
@@ -85,6 +86,10 @@ public:
 
     int numAvailable() const {
         return (int)_pool.size();
+    }
+
+    int numInUse() const {
+        return _checkedOut;
     }
 
     void createdOne(DBClientBase* base);
@@ -147,6 +152,9 @@ private:
 
     // The maximum number of connections we'll save in the pool
     int _maxPoolSize;
+
+    // The number of currently active connections from this pool
+    int _checkedOut;
 };
 
 class DBConnectionHook {
@@ -173,7 +181,7 @@ public:
        c.conn()...
     }
 */
-class MONGO_CLIENT_API DBConnectionPool : public PeriodicTask {
+class DBConnectionPool : public PeriodicTask {
 public:
     DBConnectionPool();
     ~DBConnectionPool();
@@ -266,7 +274,7 @@ private:
 
     typedef std::map<PoolKey, PoolForHost, poolKeyCompare> PoolMap;  // servername -> pool
 
-    mongo::mutex _mutex;
+    stdx::mutex _mutex;
     std::string _name;
 
     // The maximum number of connections we'll save in the pool per-host
@@ -281,9 +289,9 @@ private:
     std::list<DBConnectionHook*>* _hooks;
 };
 
-extern MONGO_CLIENT_API DBConnectionPool pool;
+class AScopedConnection {
+    MONGO_DISALLOW_COPYING(AScopedConnection);
 
-class MONGO_CLIENT_API AScopedConnection : boost::noncopyable {
 public:
     AScopedConnection() {
         _numConnections.fetchAndAdd(1);
@@ -316,22 +324,13 @@ private:
    clean up nicely (i.e. the socket gets closed automatically when the
    scopeddbconnection goes out of scope).
 */
-class MONGO_CLIENT_API ScopedDbConnection : public AScopedConnection {
+class ScopedDbConnection : public AScopedConnection {
 public:
     /** the main constructor you want to use
         throws UserException if can't connect
         */
-    explicit ScopedDbConnection(const std::string& host, double socketTimeout = 0)
-        : _host(host), _conn(pool.get(host, socketTimeout)), _socketTimeout(socketTimeout) {
-        _setSocketTimeout();
-    }
-
-    explicit ScopedDbConnection(const ConnectionString& host, double socketTimeout = 0)
-        : _host(host.toString()),
-          _conn(pool.get(host, socketTimeout)),
-          _socketTimeout(socketTimeout) {
-        _setSocketTimeout();
-    }
+    explicit ScopedDbConnection(const std::string& host, double socketTimeout = 0);
+    explicit ScopedDbConnection(const ConnectionString& host, double socketTimeout = 0);
 
     ScopedDbConnection() : _host(""), _conn(0), _socketTimeout(0) {}
 
@@ -341,9 +340,9 @@ public:
         _setSocketTimeout();
     }
 
-    static void clearPool();
-
     ~ScopedDbConnection();
+
+    static void clearPool();
 
     /** get the associated connection object */
     DBClientBase* operator->() {
@@ -385,18 +384,7 @@ public:
         we can't be sure we fully read all expected data of a reply on the socket.  so
         we don't try to reuse the connection in that situation.
     */
-    void done() {
-        if (!_conn)
-            return;
-
-        /* we could do this, but instead of assume one is using autoreconnect mode on the connection
-        if ( _conn->isFailed() )
-            kill();
-        else
-        */
-        pool.release(_host, _conn);
-        _conn = 0;
-    }
+    void done();
 
 private:
     void _setSocketTimeout();

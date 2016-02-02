@@ -22,23 +22,24 @@
 
 #include "mongo/dbtests/dbtests.h"
 
-#include <boost/scoped_ptr.hpp>
 
+#include "mongo/db/catalog/collection.h"
 #include "mongo/db/db.h"
+#include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/exec/oplogstart.h"
 #include "mongo/db/exec/working_set.h"
-#include "mongo/db/global_environment_experiment.h"
-#include "mongo/db/query/canonical_query.h"
-#include "mongo/db/repl/oplog.h"
-#include "mongo/db/repl/repl_settings.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/operation_context_impl.h"
-#include "mongo/db/catalog/collection.h"
+#include "mongo/db/query/canonical_query.h"
+#include "mongo/db/repl/repl_settings.h"
 
 namespace OplogStartTests {
 
-using boost::scoped_ptr;
+using std::unique_ptr;
 using std::string;
+
+static const NamespaceString nss("unittests.oplogstarttests");
 
 class Base {
 public:
@@ -46,37 +47,27 @@ public:
         : _txn(),
           _scopedXact(&_txn, MODE_X),
           _lk(_txn.lockState()),
-          _wunit(&_txn),
-          _context(&_txn, ns()),
+          _context(&_txn, nss.ns()),
           _client(&_txn) {
-        Collection* c = _context.db()->getCollection(ns());
+        Collection* c = _context.db()->getCollection(nss.ns());
         if (!c) {
-            c = _context.db()->createCollection(&_txn, ns());
+            WriteUnitOfWork wuow(&_txn);
+            c = _context.db()->createCollection(&_txn, nss.ns());
+            wuow.commit();
         }
         ASSERT(c->getIndexCatalog()->haveIdIndex(&_txn));
     }
 
     ~Base() {
-        client()->dropCollection(ns());
-        _wunit.commit();
+        client()->dropCollection(nss.ns());
 
         // The OplogStart stage is not allowed to outlive it's RecoveryUnit.
         _stage.reset();
     }
 
 protected:
-    static const char* ns() {
-        return "unittests.oplogstarttests";
-    }
-    static const char* dbname() {
-        return "unittests";
-    }
-    static const char* collname() {
-        return "oplogstarttests";
-    }
-
     Collection* collection() {
-        return _context.db()->getCollection(ns());
+        return _context.db()->getCollection(nss.ns());
     }
 
     DBDirectClient* client() {
@@ -84,10 +75,9 @@ protected:
     }
 
     void setupFromQuery(const BSONObj& query) {
-        CanonicalQuery* cq;
-        Status s = CanonicalQuery::canonicalize(ns(), query, &cq);
-        ASSERT(s.isOK());
-        _cq.reset(cq);
+        auto statusWithCQ = CanonicalQuery::canonicalize(nss, query);
+        ASSERT_OK(statusWithCQ.getStatus());
+        _cq = std::move(statusWithCQ.getValue());
         _oplogws.reset(new WorkingSet());
         _stage.reset(new OplogStart(&_txn, collection(), _cq->root(), _oplogws.get()));
     }
@@ -100,17 +90,16 @@ protected:
         ASSERT_EQUALS(idEl.numberInt(), expectedId);
     }
 
-    scoped_ptr<CanonicalQuery> _cq;
-    scoped_ptr<WorkingSet> _oplogws;
-    scoped_ptr<OplogStart> _stage;
+    unique_ptr<CanonicalQuery> _cq;
+    unique_ptr<WorkingSet> _oplogws;
+    unique_ptr<OplogStart> _stage;
 
 private:
     // The order of these is important in order to ensure order of destruction
     OperationContextImpl _txn;
     ScopedTransaction _scopedXact;
     Lock::GlobalWrite _lk;
-    WriteUnitOfWork _wunit;
-    Client::Context _context;
+    OldClientContext _context;
 
     DBDirectClient _client;
 };
@@ -125,7 +114,7 @@ class OplogStartIsOldest : public Base {
 public:
     void run() {
         for (int i = 0; i < 10; ++i) {
-            client()->insert(ns(), BSON("_id" << i << "ts" << i));
+            client()->insert(nss.ns(), BSON("_id" << i << "ts" << i));
         }
 
         setupFromQuery(BSON("ts" << BSON("$gte" << 10)));
@@ -149,7 +138,7 @@ class OplogStartIsNewest : public Base {
 public:
     void run() {
         for (int i = 0; i < 10; ++i) {
-            client()->insert(ns(), BSON("_id" << i << "ts" << i));
+            client()->insert(nss.ns(), BSON("_id" << i << "ts" << i));
         }
 
         setupFromQuery(BSON("ts" << BSON("$gte" << 1)));
@@ -176,7 +165,7 @@ class OplogStartIsNewestExtentHop : public Base {
 public:
     void run() {
         for (int i = 0; i < 10; ++i) {
-            client()->insert(ns(), BSON("_id" << i << "ts" << i));
+            client()->insert(nss.ns(), BSON("_id" << i << "ts" << i));
         }
 
         setupFromQuery(BSON("ts" << BSON("$gte" << 1)));
@@ -197,10 +186,10 @@ public:
 class SizedExtentHopBase : public Base {
 public:
     SizedExtentHopBase() {
-        client()->dropCollection(ns());
+        client()->dropCollection(nss.ns());
     }
     virtual ~SizedExtentHopBase() {
-        client()->dropCollection(ns());
+        client()->dropCollection(nss.ns());
     }
 
     void run() {
@@ -230,13 +219,13 @@ protected:
     void buildCollection() {
         BSONObj info;
         // Create a collection with specified extent sizes
-        BSONObj command = BSON("create" << collname() << "capped" << true << "$nExtents"
+        BSONObj command = BSON("create" << nss.coll() << "capped" << true << "$nExtents"
                                         << extentSizes() << "autoIndexId" << false);
-        ASSERT(client()->runCommand(dbname(), command, info));
+        ASSERT(client()->runCommand(nss.db().toString(), command, info));
 
         // Populate documents.
         for (int i = 0; i < numDocs(); ++i) {
-            client()->insert(ns(), BSON("_id" << i << "ts" << i << "payload" << payload8k()));
+            client()->insert(nss.ns(), BSON("_id" << i << "ts" << i << "payload" << payload8k()));
         }
     }
 
@@ -412,7 +401,7 @@ public:
 
         // These tests rely on extent allocation details specific to mmapv1.
         // TODO figure out a way to generically test this.
-        if (getGlobalEnvironment()->getGlobalStorageEngine()->isMmapV1()) {
+        if (getGlobalServiceContext()->getGlobalStorageEngine()->isMmapV1()) {
             add<OplogStartIsNewestExtentHop>();
             add<OplogStartOneEmptyExtent>();
             add<OplogStartTwoEmptyExtents>();

@@ -23,7 +23,8 @@ assert(result.hasOwnProperty('ns'));
 assert(result.hasOwnProperty('millis'));
 assert(result.hasOwnProperty('query'));
 assert.eq('string', typeof(result.query));
-assert(result.query.match(/^{ a: "a+\.\.\." }$/)); // String value is truncated.
+// String value is truncated.
+assert(result.query.match(/filter: { a: "a+\.\.\." } }$/));
 
 assert.commandWorked(coll.getDB().runCommand({profile: 0}));
 coll.getDB().system.profile.drop();
@@ -72,6 +73,7 @@ assert(result.hasOwnProperty('ns'));
 assert(result.hasOwnProperty('millis'));
 assert(result.hasOwnProperty('query'));
 assert.eq('string', typeof(result.query));
-assert(result.query.match(/^{ a0: 1\.0, a1: .*\.\.\.$/)); // Query object itself is truncated.
+// Query object itself is truncated.
+assert(result.query.match(/filter: { a0: 1\.0, a1: .*\.\.\.$/));
 
 assert.commandWorked(coll.getDB().runCommand({profile: 0}));

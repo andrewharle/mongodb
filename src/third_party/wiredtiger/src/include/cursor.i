@@ -32,7 +32,7 @@ __cursor_pos_clear(WT_CURSOR_BTREE *cbt)
 	 * and it's a minimal set of things we need to clear. It would be a
 	 * lot simpler to clear everything, but we call this function a lot.
 	 */
-	cbt->recno = 0;
+	cbt->recno = WT_RECNO_OOB;
 
 	cbt->ins = NULL;
 	cbt->ins_head = NULL;
@@ -41,11 +41,7 @@ __cursor_pos_clear(WT_CURSOR_BTREE *cbt)
 	cbt->cip_saved = NULL;
 	cbt->rip_saved = NULL;
 
-	/*
-	 * Don't clear the active flag, it's owned by the cursor enter/leave
-	 * functions.
-	 */
-	F_CLR(cbt, ~WT_CBT_ACTIVE);
+	F_CLR(cbt, WT_CBT_POSITION_MASK);
 }
 
 /*
@@ -60,7 +56,7 @@ __cursor_enter(WT_SESSION_IMPL *session)
 	 * whether the cache is full.
 	 */
 	if (session->ncursors == 0)
-		WT_RET(__wt_cache_full_check(session));
+		WT_RET(__wt_cache_eviction_check(session, false, NULL));
 	++session->ncursors;
 	return (0);
 }
@@ -93,7 +89,8 @@ __curfile_enter(WT_CURSOR_BTREE *cbt)
 
 	session = (WT_SESSION_IMPL *)cbt->iface.session;
 
-	WT_RET(__cursor_enter(session));
+	if (!F_ISSET(cbt, WT_CBT_NO_TXN))
+		WT_RET(__cursor_enter(session));
 	F_SET(cbt, WT_CBT_ACTIVE);
 	return (0);
 }
@@ -112,7 +109,8 @@ __curfile_leave(WT_CURSOR_BTREE *cbt)
 
 	/* If the cursor was active, deactivate it. */
 	if (F_ISSET(cbt, WT_CBT_ACTIVE)) {
-		__cursor_leave(session);
+		if (!F_ISSET(cbt, WT_CBT_NO_TXN))
+			__cursor_leave(session);
 		F_CLR(cbt, WT_CBT_ACTIVE);
 	}
 
@@ -139,8 +137,72 @@ __curfile_leave(WT_CURSOR_BTREE *cbt)
 }
 
 /*
+ * __wt_curindex_get_valuev --
+ *	Internal implementation of WT_CURSOR->get_value for index cursors
+ */
+static inline int
+__wt_curindex_get_valuev(WT_CURSOR *cursor, va_list ap)
+{
+	WT_CURSOR_INDEX *cindex;
+	WT_DECL_RET;
+	WT_ITEM *item;
+	WT_SESSION_IMPL *session;
+
+	cindex = (WT_CURSOR_INDEX *)cursor;
+	session = (WT_SESSION_IMPL *)cursor->session;
+	WT_CURSOR_NEEDVALUE(cursor);
+
+	if (F_ISSET(cursor, WT_CURSOR_RAW_OK)) {
+		ret = __wt_schema_project_merge(session,
+		    cindex->cg_cursors, cindex->value_plan,
+		    cursor->value_format, &cursor->value);
+		if (ret == 0) {
+			item = va_arg(ap, WT_ITEM *);
+			item->data = cursor->value.data;
+			item->size = cursor->value.size;
+		}
+	} else
+		ret = __wt_schema_project_out(session,
+		    cindex->cg_cursors, cindex->value_plan, ap);
+err:	return (ret);
+}
+
+/*
+ * __wt_curtable_get_valuev --
+ *	Internal implementation of WT_CURSOR->get_value for table cursors.
+ */
+static inline int
+__wt_curtable_get_valuev(WT_CURSOR *cursor, va_list ap)
+{
+	WT_CURSOR *primary;
+	WT_CURSOR_TABLE *ctable;
+	WT_DECL_RET;
+	WT_ITEM *item;
+	WT_SESSION_IMPL *session;
+
+	ctable = (WT_CURSOR_TABLE *)cursor;
+	session = (WT_SESSION_IMPL *)cursor->session;
+	primary = *ctable->cg_cursors;
+	WT_CURSOR_NEEDVALUE(primary);
+
+	if (F_ISSET(cursor, WT_CURSOR_RAW_OK)) {
+		ret = __wt_schema_project_merge(session,
+		    ctable->cg_cursors, ctable->plan,
+		    cursor->value_format, &cursor->value);
+		if (ret == 0) {
+			item = va_arg(ap, WT_ITEM *);
+			item->data = cursor->value.data;
+			item->size = cursor->value.size;
+		}
+	} else
+		ret = __wt_schema_project_out(session,
+		    ctable->cg_cursors, ctable->plan, ap);
+err:	return (ret);
+}
+
+/*
  * __wt_cursor_dhandle_incr_use --
- *	Increment the in-use counter in cursor's data source.
+ *	Increment the in-use counter in the cursor's data source.
  */
 static inline void
 __wt_cursor_dhandle_incr_use(WT_SESSION_IMPL *session)
@@ -157,7 +219,7 @@ __wt_cursor_dhandle_incr_use(WT_SESSION_IMPL *session)
 
 /*
  * __wt_cursor_dhandle_decr_use --
- *	Decrement the in-use counter in cursor's data source.
+ *	Decrement the in-use counter in the cursor's data source.
  */
 static inline void
 __wt_cursor_dhandle_decr_use(WT_SESSION_IMPL *session)
@@ -198,7 +260,13 @@ __cursor_func_init(WT_CURSOR_BTREE *cbt, bool reenter)
 
 	if (!F_ISSET(cbt, WT_CBT_ACTIVE))
 		WT_RET(__curfile_enter(cbt));
-	__wt_txn_cursor_op(session);
+
+	/*
+	 * If this is an ordinary transactional cursor, make sure we are set up
+	 * to read.
+	 */
+	if (!F_ISSET(cbt, WT_CBT_NO_TXN))
+		__wt_txn_cursor_op(session);
 	return (0);
 }
 
@@ -274,7 +342,7 @@ __cursor_row_slot_return(WT_CURSOR_BTREE *cbt, WT_ROW *rip, WT_UPDATE *upd)
 	__wt_cell_unpack(cell, unpack);
 	if (unpack->type == WT_CELL_KEY &&
 	    cbt->rip_saved != NULL && cbt->rip_saved == rip - 1) {
-		WT_ASSERT(session, cbt->tmp.size >= unpack->prefix);
+		WT_ASSERT(session, cbt->row_key->size >= unpack->prefix);
 
 		/*
 		 * Grow the buffer as necessary as well as ensure data has been
@@ -284,22 +352,22 @@ __cursor_row_slot_return(WT_CURSOR_BTREE *cbt, WT_ROW *rip, WT_UPDATE *upd)
 		 * Don't grow the buffer unnecessarily or copy data we don't
 		 * need, truncate the item's data length to the prefix bytes.
 		 */
-		cbt->tmp.size = unpack->prefix;
+		cbt->row_key->size = unpack->prefix;
 		WT_RET(__wt_buf_grow(
-		    session, &cbt->tmp, cbt->tmp.size + unpack->size));
-		memcpy((uint8_t *)cbt->tmp.data + cbt->tmp.size,
+		    session, cbt->row_key, cbt->row_key->size + unpack->size));
+		memcpy((uint8_t *)cbt->row_key->data + cbt->row_key->size,
 		    unpack->data, unpack->size);
-		cbt->tmp.size += unpack->size;
+		cbt->row_key->size += unpack->size;
 	} else {
 		/*
 		 * Call __wt_row_leaf_key_work instead of __wt_row_leaf_key: we
 		 * already did __wt_row_leaf_key's fast-path checks inline.
 		 */
 slow:		WT_RET(__wt_row_leaf_key_work(
-		    session, page, rip, &cbt->tmp, false));
+		    session, page, rip, cbt->row_key, false));
 	}
-	kb->data = cbt->tmp.data;
-	kb->size = cbt->tmp.size;
+	kb->data = cbt->row_key->data;
+	kb->size = cbt->row_key->size;
 	cbt->rip_saved = rip;
 
 value:

@@ -26,13 +26,15 @@
  *    it in the license file.
  */
 
+#include "mongo/platform/basic.h"
+
 #include "mongo/s/write_ops/batch_write_op.h"
 
 #include "mongo/base/error_codes.h"
 
 namespace mongo {
 
-using std::auto_ptr;
+using std::unique_ptr;
 using std::make_pair;
 using std::set;
 using std::stringstream;
@@ -226,7 +228,8 @@ static void cancelBatches(const WriteErrorDetail& why,
     batchMap->clear();
 }
 
-Status BatchWriteOp::targetBatch(const NSTargeter& targeter,
+Status BatchWriteOp::targetBatch(OperationContext* txn,
+                                 const NSTargeter& targeter,
                                  bool recordTargetErrors,
                                  vector<TargetedWriteBatch*>* targetedBatches) {
     //
@@ -285,7 +288,7 @@ Status BatchWriteOp::targetBatch(const NSTargeter& targeter,
         OwnedPointerVector<TargetedWrite> writesOwned;
         vector<TargetedWrite*>& writes = writesOwned.mutableVector();
 
-        Status targetStatus = writeOp.targetWrites(targeter, &writes);
+        Status targetStatus = writeOp.targetWrites(txn, targeter, &writes);
 
         if (!targetStatus.isOK()) {
             WriteErrorDetail targetError;
@@ -401,6 +404,7 @@ Status BatchWriteOp::targetBatch(const NSTargeter& targeter,
 void BatchWriteOp::buildBatchRequest(const TargetedWriteBatch& targetedBatch,
                                      BatchedCommandRequest* request) const {
     request->setNS(_clientRequest->getNS());
+    request->setShouldBypassValidation(_clientRequest->shouldBypassValidation());
 
     const vector<TargetedWrite*>& targetedWrites = targetedBatch.getWrites();
 
@@ -450,11 +454,7 @@ void BatchWriteOp::buildBatchRequest(const TargetedWriteBatch& targetedBatch,
         request->setOrdered(_clientRequest->getOrdered());
     }
 
-    auto_ptr<BatchedRequestMetadata> requestMetadata(new BatchedRequestMetadata());
-    requestMetadata->setShardName(targetedBatch.getEndpoint().shardName);
-    requestMetadata->setShardVersion(targetedBatch.getEndpoint().shardVersion);
-    requestMetadata->setSession(0);
-    request->setMetadata(requestMetadata.release());
+    request->setShardVersion(targetedBatch.getEndpoint().shardVersion);
 }
 
 //
@@ -543,7 +543,7 @@ void BatchWriteOp::noteBatchResponse(const TargetedWriteBatch& targetedBatch,
 
     // Special handling for write concern errors, save for later
     if (response.isWriteConcernErrorSet()) {
-        auto_ptr<ShardWCError> wcError(
+        unique_ptr<ShardWCError> wcError(
             new ShardWCError(targetedBatch.getEndpoint(), *response.getWriteConcernError()));
         _wcErrors.mutableVector().push_back(wcError.release());
     }
@@ -640,7 +640,7 @@ static void toWriteErrorResponse(const WriteErrorDetail& error,
 
     int numErrors = ordered ? 1 : numWrites;
     for (int i = 0; i < numErrors; i++) {
-        auto_ptr<WriteErrorDetail> errorClone(new WriteErrorDetail);
+        unique_ptr<WriteErrorDetail> errorClone(new WriteErrorDetail);
         error.cloneTo(errorClone.get());
         errorClone->setIndex(i);
         writeErrResponse->addToErrDetails(errorClone.release());

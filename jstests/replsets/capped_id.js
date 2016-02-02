@@ -18,9 +18,9 @@ var nodes = replTest.startSet();
 // This will wait for initiation
 replTest.initiate();
 
-// Call getMaster to return a reference to the node that's been
+// Call getPrimary to return a reference to the node that's been
 // elected master
-var master = replTest.getMaster();
+var master = replTest.getPrimary();
 
 // wait for secondaries to be up, since we'll be reading from them
 replTest.awaitSecondaryNodes();
@@ -28,7 +28,7 @@ replTest.awaitSecondaryNodes();
 var slave1 = replTest.liveNodes.slaves[0];
 var slave2 = replTest.liveNodes.slaves[1];
 
-// Calling getMaster made available the liveNodes structure,
+// Calling getPrimary made available the liveNodes structure,
 // which looks like this:
 // liveNodes = {master: masterNode, slaves: [slave1, slave2] }
 printjson( replTest.liveNodes );
@@ -38,6 +38,12 @@ var dbname = "dbname";
 var masterdb = master.getDB( dbname );
 var slave1db = slave1.getDB( dbname );
 var slave2db = slave2.getDB( dbname );
+
+function countIdIndexes(theDB, coll) {
+       return theDB[coll].getIndexes().filter(function(idx) {
+           return friendlyEqual(idx.key, {_id: 1});
+       }).length;
+}
 
 var numtests = 4;
 for( testnum=0; testnum < numtests; testnum++ ){
@@ -70,11 +76,6 @@ for( testnum=0; testnum < numtests; testnum++ ){
         }
         replTest.awaitReplication();
 
-        function countIdIndexes(theDB, coll) {
-               return theDB[coll].getIndexes().filter(function(idx) {
-                   return friendlyEqual(idx.key, {_id: 1});
-               }).length;
-        }
         // make sure _id index exists on primary
         assert.eq( 1 ,
                    countIdIndexes(masterdb, coll),

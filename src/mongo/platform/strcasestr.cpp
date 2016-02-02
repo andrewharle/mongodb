@@ -27,21 +27,21 @@
 
 #include "mongo/platform/strcasestr.h"
 
-#if defined(__sunos__)
+#if defined(__sun)
 #include <dlfcn.h>
 
 #include "mongo/base/init.h"
 #include "mongo/base/status.h"
 #endif
 
-#if defined(_WIN32) || defined(__sunos__)
+#if defined(_WIN32) || defined(__sun)
 
 #include <algorithm>
 #include <cctype>
 #include <cstring>
 #include <string>
 
-#if defined(__sunos__)
+#if defined(__sun)
 #define STRCASESTR_EMULATION_NAME strcasestr_emulation
 #else
 #define STRCASESTR_EMULATION_NAME strcasestr
@@ -72,7 +72,7 @@ const char* STRCASESTR_EMULATION_NAME(const char* haystack, const char* needle) 
     return location ? (haystack + (location - haystackLowerStart)) : NULL;
 }
 
-#if defined(__sunos__)
+#if defined(__sun)
 
 typedef const char* (*StrCaseStrFunc)(const char* haystack, const char* needle);
 static StrCaseStrFunc strcasestr_switcher = mongo::pal::strcasestr_emulation;
@@ -81,14 +81,14 @@ const char* strcasestr(const char* haystack, const char* needle) {
     return strcasestr_switcher(haystack, needle);
 }
 
-#endif  // #if defined(__sunos__)
+#endif  // #if defined(__sun)
 
 }  // namespace pal
 }  // namespace mongo
 
-#endif  // #if defined(_WIN32) || defined(__sunos__)
+#endif  // #if defined(_WIN32) || defined(__sun)
 
-#if defined(__sunos__)
+#if defined(__sun)
 
 namespace mongo {
 
@@ -107,4 +107,4 @@ MONGO_INITIALIZER_GENERAL(SolarisStrCaseCmp,
 
 }  // namespace mongo
 
-#endif  // __sunos__
+#endif  // __sun

@@ -46,14 +46,17 @@ __wt_block_extend(WT_SESSION_IMPL *session, WT_BLOCK *block,
 	bool locked;
 
 	/*
-	 * The locking in this function is messy: the live system is locked when
-	 * we're called, by definition, but that lock may have been acquired by
-	 * our our caller or our caller's caller. If it's our caller's lock and
-	 * we can unlock it before returning (either before extending the file
-	 * or afterward, depending on the call used), then release_lock is set.
+	 * The locking in this function is messy: by definition, the live system
+	 * is locked when we're called, but that lock may have been acquired by
+	 * our caller or our caller's caller. If our caller's lock, release_lock
+	 * comes in set, indicating this function can unlock it before returning
+	 * (either before extending the file or afterward, depending on the call
+	 * used). If it is our caller's caller, then release_lock comes in not
+	 * set, indicating it cannot be released here.
 	 *
-	 * If we unlock, but then find out we need a lock after all, re-acquire
-	 * the lock (and set release_lock so our caller knows to release it).
+	 * If we unlock here, we clear release_lock. But if we then find out we
+	 * need a lock after all, we re-acquire the lock and set release_lock so
+	 * our caller knows to release it.
 	 */
 	locked = true;
 
@@ -247,7 +250,7 @@ __wt_block_write_off(WT_SESSION_IMPL *session, WT_BLOCK *block,
 	 * turn off checksums and assume corrupted blocks won't decompress
 	 * correctly.  However, if compression failed to shrink the block, the
 	 * block wasn't compressed, in which case our caller will tell us to
-	 * checksum the data to detect corruption.   If compression succeeded,
+	 * checksum the data to detect corruption. If compression succeeded,
 	 * we still need to checksum the first WT_BLOCK_COMPRESS_SKIP bytes
 	 * because they're not compressed, both to give salvage a quick test
 	 * of whether a block is useful and to give us a test so we don't lose

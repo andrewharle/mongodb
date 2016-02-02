@@ -36,10 +36,10 @@
 #include "mongo/db/geo/geoconstants.h"
 #include "mongo/db/geo/geometry_container.h"
 #include "mongo/db/geo/geoparser.h"
-#include "mongo/db/index/s2_common.h"
 #include "mongo/db/geo/s2.h"
 #include "mongo/db/index_names.h"
 #include "mongo/db/index/2d_common.h"
+#include "mongo/db/index/s2_common.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
@@ -75,27 +75,16 @@ void addKey(const string& root, const BSONElement& e, BSONObjSet* keys) {
 // Helper functions for getS2Keys
 //
 
-static void S2KeysFromRegion(S2RegionCoverer* coverer,
-                             const S2Region& region,
-                             vector<string>* out) {
-    vector<S2CellId> covering;
-    coverer->GetCovering(region, &covering);
-    for (size_t i = 0; i < covering.size(); ++i) {
-        out->push_back(covering[i].toString());
-    }
-}
-
-
 Status S2GetKeysForElement(const BSONElement& element,
                            const S2IndexingParams& params,
-                           vector<string>* out) {
+                           vector<S2CellId>* out) {
     GeometryContainer geoContainer;
     Status status = geoContainer.parseFromStorage(element);
     if (!status.isOK())
         return status;
 
     S2RegionCoverer coverer;
-    params.configureCoverer(&coverer);
+    params.configureCoverer(geoContainer, &coverer);
 
     // Don't index big polygon
     if (geoContainer.getNativeCRS() == STRICT_SPHERE) {
@@ -119,7 +108,7 @@ Status S2GetKeysForElement(const BSONElement& element,
 
     invariant(geoContainer.hasS2Region());
 
-    S2KeysFromRegion(&coverer, geoContainer.getS2Region(), out);
+    coverer.GetCovering(geoContainer.getS2Region(), out);
     return Status::OK();
 }
 
@@ -133,7 +122,7 @@ void getS2GeoKeys(const BSONObj& document,
                   const S2IndexingParams& params,
                   BSONObjSet* out) {
     for (BSONElementSet::iterator i = elements.begin(); i != elements.end(); ++i) {
-        vector<string> cells;
+        vector<S2CellId> cells;
         Status status = S2GetKeysForElement(*i, params, &cells);
         uassert(16755,
                 str::stream() << "Can't extract geo keys: " << document << "  " << status.reason(),
@@ -143,10 +132,8 @@ void getS2GeoKeys(const BSONObj& document,
                 "Unable to generate keys for (likely malformed) geometry: " + document.toString(),
                 cells.size() > 0);
 
-        for (vector<string>::const_iterator it = cells.begin(); it != cells.end(); ++it) {
-            BSONObjBuilder b;
-            b.append("", *it);
-            out->insert(b.obj());
+        for (vector<S2CellId>::const_iterator it = cells.begin(); it != cells.end(); ++it) {
+            out->insert(S2CellIdToIndexKey(*it, params.indexVersion));
         }
     }
 
@@ -445,8 +432,8 @@ void ExpressionKeysPrivate::getS2Keys(const BSONObj& obj,
 
         BSONObjSet keysForThisField;
         if (IndexNames::GEO_2DSPHERE == e.valuestr()) {
-            if (S2_INDEX_VERSION_2 == params.indexVersion) {
-                // For V2,
+            if (params.indexVersion >= S2_INDEX_VERSION_2) {
+                // For >= V2,
                 // geo: null,
                 // geo: undefined
                 // geo: []
@@ -466,7 +453,7 @@ void ExpressionKeysPrivate::getS2Keys(const BSONObj& obj,
                     }
                 }
 
-                // V2 2dsphere indices require that at least one geo field to be present in a
+                // >= V2 2dsphere indices require that at least one geo field to be present in a
                 // document in order to index it.
                 if (fieldElements.size() > 0) {
                     haveGeoField = true;
@@ -504,16 +491,16 @@ void ExpressionKeysPrivate::getS2Keys(const BSONObj& obj,
         keysToAdd = updatedKeysToAdd;
     }
 
-    // Make sure that if we're V2 there's at least one geo field present in the doc.
-    if (S2_INDEX_VERSION_2 == params.indexVersion) {
+    // Make sure that if we're >= V2 there's at least one geo field present in the doc.
+    if (params.indexVersion >= S2_INDEX_VERSION_2) {
         if (!haveGeoField) {
             return;
         }
     }
 
     if (keysToAdd.size() > params.maxKeysPerInsert) {
-        warning() << "insert of geo object generated lots of keys (" << keysToAdd.size()
-                  << ") consider creating larger buckets. obj=" << obj;
+        warning() << "Insert of geo object generated a high number of keys."
+                  << " num keys: " << keysToAdd.size() << " obj inserted: " << obj;
     }
 
     *keys = keysToAdd;

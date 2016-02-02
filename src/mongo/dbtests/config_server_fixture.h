@@ -39,9 +39,7 @@ namespace mongo {
 
 class CustomDirectClient : public DBDirectClient {
 public:
-    CustomDirectClient(OperationContext* txn) : DBDirectClient(txn) {
-        setWireVersions(minWireVersion, maxWireVersion);
-    }
+    CustomDirectClient(OperationContext* txn) : DBDirectClient(txn) {}
 
     virtual ConnectionString::ConnectionType type() const {
         return ConnectionString::CUSTOM;
@@ -97,11 +95,9 @@ public:
     ConfigServerFixture();
 
     /**
-     * Returns a connection std::string to the virtual config server.
+     * Returns a uniform shard name to use throughout the tests.
      */
-    ConnectionString configSvr() const {
-        return ConnectionString(HostAndPort("$dummy:10000"));
-    }
+    static std::string shardName();
 
     /**
      * Clears all data on the server
@@ -109,12 +105,6 @@ public:
     void clearServer();
 
     void clearVersion();
-    void clearShards();
-    void clearDatabases();
-    void clearCollections();
-    void clearChunks();
-    void clearPings();
-    void clearChangelog();
 
     /**
      * Dumps the contents of the config server to the log.
@@ -122,13 +112,12 @@ public:
     void dumpServer();
 
 protected:
-    virtual void setUp();
-
-    virtual void tearDown();
-
-
     OperationContextImpl _txn;
     CustomDirectClient _client;
     CustomConnectHook* _connectHook;
+
+    virtual void setUp();
+    virtual void tearDown();
 };
-}
+
+}  // namespace mongo

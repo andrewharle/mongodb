@@ -26,15 +26,15 @@
  *    it in the license file.
  */
 
+#include "mongo/platform/basic.h"
+
 #include "mongo/s/write_ops/batch_upconvert.h"
 
-#include <boost/scoped_ptr.hpp>
-
 #include "mongo/bson/bsonobj.h"
+#include "mongo/client/dbclientinterface.h"
 #include "mongo/db/dbmessage.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/write_concern_options.h"
-#include "mongo/s/multi_command_dispatch.h"
 #include "mongo/s/write_ops/batched_command_request.h"
 #include "mongo/s/write_ops/batched_command_response.h"
 #include "mongo/s/write_ops/batched_delete_document.h"
@@ -42,26 +42,14 @@
 
 namespace mongo {
 
-using boost::scoped_ptr;
-using mongoutils::str::stream;
-using std::auto_ptr;
+using str::stream;
 using std::string;
+using std::unique_ptr;
 using std::vector;
 
-void msgToBatchRequests(const Message& msg, vector<BatchedCommandRequest*>* requests) {
-    int opType = msg.operation();
+namespace {
 
-    auto_ptr<BatchedCommandRequest> request;
-    if (opType == dbInsert) {
-        msgToBatchInserts(msg, requests);
-    } else if (opType == dbUpdate) {
-        requests->push_back(msgToBatchUpdate(msg));
-    } else {
-        dassert(opType == dbDelete);
-        requests->push_back(msgToBatchDelete(msg));
-    }
-}
-
+// Batch inserts may get mapped to multiple batch requests, to avoid spilling MaxBSONObjSize
 void msgToBatchInserts(const Message& insertMsg, vector<BatchedCommandRequest*>* insertRequests) {
     // Parsing DbMessage throws
     DbMessage dbMsg(insertMsg);
@@ -93,7 +81,7 @@ void msgToBatchInserts(const Message& insertMsg, vector<BatchedCommandRequest*>*
         // No exceptions from here on
         BatchedCommandRequest* request =
             new BatchedCommandRequest(BatchedCommandRequest::BatchType_Insert);
-        request->setNSS(nss);
+        request->setNS(nss);
         for (vector<BSONObj>::const_iterator it = docs.begin(); it != docs.end(); ++it) {
             request->getInsertRequest()->addToDocuments(*it);
         }
@@ -123,7 +111,7 @@ BatchedCommandRequest* msgToBatchUpdate(const Message& updateMsg) {
 
     BatchedCommandRequest* request =
         new BatchedCommandRequest(BatchedCommandRequest::BatchType_Update);
-    request->setNSS(nss);
+    request->setNS(nss);
     request->getUpdateRequest()->addToUpdates(updateDoc);
     request->setWriteConcern(WriteConcernOptions::Acknowledged);
 
@@ -145,7 +133,7 @@ BatchedCommandRequest* msgToBatchDelete(const Message& deleteMsg) {
 
     BatchedCommandRequest* request =
         new BatchedCommandRequest(BatchedCommandRequest::BatchType_Delete);
-    request->setNSS(nss);
+    request->setNS(nss);
     request->getDeleteRequest()->addToDeletes(deleteDoc);
     request->setWriteConcern(WriteConcernOptions::Acknowledged);
 
@@ -157,10 +145,25 @@ void buildErrorFromResponse(const BatchedCommandResponse& response, WriteErrorDe
     error->setErrMessage(response.getErrMessage());
 }
 
+}  // namespace
+
+void msgToBatchRequests(const Message& msg, vector<BatchedCommandRequest*>* requests) {
+    int opType = msg.operation();
+
+    if (opType == dbInsert) {
+        msgToBatchInserts(msg, requests);
+    } else if (opType == dbUpdate) {
+        requests->push_back(msgToBatchUpdate(msg));
+    } else {
+        dassert(opType == dbDelete);
+        requests->push_back(msgToBatchDelete(msg));
+    }
+}
+
 bool batchErrorToLastError(const BatchedCommandRequest& request,
                            const BatchedCommandResponse& response,
                            LastError* error) {
-    scoped_ptr<WriteErrorDetail> commandError;
+    unique_ptr<WriteErrorDetail> commandError;
     WriteErrorDetail* lastBatchError = NULL;
 
     if (!response.getOk()) {
@@ -186,8 +189,8 @@ bool batchErrorToLastError(const BatchedCommandRequest& request,
     // Record an error if one exists
     if (lastBatchError) {
         string errMsg = lastBatchError->getErrMessage();
-        error->raiseError(lastBatchError->getErrCode(),
-                          errMsg.empty() ? "see code for details" : errMsg.c_str());
+        error->setLastError(lastBatchError->getErrCode(),
+                            errMsg.empty() ? "see code for details" : errMsg.c_str());
         return true;
     }
 
@@ -223,4 +226,5 @@ bool batchErrorToLastError(const BatchedCommandRequest& request,
 
     return false;
 }
-}
+
+}  // namespace mongo

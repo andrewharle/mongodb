@@ -30,7 +30,6 @@
 
 namespace mongo {
 class BSONObj;
-class DBClientWithCommands;
 
 /**
  * @return true if internal authentication parameters has been set up
@@ -53,16 +52,4 @@ void setInternalUserAuthParams(const BSONObj& authParamsIn);
  * returned.
  **/
 BSONObj getInternalUserAuthParamsWithFallback();
-
-/**
- * Returns a copy of the fallback parameter portion of an internal auth parameter object
- **/
-BSONObj getFallbackAuthParams(BSONObj params);
-
-/**
-* Authenticates to another cluster member using appropriate authentication data.
-* Uses getInternalUserAuthParams() to retrive authentication parameters.
-* @return true if the authentication was succesful
-*/
-bool authenticateInternalUser(DBClientWithCommands* conn);
 }  // namespace mongo

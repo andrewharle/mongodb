@@ -28,8 +28,14 @@
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kSharding
 
+#include "mongo/platform/basic.h"
+
 #include "mongo/s/chunk_manager_targeter.h"
 
+#include <boost/thread/tss.hpp>
+
+#include "mongo/s/chunk_manager.h"
+#include "mongo/s/client/shard_registry.h"
 #include "mongo/s/config.h"
 #include "mongo/s/grid.h"
 #include "mongo/util/log.h"
@@ -37,48 +43,237 @@
 
 namespace mongo {
 
-using std::endl;
+using std::shared_ptr;
+using mongoutils::str::stream;
 using std::map;
 using std::set;
 using std::string;
 using std::vector;
 
-using mongoutils::str::stream;
+namespace {
+
+enum UpdateType { UpdateType_Replacement, UpdateType_OpStyle, UpdateType_Unknown };
+
+enum CompareResult { CompareResult_Unknown, CompareResult_GTE, CompareResult_LT };
+
+const ShardKeyPattern virtualIdShardKey(BSON("_id" << 1));
+
+// To match legacy reload behavior, we have to backoff on config reload per-thread
+// TODO: Centralize this behavior better by refactoring config reload in mongos
+boost::thread_specific_ptr<Backoff> perThreadBackoff;
+const int maxWaitMillis = 500;
 
 /**
- * Helper to get the DBConfigPtr object in an exception-safe way.
+ * There are two styles of update expressions:
+ *
+ * Replacement style: coll.update({ x : 1 }, { y : 2 })
+ * OpStyle: coll.update({ x : 1 }, { $set : { y : 2 } })
  */
-static bool getDBConfigSafe(const StringData& db, DBConfigPtr& config, string* errMsg) {
-    try {
-        config = grid.getDBConfig(db, true);
-        if (!config)
-            *errMsg = stream() << "could not load or create database " << db;
-    } catch (const DBException& ex) {
-        *errMsg = ex.toString();
+UpdateType getUpdateExprType(const BSONObj& updateExpr) {
+    // Empty update is replacement-style, by default
+    if (updateExpr.isEmpty()) {
+        return UpdateType_Replacement;
     }
 
-    return config.get();
+    UpdateType updateType = UpdateType_Unknown;
+
+    BSONObjIterator it(updateExpr);
+    while (it.more()) {
+        BSONElement next = it.next();
+
+        if (next.fieldName()[0] == '$') {
+            if (updateType == UpdateType_Unknown) {
+                updateType = UpdateType_OpStyle;
+            } else if (updateType == UpdateType_Replacement) {
+                return UpdateType_Unknown;
+            }
+        } else {
+            if (updateType == UpdateType_Unknown) {
+                updateType = UpdateType_Replacement;
+            } else if (updateType == UpdateType_OpStyle) {
+                return UpdateType_Unknown;
+            }
+        }
+    }
+
+    return updateType;
 }
 
-ChunkManagerTargeter::ChunkManagerTargeter(TargeterStats* stats)
-    : _needsTargetingRefresh(false), _stats(stats) {}
-
-Status ChunkManagerTargeter::init(const NamespaceString& nss) {
-    _nss = nss;
-
-    //
-    // Get the latest metadata information from the cache
-    //
-
-    DBConfigPtr config;
-
-    string errMsg;
-    if (!getDBConfigSafe(_nss.db(), config, &errMsg)) {
-        return Status(ErrorCodes::DatabaseNotFound, errMsg);
+/**
+ * This returns "does the query have an _id field" and "is the _id field querying for a direct
+ * value like _id : 3 and not _id : { $gt : 3 }"
+ *
+ * Ex: { _id : 1 } => true
+ *     { foo : <anything>, _id : 1 } => true
+ *     { _id : { $lt : 30 } } => false
+ *     { foo : <anything> } => false
+ */
+bool isExactIdQuery(const BSONObj& query) {
+    StatusWith<BSONObj> status = virtualIdShardKey.extractShardKeyFromQuery(query);
+    if (!status.isOK()) {
+        return false;
     }
 
-    // Get either the chunk manager or primary shard
-    config->getChunkManagerOrPrimary(_nss.ns(), _manager, _primary);
+    return !status.getValue()["_id"].eoo();
+}
+
+void refreshBackoff() {
+    if (!perThreadBackoff.get()) {
+        perThreadBackoff.reset(new Backoff(maxWaitMillis, maxWaitMillis * 2));
+    }
+
+    perThreadBackoff.get()->nextSleepMillis();
+}
+
+
+//
+// Utilities to compare shard versions
+//
+
+/**
+ * Returns the relationship of two shard versions. Shard versions of a collection that has not
+ * been dropped and recreated and where there is at least one chunk on a shard are comparable,
+ * otherwise the result is ambiguous.
+ */
+CompareResult compareShardVersions(const ChunkVersion& shardVersionA,
+                                   const ChunkVersion& shardVersionB) {
+    // Collection may have been dropped
+    if (!shardVersionA.hasEqualEpoch(shardVersionB)) {
+        return CompareResult_Unknown;
+    }
+
+    // Zero shard versions are only comparable to themselves
+    if (!shardVersionA.isSet() || !shardVersionB.isSet()) {
+        // If both are zero...
+        if (!shardVersionA.isSet() && !shardVersionB.isSet()) {
+            return CompareResult_GTE;
+        }
+
+        return CompareResult_Unknown;
+    }
+
+    if (shardVersionA < shardVersionB) {
+        return CompareResult_LT;
+    }
+
+    else
+        return CompareResult_GTE;
+}
+
+ChunkVersion getShardVersion(StringData shardName,
+                             const ChunkManager* manager,
+                             const Shard* primary) {
+    dassert(!(manager && primary));
+    dassert(manager || primary);
+
+    if (primary) {
+        return ChunkVersion::UNSHARDED();
+    }
+
+    return manager->getVersion(shardName.toString());
+}
+
+/**
+ * Returns the relationship between two maps of shard versions. As above, these maps are often
+ * comparable when the collection has not been dropped and there is at least one chunk on the
+ * shards. If any versions in the maps are not comparable, the result is _Unknown.
+ *
+ * If any versions in the first map (cached) are _LT the versions in the second map (remote),
+ * the first (cached) versions are _LT the second (remote) versions.
+ *
+ * Note that the signature here is weird since our cached map of chunk versions is stored in a
+ * ChunkManager or is implicit in the primary shard of the collection.
+ */
+CompareResult compareAllShardVersions(const ChunkManager* cachedChunkManager,
+                                      const Shard* cachedPrimary,
+                                      const map<string, ChunkVersion>& remoteShardVersions) {
+    CompareResult finalResult = CompareResult_GTE;
+
+    for (map<string, ChunkVersion>::const_iterator it = remoteShardVersions.begin();
+         it != remoteShardVersions.end();
+         ++it) {
+        // Get the remote and cached version for the next shard
+        const string& shardName = it->first;
+        const ChunkVersion& remoteShardVersion = it->second;
+
+        ChunkVersion cachedShardVersion;
+
+        try {
+            // Throws b/c shard constructor throws
+            cachedShardVersion = getShardVersion(shardName, cachedChunkManager, cachedPrimary);
+        } catch (const DBException& ex) {
+            warning() << "could not lookup shard " << shardName
+                      << " in local cache, shard metadata may have changed"
+                      << " or be unavailable" << causedBy(ex);
+
+            return CompareResult_Unknown;
+        }
+
+        // Compare the remote and cached versions
+        CompareResult result = compareShardVersions(cachedShardVersion, remoteShardVersion);
+
+        if (result == CompareResult_Unknown)
+            return result;
+        if (result == CompareResult_LT)
+            finalResult = CompareResult_LT;
+
+        // Note that we keep going after _LT b/c there could be more _Unknowns.
+    }
+
+    return finalResult;
+}
+
+/**
+ * Whether or not the manager/primary pair is different from the other manager/primary pair.
+ */
+bool isMetadataDifferent(const ChunkManagerPtr& managerA,
+                         const ShardPtr& primaryA,
+                         const ChunkManagerPtr& managerB,
+                         const ShardPtr& primaryB) {
+    if ((managerA && !managerB) || (!managerA && managerB) || (primaryA && !primaryB) ||
+        (!primaryA && primaryB))
+        return true;
+
+    if (managerA) {
+        return !managerA->getVersion().isStrictlyEqualTo(managerB->getVersion());
+    }
+
+    dassert(NULL != primaryA.get());
+    return primaryA->getId() != primaryB->getId();
+}
+
+/**
+* Whether or not the manager/primary pair was changed or refreshed from a previous version
+* of the metadata.
+*/
+bool wasMetadataRefreshed(const ChunkManagerPtr& managerA,
+                          const ShardPtr& primaryA,
+                          const ChunkManagerPtr& managerB,
+                          const ShardPtr& primaryB) {
+    if (isMetadataDifferent(managerA, primaryA, managerB, primaryB))
+        return true;
+
+    if (managerA) {
+        dassert(managerB.get());  // otherwise metadata would be different
+        return managerA->getSequenceNumber() != managerB->getSequenceNumber();
+    }
+
+    return false;
+}
+
+}  // namespace
+
+ChunkManagerTargeter::ChunkManagerTargeter(const NamespaceString& nss)
+    : _nss(nss), _needsTargetingRefresh(false) {}
+
+Status ChunkManagerTargeter::init(OperationContext* txn) {
+    auto status = grid.implicitCreateDb(txn, _nss.db().toString());
+    if (!status.isOK()) {
+        return status.getStatus();
+    }
+
+    shared_ptr<DBConfig> config = status.getValue();
+    config->getChunkManagerOrPrimary(txn, _nss.ns(), _manager, _primary);
 
     return Status::OK();
 }
@@ -87,7 +282,9 @@ const NamespaceString& ChunkManagerTargeter::getNS() const {
     return _nss;
 }
 
-Status ChunkManagerTargeter::targetInsert(const BSONObj& doc, ShardEndpoint** endpoint) const {
+Status ChunkManagerTargeter::targetInsert(OperationContext* txn,
+                                          const BSONObj& doc,
+                                          ShardEndpoint** endpoint) const {
     BSONObj shardKey;
 
     if (_manager) {
@@ -115,7 +312,7 @@ Status ChunkManagerTargeter::targetInsert(const BSONObj& doc, ShardEndpoint** en
 
     // Target the shard key or database primary
     if (!shardKey.isEmpty()) {
-        return targetShardKey(shardKey, doc.objsize(), endpoint);
+        return targetShardKey(txn, shardKey, doc.objsize(), endpoint);
     } else {
         if (!_primary) {
             return Status(ErrorCodes::NamespaceNotFound,
@@ -123,70 +320,13 @@ Status ChunkManagerTargeter::targetInsert(const BSONObj& doc, ShardEndpoint** en
                                         << "; no metadata found");
         }
 
-        *endpoint = new ShardEndpoint(_primary->getName(), ChunkVersion::UNSHARDED());
+        *endpoint = new ShardEndpoint(_primary->getId(), ChunkVersion::UNSHARDED());
         return Status::OK();
     }
 }
 
-namespace {
-
-// TODO: Expose these for unit testing via dbtests
-
-enum UpdateType { UpdateType_Replacement, UpdateType_OpStyle, UpdateType_Unknown };
-
-/**
- * There are two styles of update expressions:
- * coll.update({ x : 1 }, { y : 2 }) // Replacement style
- * coll.update({ x : 1 }, { $set : { y : 2 } }) // OpStyle
- */
-UpdateType getUpdateExprType(const BSONObj& updateExpr) {
-    UpdateType updateType = UpdateType_Unknown;
-
-    // Empty update is replacement-style, by default
-    if (updateExpr.isEmpty())
-        return UpdateType_Replacement;
-
-    BSONObjIterator it(updateExpr);
-    while (it.more()) {
-        BSONElement next = it.next();
-
-        if (next.fieldName()[0] == '$') {
-            if (updateType == UpdateType_Unknown) {
-                updateType = UpdateType_OpStyle;
-            } else if (updateType == UpdateType_Replacement) {
-                return UpdateType_Unknown;
-            }
-        } else {
-            if (updateType == UpdateType_Unknown) {
-                updateType = UpdateType_Replacement;
-            } else if (updateType == UpdateType_OpStyle) {
-                return UpdateType_Unknown;
-            }
-        }
-    }
-
-    return updateType;
-}
-
-/**
- * This returns "does the query have an _id field" and "is the _id field
- * querying for a direct value like _id : 3 and not _id : { $gt : 3 }"
- *
- * Ex: { _id : 1 } => true
- *     { foo : <anything>, _id : 1 } => true
- *     { _id : { $lt : 30 } } => false
- *     { foo : <anything> } => false
- */
-bool isExactIdQuery(const BSONObj& query) {
-    static const ShardKeyPattern virtualIdShardKey(BSON("_id" << 1));
-    StatusWith<BSONObj> status = virtualIdShardKey.extractShardKeyFromQuery(query);
-    if (!status.isOK())
-        return false;
-    return !status.getValue()["_id"].eoo();
-}
-}
-
-Status ChunkManagerTargeter::targetUpdate(const BatchedUpdateDocument& updateDoc,
+Status ChunkManagerTargeter::targetUpdate(OperationContext* txn,
+                                          const BatchedUpdateDocument& updateDoc,
                                           vector<ShardEndpoint*>* endpoints) const {
     //
     // Update targeting may use either the query or the update.  This is to support save-style
@@ -274,17 +414,18 @@ Status ChunkManagerTargeter::targetUpdate(const BatchedUpdateDocument& updateDoc
         // We can't rely on our query targeting to be exact
         ShardEndpoint* endpoint = NULL;
         Status result =
-            targetShardKey(shardKey, (query.objsize() + updateExpr.objsize()), &endpoint);
+            targetShardKey(txn, shardKey, (query.objsize() + updateExpr.objsize()), &endpoint);
         endpoints->push_back(endpoint);
         return result;
     } else if (updateType == UpdateType_OpStyle) {
-        return targetQuery(query, endpoints);
+        return targetQuery(txn, query, endpoints);
     } else {
-        return targetDoc(updateExpr, endpoints);
+        return targetDoc(txn, updateExpr, endpoints);
     }
 }
 
-Status ChunkManagerTargeter::targetDelete(const BatchedDeleteDocument& deleteDoc,
+Status ChunkManagerTargeter::targetDelete(OperationContext* txn,
+                                          const BatchedDeleteDocument& deleteDoc,
                                           vector<ShardEndpoint*>* endpoints) const {
     BSONObj shardKey;
 
@@ -319,63 +460,65 @@ Status ChunkManagerTargeter::targetDelete(const BatchedDeleteDocument& deleteDoc
     if (!shardKey.isEmpty()) {
         // We can't rely on our query targeting to be exact
         ShardEndpoint* endpoint = NULL;
-        Status result = targetShardKey(shardKey, 0, &endpoint);
+        Status result = targetShardKey(txn, shardKey, 0, &endpoint);
         endpoints->push_back(endpoint);
         return result;
     } else {
-        return targetQuery(deleteDoc.getQuery(), endpoints);
+        return targetQuery(txn, deleteDoc.getQuery(), endpoints);
     }
 }
 
-Status ChunkManagerTargeter::targetDoc(const BSONObj& doc,
+Status ChunkManagerTargeter::targetDoc(OperationContext* txn,
+                                       const BSONObj& doc,
                                        vector<ShardEndpoint*>* endpoints) const {
     // NOTE: This is weird and fragile, but it's the way our language works right now -
     // documents are either A) invalid or B) valid equality queries over themselves.
-    return targetQuery(doc, endpoints);
+    return targetQuery(txn, doc, endpoints);
 }
 
-Status ChunkManagerTargeter::targetQuery(const BSONObj& query,
+Status ChunkManagerTargeter::targetQuery(OperationContext* txn,
+                                         const BSONObj& query,
                                          vector<ShardEndpoint*>* endpoints) const {
     if (!_primary && !_manager) {
         return Status(ErrorCodes::NamespaceNotFound,
-                      str::stream() << "could not target query in " << getNS().ns()
-                                    << "; no metadata found");
+                      stream() << "could not target query in " << getNS().ns()
+                               << "; no metadata found");
     }
 
-    set<Shard> shards;
+    set<ShardId> shardIds;
     if (_manager) {
         try {
-            _manager->getShardsForQuery(shards, query);
+            _manager->getShardIdsForQuery(txn, query, &shardIds);
         } catch (const DBException& ex) {
             return ex.toStatus();
         }
     } else {
-        shards.insert(*_primary);
+        shardIds.insert(_primary->getId());
     }
 
-    for (set<Shard>::iterator it = shards.begin(); it != shards.end(); ++it) {
-        endpoints->push_back(new ShardEndpoint(it->getName(),
-                                               _manager ? _manager->getVersion(it->getName())
-                                                        : ChunkVersion::UNSHARDED()));
+    for (const ShardId& shardId : shardIds) {
+        endpoints->push_back(new ShardEndpoint(
+            shardId, _manager ? _manager->getVersion(shardId) : ChunkVersion::UNSHARDED()));
     }
 
     return Status::OK();
 }
 
-Status ChunkManagerTargeter::targetShardKey(const BSONObj& shardKey,
+Status ChunkManagerTargeter::targetShardKey(OperationContext* txn,
+                                            const BSONObj& shardKey,
                                             long long estDataSize,
                                             ShardEndpoint** endpoint) const {
     invariant(NULL != _manager);
 
-    ChunkPtr chunk = _manager->findIntersectingChunk(shardKey);
+    ChunkPtr chunk = _manager->findIntersectingChunk(txn, shardKey);
 
     // Track autosplit stats for sharded collections
     // Note: this is only best effort accounting and is not accurate.
-    if (estDataSize > 0)
-        _stats->chunkSizeDelta[chunk->getMin()] += estDataSize;
+    if (estDataSize > 0) {
+        _stats.chunkSizeDelta[chunk->getMin()] += estDataSize;
+    }
 
-    Shard shard = chunk->getShard();
-    *endpoint = new ShardEndpoint(shard.getName(), _manager->getVersion(shard.getName()));
+    *endpoint = new ShardEndpoint(chunk->getShardId(), _manager->getVersion(chunk->getShardId()));
 
     return Status::OK();
 }
@@ -387,17 +530,16 @@ Status ChunkManagerTargeter::targetCollection(vector<ShardEndpoint*>* endpoints)
                                     << "; metadata not found");
     }
 
-    set<Shard> shards;
+    set<ShardId> shardIds;
     if (_manager) {
-        _manager->getAllShards(shards);
+        _manager->getAllShardIds(&shardIds);
     } else {
-        shards.insert(*_primary);
+        shardIds.insert(_primary->getId());
     }
 
-    for (set<Shard>::iterator it = shards.begin(); it != shards.end(); ++it) {
-        endpoints->push_back(new ShardEndpoint(it->getName(),
-                                               _manager ? _manager->getVersion(it->getName())
-                                                        : ChunkVersion::UNSHARDED()));
+    for (const ShardId& shardId : shardIds) {
+        endpoints->push_back(new ShardEndpoint(
+            shardId, _manager ? _manager->getVersion(shardId) : ChunkVersion::UNSHARDED()));
     }
 
     return Status::OK();
@@ -410,159 +552,15 @@ Status ChunkManagerTargeter::targetAllShards(vector<ShardEndpoint*>* endpoints) 
                                     << getNS().ns() << "; metadata not found");
     }
 
-    vector<Shard> shards;
-    Shard::getAllShards(shards);
+    vector<ShardId> shardIds;
+    grid.shardRegistry()->getAllShardIds(&shardIds);
 
-    for (vector<Shard>::iterator it = shards.begin(); it != shards.end(); ++it) {
-        endpoints->push_back(new ShardEndpoint(it->getName(),
-                                               _manager ? _manager->getVersion(it->getName())
-                                                        : ChunkVersion::UNSHARDED()));
+    for (const ShardId& shardId : shardIds) {
+        endpoints->push_back(new ShardEndpoint(
+            shardId, _manager ? _manager->getVersion(shardId) : ChunkVersion::UNSHARDED()));
     }
 
     return Status::OK();
-}
-
-namespace {
-
-//
-// Utilities to compare shard versions
-//
-
-enum CompareResult { CompareResult_Unknown, CompareResult_GTE, CompareResult_LT };
-
-/**
- * Returns the relationship of two shard versions.  Shard versions of a collection that has
- * not been dropped and recreated and where there is at least one chunk on a shard are
- * comparable, otherwise the result is ambiguous.
- */
-CompareResult compareShardVersions(const ChunkVersion& shardVersionA,
-                                   const ChunkVersion& shardVersionB) {
-    // Collection may have been dropped
-    if (!shardVersionA.hasEqualEpoch(shardVersionB))
-        return CompareResult_Unknown;
-
-    // Zero shard versions are only comparable to themselves
-    if (!shardVersionA.isSet() || !shardVersionB.isSet()) {
-        // If both are zero...
-        if (!shardVersionA.isSet() && !shardVersionB.isSet())
-            return CompareResult_GTE;
-        // Otherwise...
-        return CompareResult_Unknown;
-    }
-
-    if (shardVersionA < shardVersionB)
-        return CompareResult_LT;
-    else
-        return CompareResult_GTE;
-}
-
-ChunkVersion getShardVersion(const StringData& shardName,
-                             const ChunkManagerPtr& manager,
-                             const ShardPtr& primary) {
-    dassert(!(manager && primary));
-    dassert(manager || primary);
-
-    if (primary)
-        return ChunkVersion::UNSHARDED();
-
-    return manager->getVersion(shardName.toString());
-}
-
-/**
- * Returns the relationship between two maps of shard versions.  As above, these maps are
- * often comparable when the collection has not been dropped and there is at least one
- * chunk on the shards.
- *
- * If any versions in the maps are not comparable, the result is _Unknown.
- *
- * If any versions in the first map (cached) are _LT the versions in the second map
- * (remote), the first (cached) versions are _LT the second (remote) versions.
- *
- * Note that the signature here is weird since our cached map of chunk versions is
- * stored in a ChunkManager or is implicit in the primary shard of the collection.
- */
-CompareResult  //
-    compareAllShardVersions(const ChunkManagerPtr& cachedShardVersions,
-                            const ShardPtr& cachedPrimary,
-                            const map<string, ChunkVersion>& remoteShardVersions) {
-    CompareResult finalResult = CompareResult_GTE;
-
-    for (map<string, ChunkVersion>::const_iterator it = remoteShardVersions.begin();
-         it != remoteShardVersions.end();
-         ++it) {
-        //
-        // Get the remote and cached version for the next shard
-        //
-
-        const string& shardName = it->first;
-        const ChunkVersion& remoteShardVersion = it->second;
-        ChunkVersion cachedShardVersion;
-
-        try {
-            // Throws b/c shard constructor throws
-            cachedShardVersion = getShardVersion(shardName, cachedShardVersions, cachedPrimary);
-        } catch (const DBException& ex) {
-            warning() << "could not lookup shard " << shardName
-                      << " in local cache, shard metadata may have changed"
-                      << " or be unavailable" << causedBy(ex) << endl;
-
-            return CompareResult_Unknown;
-        }
-
-        //
-        // Compare the remote and cached versions
-        //
-
-        CompareResult result = compareShardVersions(cachedShardVersion, remoteShardVersion);
-
-        if (result == CompareResult_Unknown)
-            return result;
-        if (result == CompareResult_LT)
-            finalResult = CompareResult_LT;
-
-        // Note that we keep going after _LT b/c there could be more _Unknowns.
-    }
-
-    return finalResult;
-}
-
-/**
- * Whether or not the manager/primary pair is different from the other manager/primary pair
- */
-bool isMetadataDifferent(const ChunkManagerPtr& managerA,
-                         const ShardPtr& primaryA,
-                         const ChunkManagerPtr& managerB,
-                         const ShardPtr& primaryB) {
-    if ((managerA && !managerB) || (!managerA && managerB) || (primaryA && !primaryB) ||
-        (!primaryA && primaryB))
-        return true;
-
-    if (managerA) {
-        return !managerA->getVersion().isStrictlyEqualTo(managerB->getVersion());
-    }
-
-    dassert(NULL != primaryA.get());
-    return primaryA->getName() != primaryB->getName();
-}
-
-/**
- * Whether or not the manager/primary pair was changed or refreshed from a previous version
- * of the metadata.
- */
-bool wasMetadataRefreshed(const ChunkManagerPtr& managerA,
-                          const ShardPtr& primaryA,
-                          const ChunkManagerPtr& managerB,
-                          const ShardPtr& primaryB) {
-    if (isMetadataDifferent(managerA, primaryA, managerB, primaryB))
-        return true;
-
-    if (managerA) {
-        dassert(managerB.get());  // otherwise metadata would be different
-        return managerA->getSequenceNumber() != managerB->getSequenceNumber();
-    }
-
-    return false;
-}
 }
 
 void ChunkManagerTargeter::noteStaleResponse(const ShardEndpoint& endpoint,
@@ -573,7 +571,7 @@ void ChunkManagerTargeter::noteStaleResponse(const ShardEndpoint& endpoint,
     if (staleInfo["vWanted"].eoo()) {
         // If we don't have a vWanted sent, assume the version is higher than our current
         // version.
-        remoteShardVersion = getShardVersion(endpoint.shardName, _manager, _primary);
+        remoteShardVersion = getShardVersion(endpoint.shardName, _manager.get(), _primary.get());
         remoteShardVersion.incMajor();
     } else {
         remoteShardVersion = ChunkVersion::fromBSON(staleInfo, "vWanted");
@@ -586,13 +584,12 @@ void ChunkManagerTargeter::noteStaleResponse(const ShardEndpoint& endpoint,
         ChunkVersion& previouslyNotedVersion = it->second;
         if (previouslyNotedVersion.hasEqualEpoch(remoteShardVersion)) {
             if (previouslyNotedVersion.isOlderThan(remoteShardVersion)) {
-                remoteShardVersion.cloneTo(&previouslyNotedVersion);
+                previouslyNotedVersion = remoteShardVersion;
             }
         } else {
-            // Epoch changed midway while applying the batch so set the version to
-            // something unique and non-existent to force a reload when
-            // refreshIsNeeded is called.
-            ChunkVersion::IGNORED().cloneTo(&previouslyNotedVersion);
+            // Epoch changed midway while applying the batch so set the version to something unique
+            // and non-existent to force a reload when refreshIsNeeded is called.
+            previouslyNotedVersion = ChunkVersion::IGNORED();
         }
     }
 }
@@ -602,10 +599,15 @@ void ChunkManagerTargeter::noteCouldNotTarget() {
     _needsTargetingRefresh = true;
 }
 
-Status ChunkManagerTargeter::refreshIfNeeded(bool* wasChanged) {
+const TargeterStats* ChunkManagerTargeter::getStats() const {
+    return &_stats;
+}
+
+Status ChunkManagerTargeter::refreshIfNeeded(OperationContext* txn, bool* wasChanged) {
     bool dummy;
-    if (!wasChanged)
+    if (!wasChanged) {
         wasChanged = &dummy;
+    }
 
     *wasChanged = false;
 
@@ -613,8 +615,9 @@ Status ChunkManagerTargeter::refreshIfNeeded(bool* wasChanged) {
     // Did we have any stale config or targeting errors at all?
     //
 
-    if (!_needsTargetingRefresh && _remoteShardVersions.empty())
+    if (!_needsTargetingRefresh && _remoteShardVersions.empty()) {
         return Status::OK();
+    }
 
     //
     // Get the latest metadata information from the cache if there were issues
@@ -623,15 +626,13 @@ Status ChunkManagerTargeter::refreshIfNeeded(bool* wasChanged) {
     ChunkManagerPtr lastManager = _manager;
     ShardPtr lastPrimary = _primary;
 
-    DBConfigPtr config;
-
-    string errMsg;
-    if (!getDBConfigSafe(_nss.db(), config, &errMsg)) {
-        return Status(ErrorCodes::DatabaseNotFound, errMsg);
+    auto status = grid.implicitCreateDb(txn, _nss.db().toString());
+    if (!status.isOK()) {
+        return status.getStatus();
     }
 
-    // Get either the chunk manager or primary shard
-    config->getChunkManagerOrPrimary(_nss.ns(), _manager, _primary);
+    shared_ptr<DBConfig> config = status.getValue();
+    config->getChunkManagerOrPrimary(txn, _nss.ns(), _manager, _primary);
 
     // We now have the latest metadata from the cache.
 
@@ -654,7 +655,7 @@ Status ChunkManagerTargeter::refreshIfNeeded(bool* wasChanged) {
         // If didn't already refresh the targeting information, refresh it
         if (!alreadyRefreshed) {
             // To match previous behavior, we just need an incremental refresh here
-            return refreshNow(RefreshType_RefreshChunkManager);
+            return refreshNow(txn, RefreshType_RefreshChunkManager);
         }
 
         *wasChanged = isMetadataDifferent(lastManager, lastPrimary, _manager, _primary);
@@ -663,16 +664,17 @@ Status ChunkManagerTargeter::refreshIfNeeded(bool* wasChanged) {
         // If we got stale shard versions from remote shards, we may need to refresh
         // NOTE: Not sure yet if this can happen simultaneously with targeting issues
 
-        CompareResult result = compareAllShardVersions(_manager, _primary, _remoteShardVersions);
+        CompareResult result =
+            compareAllShardVersions(_manager.get(), _primary.get(), _remoteShardVersions);
         // Reset the versions
         _remoteShardVersions.clear();
 
         if (result == CompareResult_Unknown) {
             // Our current shard versions aren't all comparable to the old versions, maybe drop
-            return refreshNow(RefreshType_ReloadDatabase);
+            return refreshNow(txn, RefreshType_ReloadDatabase);
         } else if (result == CompareResult_LT) {
             // Our current shard versions are less than the remote versions, but no drop
-            return refreshNow(RefreshType_RefreshChunkManager);
+            return refreshNow(txn, RefreshType_RefreshChunkManager);
         }
 
         *wasChanged = isMetadataDifferent(lastManager, lastPrimary, _manager, _primary);
@@ -684,24 +686,13 @@ Status ChunkManagerTargeter::refreshIfNeeded(bool* wasChanged) {
     return Status::OK();
 }
 
-// To match legacy reload behavior, we have to backoff on config reload per-thread
-// TODO: Centralize this behavior better by refactoring config reload in mongos
-static const int maxWaitMillis = 500;
-static boost::thread_specific_ptr<Backoff> perThreadBackoff;
-
-static void refreshBackoff() {
-    if (!perThreadBackoff.get())
-        perThreadBackoff.reset(new Backoff(maxWaitMillis, maxWaitMillis * 2));
-    perThreadBackoff.get()->nextSleepMillis();
-}
-
-Status ChunkManagerTargeter::refreshNow(RefreshType refreshType) {
-    DBConfigPtr config;
-
-    string errMsg;
-    if (!getDBConfigSafe(_nss.db(), config, &errMsg)) {
-        return Status(ErrorCodes::DatabaseNotFound, errMsg);
+Status ChunkManagerTargeter::refreshNow(OperationContext* txn, RefreshType refreshType) {
+    auto status = grid.implicitCreateDb(txn, _nss.db().toString());
+    if (!status.isOK()) {
+        return status.getStatus();
     }
+
+    shared_ptr<DBConfig> config = status.getValue();
 
     // Try not to spam the configs
     refreshBackoff();
@@ -711,21 +702,22 @@ Status ChunkManagerTargeter::refreshNow(RefreshType refreshType) {
         try {
             // Forces a remote check of the collection info, synchronization between threads
             // happens internally.
-            config->getChunkManagerIfExists(_nss.ns(), true);
+            config->getChunkManagerIfExists(txn, _nss.ns(), true);
         } catch (const DBException& ex) {
             return Status(ErrorCodes::UnknownError, ex.toString());
         }
-        config->getChunkManagerOrPrimary(_nss.ns(), _manager, _primary);
+        config->getChunkManagerOrPrimary(txn, _nss.ns(), _manager, _primary);
     } else if (refreshType == RefreshType_ReloadDatabase) {
         try {
             // Dumps the db info, reloads it all, synchronization between threads happens
             // internally.
-            config->reload();
-            config->getChunkManagerIfExists(_nss.ns(), true, true);
+            config->reload(txn);
+            config->getChunkManagerIfExists(txn, _nss.ns(), true, true);
         } catch (const DBException& ex) {
             return Status(ErrorCodes::UnknownError, ex.toString());
         }
-        config->getChunkManagerOrPrimary(_nss.ns(), _manager, _primary);
+
+        config->getChunkManagerOrPrimary(txn, _nss.ns(), _manager, _primary);
     }
 
     return Status::OK();

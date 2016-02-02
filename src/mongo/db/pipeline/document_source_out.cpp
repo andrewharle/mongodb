@@ -35,8 +35,6 @@ namespace mongo {
 using boost::intrusive_ptr;
 using std::vector;
 
-const char DocumentSourceOut::outName[] = "$out";
-
 DocumentSourceOut::~DocumentSourceOut() {
     DESTRUCTOR_GUARD(
         // Make sure we drop the temp collection if anything goes wrong. Errors are ignored
@@ -45,8 +43,10 @@ DocumentSourceOut::~DocumentSourceOut() {
         if (_mongod && _tempNs.size()) _mongod->directClient()->dropCollection(_tempNs.ns());)
 }
 
+REGISTER_DOCUMENT_SOURCE(out, DocumentSourceOut::createFromBson);
+
 const char* DocumentSourceOut::getSourceName() const {
-    return outName;
+    return "$out";
 }
 
 static AtomicUInt32 aggOutCounter;
@@ -71,10 +71,19 @@ void DocumentSourceOut::prepTempCollection() {
     _tempNs = NamespaceString(StringData(str::stream() << _outputNs.db() << ".tmp.agg_out."
                                                        << aggOutCounter.addAndFetch(1)));
 
+    // Create output collection, copying options from existing collection if any.
     {
+        const auto infos =
+            conn->getCollectionInfos(_outputNs.db().toString(), BSON("name" << _outputNs.coll()));
+        const auto options = infos.empty() ? BSONObj() : infos.front().getObjectField("options");
+
+        BSONObjBuilder cmd;
+        cmd << "create" << _tempNs.coll();
+        cmd << "temp" << true;
+        cmd.appendElementsUnique(options);
+
         BSONObj info;
-        bool ok = conn->runCommand(
-            _outputNs.db().toString(), BSON("create" << _tempNs.coll() << "temp" << true), info);
+        bool ok = conn->runCommand(_outputNs.db().toString(), cmd.done(), info);
         uassert(16994,
                 str::stream() << "failed to create temporary $out collection '" << _tempNs.ns()
                               << "': " << info.toString(),
@@ -82,7 +91,7 @@ void DocumentSourceOut::prepTempCollection() {
     }
 
     // copy indexes on _outputNs to _tempNs
-    const std::list<BSONObj> indexes = conn->getIndexSpecs(_outputNs);
+    const std::list<BSONObj> indexes = conn->getIndexSpecs(_outputNs.ns());
     for (std::list<BSONObj>::const_iterator it = indexes.begin(); it != indexes.end(); ++it) {
         MutableDocument index((Document(*it)));
         index.remove("_id");  // indexes shouldn't have _ids but some existing ones do
@@ -98,9 +107,8 @@ void DocumentSourceOut::prepTempCollection() {
     }
 }
 
-void DocumentSourceOut::spill(DBClientBase* conn, const vector<BSONObj>& toInsert) {
-    conn->insert(_tempNs.ns(), toInsert);
-    BSONObj err = conn->getLastErrorDetailed();
+void DocumentSourceOut::spill(const vector<BSONObj>& toInsert) {
+    BSONObj err = _mongod->insert(_tempNs, toInsert);
     uassert(16996,
             str::stream() << "insert for $out failed: " << err,
             DBClientWithCommands::getLastErrorString(err).empty());
@@ -126,7 +134,7 @@ boost::optional<Document> DocumentSourceOut::getNext() {
         BSONObj toInsert = next->toBson();
         bufferedBytes += toInsert.objsize();
         if (!bufferedObjects.empty() && bufferedBytes > BSONObjMaxUserSize) {
-            spill(conn, bufferedObjects);
+            spill(bufferedObjects);
             bufferedObjects.clear();
             bufferedBytes = toInsert.objsize();
         }
@@ -134,7 +142,7 @@ boost::optional<Document> DocumentSourceOut::getNext() {
     }
 
     if (!bufferedObjects.empty())
-        spill(conn, bufferedObjects);
+        spill(bufferedObjects);
 
     // Checking again to make sure we didn't become sharded while running.
     uassert(17018,

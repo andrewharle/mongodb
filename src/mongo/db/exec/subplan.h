@@ -28,7 +28,6 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
 #include <string>
 
 #include "mongo/base/owned_pointer_vector.h"
@@ -40,6 +39,7 @@
 #include "mongo/db/query/query_planner_params.h"
 #include "mongo/db/query/query_solution.h"
 #include "mongo/db/record_id.h"
+#include "mongo/stdx/memory.h"
 
 namespace mongo {
 
@@ -64,7 +64,7 @@ class OperationContext;
  *
  *   --Plans for entire rooted $or queries are neither written to nor read from the plan cache.
  */
-class SubplanStage : public PlanStage {
+class SubplanStage final : public PlanStage {
 public:
     SubplanStage(OperationContext* txn,
                  Collection* collection,
@@ -74,24 +74,16 @@ public:
 
     static bool canUseSubplanning(const CanonicalQuery& query);
 
-    virtual bool isEOF();
-    virtual StageState work(WorkingSetID* out);
+    bool isEOF() final;
+    StageState work(WorkingSetID* out) final;
 
-    virtual void saveState();
-    virtual void restoreState(OperationContext* opCtx);
-    virtual void invalidate(OperationContext* txn, const RecordId& dl, InvalidationType type);
-
-    virtual std::vector<PlanStage*> getChildren() const;
-
-    virtual StageType stageType() const {
+    StageType stageType() const final {
         return STAGE_SUBPLAN;
     }
 
-    PlanStageStats* getStats();
+    std::unique_ptr<PlanStageStats> getStats();
 
-    virtual const CommonStats* getCommonStats();
-
-    virtual const SpecificStats* getSpecificStats();
+    const SpecificStats* getSpecificStats() const final;
 
     static const char* kStageType;
 
@@ -109,6 +101,19 @@ public:
      * Returns a non-OK status if the plan was killed during yield or if planning fails.
      */
     Status pickBestPlan(PlanYieldPolicy* yieldPolicy);
+
+    /**
+     * Takes a match expression, 'root', which has a single "contained OR". This means that
+     * 'root' is an AND with exactly one OR child.
+     *
+     * Returns a logically equivalent query after rewriting so that the contained OR is at the
+     * root of the expression tree.
+     *
+     * Used internally so that the subplanner can be used for contained OR type queries, but
+     * exposed for testing.
+     */
+    static std::unique_ptr<MatchExpression> rewriteToRootedOr(
+        std::unique_ptr<MatchExpression> root);
 
     //
     // For testing.
@@ -132,13 +137,13 @@ private:
         BranchPlanningResult() {}
 
         // A parsed version of one branch of the $or.
-        boost::scoped_ptr<CanonicalQuery> canonicalQuery;
+        std::unique_ptr<CanonicalQuery> canonicalQuery;
 
         // If there is cache data available, then we store it here rather than generating
         // a set of alternate plans for the branch. The index tags from the cache data
         // can be applied directly to the parent $or MatchExpression when generating the
         // composite solution.
-        boost::scoped_ptr<CachedSolution> cachedSolution;
+        std::unique_ptr<CachedSolution> cachedSolution;
 
         // Query solutions resulting from planning the $or branch.
         OwnedPointerVector<QuerySolution> solutions;
@@ -167,9 +172,7 @@ private:
      */
     Status choosePlanWholeQuery(PlanYieldPolicy* yieldPolicy);
 
-    // transactional context for read locks. Not owned by us
-    OperationContext* _txn;
-
+    // Not owned here. Must be non-null.
     Collection* _collection;
 
     // Not owned here.
@@ -180,19 +183,20 @@ private:
     // Not owned here.
     CanonicalQuery* _query;
 
+    // The copy of the query that we will annotate with tags and use to construct the composite
+    // solution. Must be a rooted $or query, or a contained $or that has been rewritten to a
+    // rooted $or.
+    std::unique_ptr<MatchExpression> _orExpression;
+
     // If we successfully create a "composite solution" by planning each $or branch
     // independently, that solution is owned here.
-    boost::scoped_ptr<QuerySolution> _compositeSolution;
-
-    boost::scoped_ptr<PlanStage> _child;
+    std::unique_ptr<QuerySolution> _compositeSolution;
 
     // Holds a list of the results from planning each branch.
     OwnedPointerVector<BranchPlanningResult> _branchResults;
 
     // We need this to extract cache-friendly index data from the index assignments.
     std::map<BSONObj, size_t> _indexMap;
-
-    CommonStats _commonStats;
 };
 
 }  // namespace mongo

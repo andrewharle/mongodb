@@ -30,10 +30,10 @@
 
 #include "mongo/platform/basic.h"
 
-#include <boost/shared_ptr.hpp>
 #include <string>
 #include <vector>
 
+#include "mongo/config.h"
 #include "mongo/db/concurrency/lock_manager_test_help.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/log.h"
@@ -304,11 +304,11 @@ TEST(LockerImpl, CanceledDeadlockUnblocks) {
 
 // These two tests exercise single-threaded performance of uncontended lock acquisition. It
 // is not practical to run them on debug builds.
-#ifndef _DEBUG
+#ifndef MONGO_CONFIG_DEBUG_BUILD
 
 TEST(Locker, PerformanceBoostSharedMutex) {
     for (int numLockers = 1; numLockers <= 64; numLockers = numLockers * 2) {
-        boost::mutex mtx;
+        stdx::mutex mtx;
 
         // Do some warm-up loops
         for (int i = 0; i < 1000; i++) {
@@ -333,7 +333,7 @@ TEST(Locker, PerformanceBoostSharedMutex) {
 
 TEST(Locker, PerformanceLocker) {
     for (int numLockers = 1; numLockers <= 64; numLockers = numLockers * 2) {
-        std::vector<boost::shared_ptr<LockerForTests>> lockers(numLockers);
+        std::vector<std::shared_ptr<LockerForTests>> lockers(numLockers);
         for (int i = 0; i < numLockers; i++) {
             lockers[i].reset(new LockerForTests(MODE_S));
         }
@@ -360,6 +360,6 @@ TEST(Locker, PerformanceLocker) {
     }
 }
 
-#endif  // _DEBUG
+#endif  // MONGO_CONFIG_DEBUG_BUILD
 
 }  // namespace mongo

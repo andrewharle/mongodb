@@ -28,25 +28,23 @@
  *    then also delete it in the license file.
  */
 
-#include <boost/scoped_ptr.hpp>
+#include <cstdint>
 
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/catalog/index_create.h"
+#include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/dbhelpers.h"
-#include "mongo/db/global_environment_d.h"
-#include "mongo/db/global_environment_experiment.h"
-#include "mongo/db/index/btree_based_bulk_access_method.h"
+#include "mongo/db/service_context_d.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/operation_context_impl.h"
-#include "mongo/platform/cstdint.h"
-
 #include "mongo/dbtests/dbtests.h"
 
 namespace IndexUpdateTests {
 
-using boost::scoped_ptr;
+using std::unique_ptr;
 
 static const char* const _ns = "unittests.indexupdate";
 
@@ -62,7 +60,7 @@ public:
     }
     ~IndexBuildBase() {
         _client.dropCollection(_ns);
-        getGlobalEnvironment()->unsetKillAllOperations();
+        getGlobalServiceContext()->unsetKillAllOperations();
     }
     Collection* collection() {
         return _ctx.getCollection();
@@ -118,7 +116,7 @@ protected:
     }
 
     OperationContextImpl _txn;
-    Client::WriteContext _ctx;
+    OldClientWriteContext _ctx;
     DBDirectClient _client;
 };
 
@@ -173,7 +171,7 @@ protected:
                                                     nDocs,
                                                     nDocs));
             // Register a request to kill the current operation.
-            txn.getCurOp()->kill();
+            CurOp::get(txn)->kill();
             if ( _mayInterrupt ) {
                 // Add keys to phaseOne.
                 ASSERT_THROWS( BtreeBasedBuilder::addKeysToPhaseOne( collection(),
@@ -223,7 +221,7 @@ protected:
             phaseOne.sorter->sort( false );
             // Set up remaining arguments.
             set<RecordId> dups;
-            CurOp* op = txn.getCurOp();
+            CurOp* op = CurOp::get(txn);
             ProgressMeterHolder pm (op->setMessage("BuildBottomUp",
                                                    "BuildBottomUp Progress",
                                                    nKeys,
@@ -246,7 +244,7 @@ protected:
             // The index's root is set after the build is complete.
             ASSERT( !id->getHead().isNull() );
             // Create a cursor over the index.
-            scoped_ptr<BtreeCursor> cursor(
+            unique_ptr<BtreeCursor> cursor(
                     BtreeCursor::make( nsdetails( _ns ),
                                        id->getOnDisk(),
                                        BSON( "" << -1 ),    // startKey below minimum key.
@@ -289,7 +287,7 @@ protected:
             phaseOne.sorter->sort( false );
             // Set up remaining arguments.
             set<RecordId> dups;
-            CurOp* op = txn.getCurOp();
+            CurOp* op = CurOp::get(txn);
             ProgressMeterHolder pm (op->setMessage("InterruptBuildBottomUp",
                                                    "InterruptBuildBottomUp Progress",
                                                    nKeys,
@@ -299,7 +297,7 @@ protected:
             // The index's root has not yet been set.
             ASSERT( id->getHead().isNull() );
             // Register a request to kill the current operation.
-            txn.getCurOp()->kill();
+            CurOp::get(txn)->kill();
             if ( _mayInterrupt ) {
                 // The build is aborted due to the kill request.
                 ASSERT_THROWS
@@ -343,7 +341,7 @@ class InsertBuildIgnoreUnique : public IndexBuildBase {
 public:
     void run() {
         // Create a new collection.
-        Database* db = _ctx.ctx().db();
+        Database* db = _ctx.db();
         Collection* coll;
         {
             WriteUnitOfWork wunit(&_txn);
@@ -386,7 +384,7 @@ class InsertBuildEnforceUnique : public IndexBuildBase {
 public:
     void run() {
         // Create a new collection.
-        Database* db = _ctx.ctx().db();
+        Database* db = _ctx.db();
         Collection* coll;
         {
             WriteUnitOfWork wunit(&_txn);
@@ -426,7 +424,7 @@ class InsertBuildFillDups : public IndexBuildBase {
 public:
     void run() {
         // Create a new collection.
-        Database* db = _ctx.ctx().db();
+        Database* db = _ctx.db();
         Collection* coll;
         RecordId loc1;
         RecordId loc2;
@@ -435,18 +433,14 @@ public:
             db->dropCollection(&_txn, _ns);
             coll = db->createCollection(&_txn, _ns);
 
-            StatusWith<RecordId> swLoc1 = coll->insertDocument(&_txn,
-                                                               BSON("_id" << 1 << "a"
-                                                                          << "dup"),
-                                                               true);
-            StatusWith<RecordId> swLoc2 = coll->insertDocument(&_txn,
-                                                               BSON("_id" << 2 << "a"
-                                                                          << "dup"),
-                                                               true);
-            ASSERT_OK(swLoc1.getStatus());
-            ASSERT_OK(swLoc2.getStatus());
-            loc1 = swLoc1.getValue();
-            loc2 = swLoc2.getValue();
+            ASSERT_OK(coll->insertDocument(&_txn,
+                                           BSON("_id" << 1 << "a"
+                                                      << "dup"),
+                                           true));
+            ASSERT_OK(coll->insertDocument(&_txn,
+                                           BSON("_id" << 2 << "a"
+                                                      << "dup"),
+                                           true));
             wunit.commit();
         }
 
@@ -467,7 +461,12 @@ public:
 
         // either loc1 or loc2 should be in dups but not both.
         ASSERT_EQUALS(dups.size(), 1U);
-        ASSERT(dups.count(loc1) || dups.count(loc2));
+        for (auto recordId : dups) {
+            ASSERT_NOT_EQUALS(recordId, RecordId());
+            BSONObj obj = coll->docFor(&_txn, recordId).value();
+            int id = obj["_id"].Int();
+            ASSERT(id == 1 || id == 2);
+        }
     }
 };
 
@@ -476,7 +475,7 @@ class InsertBuildIndexInterrupt : public IndexBuildBase {
 public:
     void run() {
         // Create a new collection.
-        Database* db = _ctx.ctx().db();
+        Database* db = _ctx.db();
         Collection* coll;
         {
             WriteUnitOfWork wunit(&_txn);
@@ -491,16 +490,14 @@ public:
             }
             wunit.commit();
         }
-        // Initialize curop.
-        _txn.getCurOp()->reset();
         // Request an interrupt.
-        getGlobalEnvironment()->setKillAllOperations();
+        getGlobalServiceContext()->setKillAllOperations();
         BSONObj indexInfo = BSON("key" << BSON("a" << 1) << "ns" << _ns << "name"
                                        << "a_1");
         // The call is interrupted because mayInterrupt == true.
         ASSERT_TRUE(buildIndexInterrupted(indexInfo, true));
         // only want to interrupt the index build
-        getGlobalEnvironment()->unsetKillAllOperations();
+        getGlobalServiceContext()->unsetKillAllOperations();
         // The new index is not listed in the index catalog because the index build failed.
         ASSERT(!coll->getIndexCatalog()->findIndexByName(&_txn, "a_1"));
     }
@@ -511,7 +508,7 @@ class InsertBuildIndexInterruptDisallowed : public IndexBuildBase {
 public:
     void run() {
         // Create a new collection.
-        Database* db = _ctx.ctx().db();
+        Database* db = _ctx.db();
         Collection* coll;
         {
             WriteUnitOfWork wunit(&_txn);
@@ -525,16 +522,14 @@ public:
             }
             wunit.commit();
         }
-        // Initialize curop.
-        _txn.getCurOp()->reset();
         // Request an interrupt.
-        getGlobalEnvironment()->setKillAllOperations();
+        getGlobalServiceContext()->setKillAllOperations();
         BSONObj indexInfo = BSON("key" << BSON("a" << 1) << "ns" << _ns << "name"
                                        << "a_1");
         // The call is not interrupted because mayInterrupt == false.
         ASSERT_FALSE(buildIndexInterrupted(indexInfo, false));
         // only want to interrupt the index build
-        getGlobalEnvironment()->unsetKillAllOperations();
+        getGlobalServiceContext()->unsetKillAllOperations();
         // The new index is listed in the index catalog because the index build completed.
         ASSERT(coll->getIndexCatalog()->findIndexByName(&_txn, "a_1"));
     }
@@ -545,7 +540,7 @@ class InsertBuildIdIndexInterrupt : public IndexBuildBase {
 public:
     void run() {
         // Recreate the collection as capped, without an _id index.
-        Database* db = _ctx.ctx().db();
+        Database* db = _ctx.db();
         Collection* coll;
         {
             WriteUnitOfWork wunit(&_txn);
@@ -562,16 +557,14 @@ public:
             }
             wunit.commit();
         }
-        // Initialize curop.
-        _txn.getCurOp()->reset();
         // Request an interrupt.
-        getGlobalEnvironment()->setKillAllOperations();
+        getGlobalServiceContext()->setKillAllOperations();
         BSONObj indexInfo = BSON("key" << BSON("_id" << 1) << "ns" << _ns << "name"
                                        << "_id_");
         // The call is interrupted because mayInterrupt == true.
         ASSERT_TRUE(buildIndexInterrupted(indexInfo, true));
         // only want to interrupt the index build
-        getGlobalEnvironment()->unsetKillAllOperations();
+        getGlobalServiceContext()->unsetKillAllOperations();
         // The new index is not listed in the index catalog because the index build failed.
         ASSERT(!coll->getIndexCatalog()->findIndexByName(&_txn, "_id_"));
     }
@@ -582,7 +575,7 @@ class InsertBuildIdIndexInterruptDisallowed : public IndexBuildBase {
 public:
     void run() {
         // Recreate the collection as capped, without an _id index.
-        Database* db = _ctx.ctx().db();
+        Database* db = _ctx.db();
         Collection* coll;
         {
             WriteUnitOfWork wunit(&_txn);
@@ -599,16 +592,14 @@ public:
             }
             wunit.commit();
         }
-        // Initialize curop.
-        _txn.getCurOp()->reset();
         // Request an interrupt.
-        getGlobalEnvironment()->setKillAllOperations();
+        getGlobalServiceContext()->setKillAllOperations();
         BSONObj indexInfo = BSON("key" << BSON("_id" << 1) << "ns" << _ns << "name"
                                        << "_id_");
         // The call is not interrupted because mayInterrupt == false.
         ASSERT_FALSE(buildIndexInterrupted(indexInfo, false));
         // only want to interrupt the index build
-        getGlobalEnvironment()->unsetKillAllOperations();
+        getGlobalServiceContext()->unsetKillAllOperations();
         // The new index is listed in the index catalog because the index build succeeded.
         ASSERT(coll->getIndexCatalog()->findIndexByName(&_txn, "_id_"));
     }
@@ -625,14 +616,12 @@ public:
         }
         // Start with just _id
         ASSERT_EQUALS(1U, _client.getIndexSpecs(_ns).size());
-        // Initialize curop.
-        _txn.getCurOp()->reset();
         // Request an interrupt.
-        getGlobalEnvironment()->setKillAllOperations();
+        getGlobalServiceContext()->setKillAllOperations();
         // The call is not interrupted.
         Helpers::ensureIndex(&_txn, collection(), BSON("a" << 1), false, "a_1");
         // only want to interrupt the index build
-        getGlobalEnvironment()->unsetKillAllOperations();
+        getGlobalServiceContext()->unsetKillAllOperations();
         // The new index is listed in getIndexSpecs because the index build completed.
         ASSERT_EQUALS(2U, _client.getIndexSpecs(_ns).size());
     }
@@ -852,7 +841,7 @@ public:
         const std::string storageEngineName = "wiredTiger";
 
         // Run 'wiredTiger' tests if the storage engine is supported.
-        if (getGlobalEnvironment()->isRegisteredStorageEngine(storageEngineName)) {
+        if (getGlobalServiceContext()->isRegisteredStorageEngine(storageEngineName)) {
             // Every field under "storageEngine" has to be an object.
             ASSERT_NOT_OK(createIndex("unittest", _createSpec(BSON(storageEngineName << 1))));
 

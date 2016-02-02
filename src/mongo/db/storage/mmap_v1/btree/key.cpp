@@ -30,8 +30,9 @@
 
 #include "mongo/db/storage/mmap_v1/btree/key.h"
 
+#include <cmath>
+
 #include "mongo/bson/util/builder.h"
-#include "mongo/platform/float_utils.h"
 #include "mongo/util/log.h"
 #include "mongo/util/startup_test.h"
 
@@ -64,12 +65,15 @@ int oldCompareElementValues(const BSONElement& l, const BSONElement& r) {
             return 0;
         case Bool:
             return *l.value() - *r.value();
-        case Timestamp:
-        case Date:
+        case bsonTimestamp:
+        case Date: {
+            const unsigned long long lULL = l.date().toULL();
+            const unsigned long long rULL = r.date().toULL();
             // unsigned dates for old version
-            if (l.date() < r.date())
+            if (lULL < rULL)
                 return -1;
-            return l.date() == r.date() ? 0 : 1;
+            return lULL == rULL ? 0 : 1;
+        }
         case NumberLong:
             if (r.type() == NumberLong) {
                 long long L = l._numberLong();
@@ -347,7 +351,7 @@ KeyV1Owned::KeyV1Owned(const BSONObj& obj) {
             }
             case NumberDouble: {
                 double d = e._numberDouble();
-                if (isNaN(d)) {
+                if (std::isnan(d)) {
                     traditional(obj);
                     return;
                 }

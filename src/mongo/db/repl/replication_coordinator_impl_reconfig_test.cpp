@@ -32,7 +32,6 @@
 
 #include "mongo/db/jsobj.h"
 #include "mongo/db/operation_context_noop.h"
-#include "mongo/db/repl/network_interface_mock.h"
 #include "mongo/db/repl/repl_set_heartbeat_args.h"
 #include "mongo/db/repl/repl_set_heartbeat_response.h"
 #include "mongo/db/repl/replica_set_config.h"
@@ -40,6 +39,7 @@
 #include "mongo/db/repl/replication_coordinator_impl.h"
 #include "mongo/db/repl/replication_coordinator_test_fixture.h"
 #include "mongo/db/repl/replication_coordinator.h"  // ReplSetReconfigArgs
+#include "mongo/executor/network_interface_mock.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/log.h"
 
@@ -47,8 +47,11 @@ namespace mongo {
 namespace repl {
 namespace {
 
+using executor::NetworkInterfaceMock;
+using executor::RemoteCommandRequest;
+using executor::RemoteCommandResponse;
+
 typedef ReplicationCoordinator::ReplSetReconfigArgs ReplSetReconfigArgs;
-typedef ReplicationExecutor::RemoteCommandRequest RemoteCommandRequest;
 
 TEST_F(ReplCoordTest, ReconfigBeforeInitialized) {
     // start up but do not initiate
@@ -96,8 +99,8 @@ TEST_F(ReplCoordTest, ReconfigWithUninitializableConfig) {
                                                         << "node2:12345"))),
                        HostAndPort("node1", 12345));
     ASSERT(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
-    getReplCoord()->setMyLastOptime(OpTime(100, 0));
-    simulateSuccessfulElection();
+    getReplCoord()->setMyLastOptime(OpTime(Timestamp(100, 0), 0));
+    simulateSuccessfulV1Election();
 
     BSONObjBuilder result;
     ReplSetReconfigArgs args;
@@ -129,8 +132,8 @@ TEST_F(ReplCoordTest, ReconfigWithWrongReplSetName) {
                                                         << "node2:12345"))),
                        HostAndPort("node1", 12345));
     ASSERT(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
-    getReplCoord()->setMyLastOptime(OpTime(100, 0));
-    simulateSuccessfulElection();
+    getReplCoord()->setMyLastOptime(OpTime(Timestamp(100, 0), 0));
+    simulateSuccessfulV1Election();
 
     BSONObjBuilder result;
     ReplSetReconfigArgs args;
@@ -160,8 +163,8 @@ TEST_F(ReplCoordTest, ReconfigValidateFails) {
                                                         << "node2:12345"))),
                        HostAndPort("node1", 12345));
     ASSERT(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
-    getReplCoord()->setMyLastOptime(OpTime(100, 0));
-    simulateSuccessfulElection();
+    getReplCoord()->setMyLastOptime(OpTime(Timestamp(100, 0), 0));
+    simulateSuccessfulV1Election();
 
     BSONObjBuilder result;
     ReplSetReconfigArgs args;
@@ -223,25 +226,25 @@ TEST_F(ReplCoordTest, ReconfigQuorumCheckFails) {
                                                         << "node2:12345"))),
                        HostAndPort("node1", 12345));
     ASSERT(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
-    getReplCoord()->setMyLastOptime(OpTime(100, 0));
-    simulateSuccessfulElection();
+    getReplCoord()->setMyLastOptime(OpTime(Timestamp(100, 0), 0));
+    simulateSuccessfulV1Election();
 
     Status status(ErrorCodes::InternalError, "Not Set");
-    boost::thread reconfigThread(stdx::bind(doReplSetReconfig, getReplCoord(), &status));
+    stdx::thread reconfigThread(stdx::bind(doReplSetReconfig, getReplCoord(), &status));
 
     NetworkInterfaceMock* net = getNet();
     getNet()->enterNetwork();
     const NetworkInterfaceMock::NetworkOperationIterator noi = net->getNextReadyRequest();
-    const ReplicationExecutor::RemoteCommandRequest& request = noi->getRequest();
+    const RemoteCommandRequest& request = noi->getRequest();
     repl::ReplSetHeartbeatArgs hbArgs;
     ASSERT_OK(hbArgs.initialize(request.cmdObj));
     repl::ReplSetHeartbeatResponse hbResp;
     hbResp.setSetName("mySet");
     hbResp.setState(MemberState::RS_SECONDARY);
-    hbResp.setVersion(5);
+    hbResp.setConfigVersion(5);
     BSONObjBuilder respObj;
     respObj << "ok" << 1;
-    hbResp.addToBSON(&respObj);
+    hbResp.addToBSON(&respObj, false);
     net->scheduleResponse(noi, net->now(), makeResponseStatus(respObj.obj()));
     net->runReadyNetworkOperations();
     getNet()->exitNetwork();
@@ -261,30 +264,15 @@ TEST_F(ReplCoordTest, ReconfigStoreLocalConfigDocumentFails) {
                                                         << "node2:12345"))),
                        HostAndPort("node1", 12345));
     ASSERT(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
-    getReplCoord()->setMyLastOptime(OpTime(100, 0));
-    simulateSuccessfulElection();
+    getReplCoord()->setMyLastOptime(OpTime(Timestamp(100, 0), 0));
+    simulateSuccessfulV1Election();
 
     Status status(ErrorCodes::InternalError, "Not Set");
     getExternalState()->setStoreLocalConfigDocumentStatus(
         Status(ErrorCodes::OutOfDiskSpace, "The test set this"));
-    boost::thread reconfigThread(stdx::bind(doReplSetReconfig, getReplCoord(), &status));
+    stdx::thread reconfigThread(stdx::bind(doReplSetReconfig, getReplCoord(), &status));
 
-    NetworkInterfaceMock* net = getNet();
-    getNet()->enterNetwork();
-    const NetworkInterfaceMock::NetworkOperationIterator noi = net->getNextReadyRequest();
-    const ReplicationExecutor::RemoteCommandRequest& request = noi->getRequest();
-    repl::ReplSetHeartbeatArgs hbArgs;
-    ASSERT_OK(hbArgs.initialize(request.cmdObj));
-    repl::ReplSetHeartbeatResponse hbResp;
-    hbResp.setSetName("mySet");
-    hbResp.setState(MemberState::RS_SECONDARY);
-    hbResp.setVersion(2);
-    BSONObjBuilder respObj;
-    respObj << "ok" << 1;
-    hbResp.addToBSON(&respObj);
-    net->scheduleResponse(noi, net->now(), makeResponseStatus(respObj.obj()));
-    net->runReadyNetworkOperations();
-    getNet()->exitNetwork();
+    replyToReceivedHeartbeat();
     reconfigThread.join();
     ASSERT_EQUALS(ErrorCodes::OutOfDiskSpace, status);
 }
@@ -301,12 +289,12 @@ TEST_F(ReplCoordTest, ReconfigWhileReconfiggingFails) {
                                                         << "node2:12345"))),
                        HostAndPort("node1", 12345));
     ASSERT(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
-    getReplCoord()->setMyLastOptime(OpTime(100, 0));
-    simulateSuccessfulElection();
+    getReplCoord()->setMyLastOptime(OpTime(Timestamp(100, 0), 0));
+    simulateSuccessfulV1Election();
 
     Status status(ErrorCodes::InternalError, "Not Set");
     // first reconfig
-    boost::thread reconfigThread(stdx::bind(doReplSetReconfig, getReplCoord(), &status));
+    stdx::thread reconfigThread(stdx::bind(doReplSetReconfig, getReplCoord(), &status));
     getNet()->enterNetwork();
     getNet()->blackHole(getNet()->getNextReadyRequest());
     getNet()->exitNetwork();
@@ -337,11 +325,11 @@ TEST_F(ReplCoordTest, ReconfigWhileInitializingFails) {
     init();
     start(HostAndPort("node1", 12345));
     ASSERT(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
-    getReplCoord()->setMyLastOptime(OpTime(100, 0));
+    getReplCoord()->setMyLastOptime(OpTime(Timestamp(100, 0), 0));
 
     // initiate
     Status status(ErrorCodes::InternalError, "Not Set");
-    boost::thread initateThread(stdx::bind(doReplSetInitiate, getReplCoord(), &status));
+    stdx::thread initateThread(stdx::bind(doReplSetInitiate, getReplCoord(), &status));
     getNet()->enterNetwork();
     getNet()->blackHole(getNet()->getNextReadyRequest());
     getNet()->exitNetwork();
@@ -378,25 +366,25 @@ TEST_F(ReplCoordTest, ReconfigSuccessful) {
                                                         << "node2:12345"))),
                        HostAndPort("node1", 12345));
     ASSERT(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
-    getReplCoord()->setMyLastOptime(OpTime(100, 0));
-    simulateSuccessfulElection();
+    getReplCoord()->setMyLastOptime(OpTime(Timestamp(100, 0), 0));
+    simulateSuccessfulV1Election();
 
     Status status(ErrorCodes::InternalError, "Not Set");
-    boost::thread reconfigThread(stdx::bind(doReplSetReconfig, getReplCoord(), &status));
+    stdx::thread reconfigThread(stdx::bind(doReplSetReconfig, getReplCoord(), &status));
 
     NetworkInterfaceMock* net = getNet();
     getNet()->enterNetwork();
     const NetworkInterfaceMock::NetworkOperationIterator noi = net->getNextReadyRequest();
-    const ReplicationExecutor::RemoteCommandRequest& request = noi->getRequest();
+    const RemoteCommandRequest& request = noi->getRequest();
     repl::ReplSetHeartbeatArgs hbArgs;
     ASSERT_OK(hbArgs.initialize(request.cmdObj));
     repl::ReplSetHeartbeatResponse hbResp;
     hbResp.setSetName("mySet");
     hbResp.setState(MemberState::RS_SECONDARY);
-    hbResp.setVersion(2);
+    hbResp.setConfigVersion(2);
     BSONObjBuilder respObj;
     respObj << "ok" << 1;
-    hbResp.addToBSON(&respObj);
+    hbResp.addToBSON(&respObj, false);
     net->scheduleResponse(noi, net->now(), makeResponseStatus(respObj.obj()));
     net->runReadyNetworkOperations();
     getNet()->exitNetwork();
@@ -417,8 +405,8 @@ TEST_F(ReplCoordTest, ReconfigDuringHBReconfigFails) {
                                                         << "node2:12345"))),
                        HostAndPort("node1", 12345));
     ASSERT(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
-    getReplCoord()->setMyLastOptime(OpTime(100, 0));
-    simulateSuccessfulElection();
+    getReplCoord()->setMyLastOptime(OpTime(Timestamp(100, 0), 0));
+    simulateSuccessfulV1Election();
     ASSERT_TRUE(getReplCoord()->getMemberState().primary());
 
     // set hbreconfig to hang while in progress
@@ -437,13 +425,13 @@ TEST_F(ReplCoordTest, ReconfigDuringHBReconfigFails) {
                                          << BSON("_id" << 2 << "host"
                                                        << "node2:12345"))));
     hbResp2.setConfig(config);
-    hbResp2.setVersion(3);
+    hbResp2.setConfigVersion(3);
     hbResp2.setSetName("mySet");
     hbResp2.setState(MemberState::RS_SECONDARY);
     BSONObjBuilder respObj2;
     respObj2 << "ok" << 1;
-    hbResp2.addToBSON(&respObj2);
-    net->runUntil(net->now() + 10 * 1000);  // run until we've sent a heartbeat request
+    hbResp2.addToBSON(&respObj2, false);
+    net->runUntil(net->now() + Seconds(10));  // run until we've sent a heartbeat request
     const NetworkInterfaceMock::NetworkOperationIterator noi2 = net->getNextReadyRequest();
     net->scheduleResponse(noi2, net->now(), makeResponseStatus(respObj2.obj()));
     net->runReadyNetworkOperations();
@@ -460,71 +448,66 @@ TEST_F(ReplCoordTest, ReconfigDuringHBReconfigFails) {
     getExternalState()->setStoreLocalConfigDocumentToHang(false);
 }
 
-//     TEST_F(ReplCoordTest, HBReconfigDuringReconfigFails) {
-//         // start up, become primary, reconfig, while reconfigging receive reconfig via heartbeat
-//         OperationContextNoop txn;
-//         assertStartSuccess(
-//                     BSON("_id" << "mySet" <<
-//                          "version" << 2 <<
-//                          "members" << BSON_ARRAY(BSON("_id" << 1 << "host" << "node1:12345") <<
-//                                                  BSON("_id" << 2 << "host" << "node2:12345") )),
-//                     HostAndPort("node1", 12345));
-//         ASSERT(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
-//         getReplCoord()->setMyLastOptime(OpTime(100,0));
-//         simulateSuccessfulElection();
-//         ASSERT_TRUE(getReplCoord()->getCurrentMemberState().primary());
-//
-//         // schedule hb reconfig
-//         NetworkInterfaceMock* net = getNet();
-//         net->enterNetwork();
-//         net->runUntil(net->now() + 10*1000); // run until we've sent a heartbeat request
-//         const NetworkInterfaceMock::NetworkOperationIterator noi = net->getNextReadyRequest();
-//         ReplSetHeartbeatResponse hbResp;
-//         ReplicaSetConfig config;
-//         config.initialize(BSON("_id" << "mySet" <<
-//                                "version" << 4 <<
-//                                "members" << BSON_ARRAY(BSON("_id" << 1 <<
-//                                                             "host" << "node1:12345") <<
-//                                                        BSON("_id" << 2 <<
-//                                                             "host" << "node2:12345"))));
-//         hbResp.setConfig(config);
-//         hbResp.setVersion(4);
-//         hbResp.setSetName("mySet");
-//         hbResp.setState(MemberState::RS_SECONDARY);
-//         BSONObjBuilder respObj2;
-//         respObj2 << "ok" << 1;
-//         hbResp.addToBSON(&respObj2);
-//         net->scheduleResponse(noi, net->now(), makeResponseStatus(respObj2.obj()));
-//
-//         // start reconfig thread
-//         Status status2(ErrorCodes::InternalError, "Not Set");
-//         boost::thread reconfigThread(stdx::bind(doReplSetReconfig, getReplCoord(), &status2));
-//         logger::globalLogDomain()->setMinimumLoggedSeverity(logger::LogSeverity::Debug(1));
-//         startCapturingLogMessages();
-//         // execute hb reconfig, which should fail with a log message; confirmed at end of test
-//         net->runUntil(net->now()+500);
-//         net->runReadyNetworkOperations();
-//         // respond to reconfig's quorum check so that we can join that thread and exit cleanly
-//         const NetworkInterfaceMock::NetworkOperationIterator noi2 = net->getNextReadyRequest();
-//         const ReplicationExecutor::RemoteCommandRequest& request = noi2->getRequest();
-//         repl::ReplSetHeartbeatArgs hbArgs;
-//         ASSERT_OK(hbArgs.initialize(request.cmdObj));
-//         repl::ReplSetHeartbeatResponse hbResp2;
-//         hbResp2.setSetName("mySet");
-//         hbResp2.setState(MemberState::RS_SECONDARY);
-//         hbResp2.setVersion(5);
-//         BSONObjBuilder respObj;
-//         respObj << "ok" << 1;
-//         hbResp2.addToBSON(&respObj);
-//         net->scheduleResponse(noi2, net->now(), makeResponseStatus(respObj.obj()));
-//         net->runReadyNetworkOperations();
-//         net->exitNetwork();
-//         stopCapturingLogMessages();
-//         ASSERT_EQUALS(1,
-//             countLogLinesContaining("because already in the midst of a configuration process"));
-//         reconfigThread.join();
-//         logger::globalLogDomain()->setMinimumLoggedSeverity(logger::LogSeverity::Log());
-//     }
+TEST_F(ReplCoordTest, HBReconfigDuringReconfigFails) {
+    // start up, become primary, reconfig, while reconfigging receive reconfig via heartbeat
+    OperationContextNoop txn;
+    assertStartSuccess(BSON("_id"
+                            << "mySet"
+                            << "version" << 2 << "members"
+                            << BSON_ARRAY(BSON("_id" << 1 << "host"
+                                                     << "node1:12345")
+                                          << BSON("_id" << 2 << "host"
+                                                        << "node2:12345"))),
+                       HostAndPort("node1", 12345));
+    ASSERT(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+    getReplCoord()->setMyLastOptime(OpTime(Timestamp(100, 0), 0));
+    simulateSuccessfulV1Election();
+    ASSERT_TRUE(getReplCoord()->getMemberState().primary());
+
+    // start reconfigThread
+    Status status(ErrorCodes::InternalError, "Not Set");
+    stdx::thread reconfigThread(stdx::bind(doReplSetReconfig, getReplCoord(), &status));
+
+    // wait for reconfigThread to create network requests to ensure the replication coordinator
+    // is in state kConfigReconfiguring
+    NetworkInterfaceMock* net = getNet();
+    net->enterNetwork();
+    net->blackHole(net->getNextReadyRequest());
+
+    // schedule hb reconfig
+    net->runUntil(net->now() + Seconds(10));  // run until we've sent a heartbeat request
+    const NetworkInterfaceMock::NetworkOperationIterator noi = net->getNextReadyRequest();
+    ReplSetHeartbeatResponse hbResp;
+    ReplicaSetConfig config;
+    config.initialize(BSON("_id"
+                           << "mySet"
+                           << "version" << 4 << "members"
+                           << BSON_ARRAY(BSON("_id" << 1 << "host"
+                                                    << "node1:12345")
+                                         << BSON("_id" << 2 << "host"
+                                                       << "node2:12345"))));
+    hbResp.setConfig(config);
+    hbResp.setConfigVersion(4);
+    hbResp.setSetName("mySet");
+    hbResp.setState(MemberState::RS_SECONDARY);
+    BSONObjBuilder respObj2;
+    respObj2 << "ok" << 1;
+    hbResp.addToBSON(&respObj2, false);
+    net->scheduleResponse(noi, net->now(), makeResponseStatus(respObj2.obj()));
+
+    logger::globalLogDomain()->setMinimumLoggedSeverity(logger::LogSeverity::Debug(1));
+    startCapturingLogMessages();
+    // execute hb reconfig, which should fail with a log message; confirmed at end of test
+    net->runReadyNetworkOperations();
+    // respond to reconfig's quorum check so that we can join that thread and exit cleanly
+    net->exitNetwork();
+    stopCapturingLogMessages();
+    ASSERT_EQUALS(
+        1, countLogLinesContaining("because already in the midst of a configuration process"));
+    shutdown();
+    reconfigThread.join();
+    logger::globalLogDomain()->setMinimumLoggedSeverity(logger::LogSeverity::Log());
+}
 
 TEST_F(ReplCoordTest, ForceReconfigWhileNotPrimarySuccessful) {
     // start up, become a secondary, receive a forced reconfig
@@ -539,7 +522,7 @@ TEST_F(ReplCoordTest, ForceReconfigWhileNotPrimarySuccessful) {
                                                         << "node2:12345"))),
                        HostAndPort("node1", 12345));
     ASSERT(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
-    getReplCoord()->setMyLastOptime(OpTime(100, 0));
+    getReplCoord()->setMyLastOptime(OpTime(Timestamp(100, 0), 0));
 
     // fail before forced
     BSONObjBuilder result;

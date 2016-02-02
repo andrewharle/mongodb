@@ -32,16 +32,21 @@
 #include <boost/date_time/posix_time/posix_time.hpp>
 
 #include "mongo/util/concurrency/mutex.h"
+#include "mongo/util/net/message.h"
 #include "mongo/util/string_map.h"
 
 namespace mongo {
+
+class ServiceContext;
 
 /**
  * tracks usage by collection
  */
 class Top {
 public:
-    Top() : _lock("Top") {}
+    static Top& get(ServiceContext* service);
+
+    Top() = default;
 
     struct UsageData {
         UsageData() : time(0), count(0) {}
@@ -78,18 +83,15 @@ public:
     typedef StringMap<CollectionData> UsageMap;
 
 public:
-    void record(const StringData& ns, int op, int lockType, long long micros, bool command);
+    void record(StringData ns, LogicalOp logicalOp, int lockType, long long micros, bool command);
     void append(BSONObjBuilder& b);
     void cloneMap(UsageMap& out) const;
-    void collectionDropped(const StringData& ns);
-
-public:  // static stuff
-    static Top global;
+    void collectionDropped(StringData ns);
 
 private:
     void _appendToUsageMap(BSONObjBuilder& b, const UsageMap& map) const;
     void _appendStatsEntry(BSONObjBuilder& b, const char* statsName, const UsageData& map) const;
-    void _record(CollectionData& c, int op, int lockType, long long micros, bool command);
+    void _record(CollectionData& c, LogicalOp logicalOp, int lockType, long long micros);
 
     mutable SimpleMutex _lock;
     UsageMap _usage;

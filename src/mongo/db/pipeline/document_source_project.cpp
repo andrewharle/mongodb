@@ -28,7 +28,7 @@
 
 #include "mongo/platform/basic.h"
 
-#include <boost/smart_ptr.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "mongo/db/jsobj.h"
 #include "mongo/db/pipeline/document.h"
@@ -42,14 +42,14 @@ using boost::intrusive_ptr;
 using std::string;
 using std::vector;
 
-const char DocumentSourceProject::projectName[] = "$project";
-
 DocumentSourceProject::DocumentSourceProject(const intrusive_ptr<ExpressionContext>& pExpCtx,
                                              const intrusive_ptr<ExpressionObject>& exprObj)
     : DocumentSource(pExpCtx), pEO(exprObj) {}
 
+REGISTER_DOCUMENT_SOURCE(project, DocumentSourceProject::createFromBson);
+
 const char* DocumentSourceProject::getSourceName() const {
-    return projectName;
+    return "$project";
 }
 
 boost::optional<Document> DocumentSourceProject::getNext() {
@@ -77,9 +77,10 @@ boost::optional<Document> DocumentSourceProject::getNext() {
     return out.freeze();
 }
 
-void DocumentSourceProject::optimize() {
+intrusive_ptr<DocumentSource> DocumentSourceProject::optimize() {
     intrusive_ptr<Expression> pE(pEO->optimize());
     pEO = boost::dynamic_pointer_cast<ExpressionObject>(pE);
+    return this;
 }
 
 Value DocumentSourceProject::serialize(bool explain) const {
@@ -89,9 +90,7 @@ Value DocumentSourceProject::serialize(bool explain) const {
 intrusive_ptr<DocumentSource> DocumentSourceProject::createFromBson(
     BSONElement elem, const intrusive_ptr<ExpressionContext>& pExpCtx) {
     /* validate */
-    uassert(15969,
-            str::stream() << projectName << " specification must be an object",
-            elem.type() == Object);
+    uassert(15969, "$project specification must be an object", elem.type() == Object);
 
     Expression::ObjectCtx objectCtx(Expression::ObjectCtx::DOCUMENT_OK |
                                     Expression::ObjectCtx::TOP_LEVEL |

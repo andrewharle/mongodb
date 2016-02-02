@@ -1,156 +1,140 @@
-// config.h
-
 /**
-*    Copyright (C) 2008 10gen Inc.
-*
-*    This program is free software: you can redistribute it and/or  modify
-*    it under the terms of the GNU Affero General Public License, version 3,
-*    as published by the Free Software Foundation.
-*
-*    This program is distributed in the hope that it will be useful,
-*    but WITHOUT ANY WARRANTY; without even the implied warranty of
-*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*    GNU Affero General Public License for more details.
-*
-*    You should have received a copy of the GNU Affero General Public License
-*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*
-*    As a special exception, the copyright holders give permission to link the
-*    code of portions of this program with the OpenSSL library under certain
-*    conditions as described in each individual source file and distribute
-*    linked combinations including the program with the OpenSSL library. You
-*    must comply with the GNU Affero General Public License in all respects
-*    for all of the code used other than as permitted herein. If you modify
-*    file(s) with this exception, you may extend this exception to your
-*    version of the file(s), but you are not obligated to do so. If you do not
-*    wish to do so, delete this exception statement from your version. If you
-*    delete this exception statement from all source files in the program,
-*    then also delete it in the license file.
-*/
-
-/* This file is things related to the "grid configuration":
-   - what machines make up the db component of our cloud
-   - where various ranges of things live
-*/
+ *    Copyright (C) 2008-2015 MongoDB Inc.
+ *
+ *    This program is free software: you can redistribute it and/or  modify
+ *    it under the terms of the GNU Affero General Public License, version 3,
+ *    as published by the Free Software Foundation.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    GNU Affero General Public License for more details.
+ *
+ *    You should have received a copy of the GNU Affero General Public License
+ *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the GNU Affero General Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
+ */
 
 #pragma once
 
-#include <boost/shared_ptr.hpp>
+#include <set>
 
-#include "mongo/client/dbclient_rs.h"
-#include "mongo/platform/atomic_word.h"
-#include "mongo/s/chunk.h"
-#include "mongo/s/shard.h"
-#include "mongo/s/shard_key_pattern.h"
+#include "mongo/db/jsobj.h"
+#include "mongo/db/repl/optime.h"
+#include "mongo/s/client/shard.h"
+#include "mongo/util/concurrency/mutex.h"
 
 namespace mongo {
 
-class ConfigServer;
-
+class ChunkManager;
+class CollectionType;
+class DatabaseType;
 class DBConfig;
-typedef boost::shared_ptr<DBConfig> DBConfigPtr;
+class OperationContext;
 
-extern DBConfigPtr configServerPtr;
-extern ConfigServer& configServer;
+struct CollectionInfo {
+    CollectionInfo() {
+        _dirty = false;
+        _dropped = false;
+    }
+
+    CollectionInfo(OperationContext* txn, const CollectionType& in, repl::OpTime);
+    ~CollectionInfo();
+
+    bool isSharded() const {
+        return _cm.get();
+    }
+
+    std::shared_ptr<ChunkManager> getCM() const {
+        return _cm;
+    }
+
+    void resetCM(ChunkManager* cm);
+
+    void unshard();
+
+    bool isDirty() const {
+        return _dirty;
+    }
+
+    bool wasDropped() const {
+        return _dropped;
+    }
+
+    void save(OperationContext* txn, const std::string& ns);
+
+    void useChunkManager(std::shared_ptr<ChunkManager> manager);
+
+    bool unique() const {
+        return _unique;
+    }
+
+    BSONObj key() const {
+        return _key;
+    }
+
+    repl::OpTime getConfigOpTime() const {
+        return _configOpTime;
+    }
+
+private:
+    BSONObj _key;
+    bool _unique;
+    std::shared_ptr<ChunkManager> _cm;
+    bool _dirty;
+    bool _dropped;
+    repl::OpTime _configOpTime;
+};
 
 /**
  * top level configuration for a database
  */
 class DBConfig {
-    struct CollectionInfo {
-        CollectionInfo() {
-            _dirty = false;
-            _dropped = false;
-        }
-
-        CollectionInfo(const BSONObj& in);
-
-        bool isSharded() const {
-            return _cm.get();
-        }
-
-        ChunkManagerPtr getCM() const {
-            return _cm;
-        }
-
-        void resetCM(ChunkManager* cm) {
-            verify(cm);
-            verify(_cm);  // this has to be already sharded
-            _cm.reset(cm);
-        }
-
-        void shard(std::unique_ptr<ChunkManager> manager);
-        void unshard();
-
-        bool isDirty() const {
-            return _dirty;
-        }
-        bool wasDropped() const {
-            return _dropped;
-        }
-
-        void save(const std::string& ns);
-
-        bool unique() const {
-            return _unqiue;
-        }
-        BSONObj key() const {
-            return _key;
-        }
-
-
-    private:
-        BSONObj _key;
-        bool _unqiue;
-        ChunkManagerPtr _cm;
-        bool _dirty;
-        bool _dropped;
-    };
-
-    typedef std::map<std::string, CollectionInfo> Collections;
-
 public:
-    DBConfig(std::string name)
-        : _name(name),
-          _primary("config", "", 0 /* maxSize */, false /* draining */),
-          _shardingEnabled(false),
-          _lock("DBConfig"),
-          _hitConfigServerLock("DBConfig::_hitConfigServerLock") {
-        verify(name.size());
-    }
-    virtual ~DBConfig() {}
-
-    std::string getName() const {
-        return _name;
-    };
+    DBConfig(std::string name, const DatabaseType& dbt, repl::OpTime configOpTime);
+    ~DBConfig();
 
     /**
-     * @return if anything in this db is partitioned or not
+     * The name of the database which this entry caches.
      */
-    bool isShardingEnabled() {
+    const std::string& name() const {
+        return _name;
+    }
+
+    /**
+     * Whether sharding is enabled for this database.
+     */
+    bool isShardingEnabled() const {
         return _shardingEnabled;
     }
 
-    void enableSharding(bool save = true);
+    const ShardId& getPrimaryId() const {
+        return _primaryId;
+    }
 
-    /* Makes all the configuration changes necessary to shard a new collection.
-     * Optionally, chunks will be created based on a set of specified initial split points, and
-     * distributed in a round-robin fashion onto a set of initial shards.  If no initial shards
-     * are specified, only the primary will be used.
-     *
-     * WARNING: It's not safe to place initial chunks onto non-primary shards using this method.
-     * The initShards parameter allows legacy behavior expected by map-reduce.
+    /**
+     * Removes all cached metadata for the specified namespace so that subsequent attempts to
+     * retrieve it will cause a full reload.
      */
-    ChunkManagerPtr shardCollection(const std::string& ns,
-                                    const ShardKeyPattern& fieldsAndOrder,
-                                    bool unique,
-                                    std::vector<BSONObj>* initPoints = 0,
-                                    std::vector<Shard>* initShards = 0);
+    void invalidateNs(const std::string& ns);
+
+    void enableSharding(OperationContext* txn);
 
     /**
        @return true if there was sharding info to remove
      */
-    bool removeSharding(const std::string& ns);
+    bool removeSharding(OperationContext* txn, const std::string& ns);
 
     /**
      * @return whether or not the 'ns' collection is partitioned
@@ -159,160 +143,98 @@ public:
 
     // Atomically returns *either* the chunk manager *or* the primary shard for the collection,
     // neither if the collection doesn't exist.
-    void getChunkManagerOrPrimary(const std::string& ns,
-                                  ChunkManagerPtr& manager,
-                                  ShardPtr& primary);
+    void getChunkManagerOrPrimary(OperationContext* txn,
+                                  const std::string& ns,
+                                  std::shared_ptr<ChunkManager>& manager,
+                                  std::shared_ptr<Shard>& primary);
 
-    ChunkManagerPtr getChunkManager(const std::string& ns,
-                                    bool reload = false,
-                                    bool forceReload = false);
-    ChunkManagerPtr getChunkManagerIfExists(const std::string& ns,
-                                            bool reload = false,
-                                            bool forceReload = false);
+    std::shared_ptr<ChunkManager> getChunkManager(OperationContext* txn,
+                                                  const std::string& ns,
+                                                  bool reload = false,
+                                                  bool forceReload = false);
+    std::shared_ptr<ChunkManager> getChunkManagerIfExists(OperationContext* txn,
+                                                          const std::string& ns,
+                                                          bool reload = false,
+                                                          bool forceReload = false);
 
-    const Shard& getShard(const std::string& ns);
     /**
-     * @return the correct for shard for the ns
-     * if the namespace is sharded, will return NULL
+     * Returns shard id for primary shard for the database for which this DBConfig represents.
      */
-    ShardPtr getShardIfExists(const std::string& ns);
+    const ShardId& getShardId(OperationContext* txn, const std::string& ns);
 
-    const Shard& getPrimary() const {
-        uassert(8041, (std::string) "no primary shard configured for db: " + _name, _primary.ok());
-        return _primary;
-    }
-
-    void setPrimary(const std::string& s);
-
-    bool load();
-    bool reload();
-
-    bool dropDatabase(std::string& errmsg);
-
-    // model stuff
-
-    // lockless loading
-    void serialize(BSONObjBuilder& to);
-
-    void unserialize(const BSONObj& from);
-
-    void getAllShards(std::set<Shard>& shards) const;
-
-    void getAllShardedCollections(std::set<std::string>& namespaces) const;
-
-protected:
-    typedef AtomicUInt64::WordType Counter;
-
-    /**
-        lockless
-    */
-    bool _isSharded(const std::string& ns);
-
-    bool _dropShardedCollections(int& num, std::set<Shard>& allServers, std::string& errmsg);
+    void setPrimary(OperationContext* txn, const ShardId& newPrimaryId);
 
     /**
      * Returns true if it is successful at loading the DBConfig, false if the database is not found,
      * and throws on all other errors.
-     * Also returns true without reloading if reloadIteration is not equal to the _reloadCount.
-     * This is to avoid multiple threads attempting to reload do duplicate work.
      */
-    bool _loadIfNeeded(Counter reloadIteration);
+    bool load(OperationContext* txn);
+    bool reload(OperationContext* txn);
 
-    void _save(bool db = true, bool coll = true);
+    bool dropDatabase(OperationContext*, std::string& errmsg);
 
-    std::string _name;  // e.g. "alleyinsider"
-    Shard _primary;     // e.g. localhost , mongo.foo.com:9999
+    void getAllShardIds(std::set<ShardId>* shardIds);
+    void getAllShardedCollections(std::set<std::string>& namespaces);
+
+protected:
+    typedef std::map<std::string, CollectionInfo> CollectionInfoMap;
+
+    bool _dropShardedCollections(OperationContext* txn,
+                                 int& num,
+                                 std::set<ShardId>& shardIds,
+                                 std::string& errmsg);
+
+    /**
+     * Returns true if it is successful at loading the DBConfig, false if the database is not found,
+     * and throws on all other errors.
+     */
+    bool _load(OperationContext* txn);
+
+    void _save(OperationContext* txn, bool db = true, bool coll = true);
+
+    // Name of the database which this entry caches
+    const std::string _name;
+
+    // Primary shard id
+    ShardId _primaryId;
+
+    // Whether sharding has been enabled for this database
     bool _shardingEnabled;
 
-    // { "alleyinsider.blog.posts" : { ts : 1 }  , ... ] - all ns that are sharded
-    // map<std::string,CollectionInfo> _sharded;
-    // this will only have entries for things that have been looked at
-    // map<std::string,ChunkManagerPtr> _shards;
+    // Set of collections and lock to protect access
+    stdx::mutex _lock;
+    CollectionInfoMap _collections;
 
-    Collections _collections;
+    // OpTime of config server when the database definition was loaded.
+    repl::OpTime _configOpTime;
 
-    mutable mongo::mutex _lock;  // TODO: change to r/w lock ??
-    mutable mongo::mutex _hitConfigServerLock;
-
-    // Increments every time this performs a full reload. Since a full reload can take a very
-    // long time for very large clusters, this can be used to minimize duplicate work when multiple
-    // threads tries to perform full reload at roughly the same time.
-    AtomicUInt64 _reloadCount;  // (S)
+    // Ensures that only one thread at a time loads collection configuration data from
+    // the config server
+    stdx::mutex _hitConfigServerLock;
 };
 
-class ConfigServer : public DBConfig {
+
+class ConfigServer {
 public:
-    ConfigServer();
-    ~ConfigServer();
-
-    bool ok(bool checkConsistency = false);
-
-    virtual std::string modelServer() {
-        uassert(10190, "ConfigServer not setup", _primary.ok());
-        return _primary.getConnString();
-    }
+    static void reloadSettings(OperationContext* txn);
 
     /**
-       call at startup, this will initiate connection to the grid db
-    */
-    bool init(std::vector<std::string> configHosts);
-
-    bool init(const std::string& s);
-
-    /**
-     * Check hosts are unique. Returns true if all configHosts
-     * hostname:port entries are unique. Otherwise return false
-     * and fill errmsg with message containing the offending server.
-     */
-    bool checkHostsAreUnique(const std::vector<std::string>& configHosts, std::string* errmsg);
-
-    /**
-     * Checks if all config servers are up.
+     * For use in mongos and mongod which needs notifications about changes to shard and config
+     * server replset membership to update the ShardRegistry.
      *
-     * If localCheckOnly is true, only check if the socket is still open with no errors.
-     * Otherwise, also send a getLastError command with recv timeout.
-     *
-     * TODO: fix this - SERVER-15811
+     * This is expected to be run in an existing thread.
      */
-    bool allUp(bool localCheckOnly);
-    bool allUp(bool localCheckOnly, std::string& errmsg);
-
-    int dbConfigVersion();
-    int dbConfigVersion(DBClientBase& conn);
-
-    void reloadSettings();
+    static void replicaSetChangeShardRegistryUpdateHook(const std::string& setName,
+                                                        const std::string& newConnectionString);
 
     /**
-     * Create a metadata change log entry in the config.changelog collection.
+     * For use in mongos which needs notifications about changes to shard replset membership to
+     * update the config.shards collection.
      *
-     * @param what e.g. "split" , "migrate"
-     * @param ns to which collection the metadata change is being applied
-     * @param msg additional info about the metadata change
-     *
-     * This call is guaranteed never to throw.
+     * This is expected to be run in a brand new thread.
      */
-    void logChange(const std::string& what,
-                   const std::string& ns,
-                   const BSONObj& detail = BSONObj());
-
-    ConnectionString getConnectionString() const {
-        return ConnectionString(_primary.getConnString(), ConnectionString::SYNC);
-    }
-
-    void replicaSetChange(const std::string& setName, const std::string& newConnectionString);
-
-    static int VERSION;
-
-
-    /**
-     * check to see if all config servers have the same state
-     * will try tries time to make sure not catching in a bad state
-     */
-    bool checkConfigServersConsistent(std::string& errmsg, int tries = 4) const;
-
-private:
-    std::string getHost(const std::string& name, bool withPort);
-    std::vector<std::string> _config;
+    static void replicaSetChangeConfigServerUpdateHook(const std::string& setName,
+                                                       const std::string& newConnectionString);
 };
 
 }  // namespace mongo

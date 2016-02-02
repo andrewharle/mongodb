@@ -111,7 +111,7 @@ Status ModifierInc::init(const BSONElement& modExpr, const Options& opts, bool* 
 }
 
 Status ModifierInc::prepare(mutablebson::Element root,
-                            const StringData& matchedField,
+                            StringData matchedField,
                             ExecInfo* execInfo) {
     _preparedState.reset(new PreparedState(root.getDocument()));
 

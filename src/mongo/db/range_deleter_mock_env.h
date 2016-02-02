@@ -32,8 +32,8 @@
 #include <set>
 #include <string>
 
-#include "mongo/s/range_arithmetic.h"
 #include "mongo/db/range_deleter.h"
+#include "mongo/stdx/mutex.h"
 
 namespace mongo {
 
@@ -60,8 +60,6 @@ class RangeDeleterMockEnv : public mongo::RangeDeleterEnv {
 public:
     RangeDeleterMockEnv();
 
-    void initThread() {}
-
     //
     // Environment modification methods.
     //
@@ -69,12 +67,12 @@ public:
     /**
      * Adds an id to the current set of cursors in the given namespace.
      */
-    void addCursorId(const StringData& ns, CursorId id);
+    void addCursorId(StringData ns, CursorId id);
 
     /**
      * Removes the id from the set of open cursors in the given namespace.
      */
-    void removeCursorId(const StringData& ns, CursorId id);
+    void removeCursorId(StringData ns, CursorId id);
 
     //
     // Environment synchronization methods.
@@ -136,34 +134,34 @@ public:
      * RangeDeleterEnv::getCursorIds. The cursors returned can be modified with
      * the setCursorId and clearCursorMap methods.
      */
-    void getCursorIds(OperationContext* txn, const StringData& ns, std::set<CursorId>* in);
+    void getCursorIds(OperationContext* txn, StringData ns, std::set<CursorId>* in);
 
 private:
     // mutex acquisition ordering:
     // _envStatMutex -> _pauseDeleteMutex -> _deleteListMutex -> _cursorMapMutex
 
-    mutable mutex _deleteListMutex;
+    mutable stdx::mutex _deleteListMutex;
     std::vector<DeletedRange> _deleteList;
 
-    mutex _cursorMapMutex;
+    stdx::mutex _cursorMapMutex;
     std::map<std::string, std::set<CursorId>> _cursorMap;
 
     // Protects _pauseDelete & _pausedCount
-    mutex _pauseDeleteMutex;
-    boost::condition _pausedCV;
+    stdx::mutex _pauseDeleteMutex;
+    stdx::condition_variable _pausedCV;
     bool _pauseDelete;
 
     // Number of times a delete gets paused.
     uint64_t _pausedCount;
     // _pausedCount < nthPause (used by waitForNthPausedDelete)
-    boost::condition _pausedDeleteChangeCV;
+    stdx::condition_variable _pausedDeleteChangeCV;
 
     // Protects all variables below this line.
-    mutex _envStatMutex;
+    stdx::mutex _envStatMutex;
 
     // Keeps track of the number of times getCursorIds was called.
     uint64_t _getCursorsCallCount;
     // _getCursorsCallCount < nthCall (used by waitForNthGetCursor)
-    boost::condition _cursorsCallCountUpdatedCV;
+    stdx::condition_variable _cursorsCallCountUpdatedCV;
 };
 }

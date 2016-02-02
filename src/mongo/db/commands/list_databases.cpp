@@ -33,7 +33,7 @@
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/global_environment_experiment.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/storage/storage_engine.h"
 
 namespace mongo {
@@ -78,10 +78,9 @@ public:
              BSONObj& jsobj,
              int,
              string& errmsg,
-             BSONObjBuilder& result,
-             bool /*fromRepl*/) {
+             BSONObjBuilder& result) {
         vector<string> dbNames;
-        StorageEngine* storageEngine = getGlobalEnvironment()->getGlobalStorageEngine();
+        StorageEngine* storageEngine = getGlobalServiceContext()->getGlobalStorageEngine();
         storageEngine->listDatabases(&dbNames);
 
         vector<BSONObj> dbInfos;

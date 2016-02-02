@@ -143,7 +143,6 @@ public:
             log() << result.jsonString();
             ASSERT(ok);
         }
-        db.resetIndexCache();
     }
 };
 

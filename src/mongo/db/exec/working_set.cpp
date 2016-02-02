@@ -29,6 +29,7 @@
 #include "mongo/db/exec/working_set.h"
 
 #include "mongo/db/index/index_descriptor.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/storage/record_fetcher.h"
 
 namespace mongo {
@@ -65,7 +66,7 @@ WorkingSetID WorkingSet::allocate() {
     return id;
 }
 
-void WorkingSet::free(const WorkingSetID& i) {
+void WorkingSet::free(WorkingSetID i) {
     MemberHolder& holder = _data[i];
     verify(i < _data.size());            // ID has been allocated.
     verify(holder.nextFreeOrSelf == i);  // ID currently in use.
@@ -76,13 +77,13 @@ void WorkingSet::free(const WorkingSetID& i) {
     _freeList = i;
 }
 
-void WorkingSet::flagForReview(const WorkingSetID& i) {
+void WorkingSet::flagForReview(WorkingSetID i) {
     WorkingSetMember* member = get(i);
-    verify(WorkingSetMember::OWNED_OBJ == member->state);
+    verify(WorkingSetMember::OWNED_OBJ == member->_state);
     _flagged.insert(i);
 }
 
-const std::unordered_set<WorkingSetID>& WorkingSet::getFlagged() const {
+const unordered_set<WorkingSetID>& WorkingSet::getFlagged() const {
     return _flagged;
 }
 
@@ -102,17 +103,29 @@ void WorkingSet::clear() {
     _freeList = INVALID_ID;
 
     _flagged.clear();
-    _idxIds.clear();
+    _yieldSensitiveIds.clear();
 }
 
-void WorkingSet::flagNewIdxId(const WorkingSetID& id) {
-    _idxIds.push_back(id);
+void WorkingSet::transitionToLocAndIdx(WorkingSetID id) {
+    WorkingSetMember* member = get(id);
+    member->_state = WorkingSetMember::LOC_AND_IDX;
+    _yieldSensitiveIds.push_back(id);
 }
 
-std::vector<WorkingSetID> WorkingSet::getAndClearIdxIds() {
+void WorkingSet::transitionToLocAndObj(WorkingSetID id) {
+    WorkingSetMember* member = get(id);
+    member->_state = WorkingSetMember::LOC_AND_OBJ;
+}
+
+void WorkingSet::transitionToOwnedObj(WorkingSetID id) {
+    WorkingSetMember* member = get(id);
+    member->transitionToOwnedObj();
+}
+
+std::vector<WorkingSetID> WorkingSet::getAndClearYieldSensitiveIds() {
     std::vector<WorkingSetID> out;
-    // Clear '_idxIds' by swapping it into the vector to be returned.
-    _idxIds.swap(out);
+    // Clear '_yieldSensitiveIds' by swapping it into the set to be returned.
+    _yieldSensitiveIds.swap(out);
     return out;
 }
 
@@ -120,7 +133,7 @@ std::vector<WorkingSetID> WorkingSet::getAndClearIdxIds() {
 // WorkingSetMember
 //
 
-WorkingSetMember::WorkingSetMember() : state(WorkingSetMember::INVALID) {}
+WorkingSetMember::WorkingSetMember() {}
 
 WorkingSetMember::~WorkingSetMember() {}
 
@@ -131,19 +144,35 @@ void WorkingSetMember::clear() {
 
     keyData.clear();
     obj.reset();
-    state = WorkingSetMember::INVALID;
+    _state = WorkingSetMember::INVALID;
 }
 
+WorkingSetMember::MemberState WorkingSetMember::getState() const {
+    return _state;
+}
+
+void WorkingSetMember::transitionToOwnedObj() {
+    invariant(obj.value().isOwned());
+    _state = OWNED_OBJ;
+}
+
+
 bool WorkingSetMember::hasLoc() const {
-    return state == LOC_AND_IDX || state == LOC_AND_OBJ;
+    return _state == LOC_AND_IDX || _state == LOC_AND_OBJ;
 }
 
 bool WorkingSetMember::hasObj() const {
-    return hasOwnedObj() || (state == LOC_AND_OBJ);
+    return _state == OWNED_OBJ || _state == LOC_AND_OBJ;
 }
 
 bool WorkingSetMember::hasOwnedObj() const {
-    return state == OWNED_OBJ;
+    return _state == OWNED_OBJ || (_state == LOC_AND_OBJ && obj.value().isOwned());
+}
+
+void WorkingSetMember::makeObjOwnedIfNeeded() {
+    if (supportsDocLocking() && _state == LOC_AND_OBJ && !obj.value().isOwned()) {
+        obj.setValue(obj.value().getOwned());
+    }
 }
 
 bool WorkingSetMember::hasComputed(const WorkingSetComputedDataType type) const {

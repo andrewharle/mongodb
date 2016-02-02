@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2012 10gen Inc.
+ *    Copyright (C) 2012-2015 MongoDB Inc.
  *
  *    This program is free software: you can redistribute it and/or  modify
  *    it under the terms of the GNU Affero General Public License, version 3,
@@ -17,37 +17,33 @@
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the GNU Affero General Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
-#include <boost/make_shared.hpp>
+#include "mongo/platform/basic.h"
 
-#include "mongo/client/connpool.h"
-#include "mongo/client/dbclientinterface.h"
-#include "mongo/client/dbclient_rs.h"
+
 #include "mongo/client/replica_set_monitor.h"
 #include "mongo/client/replica_set_monitor_internal.h"
-#include "mongo/dbtests/mock/mock_conn_registry.h"
 #include "mongo/unittest/unittest.h"
 
-using std::set;
+namespace {
+
 using namespace mongo;
+using std::set;
 
 // Pull nested types to top-level scope
 typedef ReplicaSetMonitor::IsMasterReply IsMasterReply;
-typedef ReplicaSetMonitor::ScanState ScanState;
-typedef ReplicaSetMonitor::ScanStatePtr ScanStatePtr;
 typedef ReplicaSetMonitor::SetState SetState;
 typedef ReplicaSetMonitor::SetStatePtr SetStatePtr;
 typedef ReplicaSetMonitor::Refresher Refresher;
 typedef Refresher::NextStep NextStep;
-typedef ScanState::UnconfirmedReplies UnconfirmedReplies;
 typedef SetState::Node Node;
 typedef SetState::Nodes Nodes;
 
@@ -66,8 +62,8 @@ const std::set<HostAndPort> basicSeedsSet(basicSeeds.begin(), basicSeeds.end());
 // current (only) thread, so they do not lock SetState::mutex before examining state. This is
 // NOT something that non-test code should do.
 
-TEST(ReplicaSetMonitorTests, InitialState) {
-    SetStatePtr state = boost::make_shared<SetState>("name", basicSeedsSet);
+TEST(ReplicaSetMonitor, InitialState) {
+    SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
     ASSERT_EQUALS(state->name, "name");
     ASSERT(state->seedNodes == basicSeedsSet);
     ASSERT(state->lastSeenMaster.empty());
@@ -82,13 +78,13 @@ TEST(ReplicaSetMonitorTests, InitialState) {
     }
 }
 
-TEST(ReplicaSetMonitorTests, IsMasterBadParse) {
+TEST(ReplicaSetMonitor, IsMasterBadParse) {
     BSONObj ismaster = BSON("hosts" << BSON_ARRAY("mongo.example:badport"));
     IsMasterReply imr(HostAndPort("mongo.example:27017"), -1, ismaster);
     ASSERT_EQUALS(imr.ok, false);
 }
 
-TEST(ReplicaSetMonitorTests, IsMasterReplyRSNotInitiated) {
+TEST(ReplicaSetMonitor, IsMasterReplyRSNotInitiated) {
     BSONObj ismaster = BSON(
         "ismaster" << false << "secondary" << false << "info"
                    << "can't get local.system.replset config from self or any seed (EMPTYCONFIG)"
@@ -109,7 +105,7 @@ TEST(ReplicaSetMonitorTests, IsMasterReplyRSNotInitiated) {
     ASSERT(imr.tags.isEmpty());
 }
 
-TEST(ReplicaSetMonitorTests, IsMasterReplyRSPrimary) {
+TEST(ReplicaSetMonitor, IsMasterReplyRSPrimary) {
     BSONObj ismaster = BSON("setName"
                             << "test"
                             << "setVersion" << 1 << "ismaster" << true << "secondary" << false
@@ -134,7 +130,7 @@ TEST(ReplicaSetMonitorTests, IsMasterReplyRSPrimary) {
     ASSERT(imr.tags.isEmpty());
 }
 
-TEST(ReplicaSetMonitorTests, IsMasterReplyPassiveSecondary) {
+TEST(ReplicaSetMonitor, IsMasterReplyPassiveSecondary) {
     BSONObj ismaster = BSON("setName"
                             << "test"
                             << "setVersion" << 1 << "ismaster" << false << "secondary" << true
@@ -161,7 +157,7 @@ TEST(ReplicaSetMonitorTests, IsMasterReplyPassiveSecondary) {
     ASSERT(imr.tags.isEmpty());
 }
 
-TEST(ReplicaSetMonitorTests, IsMasterReplyHiddenSecondary) {
+TEST(ReplicaSetMonitor, IsMasterReplyHiddenSecondary) {
     BSONObj ismaster = BSON("setName"
                             << "test"
                             << "setVersion" << 1 << "ismaster" << false << "secondary" << true
@@ -186,7 +182,7 @@ TEST(ReplicaSetMonitorTests, IsMasterReplyHiddenSecondary) {
     ASSERT(imr.tags.isEmpty());
 }
 
-TEST(ReplicaSetMonitorTests, IsMasterSecondaryWithTags) {
+TEST(ReplicaSetMonitor, IsMasterSecondaryWithTags) {
     BSONObj ismaster = BSON("setName"
                             << "test"
                             << "setVersion" << 1 << "ismaster" << false << "secondary" << true
@@ -220,8 +216,8 @@ TEST(ReplicaSetMonitorTests, IsMasterSecondaryWithTags) {
     ASSERT_EQUALS(imr.tags["use"].str(), "production");
 }
 
-TEST(ReplicaSetMonitorTests, CheckAllSeedsSerial) {
-    SetStatePtr state = boost::make_shared<SetState>("name", basicSeedsSet);
+TEST(ReplicaSetMonitor, CheckAllSeedsSerial) {
+    SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
     Refresher refresher(state);
 
     set<HostAndPort> seen;
@@ -261,8 +257,8 @@ TEST(ReplicaSetMonitorTests, CheckAllSeedsSerial) {
     }
 }
 
-TEST(ReplicaSetMonitorTests, CheckAllSeedsParallel) {
-    SetStatePtr state = boost::make_shared<SetState>("name", basicSeedsSet);
+TEST(ReplicaSetMonitor, CheckAllSeedsParallel) {
+    SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
     Refresher refresher(state);
 
     set<HostAndPort> seen;
@@ -312,8 +308,8 @@ TEST(ReplicaSetMonitorTests, CheckAllSeedsParallel) {
     }
 }
 
-TEST(ReplicaSetMonitorTests, NoMasterInitAllUp) {
-    SetStatePtr state = boost::make_shared<SetState>("name", basicSeedsSet);
+TEST(ReplicaSetMonitor, NoMasterInitAllUp) {
+    SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
     Refresher refresher(state);
 
     set<HostAndPort> seen;
@@ -352,8 +348,8 @@ TEST(ReplicaSetMonitorTests, NoMasterInitAllUp) {
     }
 }
 
-TEST(ReplicaSetMonitorTests, MasterNotInSeeds_NoPrimaryInIsMaster) {
-    SetStatePtr state = boost::make_shared<SetState>("name", basicSeedsSet);
+TEST(ReplicaSetMonitor, MasterNotInSeeds_NoPrimaryInIsMaster) {
+    SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
     Refresher refresher(state);
 
     set<HostAndPort> seen;
@@ -415,8 +411,8 @@ TEST(ReplicaSetMonitorTests, MasterNotInSeeds_NoPrimaryInIsMaster) {
     ASSERT(node->tags.isEmpty());
 }
 
-TEST(ReplicaSetMonitorTests, MasterNotInSeeds_PrimaryInIsMaster) {
-    SetStatePtr state = boost::make_shared<SetState>("name", basicSeedsSet);
+TEST(ReplicaSetMonitor, MasterNotInSeeds_PrimaryInIsMaster) {
+    SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
     Refresher refresher(state);
 
     set<HostAndPort> seen;
@@ -472,13 +468,13 @@ TEST(ReplicaSetMonitorTests, MasterNotInSeeds_PrimaryInIsMaster) {
 }
 
 // Make sure we can use slaves we find even if we can't find a primary
-TEST(ReplicaSetMonitorTests, SlavesUsableEvenIfNoMaster) {
+TEST(ReplicaSetMonitor, SlavesUsableEvenIfNoMaster) {
     std::set<HostAndPort> seeds;
     seeds.insert(HostAndPort("a"));
-    SetStatePtr state = boost::make_shared<SetState>("name", seeds);
+    SetStatePtr state = std::make_shared<SetState>("name", seeds);
     Refresher refresher(state);
 
-    const ReadPreferenceSetting secondary(ReadPreference_SecondaryOnly, TagSet());
+    const ReadPreferenceSetting secondary(ReadPreference::SecondaryOnly, TagSet());
 
     // Mock a reply from the only host we know about and have it claim to not be master or know
     // about any other hosts. This leaves the scan with no more hosts to scan, but all hosts are
@@ -509,8 +505,8 @@ TEST(ReplicaSetMonitorTests, SlavesUsableEvenIfNoMaster) {
 }
 
 // Test multiple nodes that claim to be master (we use a last-wins policy)
-TEST(ReplicaSetMonitorTests, MultipleMasterLastNodeWins) {
-    SetStatePtr state = boost::make_shared<SetState>("name", basicSeedsSet);
+TEST(ReplicaSetMonitor, MultipleMasterLastNodeWins) {
+    SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
     Refresher refresher(state);
 
     set<HostAndPort> seen;
@@ -524,7 +520,7 @@ TEST(ReplicaSetMonitorTests, MultipleMasterLastNodeWins) {
         seen.insert(ns.host);
     }
 
-    const ReadPreferenceSetting primaryOnly(ReadPreference_PrimaryOnly, TagSet());
+    const ReadPreferenceSetting primaryOnly(ReadPreference::PrimaryOnly, TagSet());
 
     // mock all replies
     for (size_t i = 0; i != basicSeeds.size(); ++i) {
@@ -565,8 +561,8 @@ TEST(ReplicaSetMonitorTests, MultipleMasterLastNodeWins) {
 }
 
 // Test nodes disagree about who is in the set, master is source of truth
-TEST(ReplicaSetMonitorTests, MasterIsSourceOfTruth) {
-    SetStatePtr state = boost::make_shared<SetState>("name", basicSeedsSet);
+TEST(ReplicaSetMonitor, MasterIsSourceOfTruth) {
+    SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
     Refresher refresher(state);
 
     BSONArray primaryHosts = BSON_ARRAY("a"
@@ -600,8 +596,8 @@ TEST(ReplicaSetMonitorTests, MasterIsSourceOfTruth) {
 }
 
 // Test multiple master nodes that disagree about set membership
-TEST(ReplicaSetMonitorTests, MultipleMastersDisagree) {
-    SetStatePtr state = boost::make_shared<SetState>("name", basicSeedsSet);
+TEST(ReplicaSetMonitor, MultipleMastersDisagree) {
+    SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
     Refresher refresher(state);
 
     BSONArray hostsForSeed[3];
@@ -625,7 +621,7 @@ TEST(ReplicaSetMonitorTests, MultipleMastersDisagree) {
         seen.insert(ns.host);
     }
 
-    const ReadPreferenceSetting primaryOnly(ReadPreference_PrimaryOnly, TagSet());
+    const ReadPreferenceSetting primaryOnly(ReadPreference::PrimaryOnly, TagSet());
 
     // mock all replies
     for (size_t i = 0; i != basicSeeds.size(); ++i) {
@@ -684,12 +680,12 @@ TEST(ReplicaSetMonitorTests, MultipleMastersDisagree) {
 }
 
 // Ensure getMatchingHost returns hosts even if scan is ongoing
-TEST(ReplicaSetMonitorTests, GetMatchingDuringScan) {
-    SetStatePtr state = boost::make_shared<SetState>("name", basicSeedsSet);
+TEST(ReplicaSetMonitor, GetMatchingDuringScan) {
+    SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
     Refresher refresher(state);
 
-    const ReadPreferenceSetting primaryOnly(ReadPreference_PrimaryOnly, TagSet());
-    const ReadPreferenceSetting secondaryOnly(ReadPreference_SecondaryOnly, TagSet());
+    const ReadPreferenceSetting primaryOnly(ReadPreference::PrimaryOnly, TagSet());
+    const ReadPreferenceSetting secondaryOnly(ReadPreference::SecondaryOnly, TagSet());
 
     for (std::vector<HostAndPort>::const_iterator it = basicSeeds.begin(); it != basicSeeds.end();
          ++it) {
@@ -735,9 +731,9 @@ TEST(ReplicaSetMonitorTests, GetMatchingDuringScan) {
 }
 
 // Ensure nothing breaks when out-of-band failedHost is called during scan
-TEST(ReplicaSetMonitorTests, OutOfBandFailedHost) {
-    SetStatePtr state = boost::make_shared<SetState>("name", basicSeedsSet);
-    ReplicaSetMonitorPtr rsm = boost::make_shared<ReplicaSetMonitor>(state);
+TEST(ReplicaSetMonitor, OutOfBandFailedHost) {
+    SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
+    ReplicaSetMonitorPtr rsm = std::make_shared<ReplicaSetMonitor>(state);
     Refresher refresher = rsm->startOrContinueRefresh();
 
     for (size_t i = 0; i != basicSeeds.size(); ++i) {
@@ -774,7 +770,7 @@ TEST(ReplicaSetMonitorTests, OutOfBandFailedHost) {
 
 // Newly elected primary with electionId >= maximum electionId seen by the Refresher
 TEST(ReplicaSetMonitorTests, NewPrimaryWithMaxElectionId) {
-    SetStatePtr state = boost::make_shared<SetState>("name", basicSeedsSet);
+    SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
     Refresher refresher(state);
 
     set<HostAndPort> seen;
@@ -788,7 +784,7 @@ TEST(ReplicaSetMonitorTests, NewPrimaryWithMaxElectionId) {
         seen.insert(ns.host);
     }
 
-    const ReadPreferenceSetting primaryOnly(ReadPreference_PrimaryOnly, TagSet());
+    const ReadPreferenceSetting primaryOnly(ReadPreference::PrimaryOnly, TagSet());
 
     // mock all replies
     for (size_t i = 0; i != basicSeeds.size(); ++i) {
@@ -831,7 +827,7 @@ TEST(ReplicaSetMonitorTests, NewPrimaryWithMaxElectionId) {
 
 // Ignore electionId of secondaries
 TEST(ReplicaSetMonitorTests, IgnoreElectionIdFromSecondaries) {
-    SetStatePtr state = boost::make_shared<SetState>("name", basicSeedsSet);
+    SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
     Refresher refresher(state);
 
     set<HostAndPort> seen;
@@ -871,7 +867,7 @@ TEST(ReplicaSetMonitorTests, IgnoreElectionIdFromSecondaries) {
 
 // Stale Primary with obsolete electionId
 TEST(ReplicaSetMonitorTests, StalePrimaryWithObsoleteElectionId) {
-    SetStatePtr state = boost::make_shared<SetState>("name", basicSeedsSet);
+    SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
     Refresher refresher(state);
 
     const OID firstElectionId = OID::gen();
@@ -958,3 +954,5 @@ TEST(ReplicaSetMonitorTests, StalePrimaryWithObsoleteElectionId) {
     ASSERT_EQUALS(ns.step, NextStep::DONE);
     ASSERT(ns.host.empty());
 }
+
+}  // namespace

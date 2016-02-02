@@ -28,18 +28,22 @@
 
 #include "mongo/platform/basic.h"
 
-#include <boost/scoped_ptr.hpp>
-#include <boost/thread.hpp>
-
-#include "mongo/db/repl/network_interface_mock.h"
 #include "mongo/db/repl/replication_executor.h"
 #include "mongo/db/repl/scatter_gather_algorithm.h"
 #include "mongo/db/repl/scatter_gather_runner.h"
+#include "mongo/db/repl/storage_interface_mock.h"
+#include "mongo/executor/network_interface_mock.h"
+#include "mongo/stdx/functional.h"
+#include "mongo/stdx/thread.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo {
 namespace repl {
 namespace {
+
+using executor::NetworkInterfaceMock;
+using executor::RemoteCommandRequest;
+using executor::RemoteCommandResponse;
 
 /**
  * Algorithm for testing the ScatterGatherRunner, which will finish running when finish() is
@@ -51,16 +55,16 @@ public:
     ScatterGatherTestAlgorithm(int64_t maxResponses = 2)
         : _done(false), _numResponses(0), _maxResponses(maxResponses) {}
 
-    virtual std::vector<ReplicationExecutor::RemoteCommandRequest> getRequests() const {
-        std::vector<ReplicationExecutor::RemoteCommandRequest> requests;
+    virtual std::vector<RemoteCommandRequest> getRequests() const {
+        std::vector<RemoteCommandRequest> requests;
         for (int i = 0; i < 3; i++) {
-            requests.push_back(ReplicationExecutor::RemoteCommandRequest(
+            requests.push_back(RemoteCommandRequest(
                 HostAndPort("hostname", i), "admin", BSONObj(), Milliseconds(30 * 1000)));
         }
         return requests;
     }
 
-    virtual void processResponse(const ReplicationExecutor::RemoteCommandRequest& request,
+    virtual void processResponse(const RemoteCommandRequest& request,
                                  const ResponseStatus& response) {
         _numResponses++;
     }
@@ -107,15 +111,16 @@ private:
 
     // owned by _executor
     NetworkInterfaceMock* _net;
-    boost::scoped_ptr<ReplicationExecutor> _executor;
-    boost::scoped_ptr<boost::thread> _executorThread;
+    StorageInterfaceMock* _storage;
+    std::unique_ptr<ReplicationExecutor> _executor;
+    std::unique_ptr<stdx::thread> _executorThread;
 };
 
 void ScatterGatherTest::setUp() {
     _net = new NetworkInterfaceMock;
-    _executor.reset(new ReplicationExecutor(_net, 1 /* prng seed */));
-    _executorThread.reset(
-        new boost::thread(stdx::bind(&ReplicationExecutor::run, _executor.get())));
+    _storage = new StorageInterfaceMock;
+    _executor.reset(new ReplicationExecutor(_net, _storage, 1 /* prng seed */));
+    _executorThread.reset(new stdx::thread(stdx::bind(&ReplicationExecutor::run, _executor.get())));
 }
 
 void ScatterGatherTest::tearDown() {
@@ -140,7 +145,7 @@ public:
 
     void run() {
         _thread.reset(
-            new boost::thread(stdx::bind(&ScatterGatherRunnerRunner::_run, this, _executor)));
+            new stdx::thread(stdx::bind(&ScatterGatherRunnerRunner::_run, this, _executor)));
     }
 
 private:
@@ -151,7 +156,7 @@ private:
     ScatterGatherRunner* _sgr;
     ReplicationExecutor* _executor;
     Status _result;
-    boost::scoped_ptr<boost::thread> _thread;
+    std::unique_ptr<stdx::thread> _thread;
 };
 
 // Simple onCompletion function which will toggle a bool, so that we can check the logs to
@@ -177,27 +182,27 @@ TEST_F(ScatterGatherTest, DeleteAlgorithmAfterItHasCompleted) {
     NetworkInterfaceMock* net = getNet();
     net->enterNetwork();
     NetworkInterfaceMock::NetworkOperationIterator noi = net->getNextReadyRequest();
-    net->scheduleResponse(noi,
-                          net->now() + 2000,
-                          ResponseStatus(ReplicationExecutor::RemoteCommandResponse(
-                              BSON("ok" << 1), boost::posix_time::milliseconds(10))));
+    net->scheduleResponse(
+        noi,
+        net->now() + Seconds(2),
+        ResponseStatus(RemoteCommandResponse(BSON("ok" << 1), BSONObj(), Milliseconds(10))));
     ASSERT_FALSE(ranCompletion);
 
     noi = net->getNextReadyRequest();
-    net->scheduleResponse(noi,
-                          net->now() + 2000,
-                          ResponseStatus(ReplicationExecutor::RemoteCommandResponse(
-                              BSON("ok" << 1), boost::posix_time::milliseconds(10))));
+    net->scheduleResponse(
+        noi,
+        net->now() + Seconds(2),
+        ResponseStatus(RemoteCommandResponse(BSON("ok" << 1), BSONObj(), Milliseconds(10))));
     ASSERT_FALSE(ranCompletion);
 
     noi = net->getNextReadyRequest();
-    net->scheduleResponse(noi,
-                          net->now() + 5000,
-                          ResponseStatus(ReplicationExecutor::RemoteCommandResponse(
-                              BSON("ok" << 1), boost::posix_time::milliseconds(10))));
+    net->scheduleResponse(
+        noi,
+        net->now() + Seconds(5),
+        ResponseStatus(RemoteCommandResponse(BSON("ok" << 1), BSONObj(), Milliseconds(10))));
     ASSERT_FALSE(ranCompletion);
 
-    net->runUntil(net->now() + 2000);
+    net->runUntil(net->now() + Seconds(2));
     ASSERT_TRUE(ranCompletion);
 
     delete sga;
@@ -278,29 +283,28 @@ TEST_F(ScatterGatherTest, DoNotProcessMoreThanSufficientResponses) {
     NetworkInterfaceMock* net = getNet();
     net->enterNetwork();
     NetworkInterfaceMock::NetworkOperationIterator noi = net->getNextReadyRequest();
-    net->scheduleResponse(noi,
-                          net->now() + 2000,
-                          ResponseStatus(ReplicationExecutor::RemoteCommandResponse(
-                              BSON("ok" << 1), boost::posix_time::milliseconds(10))));
+    net->scheduleResponse(
+        noi,
+        net->now() + Seconds(2),
+        ResponseStatus(RemoteCommandResponse(BSON("ok" << 1), BSONObj(), Milliseconds(10))));
     ASSERT_FALSE(ranCompletion);
 
     noi = net->getNextReadyRequest();
-    net->scheduleResponse(noi,
-                          net->now() + 2000,
-                          ResponseStatus(ReplicationExecutor::RemoteCommandResponse(
-                              BSON("ok" << 1), boost::posix_time::milliseconds(10))));
+    net->scheduleResponse(
+        noi,
+        net->now() + Seconds(2),
+        ResponseStatus(RemoteCommandResponse(BSON("ok" << 1), BSONObj(), Milliseconds(10))));
     ASSERT_FALSE(ranCompletion);
 
     noi = net->getNextReadyRequest();
-    net->scheduleResponse(noi,
-                          net->now() + 5000,
-                          ResponseStatus(ReplicationExecutor::RemoteCommandResponse(
-                              BSON("ok" << 1), boost::posix_time::milliseconds(10))));
+    net->scheduleResponse(
+        noi,
+        net->now() + Seconds(5),
+        ResponseStatus(RemoteCommandResponse(BSON("ok" << 1), BSONObj(), Milliseconds(10))));
     ASSERT_FALSE(ranCompletion);
 
-    net->runUntil(net->now() + 2000);
+    net->runUntil(net->now() + Seconds(2));
     ASSERT_TRUE(ranCompletion);
-
 
     net->runReadyNetworkOperations();
     // the third resposne should not be processed, so the count should not increment
@@ -345,7 +349,7 @@ TEST_F(ScatterGatherTest, DoNotCreateCallbacksIfHasSufficientResponsesReturnsTru
         NetworkInterfaceMock::NetworkOperationIterator noi = net->getNextReadyRequest();
         net->scheduleResponse(noi,
                               net->now(),
-                              ResponseStatus(ReplicationExecutor::RemoteCommandResponse(
+                              ResponseStatus(RemoteCommandResponse(
                                     BSON("ok" << 1),
                                     boost::posix_time::milliseconds(10))));
         net->runReadyNetworkOperations();
@@ -354,7 +358,7 @@ TEST_F(ScatterGatherTest, DoNotCreateCallbacksIfHasSufficientResponsesReturnsTru
         noi = net->getNextReadyRequest();
         net->scheduleResponse(noi,
                               net->now(),
-                              ResponseStatus(ReplicationExecutor::RemoteCommandResponse(
+                              ResponseStatus(RemoteCommandResponse(
                                     BSON("ok" << 1),
                                     boost::posix_time::milliseconds(10))));
         net->runReadyNetworkOperations();
@@ -363,7 +367,7 @@ TEST_F(ScatterGatherTest, DoNotCreateCallbacksIfHasSufficientResponsesReturnsTru
         noi = net->getNextReadyRequest();
         net->scheduleResponse(noi,
                               net->now(),
-                              ResponseStatus(ReplicationExecutor::RemoteCommandResponse(
+                              ResponseStatus(RemoteCommandResponse(
                                     BSON("ok" << 1),
                                     boost::posix_time::milliseconds(10))));
         net->runReadyNetworkOperations();
@@ -382,10 +386,10 @@ TEST_F(ScatterGatherTest, SuccessfulScatterGatherViaRun) {
     NetworkInterfaceMock* net = getNet();
     net->enterNetwork();
     NetworkInterfaceMock::NetworkOperationIterator noi = net->getNextReadyRequest();
-    net->scheduleResponse(noi,
-                          net->now(),
-                          ResponseStatus(ReplicationExecutor::RemoteCommandResponse(
-                              BSON("ok" << 1), boost::posix_time::milliseconds(10))));
+    net->scheduleResponse(
+        noi,
+        net->now(),
+        ResponseStatus(RemoteCommandResponse(BSON("ok" << 1), BSONObj(), Milliseconds(10))));
     net->runReadyNetworkOperations();
 
     noi = net->getNextReadyRequest();
@@ -393,10 +397,10 @@ TEST_F(ScatterGatherTest, SuccessfulScatterGatherViaRun) {
     net->runReadyNetworkOperations();
 
     noi = net->getNextReadyRequest();
-    net->scheduleResponse(noi,
-                          net->now(),
-                          ResponseStatus(ReplicationExecutor::RemoteCommandResponse(
-                              BSON("ok" << 1), boost::posix_time::milliseconds(10))));
+    net->scheduleResponse(
+        noi,
+        net->now(),
+        ResponseStatus(RemoteCommandResponse(BSON("ok" << 1), BSONObj(), Milliseconds(10))));
     net->runReadyNetworkOperations();
     net->exitNetwork();
 

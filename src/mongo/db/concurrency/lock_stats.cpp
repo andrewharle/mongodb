@@ -54,14 +54,14 @@ template <typename CounterType>
 void LockStats<CounterType>::_report(BSONObjBuilder* builder,
                                      const char* sectionName,
                                      const PerModeLockStatCounters& stat) const {
-    boost::scoped_ptr<BSONObjBuilder> section;
+    std::unique_ptr<BSONObjBuilder> section;
 
     // All indexing below starts from offset 1, because we do not want to report/account
     // position 0, which is a sentinel value for invalid resource/no lock.
 
     // Num acquires
     {
-        boost::scoped_ptr<BSONObjBuilder> numAcquires;
+        std::unique_ptr<BSONObjBuilder> numAcquires;
         for (int mode = 1; mode < LockModesCount; mode++) {
             const long long value = CounterOps::get(stat.modeStats[mode].numAcquisitions);
             if (value > 0) {
@@ -79,7 +79,7 @@ void LockStats<CounterType>::_report(BSONObjBuilder* builder,
 
     // Num waits
     {
-        boost::scoped_ptr<BSONObjBuilder> numWaits;
+        std::unique_ptr<BSONObjBuilder> numWaits;
         for (int mode = 1; mode < LockModesCount; mode++) {
             const long long value = CounterOps::get(stat.modeStats[mode].numWaits);
             if (value > 0) {
@@ -97,7 +97,7 @@ void LockStats<CounterType>::_report(BSONObjBuilder* builder,
 
     // Total time waiting
     {
-        boost::scoped_ptr<BSONObjBuilder> timeAcquiring;
+        std::unique_ptr<BSONObjBuilder> timeAcquiring;
         for (int mode = 1; mode < LockModesCount; mode++) {
             const long long value = CounterOps::get(stat.modeStats[mode].combinedWaitTimeMicros);
             if (value > 0) {
@@ -116,7 +116,7 @@ void LockStats<CounterType>::_report(BSONObjBuilder* builder,
 
     // Deadlocks
     {
-        boost::scoped_ptr<BSONObjBuilder> deadlockCount;
+        std::unique_ptr<BSONObjBuilder> deadlockCount;
         for (int mode = 1; mode < LockModesCount; mode++) {
             const long long value = CounterOps::get(stat.modeStats[mode].numDeadlocks);
             if (value > 0) {

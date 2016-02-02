@@ -1,7 +1,6 @@
-x = 5
-name = "sharding_rs_arb1"
-replTest = new ReplSetTest( { name : name , nodes : 3 , startPort : 31000 } );
-nodes = replTest.startSet();
+var name = "sharding_rs_arb1"
+var replTest = new ReplSetTest( { name : name , nodes : 3 } );
+replTest.startSet();
 var port = replTest.ports;
 replTest.initiate({_id : name, members :
         [
@@ -13,28 +12,16 @@ replTest.initiate({_id : name, members :
 
 replTest.awaitReplication();
 
-master = replTest.getMaster();
-db = master.getDB( "test" );
+var master = replTest.getPrimary();
+var db = master.getDB( "test" );
 printjson( rs.status() );
 
-var config = startMongodEmpty("--configsvr", "--port", 29999, "--dbpath", MongoRunner.dataPath + name + "_config" );
+var st = new ShardingTest({numShards: 0})
+var admin = st.getDB('admin');
 
-var mongos = startMongos({ port : 30000, configdb : getHostName() + ":29999" })
-var admin = mongos.getDB("admin")
-var url = name + "/";
-for ( i=0; i<port.length; i++ ) {
-    if ( i > 0 )
-        url += ",";
-    url += getHostName() + ":" + port[i];
-}
-print( url )
-res = admin.runCommand( { addshard : url } )
+var res = admin.runCommand( { addshard : replTest.getURL() } );
 printjson( res )
 assert( res.ok , tojson(res) )
 
-
-
-stopMongod( 30000 )
-stopMongod( 29999 )
+st.stop();
 replTest.stopSet();
-

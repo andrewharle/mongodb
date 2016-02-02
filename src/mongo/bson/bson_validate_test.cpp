@@ -27,8 +27,6 @@
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kDefault
 
-#include <boost/scoped_array.hpp>
-
 #include "mongo/base/data_view.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/unittest/unittest.h"
@@ -39,7 +37,7 @@
 namespace {
 
 using namespace mongo;
-using boost::scoped_array;
+using std::unique_ptr;
 using std::endl;
 
 void appendInvalidStringElement(const char* fieldName, BufBuilder* bb) {
@@ -69,7 +67,7 @@ TEST(BSONValidate, RandomData) {
         int size = 1234;
 
         char* x = new char[size];
-        DataView(x).writeLE(size);
+        DataView(x).write(tagLittleEndian(size));
 
         for (int i = 4; i < size; i++) {
             x[i] = r.nextInt32(255);
@@ -155,15 +153,15 @@ TEST(BSONValidate, Fuzz) {
                                                                                  << "ccc" << 5)
                    << "eight" << BSONDBRef("rrr", OID("01234567890123456789aaaa")) << "_id"
                    << OID("deadbeefdeadbeefdeadbeef") << "nine"
-                   << BSONBinData("\x69\xb7", 2, BinDataGeneral) << "ten" << Date_t(44) << "eleven"
-                   << BSONRegEx("foooooo", "i"));
+                   << BSONBinData("\x69\xb7", 2, BinDataGeneral) << "ten"
+                   << Date_t::fromMillisSinceEpoch(44) << "eleven" << BSONRegEx("foooooo", "i"));
 
     int32_t fuzzFrequencies[] = {2, 10, 20, 100, 1000};
     for (size_t i = 0; i < sizeof(fuzzFrequencies) / sizeof(int32_t); ++i) {
         int32_t fuzzFrequency = fuzzFrequencies[i];
 
         // Copy the 'original' BSONObj to 'buffer'.
-        scoped_array<char> buffer(new char[original.objsize()]);
+        unique_ptr<char[]> buffer(new char[original.objsize()]);
         memcpy(buffer.get(), original.objdata(), original.objsize());
 
         // Randomly flip bits in 'buffer', with probability determined by 'fuzzFrequency'. The
@@ -311,4 +309,26 @@ TEST(BSONValidateFast, StringHasSomething) {
                   x.objsize());
     ASSERT_NOT_OK(validateBSON(x.objdata(), x.objsize()));
 }
+
+TEST(BSONValidateBool, BoolValuesAreValidated) {
+    BSONObjBuilder bob;
+    bob.append("x", false);
+    const BSONObj obj = bob.done();
+    ASSERT_OK(validateBSON(obj.objdata(), obj.objsize()));
+    const BSONElement x = obj["x"];
+    // Legal, because we know that the BufBuilder gave
+    // us back some heap memory, which isn't oringinally const.
+    auto writable = const_cast<char*>(x.value());
+    for (int val = std::numeric_limits<char>::min();
+         val != (int(std::numeric_limits<char>::max()) + 1);
+         ++val) {
+        *writable = static_cast<char>(val);
+        if ((val == 0) || (val == 1)) {
+            ASSERT_OK(validateBSON(obj.objdata(), obj.objsize()));
+        } else {
+            ASSERT_NOT_OK(validateBSON(obj.objdata(), obj.objsize()));
+        }
+    }
 }
+
+}  // namespace

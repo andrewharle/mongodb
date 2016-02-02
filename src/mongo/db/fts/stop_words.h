@@ -42,6 +42,8 @@ namespace mongo {
 namespace fts {
 
 class StopWords {
+    MONGO_DISALLOW_COPYING(StopWords);
+
 public:
     StopWords();
     StopWords(const std::set<std::string>& words);
@@ -54,7 +56,7 @@ public:
         return _words.size();
     }
 
-    static const StopWords* getStopWords(const FTSLanguage& language);
+    static const StopWords* getStopWords(const FTSLanguage* language);
 
 private:
     unordered_set<std::string> _words;

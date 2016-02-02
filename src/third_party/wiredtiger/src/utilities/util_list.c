@@ -50,8 +50,7 @@ util_list(WT_SESSION *session, int argc, char *argv[])
 
 	ret = list_print(session, name, cflag, vflag);
 
-	if (name != NULL)
-		free(name);
+	free(name);
 
 	return (ret);
 }
@@ -99,12 +98,15 @@ list_print(WT_SESSION *session, const char *name, bool cflag, bool vflag)
 		}
 
 		/*
-		 * XXX
-		 * We don't normally say anything about the WiredTiger
-		 * metadata, it's not a normal "object" in the database.  I'm
-		 * making an exception for the checkpoint and verbose options.
+		 * !!!
+		 * We don't normally say anything about the WiredTiger metadata
+		 * and lookaside tables, they're not application/user "objects"
+		 * in the database.  I'm making an exception for the checkpoint
+		 * and verbose options.
 		 */
-		if (strcmp(key, WT_METADATA_URI) != 0 || cflag || vflag)
+		if (cflag || vflag ||
+		    (strcmp(key, WT_METADATA_URI) != 0 &&
+		    strcmp(key, WT_LAS_URI) != 0))
 			printf("%s\n", key);
 
 		if (!cflag && !vflag)

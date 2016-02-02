@@ -31,8 +31,10 @@
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/json.h"
+#include "mongo/db/operation_context_noop.h"
 #include "mongo/dbtests/dbtests.h"
-#include "mongo/s/chunk.h"
+#include "mongo/s/chunk_manager.h"
+#include "mongo/stdx/memory.h"
 
 namespace mongo {
 
@@ -46,49 +48,44 @@ public:
         : ChunkManager(ns, keyPattern, unique) {}
 
     void setSingleChunkForShards(const vector<BSONObj>& splitPoints) {
-        ChunkMap& chunkMap = const_cast<ChunkMap&>(_chunkMap);
-        ChunkRangeManager& chunkRanges = const_cast<ChunkRangeManager&>(_chunkRanges);
-        set<Shard>& shards = const_cast<set<Shard>&>(_shards);
-
         vector<BSONObj> mySplitPoints(splitPoints);
         mySplitPoints.insert(mySplitPoints.begin(), _keyPattern.getKeyPattern().globalMin());
         mySplitPoints.push_back(_keyPattern.getKeyPattern().globalMax());
 
         for (unsigned i = 1; i < mySplitPoints.size(); ++i) {
-            string name = str::stream() << (i - 1);
-            Shard shard(name, name, 0 /* maxSize */, false /* draining */);
-            shards.insert(shard);
+            const string shardId = str::stream() << (i - 1);
+            _shardIds.insert(shardId);
 
-            ChunkPtr chunk(new Chunk(this, mySplitPoints[i - 1], mySplitPoints[i], shard));
-            chunkMap[mySplitPoints[i]] = chunk;
+            std::shared_ptr<Chunk> chunk(
+                new Chunk(this, mySplitPoints[i - 1], mySplitPoints[i], shardId));
+            _chunkMap[mySplitPoints[i]] = chunk;
         }
 
-        chunkRanges.reloadAll(chunkMap);
+        _chunkRanges.reloadAll(_chunkMap);
     }
 };
 
-}  // namespace mongo
-
-namespace ChunkTests {
-
-namespace ChunkManagerTests {
-
-typedef mongo::TestableChunkManager ChunkManager;
+namespace {
 
 class Base {
 public:
-    virtual ~Base() {}
+    Base() = default;
+
+    virtual ~Base() = default;
+
     void run() {
+        auto opCtx = stdx::make_unique<OperationContextNoop>();
+
         ShardKeyPattern shardKeyPattern(shardKey());
-        ChunkManager chunkManager("", shardKeyPattern, false);
+        TestableChunkManager chunkManager("", shardKeyPattern, false);
         chunkManager.setSingleChunkForShards(splitPointsVector());
 
-        set<Shard> shards;
-        chunkManager.getShardsForQuery(shards, query());
+        set<ShardId> shardIds;
+        chunkManager.getShardIdsForQuery(opCtx.get(), query(), &shardIds);
 
         BSONArrayBuilder b;
-        for (set<Shard>::const_iterator i = shards.begin(); i != shards.end(); ++i) {
-            b << i->getName();
+        for (const ShardId& shardId : shardIds) {
+            b << shardId;
         }
         ASSERT_EQUALS(expectedShardNames(), b.arr());
     }
@@ -97,15 +94,19 @@ protected:
     virtual BSONObj shardKey() const {
         return BSON("a" << 1);
     }
+
     virtual BSONArray splitPoints() const {
         return BSONArray();
     }
+
     virtual BSONObj query() const {
         return BSONObj();
     }
+
     virtual BSONArray expectedShardNames() const {
         return BSON_ARRAY("0");
     }
+
     virtual vector<BSONObj> splitPointsVector() const {
         vector<BSONObj> ret;
         BSONArray a = splitPoints();
@@ -197,6 +198,7 @@ class LTRangeMultiShard : public MultiShardBase {
     virtual BSONObj query() const {
         return BSON("a" << LT << "y");
     }
+
     /**
      * It isn't actually necessary to return shard 2 because its lowest key is "y", which
      * is excluded from the query.  SERVER-4791
@@ -244,6 +246,7 @@ class OrEqualityInequalityUnhelpful : public MultiShardBase {
     virtual BSONObj query() const {
         return fromjson("{$or:[{a:'u'},{a:{$gte:'zz'}},{}]}");
     }
+
     virtual BSONArray expectedShardNames() const {
         return BSON_ARRAY("0"
                           << "1"
@@ -256,10 +259,10 @@ template <class BASE>
 class Unsatisfiable : public BASE {
     /**
      * SERVER-4914 For now the first shard is returned for unsatisfiable queries, as some
-     * clients of getShardsForQuery() expect at least one shard.
+     * clients of getShardIdsForQuery() expect at least one shard.
      */
     virtual BSONArray expectedShardNames() const {
-        return BSON_ARRAY("0") /* BSONArray() */;
+        return BSON_ARRAY("0");
     }
 };
 
@@ -297,6 +300,7 @@ class OrEqualityUnsatisfiableInequality : public MultiShardBase {
     virtual BSONObj query() const {
         return fromjson("{$or:[{a:'x'},{a:{$gt:'u',$lt:'u'}},{a:{$gte:'y'}}]}");
     }
+
     virtual BSONArray expectedShardNames() const {
         return BSON_ARRAY("1"
                           << "2"
@@ -308,6 +312,7 @@ class CompoundKeyBase : public Base {
     virtual BSONObj shardKey() const {
         return BSON("a" << 1 << "b" << 1);
     }
+
     virtual BSONArray splitPoints() const {
         return BSON_ARRAY(BSON("a" << 5 << "b" << 10) << BSON("a" << 5 << "b" << 20));
     }
@@ -318,8 +323,10 @@ class InMultiShard : public CompoundKeyBase {
         return BSON("a" << BSON("$in" << BSON_ARRAY(0 << 5 << 10)) << "b"
                         << BSON("$in" << BSON_ARRAY(0 << 5 << 25)));
     }
-    // If we were to send this query to just the shards it actually needed to hit, it would only hit
-    // shards 0 and 2 Because of the optimization from SERVER-4745, however, we'll also hit shard 1.
+
+    // If we were to send this query to just the shards it actually needed to hit, it would
+    // only hit shards 0 and 2. Because of the optimization from SERVER-4745, however, we'll
+    // also hit shard 1.
     virtual BSONArray expectedShardNames() const {
         return BSON_ARRAY("0"
                           << "1"
@@ -327,35 +334,34 @@ class InMultiShard : public CompoundKeyBase {
     }
 };
 
-}  // namespace ChunkManagerTests
-
 class All : public Suite {
 public:
     All() : Suite("chunk") {}
 
     void setupTests() {
-        add<ChunkManagerTests::EmptyQuerySingleShard>();
-        add<ChunkManagerTests::EmptyQueryMultiShard>();
-        add<ChunkManagerTests::UniversalRangeMultiShard>();
-        add<ChunkManagerTests::EqualityRangeSingleShard>();
-        add<ChunkManagerTests::EqualityRangeMultiShard>();
-        add<ChunkManagerTests::SetRangeMultiShard>();
-        add<ChunkManagerTests::GTRangeMultiShard>();
-        add<ChunkManagerTests::GTERangeMultiShard>();
-        add<ChunkManagerTests::LTRangeMultiShard>();
-        add<ChunkManagerTests::LTERangeMultiShard>();
-        add<ChunkManagerTests::OrEqualities>();
-        add<ChunkManagerTests::OrEqualityInequality>();
-        add<ChunkManagerTests::OrEqualityInequalityUnhelpful>();
-        add<ChunkManagerTests::UnsatisfiableRangeSingleShard>();
-        add<ChunkManagerTests::UnsatisfiableRangeMultiShard>();
-        add<ChunkManagerTests::EqualityThenUnsatisfiable>();
-        add<ChunkManagerTests::InequalityThenUnsatisfiable>();
-        add<ChunkManagerTests::OrEqualityUnsatisfiableInequality>();
-        add<ChunkManagerTests::InMultiShard>();
+        add<EmptyQuerySingleShard>();
+        add<EmptyQueryMultiShard>();
+        add<UniversalRangeMultiShard>();
+        add<EqualityRangeSingleShard>();
+        add<EqualityRangeMultiShard>();
+        add<SetRangeMultiShard>();
+        add<GTRangeMultiShard>();
+        add<GTERangeMultiShard>();
+        add<LTRangeMultiShard>();
+        add<LTERangeMultiShard>();
+        add<OrEqualities>();
+        add<OrEqualityInequality>();
+        add<OrEqualityInequalityUnhelpful>();
+        add<UnsatisfiableRangeSingleShard>();
+        add<UnsatisfiableRangeMultiShard>();
+        add<EqualityThenUnsatisfiable>();
+        add<InequalityThenUnsatisfiable>();
+        add<OrEqualityUnsatisfiableInequality>();
+        add<InMultiShard>();
     }
 };
 
 SuiteInstance<All> myAll;
 
-}  // namespace ChunkTests
+}  // namespace
+}  // namespace mongo

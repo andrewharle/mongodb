@@ -28,9 +28,12 @@
 
 #include "mongo/platform/basic.h"
 
-#include "mongo/s/cluster_explain.h"
-
 #include "mongo/bson/bsonmisc.h"
+#include "mongo/db/query/lite_parsed_query.h"
+#include "mongo/rpc/metadata/server_selection_metadata.h"
+#include "mongo/s/client/shard_registry.h"
+#include "mongo/s/cluster_explain.h"
+#include "mongo/s/grid.h"
 
 namespace mongo {
 
@@ -49,7 +52,7 @@ namespace {
 // maximum user size for a BSON object will be exceeded.
 //
 
-bool appendIfRoom(BSONObjBuilder* bob, const BSONObj& toAppend, const StringData& fieldName) {
+bool appendIfRoom(BSONObjBuilder* bob, const BSONObj& toAppend, StringData fieldName) {
     if ((bob->len() + toAppend.objsize()) < BSONObjMaxUserSize) {
         bob->append(fieldName, toAppend);
         return true;
@@ -100,14 +103,26 @@ bool appendElementsIfRoom(BSONObjBuilder* bob, const BSONObj& toAppend) {
 // static
 void ClusterExplain::wrapAsExplain(const BSONObj& cmdObj,
                                    ExplainCommon::Verbosity verbosity,
-                                   BSONObjBuilder* out) {
-    out->append("explain", cmdObj);
-    out->append("verbosity", ExplainCommon::verbosityString(verbosity));
+                                   const rpc::ServerSelectionMetadata& serverSelectionMetadata,
+                                   BSONObjBuilder* out,
+                                   int* optionsOut) {
+    BSONObjBuilder explainBuilder;
+    explainBuilder.append("explain", cmdObj);
+    explainBuilder.append("verbosity", ExplainCommon::verbosityString(verbosity));
 
-    // If the command has a readPreference, then pull it up to the top level.
-    if (cmdObj.hasField("$readPreference")) {
-        out->append("$queryOptions", cmdObj["$readPreference"].wrap());
+    // Propagate readConcern
+    if (auto readConcern = cmdObj["readConcern"]) {
+        explainBuilder.append(readConcern);
     }
+
+    const BSONObj explainCmdObj = explainBuilder.done();
+
+    // Attach metadata to the explain command in legacy format.
+    BSONObjBuilder metadataBuilder;
+    serverSelectionMetadata.writeToMetadata(&metadataBuilder);
+    const BSONObj metadataObj = metadataBuilder.done();
+    uassertStatusOK(
+        serverSelectionMetadata.downconvert(explainCmdObj, metadataObj, out, optionsOut));
 }
 
 // static
@@ -185,7 +200,8 @@ const char* ClusterExplain::getStageNameForReadOp(
 }
 
 // static
-void ClusterExplain::buildPlannerInfo(const vector<Strategy::CommandResult>& shardResults,
+void ClusterExplain::buildPlannerInfo(OperationContext* txn,
+                                      const vector<Strategy::CommandResult>& shardResults,
                                       const char* mongosStageName,
                                       BSONObjBuilder* out) {
     BSONObjBuilder queryPlannerBob(out->subobjStart("queryPlanner"));
@@ -201,9 +217,11 @@ void ClusterExplain::buildPlannerInfo(const vector<Strategy::CommandResult>& sha
         BSONObj queryPlanner = shardResults[i].result["queryPlanner"].Obj();
         BSONObj serverInfo = shardResults[i].result["serverInfo"].Obj();
 
-        singleShardBob.append("shardName", shardResults[i].shardTarget.getName());
-        std::string connStr = shardResults[i].shardTarget.getAddress().toString();
-        singleShardBob.append("connectionString", connStr);
+        singleShardBob.append("shardName", shardResults[i].shardTargetId);
+        {
+            const auto shard = grid.shardRegistry()->getShard(txn, shardResults[i].shardTargetId);
+            singleShardBob.append("connectionString", shard->getConnString().toString());
+        }
         appendIfRoom(&singleShardBob, serverInfo, "serverInfo");
         appendElementsIfRoom(&singleShardBob, queryPlanner);
 
@@ -272,7 +290,7 @@ void ClusterExplain::buildExecStats(const vector<Strategy::CommandResult>& shard
         BSONObj execStats = shardResults[i].result["executionStats"].Obj();
         BSONObj execStages = execStats["executionStages"].Obj();
 
-        singleShardBob.append("shardName", shardResults[i].shardTarget.getName());
+        singleShardBob.append("shardName", shardResults[i].shardTargetId);
 
         // Append error-related fields, if present.
         if (!execStats["executionSuccess"].eoo()) {
@@ -304,7 +322,7 @@ void ClusterExplain::buildExecStats(const vector<Strategy::CommandResult>& shard
     for (size_t i = 0; i < shardResults.size(); i++) {
         BSONObjBuilder singleShardBob(execShardsBuilder.subobjStart());
 
-        singleShardBob.append("shardName", shardResults[i].shardTarget.getName());
+        singleShardBob.append("shardName", shardResults[i].shardTargetId);
 
         BSONObj execStats = shardResults[i].result["executionStats"].Obj();
         vector<BSONElement> allPlans = execStats["allPlansExecution"].Array();
@@ -323,7 +341,8 @@ void ClusterExplain::buildExecStats(const vector<Strategy::CommandResult>& shard
 }
 
 // static
-Status ClusterExplain::buildExplainResult(const vector<Strategy::CommandResult>& shardResults,
+Status ClusterExplain::buildExplainResult(OperationContext* txn,
+                                          const vector<Strategy::CommandResult>& shardResults,
                                           const char* mongosStageName,
                                           long long millisElapsed,
                                           BSONObjBuilder* out) {
@@ -333,7 +352,7 @@ Status ClusterExplain::buildExplainResult(const vector<Strategy::CommandResult>&
         return validateStatus;
     }
 
-    buildPlannerInfo(shardResults, mongosStageName, out);
+    buildPlannerInfo(txn, shardResults, mongosStageName, out);
     buildExecStats(shardResults, mongosStageName, millisElapsed, out);
 
     return Status::OK();

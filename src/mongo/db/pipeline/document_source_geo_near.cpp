@@ -39,9 +39,10 @@ namespace mongo {
 using boost::intrusive_ptr;
 using std::min;
 
-char DocumentSourceGeoNear::geoNearName[] = "$geoNear";
+REGISTER_DOCUMENT_SOURCE(geoNear, DocumentSourceGeoNear::createFromBson);
+
 const char* DocumentSourceGeoNear::getSourceName() const {
-    return geoNearName;
+    return "$geoNear";
 }
 
 boost::optional<Document> DocumentSourceGeoNear::getNext() {
@@ -63,10 +64,6 @@ boost::optional<Document> DocumentSourceGeoNear::getNext() {
         output.setNestedField(*includeLocs, result["loc"]);
 
     return output.freeze();
-}
-
-void DocumentSourceGeoNear::setSource(DocumentSource*) {
-    uasserted(16602, "$geoNear is only allowed as the first pipeline stage");
 }
 
 bool DocumentSourceGeoNear::coalesce(const intrusive_ptr<DocumentSource>& pNextSource) {
@@ -105,6 +102,9 @@ Value DocumentSourceGeoNear::serialize(bool explain) const {
     if (maxDistance > 0)
         result.setField("maxDistance", Value(maxDistance));
 
+    if (minDistance > 0)
+        result.setField("minDistance", Value(minDistance));
+
     result.setField("query", Value(query));
     result.setField("spherical", Value(spherical));
     result.setField("distanceMultiplier", Value(distanceMultiplier));
@@ -133,6 +133,9 @@ BSONObj DocumentSourceGeoNear::buildGeoNearCmd() const {
 
     if (maxDistance > 0)
         geoNear.append("maxDistance", maxDistance);
+
+    if (minDistance > 0)
+        geoNear.append("minDistance", minDistance);
 
     geoNear.append("query", query);
     geoNear.append("spherical", spherical);
@@ -191,6 +194,9 @@ void DocumentSourceGeoNear::parseOptions(BSONObj options) {
     if (options["maxDistance"].isNumber())
         maxDistance = options["maxDistance"].numberDouble();
 
+    if (options["minDistance"].isNumber())
+        minDistance = options["minDistance"].numberDouble();
+
     if (options["query"].type() == Object)
         query = options["query"].embeddedObject().getOwned();
 
@@ -215,6 +221,7 @@ DocumentSourceGeoNear::DocumentSourceGeoNear(const intrusive_ptr<ExpressionConte
       coordsIsArray(false),
       limit(100),
       maxDistance(-1.0),
+      minDistance(-1.0),
       spherical(false),
       distanceMultiplier(1.0) {}
 }

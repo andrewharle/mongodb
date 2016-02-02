@@ -36,7 +36,6 @@
 #include "mongo/db/jsobj.h"
 #include "mongo/db/json.h"
 #include "mongo/db/matcher/expression_parser.h"
-#include "mongo/db/query/qlog.h"
 #include "mongo/db/query/query_planner.h"
 #include "mongo/db/query/query_solution.h"
 #include "mongo/unittest/unittest.h"
@@ -52,13 +51,13 @@ bool filterMatches(const BSONObj& testFilter, const QuerySolutionNode* trueFilte
     if (NULL == trueFilterNode->filter) {
         return false;
     }
-    StatusWithMatchExpression swme = MatchExpressionParser::parse(testFilter);
-    if (!swme.isOK()) {
+    StatusWithMatchExpression statusWithMatcher = MatchExpressionParser::parse(testFilter);
+    if (!statusWithMatcher.isOK()) {
         return false;
     }
-    const boost::scoped_ptr<MatchExpression> root(swme.getValue());
+    const std::unique_ptr<MatchExpression> root = std::move(statusWithMatcher.getValue());
     CanonicalQuery::sortTree(root.get());
-    boost::scoped_ptr<MatchExpression> trueFilter(trueFilterNode->filter->shallowClone());
+    std::unique_ptr<MatchExpression> trueFilter(trueFilterNode->filter->shallowClone());
     CanonicalQuery::sortTree(trueFilter.get());
     return trueFilter->equivalent(root.get());
 }
@@ -298,14 +297,28 @@ bool QueryPlannerTestLib::solutionMatches(const BSONObj& testSoln,
 
         BSONElement searchElt = textObj["search"];
         if (!searchElt.eoo()) {
-            if (searchElt.String() != node->query) {
+            if (searchElt.String() != node->ftsQuery->getQuery()) {
                 return false;
             }
         }
 
         BSONElement languageElt = textObj["language"];
         if (!languageElt.eoo()) {
-            if (languageElt.String() != node->language) {
+            if (languageElt.String() != node->ftsQuery->getLanguage()) {
+                return false;
+            }
+        }
+
+        BSONElement caseSensitiveElt = textObj["caseSensitive"];
+        if (!caseSensitiveElt.eoo()) {
+            if (caseSensitiveElt.trueValue() != node->ftsQuery->getCaseSensitive()) {
+                return false;
+            }
+        }
+
+        BSONElement diacriticSensitiveElt = textObj["diacriticSensitive"];
+        if (!diacriticSensitiveElt.eoo()) {
+            if (diacriticSensitiveElt.trueValue() != node->ftsQuery->getDiacriticSensitive()) {
                 return false;
             }
         }
@@ -473,6 +486,20 @@ bool QueryPlannerTestLib::solutionMatches(const BSONObj& testSoln,
         size_t expectedLimit = limitEl.numberInt();
         return (patternEl.Obj() == sn->pattern) && (expectedLimit == sn->limit) &&
             solutionMatches(child.Obj(), sn->children[0]);
+    } else if (STAGE_SORT_KEY_GENERATOR == trueSoln->getType()) {
+        const SortKeyGeneratorNode* keyGenNode = static_cast<const SortKeyGeneratorNode*>(trueSoln);
+        BSONElement el = testSoln["sortKeyGen"];
+        if (el.eoo() || !el.isABSONObj()) {
+            return false;
+        }
+        BSONObj keyGenObj = el.Obj();
+
+        BSONElement child = keyGenObj["node"];
+        if (child.eoo() || !child.isABSONObj()) {
+            return false;
+        }
+
+        return solutionMatches(child.Obj(), keyGenNode->children[0]);
     } else if (STAGE_SORT_MERGE == trueSoln->getType()) {
         const MergeSortNode* msn = static_cast<const MergeSortNode*>(trueSoln);
         BSONElement el = testSoln["mergeSort"];

@@ -1,6 +1,10 @@
 // Basic tests for cluster authentication using x509.
 
-var common_options = {keyFile : "jstests/libs/key1"};
+var common_options = {keyFile : "jstests/libs/key1",
+                      sslMode : "requireSSL",
+                      sslPEMKeyFile: "jstests/libs/server.pem",
+                      sslCAFile: "jstests/libs/ca.pem",
+                      sslAllowInvalidHostnames: ""};
 
 function runInitialSyncTest() {
     load("jstests/replsets/rslib.js");
@@ -12,7 +16,7 @@ function runInitialSyncTest() {
     var conns = replTest.startSet();
     replTest.initiate();
 
-    var master = replTest.getMaster();
+    var master = replTest.getPrimary();
     var foo = master.getDB("foo");
     var admin = master.getDB("admin");
 
@@ -36,7 +40,7 @@ function runInitialSyncTest() {
     replTest.awaitReplication();
 
     print("5. Insert some stuff");
-    master = replTest.getMaster();
+    master = replTest.getPrimary();
     bulk = foo.bar.initializeUnorderedBulkOp();
     for (var i = 0; i < 100; i++) {
       bulk.insert({ date: new Date(), x: i, str: "all the talk on the market" });

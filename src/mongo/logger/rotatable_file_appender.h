@@ -27,7 +27,6 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
 
 #include "mongo/base/disallow_copying.h"
 #include "mongo/base/status.h"
@@ -65,7 +64,7 @@ public:
     }
 
 private:
-    boost::scoped_ptr<EventEncoder> _encoder;
+    std::unique_ptr<EventEncoder> _encoder;
     RotatableFileWriter* _writer;
 };
 

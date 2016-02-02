@@ -43,6 +43,12 @@ HeartbeatResponseAction HeartbeatResponseAction::makeReconfigAction() {
     return result;
 }
 
+HeartbeatResponseAction HeartbeatResponseAction::makePriorityTakeoverAction() {
+    HeartbeatResponseAction result;
+    result._action = PriorityTakeover;
+    return result;
+}
+
 HeartbeatResponseAction HeartbeatResponseAction::makeElectAction() {
     HeartbeatResponseAction result;
     result._action = StartElection;
@@ -63,8 +69,7 @@ HeartbeatResponseAction HeartbeatResponseAction::makeStepDownRemoteAction(int pr
     return result;
 }
 
-HeartbeatResponseAction::HeartbeatResponseAction()
-    : _action(NoAction), _primaryIndex(-1), _nextHeartbeatStartDate(0) {}
+HeartbeatResponseAction::HeartbeatResponseAction() : _action(NoAction), _primaryIndex(-1) {}
 
 void HeartbeatResponseAction::setNextHeartbeatStartDate(Date_t when) {
     _nextHeartbeatStartDate = when;

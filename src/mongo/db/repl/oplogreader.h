@@ -31,18 +31,23 @@
 
 #pragma once
 
-#include <boost/shared_ptr.hpp>
 
 #include "mongo/client/constants.h"
 #include "mongo/client/dbclientcursor.h"
 #include "mongo/util/net/hostandport.h"
+#include "mongo/util/time_support.h"
 
 namespace mongo {
 
-extern const BSONObj reverseNaturalObj;  // { $natural : -1 }
+class OperationContext;
 
 namespace repl {
+
 class ReplicationCoordinator;
+class OpTime;
+
+// {"$natural": -1 }
+extern const BSONObj reverseNaturalObj;
 
 /**
  * Authenticates conn using the server's cluster-membership credentials.
@@ -57,8 +62,8 @@ bool replAuthenticate(DBClientBase* conn);
 
 class OplogReader {
 private:
-    boost::shared_ptr<DBClientConnection> _conn;
-    boost::shared_ptr<DBClientCursor> cursor;
+    std::shared_ptr<DBClientConnection> _conn;
+    std::shared_ptr<DBClientCursor> cursor;
     int _tailingQueryOptions;
 
     // If _conn was actively connected, _host represents the current HostAndPort of the
@@ -82,12 +87,12 @@ public:
     BSONObj findOne(const char* ns, const Query& q) {
         return conn()->findOne(ns, q, 0, QueryOption_SlaveOk);
     }
-    BSONObj getLastOp(const char* ns) {
-        return findOne(ns, Query().sort(reverseNaturalObj));
+    BSONObj getLastOp(const std::string& ns) {
+        return findOne(ns.c_str(), Query().sort(reverseNaturalObj));
     }
 
     /* SO_TIMEOUT (send/recv time out) for our DBClientConnections */
-    static const int tcp_timeout = 30;
+    static const Seconds kSocketTimeout;
 
     /* ok to call if already connected */
     bool connect(const HostAndPort& host);
@@ -100,15 +105,9 @@ public:
 
     void query(const char* ns, Query query, int nToReturn, int nToSkip, const BSONObj* fields = 0);
 
-    void tailingQuery(const char* ns, const BSONObj& query, const BSONObj* fields = 0);
+    void tailingQuery(const char* ns, const BSONObj& query);
 
-    void tailingQueryGTE(const char* ns, OpTime t, const BSONObj* fields = 0);
-
-    /* Do a tailing query, but only send the ts field back. */
-    void ghostQueryGTE(const char* ns, OpTime t) {
-        const BSONObj fields = BSON("ts" << 1 << "_id" << 0);
-        return tailingQueryGTE(ns, t, &fields);
-    }
+    void tailingQueryGTE(const char* ns, Timestamp t);
 
     bool more() {
         uassert(15910, "Doesn't have cursor for reading oplog", cursor.get());
@@ -126,23 +125,21 @@ public:
         return cursor->getMessage()->size();
     }
 
-    int getTailingQueryOptions() const {
-        return _tailingQueryOptions;
-    }
-    void setTailingQueryOptions(int tailingQueryOptions) {
-        _tailingQueryOptions = tailingQueryOptions;
-    }
-
-    void peek(std::vector<BSONObj>& v, int n) {
-        if (cursor.get())
-            cursor->peek(v, n);
-    }
     BSONObj nextSafe() {
         return cursor->nextSafe();
     }
     BSONObj next() {
         return cursor->next();
     }
+
+
+    // master/slave only
+    void peek(std::vector<BSONObj>& v, int n) {
+        if (cursor.get())
+            cursor->peek(v, n);
+    }
+
+    // master/slave only
     void putBack(BSONObj op) {
         cursor->putBack(op);
     }
@@ -157,11 +154,9 @@ public:
      * In the process of connecting, this function may add items to the repl coordinator's
      * sync source blacklist.
      * This function may throw DB exceptions.
-     * If "lastOpTimeFetched" is (0, 0), we do not check staleness as this indicates an initial
-     * sync.
      */
     void connectToSyncSource(OperationContext* txn,
-                             OpTime lastOpTimeFetched,
+                             const OpTime& lastOpTimeFetched,
                              ReplicationCoordinator* replCoord);
 };
 

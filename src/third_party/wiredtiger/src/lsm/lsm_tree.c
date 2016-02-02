@@ -27,6 +27,13 @@ __lsm_tree_discard(WT_SESSION_IMPL *session, WT_LSM_TREE *lsm_tree, bool final)
 
 	WT_UNUSED(final);	/* Only used in diagnostic builds */
 
+	/*
+	 * The work unit queue should be empty, but it's worth checking
+	 * since work units use a different locking scheme to regular tree
+	 * operations.
+	 */
+	WT_ASSERT(session, lsm_tree->queue_ref == 0);
+
 	/* We may be destroying an lsm_tree before it was added. */
 	if (F_ISSET(lsm_tree, WT_LSM_TREE_OPEN)) {
 		WT_ASSERT(session, final ||
@@ -104,7 +111,7 @@ __lsm_tree_close(WT_SESSION_IMPL *session, WT_LSM_TREE *lsm_tree)
 		 * other schema level operations will return EBUSY, even though
 		 * we're dropping the schema lock here.
 		 */
-		if (i % 1000 == 0) {
+		if (i % WT_THOUSAND == 0) {
 			WT_WITHOUT_LOCKS(session, ret =
 			    __wt_lsm_manager_clear_tree(session, lsm_tree));
 			WT_RET(ret);
@@ -231,7 +238,7 @@ __lsm_tree_cleanup_old(WT_SESSION_IMPL *session, const char *uri)
 {
 	WT_DECL_RET;
 	const char *cfg[] =
-	    { WT_CONFIG_BASE(session, session_drop), "force", NULL };
+	    { WT_CONFIG_BASE(session, WT_SESSION_drop), "force", NULL };
 	bool exists;
 
 	WT_RET(__wt_exist(session, uri + strlen("file:"), &exists));
@@ -304,7 +311,7 @@ __wt_lsm_tree_create(WT_SESSION_IMPL *session,
 	WT_DECL_RET;
 	WT_LSM_TREE *lsm_tree;
 	const char *cfg[] =
-	    { WT_CONFIG_BASE(session, session_create), config, NULL };
+	    { WT_CONFIG_BASE(session, WT_SESSION_create), config, NULL };
 	char *tmpconfig;
 
 	/* If the tree is open, it already exists. */
@@ -329,6 +336,11 @@ __wt_lsm_tree_create(WT_SESSION_IMPL *session,
 	}
 	WT_RET_NOTFOUND_OK(ret);
 
+	/* In-memory configurations don't make sense for LSM. */
+	if (F_ISSET(S2C(session), WT_CONN_IN_MEMORY))
+		WT_RET_MSG(session, EINVAL,
+		    "LSM trees not supported by in-memory configurations");
+
 	WT_RET(__wt_config_gets(session, cfg, "key_format", &cval));
 	if (WT_STRING_MATCH("r", cval.str, cval.len))
 		WT_RET_MSG(session, EINVAL,
@@ -348,6 +360,11 @@ __wt_lsm_tree_create(WT_SESSION_IMPL *session,
 	WT_ERR(__wt_config_gets_none(session, cfg, "collator", &cval));
 	WT_ERR(__wt_strndup(
 	    session, cval.str, cval.len, &lsm_tree->collator_name));
+
+	WT_ERR(__wt_config_gets(session, cfg, "cache_resident", &cval));
+	if (cval.val != 0)
+		WT_ERR_MSG(session, EINVAL,
+		    "The cache_resident flag is not compatible with LSM");
 
 	WT_ERR(__wt_config_gets(session, cfg, "lsm.auto_throttle", &cval));
 	if (cval.val)
@@ -373,7 +390,7 @@ __wt_lsm_tree_create(WT_SESSION_IMPL *session,
 		cval.len -= 2;
 	}
 	WT_ERR(__wt_config_check(session,
-	   WT_CONFIG_REF(session, session_create), cval.str, cval.len));
+	   WT_CONFIG_REF(session, WT_SESSION_create), cval.str, cval.len));
 	WT_ERR(__wt_strndup(
 	    session, cval.str, cval.len, &lsm_tree->bloom_config));
 
@@ -516,7 +533,7 @@ __lsm_tree_open_check(WT_SESSION_IMPL *session, WT_LSM_TREE *lsm_tree)
 	WT_CONFIG_ITEM cval;
 	uint64_t maxleafpage, required;
 	const char *cfg[] = { WT_CONFIG_BASE(
-	    session, session_create), lsm_tree->file_config, NULL };
+	    session, WT_SESSION_create), lsm_tree->file_config, NULL };
 
 	WT_RET(__wt_config_gets(session, cfg, "leaf_page_max", &cval));
 	maxleafpage = (uint64_t)cval.val;
@@ -735,7 +752,7 @@ __wt_lsm_tree_throttle(
 		WT_ASSERT(session,
 		    WT_TIMECMP(last_chunk->create_ts, ondisk->create_ts) >= 0);
 		timediff =
-		    WT_TIMEDIFF(last_chunk->create_ts, ondisk->create_ts);
+		    WT_TIMEDIFF_NS(last_chunk->create_ts, ondisk->create_ts);
 		lsm_tree->ckpt_throttle =
 		    (in_memory - 2) * timediff / (20 * record_count);
 
@@ -771,8 +788,8 @@ __wt_lsm_tree_throttle(
 	}
 
 	/* Put an upper bound of 1s on both throttle calculations. */
-	lsm_tree->ckpt_throttle = WT_MIN(1000000, lsm_tree->ckpt_throttle);
-	lsm_tree->merge_throttle = WT_MIN(1000000, lsm_tree->merge_throttle);
+	lsm_tree->ckpt_throttle = WT_MIN(WT_MILLION, lsm_tree->ckpt_throttle);
+	lsm_tree->merge_throttle = WT_MIN(WT_MILLION, lsm_tree->merge_throttle);
 
 	/*
 	 * Update our estimate of how long each in-memory chunk stays active.
@@ -786,15 +803,16 @@ __wt_lsm_tree_throttle(
 		WT_ASSERT(session, prev_chunk->generation == 0);
 		WT_ASSERT(session, WT_TIMECMP(
 		    last_chunk->create_ts, prev_chunk->create_ts) >= 0);
-		timediff =
-		    WT_TIMEDIFF(last_chunk->create_ts, prev_chunk->create_ts);
+		timediff = WT_TIMEDIFF_NS(
+		    last_chunk->create_ts, prev_chunk->create_ts);
 		WT_ASSERT(session,
 		    WT_TIMECMP(prev_chunk->create_ts, ondisk->create_ts) >= 0);
-		oldtime = WT_TIMEDIFF(prev_chunk->create_ts, ondisk->create_ts);
+		oldtime = WT_TIMEDIFF_NS(
+		    prev_chunk->create_ts, ondisk->create_ts);
 		if (timediff < 10 * oldtime)
 			lsm_tree->chunk_fill_ms =
 			    (3 * lsm_tree->chunk_fill_ms +
-			    timediff / 1000000) / 4;
+			    timediff / WT_MILLION) / 4;
 	}
 }
 
@@ -1133,7 +1151,7 @@ __wt_lsm_tree_readlock(WT_SESSION_IMPL *session, WT_LSM_TREE *lsm_tree)
 	 * Diagnostic: avoid deadlocks with the schema lock: if we need it for
 	 * an operation, we should already have it.
 	 */
-	F_SET(session, WT_SESSION_NO_CACHE_CHECK | WT_SESSION_NO_SCHEMA_LOCK);
+	F_SET(session, WT_SESSION_NO_EVICTION | WT_SESSION_NO_SCHEMA_LOCK);
 	return (0);
 }
 
@@ -1146,7 +1164,7 @@ __wt_lsm_tree_readunlock(WT_SESSION_IMPL *session, WT_LSM_TREE *lsm_tree)
 {
 	WT_DECL_RET;
 
-	F_CLR(session, WT_SESSION_NO_CACHE_CHECK | WT_SESSION_NO_SCHEMA_LOCK);
+	F_CLR(session, WT_SESSION_NO_EVICTION | WT_SESSION_NO_SCHEMA_LOCK);
 
 	if ((ret = __wt_readunlock(session, lsm_tree->rwlock)) != 0)
 		WT_PANIC_RET(session, ret, "Unlocking an LSM tree");
@@ -1166,7 +1184,7 @@ __wt_lsm_tree_writelock(WT_SESSION_IMPL *session, WT_LSM_TREE *lsm_tree)
 	 * Diagnostic: avoid deadlocks with the schema lock: if we need it for
 	 * an operation, we should already have it.
 	 */
-	F_SET(session, WT_SESSION_NO_CACHE_CHECK | WT_SESSION_NO_SCHEMA_LOCK);
+	F_SET(session, WT_SESSION_NO_EVICTION | WT_SESSION_NO_SCHEMA_LOCK);
 	return (0);
 }
 
@@ -1179,7 +1197,7 @@ __wt_lsm_tree_writeunlock(WT_SESSION_IMPL *session, WT_LSM_TREE *lsm_tree)
 {
 	WT_DECL_RET;
 
-	F_CLR(session, WT_SESSION_NO_CACHE_CHECK | WT_SESSION_NO_SCHEMA_LOCK);
+	F_CLR(session, WT_SESSION_NO_EVICTION | WT_SESSION_NO_SCHEMA_LOCK);
 
 	if ((ret = __wt_writeunlock(session, lsm_tree->rwlock)) != 0)
 		WT_PANIC_RET(session, ret, "Unlocking an LSM tree");
@@ -1220,6 +1238,18 @@ __wt_lsm_compact(WT_SESSION_IMPL *session, const char *name, bool *skipp)
 	if (!F_ISSET(S2C(session), WT_CONN_LSM_MERGE))
 		WT_ERR_MSG(session, EINVAL,
 		    "LSM compaction requires active merge threads");
+
+	/*
+	 * There is no work to do if there is only a single chunk in the tree
+	 * and it has a bloom filter or is configured to never have a bloom
+	 * filter.
+	 */
+	if (lsm_tree->nchunks == 1 &&
+	    (!FLD_ISSET(lsm_tree->bloom, WT_LSM_BLOOM_OLDEST) ||
+	    F_ISSET(lsm_tree->chunk[0], WT_LSM_CHUNK_BLOOM))) {
+		__wt_lsm_tree_release(session, lsm_tree);
+		return (0);
+	}
 
 	WT_ERR(__wt_seconds(session, &begin));
 

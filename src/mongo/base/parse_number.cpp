@@ -31,11 +31,10 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cstdint>
 #include <cstdlib>
 #include <limits>
 #include <string>
-
-#include "mongo/platform/cstdint.h"
 
 namespace mongo {
 
@@ -59,7 +58,7 @@ static uint8_t _digitValue(char c) {
  * substring with any sign characters stripped away.  "*isNegative" is set to true if the
  * number is negative, and false otherwise.
  */
-static inline StringData _extractSign(const StringData& stringValue, bool* isNegative) {
+static inline StringData _extractSign(StringData stringValue, bool* isNegative) {
     if (stringValue.empty()) {
         *isNegative = false;
         return stringValue;
@@ -95,9 +94,7 @@ static inline StringData _extractSign(const StringData& stringValue, bool* isNeg
  * Returns stringValue, unless it sets *outputBase to 16, in which case it will strip off the
  * "0x" or "0X" prefix, if present.
  */
-static inline StringData _extractBase(const StringData& stringValue,
-                                      int inputBase,
-                                      int* outputBase) {
+static inline StringData _extractBase(StringData stringValue, int inputBase, int* outputBase) {
     const StringData hexPrefixLower("0x", StringData::LiteralTag());
     const StringData hexPrefixUpper("0X", StringData::LiteralTag());
     if (inputBase == 0) {
@@ -123,7 +120,7 @@ static inline StringData _extractBase(const StringData& stringValue,
 }
 
 template <typename NumberType>
-Status parseNumberFromStringWithBase(const StringData& stringValue, int base, NumberType* result) {
+Status parseNumberFromStringWithBase(StringData stringValue, int base, NumberType* result) {
     typedef ::std::numeric_limits<NumberType> limits;
 
     if (base == 1 || base < 0 || base > 36)
@@ -187,8 +184,7 @@ Status parseNumberFromStringWithBase(const StringData& stringValue, int base, Nu
 // Definition of the various supported implementations of parseNumberFromStringWithBase.
 
 #define DEFINE_PARSE_NUMBER_FROM_STRING_WITH_BASE(NUMBER_TYPE) \
-    template MONGO_CLIENT_API Status                           \
-    parseNumberFromStringWithBase<NUMBER_TYPE>(const StringData&, int, NUMBER_TYPE*);
+    template Status parseNumberFromStringWithBase<NUMBER_TYPE>(StringData, int, NUMBER_TYPE*);
 
 DEFINE_PARSE_NUMBER_FROM_STRING_WITH_BASE(long)
 DEFINE_PARSE_NUMBER_FROM_STRING_WITH_BASE(long long)
@@ -221,9 +217,7 @@ char toLowerAscii(char c) {
 #endif  // defined(_WIN32)
 
 template <>
-Status parseNumberFromStringWithBase<double>(const StringData& stringValue,
-                                             int base,
-                                             double* result) {
+Status parseNumberFromStringWithBase<double>(StringData stringValue, int base, double* result) {
     if (base != 0) {
         return Status(ErrorCodes::BadValue,
                       "Must pass 0 as base to parseNumberFromStringWithBase<double>.");

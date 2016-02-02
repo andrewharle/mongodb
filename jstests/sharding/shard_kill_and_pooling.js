@@ -1,15 +1,18 @@
 //
 // Tests what happens when a shard goes down with pooled connections.
 //
+// This test involves restarting a standalone shard, so cannot be run on ephemeral storage engines.
+// A restarted standalone will lose all data when using an ephemeral storage engine.
+// @tags: [requires_persistence]
+//
 
 // Run through the same test twice, once with a hard -9 kill, once with a regular shutdown
 
 for ( var test = 0; test < 2; test++ ) {
 
 var killWith = (test == 0 ? 15 : 9);
-var options = { separateConfig : true };
 
-var st = new ShardingTest({shards : 2, mongos : 1, other : options});
+var st = new ShardingTest({shards : 2, mongos : 1});
 
 // Stop balancer to eliminate weird conn stuff
 st.stopBalancer();

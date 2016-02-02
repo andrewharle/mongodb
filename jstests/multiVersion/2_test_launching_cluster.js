@@ -10,6 +10,8 @@ load('./jstests/multiVersion/libs/verify_versions.js');
 var versionsToCheck = [ "last-stable",
                         "latest" ];
                        
+var versionsToCheckMongos = [ "last-stable" ];
+                       
 jsTest.log( "Testing legacy versions..." );
 
 for( var i = 0; i < versionsToCheck.length; i++ ){
@@ -20,8 +22,8 @@ for( var i = 0; i < versionsToCheck.length; i++ ){
     
     var st = new ShardingTest({ shards : 2, 
                                 mongos : 2,
+                                sync: true, // Old clusters can't use replsets for config servers
                                 other : { 
-                                    separateConfig : true,
                                     mongosOptions : { binVersion : version },
                                     configOptions : { binVersion : version },
                                     shardOptions : { binVersion : version }
@@ -48,13 +50,12 @@ st = new ShardingTest({ shards : 2,
                             other : {
                                 
                                 // Three config servers
-                                separateConfig : true,
                                 sync : true,
                                 
-                                mongosOptions : { binVersion : versionsToCheck },
+                                mongosOptions : { binVersion : versionsToCheckMongos },
                                 configOptions : { binVersion : versionsToCheck },
                                 shardOptions : { binVersion : versionsToCheck }
-                                
+
                             } });
     
 shards = [ st.shard0, st.shard1 ];
@@ -72,7 +73,7 @@ versionsFound = [];
 for ( j = 0; j < mongoses.length; j++ ) 
     versionsFound.push( mongoses[j].getBinVersion() );
 
-assert.allBinVersions( versionsToCheck, versionsFound );
+assert.allBinVersions( versionsToCheckMongos, versionsFound );
     
 versionsFound = [];
 for ( j = 0; j < configs.length; j++ ) 
@@ -92,16 +93,14 @@ st = new ShardingTest({ shards : 2,
                             other : {
                                 
                                 // Three config servers
-                                separateConfig : true,
                                 sync : true,
                                 
                                 // Replica set shards
                                 rs : true,
                                 
-                                mongosOptions : { binVersion : versionsToCheck },
+                                mongosOptions : { binVersion : versionsToCheckMongos },
                                 configOptions : { binVersion : versionsToCheck },
-                                rsOptions : { binVersion : versionsToCheck }
-                                
+                                rsOptions : { binVersion : versionsToCheck, protocolVersion: 0 }
                             } });
     
 var nodesA = st.rs0.nodes;
@@ -131,7 +130,7 @@ versionsFound = [];
 for ( j = 0; j < mongoses.length; j++ )
     versionsFound.push( mongoses[j].getBinVersion() );
 
-assert.allBinVersions( versionsToCheck, versionsFound );
+assert.allBinVersions( versionsToCheckMongos, versionsFound );
 
 versionsFound = [];
 for ( j = 0; j < configs.length; j++ )

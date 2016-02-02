@@ -26,9 +26,9 @@
  *    it in the license file.
  */
 
-#include <boost/scoped_ptr.hpp>
 #include <memory>
 
+#include "mongo/db/db_raii.h"
 #include "mongo/db/exec/collection_scan.h"
 #include "mongo/db/exec/collection_scan_common.h"
 #include "mongo/db/exec/count.h"
@@ -42,8 +42,7 @@
 
 namespace QueryStageCount {
 
-using boost::scoped_ptr;
-using std::auto_ptr;
+using std::unique_ptr;
 using std::vector;
 
 const int kDocuments = 100;
@@ -90,7 +89,7 @@ public:
         params.direction = CollectionScanParams::FORWARD;
         params.tailable = false;
 
-        scoped_ptr<CollectionScan> scan(new CollectionScan(&_txn, params, &ws, NULL));
+        unique_ptr<CollectionScan> scan(new CollectionScan(&_txn, params, &ws, NULL));
         while (!scan->isEOF()) {
             WorkingSetID id = WorkingSet::INVALID_ID;
             PlanStage::StageState state = scan->work(&id);
@@ -110,20 +109,22 @@ public:
 
     void remove(const RecordId& loc) {
         WriteUnitOfWork wunit(&_txn);
-        _coll->deleteDocument(&_txn, loc, false, false, NULL);
+        _coll->deleteDocument(&_txn, loc);
         wunit.commit();
     }
 
     void update(const RecordId& oldLoc, const BSONObj& newDoc) {
         WriteUnitOfWork wunit(&_txn);
         BSONObj oldDoc = _coll->getRecordStore()->dataFor(&_txn, oldLoc).releaseToBson();
+        oplogUpdateEntryArgs args;
         _coll->updateDocument(&_txn,
                               oldLoc,
                               Snapshotted<BSONObj>(_txn.recoveryUnit()->getSnapshotId(), oldDoc),
                               newDoc,
                               false,
                               true,
-                              NULL);
+                              NULL,
+                              args);
         wunit.commit();
     }
 
@@ -137,10 +138,12 @@ public:
         setup();
         getLocs();
 
-        auto_ptr<WorkingSet> ws(new WorkingSet);
+        unique_ptr<WorkingSet> ws(new WorkingSet);
 
-        StatusWithMatchExpression swme = MatchExpressionParser::parse(request.query);
-        auto_ptr<MatchExpression> expression(swme.getValue());
+        StatusWithMatchExpression statusWithMatcher =
+            MatchExpressionParser::parse(request.getQuery());
+        ASSERT(statusWithMatcher.isOK());
+        unique_ptr<MatchExpression> expression = std::move(statusWithMatcher.getValue());
 
         PlanStage* scan;
         if (indexed) {
@@ -155,7 +158,7 @@ public:
 
         ASSERT_FALSE(stats->trivialCount);
         ASSERT_EQUALS(stats->nCounted, expected_n);
-        ASSERT_EQUALS(stats->nSkipped, request.skip);
+        ASSERT_EQUALS(stats->nSkipped, request.getSkip());
     }
 
     // Performs a test using a count stage whereby each unit of work is interjected
@@ -179,7 +182,7 @@ public:
             }
 
             // resume from yield
-            count_stage.restoreState(&_txn);
+            count_stage.restoreState();
         }
 
         return static_cast<const CountStats*>(count_stage.getSpecificStats());
@@ -211,17 +214,6 @@ public:
         return new CollectionScan(&_txn, params, ws, expr);
     }
 
-    CountRequest createCountRequest(const BSONObj& filter, size_t skip = 0, size_t limit = 0) {
-        CountRequest request;
-        request.ns = ns();
-        request.query = filter;
-        request.limit = limit;
-        request.skip = skip;
-        request.explain = false;
-        request.hint = BSONObj();
-        return request;
-    }
-
     static const char* ns() {
         return "unittest.QueryStageCount";
     }
@@ -231,15 +223,15 @@ protected:
     OperationContextImpl _txn;
     ScopedTransaction _scopedXact;
     Lock::DBLock _dbLock;
-    Client::Context _ctx;
+    OldClientContext _ctx;
     Collection* _coll;
 };
 
 class QueryStageCountNoChangeDuringYield : public CountStageTest {
 public:
     void run() {
-        BSONObj filter = BSON("x" << LT << kDocuments / 2);
-        CountRequest request = createCountRequest(filter);
+        CountRequest request(ns(), BSON("x" << LT << kDocuments / 2));
+
         testCount(request, kDocuments / 2);
         testCount(request, kDocuments / 2, true);
     }
@@ -248,7 +240,9 @@ public:
 class QueryStageCountYieldWithSkip : public CountStageTest {
 public:
     void run() {
-        CountRequest request = createCountRequest(BSON("x" << GTE << 0), 2);
+        CountRequest request(ns(), BSON("x" << GTE << 0));
+        request.setSkip(2);
+
         testCount(request, kDocuments - 2);
         testCount(request, kDocuments - 2, true);
     }
@@ -257,7 +251,10 @@ public:
 class QueryStageCountYieldWithLimit : public CountStageTest {
 public:
     void run() {
-        CountRequest request = createCountRequest(BSON("x" << GTE << 0), 0, 2);
+        CountRequest request(ns(), BSON("x" << GTE << 0));
+        request.setSkip(0);
+        request.setLimit(2);
+
         testCount(request, 2);
         testCount(request, 2, true);
     }
@@ -267,7 +264,8 @@ public:
 class QueryStageCountInsertDuringYield : public CountStageTest {
 public:
     void run() {
-        CountRequest request = createCountRequest(BSON("x" << 1));
+        CountRequest request(ns(), BSON("x" << 1));
+
         testCount(request, kInterjections + 1);
         testCount(request, kInterjections + 1, true);
     }
@@ -283,7 +281,8 @@ public:
     void run() {
         // expected count would be 99 but we delete the second record
         // after doing the first unit of work
-        CountRequest request = createCountRequest(BSON("x" << GTE << 1));
+        CountRequest request(ns(), BSON("x" << GTE << 1));
+
         testCount(request, kDocuments - 2);
         testCount(request, kDocuments - 2, true);
     }
@@ -293,11 +292,13 @@ public:
         if (interjection == 0) {
             // At this point, our first interjection, we've counted _locs[0]
             // and are about to count _locs[1]
+            WriteUnitOfWork wunit(&_txn);
             count_stage.invalidate(&_txn, _locs[interjection], INVALIDATION_DELETION);
             remove(_locs[interjection]);
 
             count_stage.invalidate(&_txn, _locs[interjection + 1], INVALIDATION_DELETION);
             remove(_locs[interjection + 1]);
+            wunit.commit();
         }
     }
 };
@@ -307,7 +308,8 @@ public:
     void run() {
         // expected count would be kDocuments-2 but we update the first and second records
         // after doing the first unit of work so they wind up getting counted later on
-        CountRequest request = createCountRequest(BSON("x" << GTE << 2));
+        CountRequest request(ns(), BSON("x" << GTE << 2));
+
         testCount(request, kDocuments);
         testCount(request, kDocuments, true);
     }
@@ -329,7 +331,7 @@ public:
 class QueryStageCountMultiKeyDuringYield : public CountStageTest {
 public:
     void run() {
-        CountRequest request = createCountRequest(BSON("x" << 1));
+        CountRequest request(ns(), BSON("x" << 1));
         testCount(request, kDocuments + 1, true);  // only applies to indexed case
     }
 

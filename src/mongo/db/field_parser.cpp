@@ -26,13 +26,13 @@
  *    it in the license file.
  */
 
+#include "mongo/platform/basic.h"
+
 #include "mongo/db/field_parser.h"
-#include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
 
 using std::string;
-using mongoutils::str::stream;
 
 FieldParser::FieldState FieldParser::extract(BSONObj doc,
                                              const BSONField<bool>& field,
@@ -154,16 +154,16 @@ FieldParser::FieldState FieldParser::extract(BSONElement elem,
 }
 
 FieldParser::FieldState FieldParser::extract(BSONObj doc,
-                                             const BSONField<OpTime>& field,
-                                             OpTime* out,
+                                             const BSONField<Timestamp>& field,
+                                             Timestamp* out,
                                              string* errMsg) {
     return extract(doc[field.name()], field, out, errMsg);
 }
 
 
 FieldParser::FieldState FieldParser::extract(BSONElement elem,
-                                             const BSONField<OpTime>& field,
-                                             OpTime* out,
+                                             const BSONField<Timestamp>& field,
+                                             Timestamp* out,
                                              string* errMsg) {
     if (elem.eoo()) {
         if (field.hasDefault()) {
@@ -174,8 +174,8 @@ FieldParser::FieldState FieldParser::extract(BSONElement elem,
         }
     }
 
-    if (elem.type() == Timestamp) {
-        *out = elem._opTime();
+    if (elem.type() == bsonTimestamp) {
+        *out = elem.timestamp();
         return FIELD_SET;
     }
 

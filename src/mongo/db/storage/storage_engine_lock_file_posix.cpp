@@ -41,9 +41,9 @@
 #include <unistd.h>
 #include <sstream>
 
+#include "mongo/db/storage/paths.h"
 #include "mongo/platform/process_id.h"
 #include "mongo/util/log.h"
-#include "mongo/util/paths.h"
 #include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
@@ -106,14 +106,14 @@ Status StorageEngineLockFile::open() {
                                     << errnoWithDescription(errorcode)
                                     << " Is a mongod instance already running?");
     }
-#if !defined(__sunos__)
+#if !defined(__sun)
     int ret = ::flock(lockFile, LOCK_EX | LOCK_NB);
 #else
     struct flock fileLockInfo = {0};
     fileLockInfo.l_type = F_WRLCK;
     fileLockInfo.l_whence = SEEK_SET;
     int ret = ::fcntl(lockFile, F_SETLK, &fileLockInfo);
-#endif  // !defined(__sunos__)
+#endif  // !defined(__sun)
     if (ret != 0) {
         int errorcode = errno;
         ::close(lockFile);
@@ -144,7 +144,8 @@ Status StorageEngineLockFile::writePid() {
     if (::ftruncate(_lockFileHandle->_fd, 0)) {
         int errorcode = errno;
         return Status(ErrorCodes::FileStreamFailed,
-                      str::stream() << errnoWithDescription(errorcode));
+                      str::stream() << "Unable to write process id to file (ftruncate failed): "
+                                    << _filespec << ' ' << errnoWithDescription(errorcode));
     }
 
     ProcessId pid = ProcessId::getCurrent();
@@ -165,7 +166,14 @@ Status StorageEngineLockFile::writePid() {
                                     << " to file: " << _filespec << " no data written.");
     }
 
-    ::fsync(_lockFileHandle->_fd);
+    if (::fsync(_lockFileHandle->_fd)) {
+        int errorcode = errno;
+        return Status(ErrorCodes::FileStreamFailed,
+                      str::stream() << "Unable to write process id " << pid.toString()
+                                    << " to file (fsync failed): " << _filespec << ' '
+                                    << errnoWithDescription(errorcode));
+    }
+
     flushMyDirectory(_filespec);
 
     return Status::OK();
@@ -183,14 +191,14 @@ void StorageEngineLockFile::clearPidAndUnlock() {
         int errorcode = errno;
         log() << "couldn't remove fs lock " << errnoWithDescription(errorcode);
     }
-#if !defined(__sunos__)
+#if !defined(__sun)
     ::flock(_lockFileHandle->_fd, LOCK_UN);
 #else
     struct flock fileLockInfo = {0};
     fileLockInfo.l_type = F_UNLCK;
     fileLockInfo.l_whence = SEEK_SET;
     ::fcntl(_lockFileHandle->_fd, F_SETLK, &fileLockInfo);
-#endif  // !defined(__sunos__)
+#endif  // !defined(__sun)
 }
 
 }  // namespace mongo

@@ -28,41 +28,11 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
 
 #include "mongo/db/exec/plan_stage.h"
+#include "mongo/db/query/count_request.h"
 
 namespace mongo {
-
-/**
- * A description of a request for a count operation. Copyable.
- */
-struct CountRequest {
-    // Namespace to operate on (e.g. "foo.bar").
-    std::string ns;
-
-    // A predicate describing the set of documents to count.
-    //
-    // NOTE:
-    //   Parsing the raw BSON to our AST is left for later so that the parse method does not
-    //   have to look at the catalog. Specifically, creating a CanonicalQuery requires a
-    //   Collection* due to the WhereCallback, and we'd rather not have the parse method require
-    //   a Collection*.
-    BSONObj query;
-
-    // Indicates to the query planner that it should generate a count plan using a
-    // particular index.
-    BSONObj hint;
-
-    // An integer limiting the number of documents to count.
-    long long limit;
-
-    // An integer indicating to not include the first n documents in the count.
-    long long skip;
-
-    // Whether this is an explain of a count.
-    bool explain;
-};
 
 /**
  * Stage used by the count command. This stage sits at the root of a plan tree
@@ -75,7 +45,7 @@ struct CountRequest {
  * Only returns NEED_TIME until hitting EOF. The count result can be obtained by examining
  * the specific stats.
  */
-class CountStage : public PlanStage {
+class CountStage final : public PlanStage {
 public:
     CountStage(OperationContext* txn,
                Collection* collection,
@@ -83,26 +53,16 @@ public:
                WorkingSet* ws,
                PlanStage* child);
 
-    virtual ~CountStage();
+    bool isEOF() final;
+    StageState work(WorkingSetID* out) final;
 
-    virtual bool isEOF();
-    virtual StageState work(WorkingSetID* out);
-
-    virtual void saveState();
-    virtual void restoreState(OperationContext* opCtx);
-    virtual void invalidate(OperationContext* txn, const RecordId& dl, InvalidationType type);
-
-    virtual std::vector<PlanStage*> getChildren() const;
-
-    virtual StageType stageType() const {
+    StageType stageType() const final {
         return STAGE_COUNT;
     }
 
-    PlanStageStats* getStats();
+    std::unique_ptr<PlanStageStats> getStats();
 
-    virtual const CommonStats* getCommonStats();
-
-    virtual const SpecificStats* getSpecificStats();
+    const SpecificStats* getSpecificStats() const final;
 
     static const char* kStageType;
 
@@ -112,9 +72,6 @@ private:
      * limit if necessary. The result is stored in '_specificStats'.
      */
     void trivialCount();
-
-    // Transactional context for read locks. Not owned by us.
-    OperationContext* _txn;
 
     // The collection over which we are counting.
     Collection* _collection;
@@ -128,9 +85,6 @@ private:
     // by us.
     WorkingSet* _ws;
 
-    boost::scoped_ptr<PlanStage> _child;
-
-    CommonStats _commonStats;
     CountStats _specificStats;
 };
 

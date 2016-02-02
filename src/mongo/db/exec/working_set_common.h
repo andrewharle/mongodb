@@ -29,8 +29,14 @@
 #pragma once
 
 #include "mongo/db/exec/working_set.h"
+#include "mongo/util/unowned_ptr.h"
 
 namespace mongo {
+
+class CanonicalQuery;
+class Collection;
+class OperationContext;
+class SeekableRecordCursor;
 
 class WorkingSetCommon {
 public:
@@ -44,36 +50,40 @@ public:
                                       const Collection* collection);
 
     /**
-     * Iterates over 'workingSet' members that have transitioned to the LOC_AND_IDX state since
-     * the last yield. For all members still in the LOC_AND_IDX state, fetches the associated
-     * document and puts the member in "loc with unowned obj" state.
+     * This must be called as part of "saveState" operations after all nodes in the tree save their
+     * state.
      *
-     * This "force-fetching" is called on saveState() for storage-engines that support document-
-     * level locking. This ensures that all WS members are still valid, even after the
-     * OperationContext becomes invalid due to a yield.
+     * Iterates over WorkingSetIDs in 'workingSet' which are "sensitive to yield". These are ids
+     * that have transitioned into the LOC_AND_IDX state since the previous yield.
      *
-     * Note that although we use the "loc and unowned obj" state, document-level locking storage
-     * engines are assumed to be returning owned BSON. This is an assumption that may not be
-     * valid for future versions, but must remain valid on the v3.0 branch. Therefore, it is ok
-     * to have a "loc and unowned obj" survive a yield.
+     * The LOC_AND_IDX members are tagged as suspicious so that they can be handled properly in case
+     * the document keyed by the index key is deleted or updated during the yield.
      */
-    static void forceFetchAllLocs(OperationContext* txn,
-                                  WorkingSet* workingSet,
-                                  const Collection* collection);
+    static void prepareForSnapshotChange(WorkingSet* workingSet);
 
     /**
-     * After a NEED_FETCH is requested, this is used to actually retrieve the document
-     * corresponding to 'member' from 'collection', and to set the state of 'member'
-     * appropriately.
+     * Transitions the WorkingSetMember with WorkingSetID 'id' from the LOC_AND_IDX state to the
+     * LOC_AND_OBJ state by fetching a document. Does the fetch using   'cursor'.
+     *
+     * If false is returned, the document should not be considered for the result set. It is the
+     * caller's responsibility to free 'id' in this case.
+     *
+     * WriteConflict exceptions may be thrown. When they are, 'member' will be unmodified.
      */
-    static void completeFetch(OperationContext* txn,
-                              WorkingSetMember* member,
-                              const Collection* collection);
+    static bool fetch(OperationContext* txn,
+                      WorkingSet* workingSet,
+                      WorkingSetID id,
+                      unowned_ptr<SeekableRecordCursor> cursor);
 
-    /**
-     * Initialize the fields in 'dest' from 'src', creating copies of owned objects as needed.
-     */
-    static void initFrom(WorkingSetMember* dest, const WorkingSetMember& src);
+    static bool fetchIfUnfetched(OperationContext* txn,
+                                 WorkingSet* workingSet,
+                                 WorkingSetID id,
+                                 unowned_ptr<SeekableRecordCursor> cursor) {
+        WorkingSetMember* member = workingSet->get(id);
+        if (member->hasObj())
+            return true;
+        return fetch(txn, workingSet, id, cursor);
+    }
 
     /**
      * Build a BSONObj which represents a Status to return in a WorkingSet.

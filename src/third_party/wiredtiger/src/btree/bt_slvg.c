@@ -153,7 +153,6 @@ static int  __slvg_trk_leaf_ovfl(
 		WT_SESSION_IMPL *, const WT_PAGE_HEADER *, WT_TRACK *);
 static int  __slvg_trk_ovfl(WT_SESSION_IMPL *,
 		const WT_PAGE_HEADER *, uint8_t *, size_t, WT_STUFF *);
-static int  __slvg_trk_split(WT_SESSION_IMPL *, WT_TRACK *, WT_TRACK **);
 
 /*
  * __wt_bt_salvage --
@@ -197,9 +196,9 @@ __wt_bt_salvage(WT_SESSION_IMPL *session, WT_CKPT *ckptbase, const char *cfg[])
 	 * Turn off read checksum and verification error messages while we're
 	 * reading the file, we expect to see corrupted blocks.
 	 */
-	F_SET(session, WT_SESSION_SALVAGE_CORRUPT_OK);
+	F_SET(session, WT_SESSION_QUIET_CORRUPT_FILE);
 	ret = __slvg_read(session, ss);
-	F_CLR(session, WT_SESSION_SALVAGE_CORRUPT_OK);
+	F_CLR(session, WT_SESSION_QUIET_CORRUPT_FILE);
 	WT_ERR(ret);
 
 	/*
@@ -268,7 +267,7 @@ __wt_bt_salvage(WT_SESSION_IMPL *session, WT_CKPT *ckptbase, const char *cfg[])
 	/*
 	 * Step 6:
 	 * We may have lost key ranges in column-store databases, that is, some
-	 * part of the record number space is gone.   Look for missing ranges.
+	 * part of the record number space is gone; look for missing ranges.
 	 */
 	switch (ss->page_type) {
 	case WT_PAGE_COL_FIX:
@@ -327,7 +326,7 @@ __wt_bt_salvage(WT_SESSION_IMPL *session, WT_CKPT *ckptbase, const char *cfg[])
 	 */
 	if (ss->root_ref.page != NULL) {
 		btree->ckpt = ckptbase;
-		ret = __wt_evict(session, &ss->root_ref, 1);
+		ret = __wt_evict(session, &ss->root_ref, true);
 		ss->root_ref.page = NULL;
 		btree->ckpt = NULL;
 	}
@@ -348,9 +347,6 @@ err:	WT_TRET(bm->salvage_end(bm, session));
 	/* Discard temporary buffers. */
 	__wt_scr_free(session, &ss->tmp1);
 	__wt_scr_free(session, &ss->tmp2);
-
-	/* Wrap up reporting. */
-	WT_TRET(__wt_progress(session, NULL, ss->fcnt));
 
 	return (ret);
 }
@@ -381,8 +377,9 @@ __slvg_read(WT_SESSION_IMPL *session, WT_STUFF *ss)
 		if (eof)
 			break;
 
-		/* Report progress every 10 chunks. */
-		if (++ss->fcnt % 10 == 0)
+		/* Report progress occasionally. */
+#define	WT_SALVAGE_PROGRESS_INTERVAL	100
+		if (++ss->fcnt % WT_SALVAGE_PROGRESS_INTERVAL == 0)
 			WT_ERR(__wt_progress(session, NULL, ss->fcnt));
 
 		/*
@@ -514,26 +511,6 @@ err:	__wt_free(session, trk->trk_addr);
 }
 
 /*
- * __slvg_trk_split --
- *	Split a tracked chunk.
- */
-static int
-__slvg_trk_split(WT_SESSION_IMPL *session, WT_TRACK *orig, WT_TRACK **newp)
-{
-	WT_TRACK *trk;
-
-	WT_RET(__wt_calloc_one(session, &trk));
-
-	trk->shared = orig->shared;
-	trk->ss = orig->ss;
-
-	++orig->shared->ref;
-
-	*newp = trk;
-	return (0);
-}
-
-/*
  * __slvg_trk_leaf --
  *	Track a leaf page.
  */
@@ -608,8 +585,8 @@ __slvg_trk_leaf(WT_SESSION_IMPL *session,
 		 * Row-store format: copy the first and last keys on the page.
 		 * Keys are prefix-compressed, the simplest and slowest thing
 		 * to do is instantiate the in-memory page, then instantiate
-		 * and copy the full keys, then free the page.   We do this
-		 * on every leaf page, and if you need to speed up the salvage,
+		 * and copy the full keys, then free the page. We do this on
+		 * every leaf page, and if you need to speed up the salvage,
 		 * it's probably a great place to start.
 		 */
 		WT_ERR(__wt_page_inmem(session, NULL, dsk, 0, 0, &page));
@@ -746,8 +723,8 @@ __slvg_trk_leaf_ovfl(
  *
  * The leaf page array is sorted in key order, and secondarily on LSN: what this
  * means is that for each new key range, the first page we find is the best page
- * for that key.   The process is to walk forward from each page until we reach
- * a page with a starting key after the current page's stopping key.
+ * for that key. The process is to walk forward from each page until we reach a
+ * page with a starting key after the current page's stopping key.
  *
  * For each of page, check to see if they overlap the current page's key range.
  * If they do, resolve the overlap.  Because WiredTiger rarely splits pages,
@@ -874,6 +851,7 @@ static int
 __slvg_col_range_overlap(
     WT_SESSION_IMPL *session, uint32_t a_slot, uint32_t b_slot, WT_STUFF *ss)
 {
+	WT_DECL_RET;
 	WT_TRACK *a_trk, *b_trk, *new;
 	uint32_t i;
 
@@ -1018,16 +996,29 @@ delete_b:	/*
 	 * Case #5: b_trk is more desirable and is a middle chunk of a_trk.
 	 * Split a_trk into two parts, the key range before b_trk and the
 	 * key range after b_trk.
+	 *
+	 * Allocate a new WT_TRACK object, and extend the array of pages as
+	 * necessary.
 	 */
-	WT_RET(__slvg_trk_split(session, a_trk, &new));
+	WT_RET(__wt_calloc_one(session, &new));
+	if ((ret = __wt_realloc_def(session,
+	    &ss->pages_allocated, ss->pages_next + 1, &ss->pages)) != 0) {
+		__wt_free(session, new);
+		return (ret);
+	}
 
 	/*
-	 * Second, reallocate the array of pages if necessary, and then insert
-	 * the new element into the array after the existing element (that's
-	 * probably wrong, but we'll fix it up in a second).
+	 * First, set up the track share (we do this after the allocation to
+	 * ensure the shared reference count is never incorrect).
 	 */
-	WT_RET(__wt_realloc_def(
-	    session, &ss->pages_allocated, ss->pages_next + 1, &ss->pages));
+	new->shared = a_trk->shared;
+	new->ss = a_trk->ss;
+	++new->shared->ref;
+
+	/*
+	 * Second, insert the new element into the array after the existing
+	 * element (that's probably wrong, but we'll fix it up in a second).
+	 */
 	memmove(ss->pages + a_slot + 1, ss->pages + a_slot,
 	    (ss->pages_next - a_slot) * sizeof(*ss->pages));
 	ss->pages[a_slot + 1] = new;
@@ -1175,7 +1166,7 @@ __slvg_col_build_internal(
 	    session, WT_PAGE_COL_INT, 1, leaf_cnt, true, &page));
 	WT_ERR(__slvg_modify_init(session, page));
 
-	WT_INTL_INDEX_GET(session, page, pindex);
+	pindex = WT_INTL_INDEX_GET_SAFE(page);
 	for (refp = pindex->index, i = 0; i < ss->pages_next; ++i) {
 		if ((trk = ss->pages[i]) == NULL)
 			continue;
@@ -1303,7 +1294,7 @@ __slvg_col_build_leaf(WT_SESSION_IMPL *session, WT_TRACK *trk, WT_REF *ref)
 
 	/* Write the new version of the leaf page to disk. */
 	WT_ERR(__slvg_modify_init(session, page));
-	WT_ERR(__wt_reconcile(session, ref, cookie, WT_SKIP_UPDATE_ERR));
+	WT_ERR(__wt_reconcile(session, ref, cookie, WT_VISIBILITY_ERR));
 
 	/* Reset the page. */
 	page->pg_var_d = save_col_var;
@@ -1311,7 +1302,7 @@ __slvg_col_build_leaf(WT_SESSION_IMPL *session, WT_TRACK *trk, WT_REF *ref)
 
 	ret = __wt_page_release(session, ref, 0);
 	if (ret == 0)
-		ret = __wt_evict(session, ref, 1);
+		ret = __wt_evict(session, ref, true);
 
 	if (0) {
 err:		WT_TRET(__wt_page_release(session, ref, 0));
@@ -1489,6 +1480,7 @@ __slvg_row_range_overlap(
     WT_SESSION_IMPL *session, uint32_t a_slot, uint32_t b_slot, WT_STUFF *ss)
 {
 	WT_BTREE *btree;
+	WT_DECL_RET;
 	WT_TRACK *a_trk, *b_trk, *new;
 	uint32_t i;
 	int start_cmp, stop_cmp;
@@ -1649,16 +1641,29 @@ delete_b:	/*
 	 * Case #5: b_trk is more desirable and is a middle chunk of a_trk.
 	 * Split a_trk into two parts, the key range before b_trk and the
 	 * key range after b_trk.
+	 *
+	 * Allocate a new WT_TRACK object, and extend the array of pages as
+	 * necessary.
 	 */
-	WT_RET(__slvg_trk_split(session, a_trk, &new));
+	WT_RET(__wt_calloc_one(session, &new));
+	if ((ret = __wt_realloc_def(session,
+	    &ss->pages_allocated, ss->pages_next + 1, &ss->pages)) != 0) {
+		__wt_free(session, new);
+		return (ret);
+	}
 
 	/*
-	 * Second, reallocate the array of pages if necessary, and then insert
-	 * the new element into the array after the existing element (that's
-	 * probably wrong, but we'll fix it up in a second).
+	 * First, set up the track share (we do this after the allocation to
+	 * ensure the shared reference count is never incorrect).
 	 */
-	WT_RET(__wt_realloc_def(
-	    session, &ss->pages_allocated, ss->pages_next + 1, &ss->pages));
+	new->shared = a_trk->shared;
+	new->ss = a_trk->ss;
+	++new->shared->ref;
+
+	/*
+	 * Second, insert the new element into the array after the existing
+	 * element (that's probably wrong, but we'll fix it up in a second).
+	 */
 	memmove(ss->pages + a_slot + 1, ss->pages + a_slot,
 	    (ss->pages_next - a_slot) * sizeof(*ss->pages));
 	ss->pages[a_slot + 1] = new;
@@ -1666,7 +1671,7 @@ delete_b:	/*
 
 	/*
 	 * Third, set its its stop key to be the stop key of the original chunk,
-	 * and call __slvg_row_trk_update_start.   That function will both set
+	 * and call __slvg_row_trk_update_start. That function will both set
 	 * the start key to be the first key after the stop key of the middle
 	 * chunk (that's b_trk), and re-sort the WT_TRACK array as necessary to
 	 * move our new entry into the right sorted location.
@@ -1819,7 +1824,7 @@ __slvg_row_build_internal(
 	    session, WT_PAGE_ROW_INT, 0, leaf_cnt, true, &page));
 	WT_ERR(__slvg_modify_init(session, page));
 
-	WT_INTL_INDEX_GET(session, page, pindex);
+	pindex = WT_INTL_INDEX_GET_SAFE(page);
 	for (refp = pindex->index, i = 0; i < ss->pages_next; ++i) {
 		if ((trk = ss->pages[i]) == NULL)
 			continue;
@@ -2010,7 +2015,7 @@ __slvg_row_build_leaf(
 
 	/* Write the new version of the leaf page to disk. */
 	WT_ERR(__slvg_modify_init(session, page));
-	WT_ERR(__wt_reconcile(session, ref, cookie, WT_SKIP_UPDATE_ERR));
+	WT_ERR(__wt_reconcile(session, ref, cookie, WT_VISIBILITY_ERR));
 
 	/* Reset the page. */
 	page->pg_row_entries += skip_stop;
@@ -2021,7 +2026,7 @@ __slvg_row_build_leaf(
 	 */
 	ret = __wt_page_release(session, ref, 0);
 	if (ret == 0)
-		ret = __wt_evict(session, ref, 1);
+		ret = __wt_evict(session, ref, true);
 
 	if (0) {
 err:		WT_TRET(__wt_page_release(session, ref, 0));

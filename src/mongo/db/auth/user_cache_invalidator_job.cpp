@@ -31,16 +31,18 @@
 
 #include "mongo/db/auth/user_cache_invalidator_job.h"
 
-#include <boost/thread/mutex.hpp>
 #include <string>
 
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
+#include "mongo/client/connpool.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/server_parameters.h"
-#include "mongo/s/config.h"
+#include "mongo/s/catalog/catalog_manager.h"
+#include "mongo/s/grid.h"
+#include "mongo/stdx/mutex.h"
 #include "mongo/util/background.h"
 #include "mongo/util/exit.h"
 #include "mongo/util/log.h"
@@ -50,19 +52,19 @@ namespace mongo {
 namespace {
 
 // How often to check with the config servers whether authorization information has changed.
-int userCacheInvalidationIntervalSecs = 30;  // 30 second default
-boost::mutex invalidationIntervalMutex;
-boost::condition_variable invalidationIntervalChangedCondition;
+std::atomic<int> userCacheInvalidationIntervalSecs(30);  // NOLINT 30 second default
+stdx::mutex invalidationIntervalMutex;
+stdx::condition_variable invalidationIntervalChangedCondition;
 Date_t lastInvalidationTime;
 
-class ExportedInvalidationIntervalParameter : public ExportedServerParameter<int> {
+class ExportedInvalidationIntervalParameter
+    : public ExportedServerParameter<int, ServerParameterType::kStartupAndRuntime> {
 public:
     ExportedInvalidationIntervalParameter()
-        : ExportedServerParameter<int>(ServerParameterSet::getGlobal(),
-                                       "userCacheInvalidationIntervalSecs",
-                                       &userCacheInvalidationIntervalSecs,
-                                       true,
-                                       true) {}
+        : ExportedServerParameter<int, ServerParameterType::kStartupAndRuntime>(
+              ServerParameterSet::getGlobal(),
+              "userCacheInvalidationIntervalSecs",
+              &userCacheInvalidationIntervalSecs) {}
 
     virtual Status validate(const int& potentialNewValue) {
         if (potentialNewValue < 1 || potentialNewValue > 86400) {
@@ -75,32 +77,27 @@ public:
 
     // Without this the compiler complains that defining set(const int&)
     // hides set(const BSONElement&)
-    using ExportedServerParameter<int>::set;
+    using ExportedServerParameter<int, ServerParameterType::kStartupAndRuntime>::set;
 
     virtual Status set(const int& newValue) {
-        boost::unique_lock<boost::mutex> lock(invalidationIntervalMutex);
-        Status status = ExportedServerParameter<int>::set(newValue);
+        stdx::unique_lock<stdx::mutex> lock(invalidationIntervalMutex);
+        Status status =
+            ExportedServerParameter<int, ServerParameterType::kStartupAndRuntime>::set(newValue);
         invalidationIntervalChangedCondition.notify_all();
         return status;
     }
 
 } exportedIntervalParam;
 
-StatusWith<OID> getCurrentCacheGeneration() {
+StatusWith<OID> getCurrentCacheGeneration(OperationContext* txn) {
     try {
-        ConnectionString config = configServer.getConnectionString();
-        ScopedDbConnection conn(config.toString(), 30);
-
-        BSONObj result;
-        conn->runCommand("admin", BSON("_getUserCacheGeneration" << 1), result);
-        conn.done();
-
-        Status status = Command::getStatusFromCommandResult(result);
-        if (!status.isOK()) {
-            return StatusWith<OID>(status);
+        BSONObjBuilder result;
+        const bool ok = grid.catalogManager(txn)->runUserManagementReadCommand(
+            txn, "admin", BSON("_getUserCacheGeneration" << 1), &result);
+        if (!ok) {
+            return Command::getStatusFromCommandResult(result.obj());
         }
-
-        return StatusWith<OID>(result["cacheGeneration"].OID());
+        return result.obj()["cacheGeneration"].OID();
     } catch (const DBException& e) {
         return StatusWith<OID>(e.toStatus());
     } catch (const std::exception& e) {
@@ -111,8 +108,10 @@ StatusWith<OID> getCurrentCacheGeneration() {
 }  // namespace
 
 UserCacheInvalidator::UserCacheInvalidator(AuthorizationManager* authzManager)
-    : _authzManager(authzManager) {
-    StatusWith<OID> currentGeneration = getCurrentCacheGeneration();
+    : _authzManager(authzManager) {}
+
+void UserCacheInvalidator::initialize(OperationContext* txn) {
+    StatusWith<OID> currentGeneration = getCurrentCacheGeneration(txn);
     if (currentGeneration.isOK()) {
         _previousCacheGeneration = currentGeneration.getValue();
         return;
@@ -131,18 +130,16 @@ UserCacheInvalidator::UserCacheInvalidator(AuthorizationManager* authzManager)
 
 void UserCacheInvalidator::run() {
     Client::initThread("UserCacheInvalidator");
-    lastInvalidationTime = Date_t(curTimeMillis64());
+    lastInvalidationTime = Date_t::now();
 
     while (true) {
-        boost::unique_lock<boost::mutex> lock(invalidationIntervalMutex);
-        Date_t sleepUntil =
-            Date_t(lastInvalidationTime.millis + userCacheInvalidationIntervalSecs * 1000);
-        Date_t now(curTimeMillis64());
-        while (now.millis < sleepUntil.millis) {
-            invalidationIntervalChangedCondition.timed_wait(lock, Milliseconds(sleepUntil - now));
-            sleepUntil =
-                Date_t(lastInvalidationTime.millis + (userCacheInvalidationIntervalSecs * 1000));
-            now = Date_t(curTimeMillis64());
+        stdx::unique_lock<stdx::mutex> lock(invalidationIntervalMutex);
+        Date_t sleepUntil = lastInvalidationTime + Seconds(userCacheInvalidationIntervalSecs);
+        Date_t now = Date_t::now();
+        while (now < sleepUntil) {
+            invalidationIntervalChangedCondition.wait_for(lock, sleepUntil - now);
+            sleepUntil = lastInvalidationTime + Seconds(userCacheInvalidationIntervalSecs);
+            now = Date_t::now();
         }
         lastInvalidationTime = now;
         lock.unlock();
@@ -151,7 +148,8 @@ void UserCacheInvalidator::run() {
             break;
         }
 
-        StatusWith<OID> currentGeneration = getCurrentCacheGeneration();
+        auto txn = cc().makeOperationContext();
+        StatusWith<OID> currentGeneration = getCurrentCacheGeneration(txn.get());
         if (!currentGeneration.isOK()) {
             if (currentGeneration.getStatus().code() == ErrorCodes::CommandNotFound) {
                 warning() << "_getUserCacheGeneration command not found on config server(s), "

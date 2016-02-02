@@ -43,11 +43,11 @@ namespace mongo {
  * functionality necessary to test btree.
  */
 class HeapRecordStoreBtree : public RecordStore {
-    struct Record;
+    struct MmapV1RecordHeader;
 
 public:
     // RecordId(0,0) isn't valid for records.
-    explicit HeapRecordStoreBtree(const StringData& ns) : RecordStore(ns), _nextId(1) {}
+    explicit HeapRecordStoreBtree(StringData ns) : RecordStore(ns), _nextId(1) {}
 
     virtual RecordData dataFor(OperationContext* txn, const RecordId& loc) const;
 
@@ -87,27 +87,19 @@ public:
         return true;
     }
 
-    virtual Status updateWithDamages(OperationContext* txn,
-                                     const RecordId& loc,
-                                     const RecordData& oldRec,
-                                     const char* damageSource,
-                                     const mutablebson::DamageVector& damages) {
+    virtual StatusWith<RecordData> updateWithDamages(OperationContext* txn,
+                                                     const RecordId& loc,
+                                                     const RecordData& oldRec,
+                                                     const char* damageSource,
+                                                     const mutablebson::DamageVector& damages) {
         invariant(false);
     }
 
-    virtual RecordIterator* getIterator(OperationContext* txn,
-                                        const RecordId& start,
-                                        const CollectionScanParams::Direction& dir) const {
+    std::unique_ptr<SeekableRecordCursor> getCursor(OperationContext* txn,
+                                                    bool forward) const final {
         invariant(false);
     }
 
-    virtual RecordIterator* getIteratorForRepair(OperationContext* txn) const {
-        invariant(false);
-    }
-
-    virtual std::vector<RecordIterator*> getManyIterators(OperationContext* txn) const {
-        invariant(false);
-    }
 
     virtual Status truncate(OperationContext* txn) {
         invariant(false);
@@ -150,7 +142,7 @@ public:
         invariant(false);
     }
 
-    virtual Record* recordFor(const RecordId& loc) const {
+    virtual MmapV1RecordHeader* recordFor(const RecordId& loc) const {
         invariant(false);
     }
 
@@ -170,9 +162,9 @@ public:
     // more things that we actually care about below
 
 private:
-    struct Record {
-        Record() : dataSize(-1), data() {}
-        explicit Record(int size) : dataSize(size), data(new char[size]) {}
+    struct MmapV1RecordHeader {
+        MmapV1RecordHeader() : dataSize(-1), data() {}
+        explicit MmapV1RecordHeader(int size) : dataSize(size), data(new char[size]) {}
 
         int dataSize;
         boost::shared_array<char> data;
@@ -180,7 +172,7 @@ private:
 
     RecordId allocateLoc();
 
-    typedef std::map<RecordId, HeapRecordStoreBtree::Record> Records;
+    typedef std::map<RecordId, HeapRecordStoreBtree::MmapV1RecordHeader> Records;
     Records _records;
     int64_t _nextId;
 };
@@ -190,21 +182,15 @@ private:
  */
 class HeapRecordStoreBtreeRecoveryUnit : public RecoveryUnit {
 public:
-    HeapRecordStoreBtreeRecoveryUnit() {
-        _depth = 0;
-    }
+    void beginUnitOfWork(OperationContext* opCtx) final{};
+    void commitUnitOfWork() final;
+    void abortUnitOfWork() final;
 
-    virtual ~HeapRecordStoreBtreeRecoveryUnit();
-
-    virtual void beginUnitOfWork(OperationContext* opCtx);
-    virtual void commitUnitOfWork();
-    virtual void endUnitOfWork();
-
-    virtual bool awaitCommit() {
+    virtual bool waitUntilDurable() {
         return true;
     }
 
-    virtual void commitAndRestart() {}
+    virtual void abandonSnapshot() {}
 
     virtual void registerChange(Change* change) {
         change->commit();
@@ -225,7 +211,6 @@ public:
     static void notifyInsert(OperationContext* ctx, HeapRecordStoreBtree* rs, const RecordId& loc);
 
 private:
-    int _depth;
     struct InsertEntry {
         HeapRecordStoreBtree* rs;
         RecordId loc;

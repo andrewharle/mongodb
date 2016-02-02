@@ -28,7 +28,6 @@
 
 #pragma once
 
-#include <boost/thread/mutex.hpp>
 #include <string>
 
 #include "mongo/base/disallow_copying.h"
@@ -50,6 +49,9 @@ public:
     AuthzManagerExternalStateMongod();
     virtual ~AuthzManagerExternalStateMongod();
 
+    std::unique_ptr<AuthzSessionExternalState> makeAuthzSessionExternalState(
+        AuthorizationManager* authzManager) override;
+
     virtual Status findOne(OperationContext* txn,
                            const NamespaceString& collectionName,
                            const BSONObj& query,
@@ -59,28 +61,6 @@ public:
                          const BSONObj& query,
                          const BSONObj& projection,
                          const stdx::function<void(const BSONObj&)>& resultProcessor);
-    virtual Status insert(OperationContext* txn,
-                          const NamespaceString& collectionName,
-                          const BSONObj& document,
-                          const BSONObj& writeConcern);
-    virtual Status update(OperationContext* txn,
-                          const NamespaceString& collectionName,
-                          const BSONObj& query,
-                          const BSONObj& updatePattern,
-                          bool upsert,
-                          bool multi,
-                          const BSONObj& writeConcern,
-                          int* nMatched);
-    virtual Status remove(OperationContext* txn,
-                          const NamespaceString& collectionName,
-                          const BSONObj& query,
-                          const BSONObj& writeConcern,
-                          int* numRemoved);
-    virtual bool tryAcquireAuthzUpdateLock(const StringData& why);
-    virtual void releaseAuthzUpdateLock();
-
-private:
-    boost::timed_mutex _authzDataUpdateLock;
 };
 
 }  // namespace mongo

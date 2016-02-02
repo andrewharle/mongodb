@@ -200,9 +200,7 @@ Status ModifierAddToSet::init(const BSONElement& modExpr, const Options& opts, b
     return Status::OK();
 }
 
-Status ModifierAddToSet::prepare(mb::Element root,
-                                 const StringData& matchedField,
-                                 ExecInfo* execInfo) {
+Status ModifierAddToSet::prepare(mb::Element root, StringData matchedField, ExecInfo* execInfo) {
     _preparedState.reset(new PreparedState(root.getDocument()));
 
     // If we have a $-positional field, it is time to bind it to an actual field part.

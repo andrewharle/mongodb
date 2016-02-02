@@ -42,9 +42,6 @@ using namespace mongo;
 
 namespace {
 
-using std::string;
-using std::vector;
-
 //
 // Validation
 //
@@ -252,6 +249,275 @@ TEST(IndexBoundsTest, ComplementRanges2) {
 }
 
 //
+// Equality
+//
+
+TEST(IndexBoundsTest, IndexBoundsEqual) {
+    // Both sets of bounds are {a: [[1, 3), (4, 5]], b: [[1,1]]}
+    OrderedIntervalList oil1;
+    oil1.name = "a";
+    oil1.intervals.push_back(Interval(BSON("" << 1 << "" << 3), true, false));
+    oil1.intervals.push_back(Interval(BSON("" << 4 << "" << 5), false, true));
+
+    OrderedIntervalList oil2;
+    oil2.name = "b";
+    oil2.intervals.push_back(Interval(BSON("" << 1 << "" << 1), true, true));
+
+    IndexBounds bounds1;
+    bounds1.fields.push_back(oil1);
+    bounds1.fields.push_back(oil2);
+
+    OrderedIntervalList oil3;
+    oil3.name = "a";
+    oil3.intervals.push_back(Interval(BSON("" << 1 << "" << 3), true, false));
+    oil3.intervals.push_back(Interval(BSON("" << 4 << "" << 5), false, true));
+
+    OrderedIntervalList oil4;
+    oil4.name = "b";
+    oil4.intervals.push_back(Interval(BSON("" << 1 << "" << 1), true, true));
+
+    IndexBounds bounds2;
+    bounds2.fields.push_back(oil3);
+    bounds2.fields.push_back(oil4);
+
+    ASSERT_TRUE(bounds1 == bounds2);
+    ASSERT_FALSE(bounds1 != bounds2);
+}
+
+TEST(IndexBoundsTest, EmptyBoundsEqual) {
+    IndexBounds bounds1;
+    IndexBounds bounds2;
+    ASSERT_TRUE(bounds1 == bounds2);
+    ASSERT_FALSE(bounds1 != bounds2);
+}
+
+TEST(IndexBoundsTest, SimpleRangeBoundsEqual) {
+    IndexBounds bounds1;
+    bounds1.isSimpleRange = true;
+    bounds1.startKey = BSON("" << 1 << "" << 3);
+    bounds1.endKey = BSON("" << 2 << "" << 4);
+    bounds1.endKeyInclusive = false;
+
+    IndexBounds bounds2;
+    bounds2.isSimpleRange = true;
+    bounds2.startKey = BSON("" << 1 << "" << 3);
+    bounds2.endKey = BSON("" << 2 << "" << 4);
+    bounds2.endKeyInclusive = false;
+
+    ASSERT_TRUE(bounds1 == bounds2);
+    ASSERT_FALSE(bounds1 != bounds2);
+}
+
+TEST(IndexBoundsTest, BoundsNotEqualDifferentFieldNames) {
+    // First set of bounds: {a: [[1, 3), (4, 5]], b: [[1,1]]}
+    OrderedIntervalList oil1;
+    oil1.name = "a";
+    oil1.intervals.push_back(Interval(BSON("" << 1 << "" << 3), true, false));
+    oil1.intervals.push_back(Interval(BSON("" << 4 << "" << 5), false, true));
+
+    OrderedIntervalList oil2;
+    oil2.name = "b";
+    oil2.intervals.push_back(Interval(BSON("" << 1 << "" << 1), true, true));
+
+    IndexBounds bounds1;
+    bounds1.fields.push_back(oil1);
+    bounds1.fields.push_back(oil2);
+
+    // Second set of bounds identical except for the second field name:
+    //    {a: [[1, 3), (4, 5]], c: [[1,1]]}
+    OrderedIntervalList oil3;
+    oil3.name = "a";
+    oil3.intervals.push_back(Interval(BSON("" << 1 << "" << 3), true, false));
+    oil3.intervals.push_back(Interval(BSON("" << 4 << "" << 5), false, true));
+
+    OrderedIntervalList oil4;
+    oil4.name = "c";
+    oil4.intervals.push_back(Interval(BSON("" << 1 << "" << 1), true, true));
+
+    IndexBounds bounds2;
+    bounds2.fields.push_back(oil3);
+    bounds2.fields.push_back(oil4);
+
+    ASSERT_FALSE(bounds1 == bounds2);
+    ASSERT_TRUE(bounds1 != bounds2);
+}
+
+TEST(IndexBoundsTest, BoundsNotEqualOneRangeExclusive) {
+    // First set of bounds: {a: [[1, 3), (4, 5]], b: [[1,1]]}
+    OrderedIntervalList oil1;
+    oil1.name = "a";
+    oil1.intervals.push_back(Interval(BSON("" << 1 << "" << 3), true, false));
+    oil1.intervals.push_back(Interval(BSON("" << 4 << "" << 5), false, true));
+
+    OrderedIntervalList oil2;
+    oil2.name = "b";
+    oil2.intervals.push_back(Interval(BSON("" << 1 << "" << 1), true, true));
+
+    IndexBounds bounds1;
+    bounds1.fields.push_back(oil1);
+    bounds1.fields.push_back(oil2);
+
+    // Second set of bounds identical except for (4, 5] changed to (4, 5):
+    //    {a: [[1, 3), (4, 5]], b: [[1,1]]}
+    OrderedIntervalList oil3;
+    oil3.name = "a";
+    oil3.intervals.push_back(Interval(BSON("" << 1 << "" << 3), true, false));
+    oil3.intervals.push_back(Interval(BSON("" << 4 << "" << 5), false, false));
+
+    OrderedIntervalList oil4;
+    oil4.name = "b";
+    oil4.intervals.push_back(Interval(BSON("" << 1 << "" << 1), true, true));
+
+    IndexBounds bounds2;
+    bounds2.fields.push_back(oil3);
+    bounds2.fields.push_back(oil4);
+
+    ASSERT_FALSE(bounds1 == bounds2);
+    ASSERT_TRUE(bounds1 != bounds2);
+}
+
+TEST(IndexBoundsTest, BoundsNotEqualExtraInterval) {
+    // First set of bounds: {a: [[1, 3), (4, 5]], b: [[1,1]]}
+    OrderedIntervalList oil1;
+    oil1.name = "a";
+    oil1.intervals.push_back(Interval(BSON("" << 1 << "" << 3), true, false));
+    oil1.intervals.push_back(Interval(BSON("" << 4 << "" << 5), false, true));
+
+    OrderedIntervalList oil2;
+    oil2.name = "b";
+    oil2.intervals.push_back(Interval(BSON("" << 1 << "" << 1), true, true));
+
+    IndexBounds bounds1;
+    bounds1.fields.push_back(oil1);
+    bounds1.fields.push_back(oil2);
+
+    // Second set of bounds has an additional interval for field 'a':
+    //    {a: [[1, 3), (4, 5], (6, 7)], b: [[1,1]]}
+    OrderedIntervalList oil3;
+    oil3.name = "a";
+    oil3.intervals.push_back(Interval(BSON("" << 1 << "" << 3), true, false));
+    oil3.intervals.push_back(Interval(BSON("" << 4 << "" << 5), false, true));
+    oil3.intervals.push_back(Interval(BSON("" << 6 << "" << 7), false, false));
+
+    OrderedIntervalList oil4;
+    oil4.name = "b";
+    oil4.intervals.push_back(Interval(BSON("" << 1 << "" << 1), true, true));
+
+    IndexBounds bounds2;
+    bounds2.fields.push_back(oil3);
+    bounds2.fields.push_back(oil4);
+
+    ASSERT_FALSE(bounds1 == bounds2);
+    ASSERT_TRUE(bounds1 != bounds2);
+}
+
+TEST(IndexBoundsTest, BoundsNotEqualExtraField) {
+    // First set of bounds: {a: [[1, 3), (4, 5]], b: [[1,1]]}
+    OrderedIntervalList oil1;
+    oil1.name = "a";
+    oil1.intervals.push_back(Interval(BSON("" << 1 << "" << 3), true, false));
+    oil1.intervals.push_back(Interval(BSON("" << 4 << "" << 5), false, true));
+
+    OrderedIntervalList oil2;
+    oil2.name = "b";
+    oil2.intervals.push_back(Interval(BSON("" << 1 << "" << 1), true, true));
+
+    IndexBounds bounds1;
+    bounds1.fields.push_back(oil1);
+    bounds1.fields.push_back(oil2);
+
+    // Second set of bounds has an additional field 'c':
+    //    {a: [[1, 3), (4, 5]], b: [[1,1]], c: [[1]]}
+    OrderedIntervalList oil3;
+    oil3.name = "a";
+    oil3.intervals.push_back(Interval(BSON("" << 1 << "" << 3), true, false));
+    oil3.intervals.push_back(Interval(BSON("" << 4 << "" << 5), false, true));
+
+    OrderedIntervalList oil4;
+    oil4.name = "b";
+    oil4.intervals.push_back(Interval(BSON("" << 1 << "" << 1), true, true));
+
+    OrderedIntervalList oil5;
+    oil4.name = "c";
+    oil4.intervals.push_back(Interval(BSON("" << 1 << "" << 1), true, true));
+
+    IndexBounds bounds2;
+    bounds2.fields.push_back(oil3);
+    bounds2.fields.push_back(oil4);
+    bounds2.fields.push_back(oil5);
+
+    ASSERT_FALSE(bounds1 == bounds2);
+    ASSERT_TRUE(bounds1 != bounds2);
+}
+
+TEST(IndexBoundsTest, SimpleRangeBoundsNotEqualToRegularBounds) {
+    IndexBounds bounds1;
+    bounds1.isSimpleRange = true;
+    bounds1.startKey = BSON("" << 1 << "" << 3);
+    bounds1.endKey = BSON("" << 2 << "" << 4);
+    bounds1.endKeyInclusive = false;
+
+    IndexBounds bounds2;
+    OrderedIntervalList oil;
+    oil.intervals.push_back(Interval(BSON("" << 1 << "" << 1), true, true));
+    bounds2.fields.push_back(oil);
+
+    ASSERT_FALSE(bounds1 == bounds2);
+    ASSERT_TRUE(bounds1 != bounds2);
+}
+
+TEST(IndexBoundsTest, SimpleRangeBoundsNotEqualDifferentStartKey) {
+    IndexBounds bounds1;
+    bounds1.isSimpleRange = true;
+    bounds1.startKey = BSON("" << 1 << "" << 3);
+    bounds1.endKey = BSON("" << 2 << "" << 4);
+    bounds1.endKeyInclusive = false;
+
+    IndexBounds bounds2;
+    bounds1.isSimpleRange = true;
+    bounds1.startKey = BSON("" << 1 << "" << 1);
+    bounds1.endKey = BSON("" << 2 << "" << 4);
+    bounds1.endKeyInclusive = false;
+
+    ASSERT_FALSE(bounds1 == bounds2);
+    ASSERT_TRUE(bounds1 != bounds2);
+}
+
+TEST(IndexBoundsTest, SimpleRangeBoundsNotEqualDifferentEndKey) {
+    IndexBounds bounds1;
+    bounds1.isSimpleRange = true;
+    bounds1.startKey = BSON("" << 1 << "" << 3);
+    bounds1.endKey = BSON("" << 2 << "" << 4);
+    bounds1.endKeyInclusive = false;
+
+    IndexBounds bounds2;
+    bounds1.isSimpleRange = true;
+    bounds1.startKey = BSON("" << 1 << "" << 3);
+    bounds1.endKey = BSON("" << 2 << "" << 99);
+    bounds1.endKeyInclusive = false;
+
+    ASSERT_FALSE(bounds1 == bounds2);
+    ASSERT_TRUE(bounds1 != bounds2);
+}
+
+TEST(IndexBoundsTest, SimpleRangeBoundsNotEqualDifferentEndKeyInclusive) {
+    IndexBounds bounds1;
+    bounds1.isSimpleRange = true;
+    bounds1.startKey = BSON("" << 1 << "" << 3);
+    bounds1.endKey = BSON("" << 2 << "" << 4);
+    bounds1.endKeyInclusive = false;
+
+    IndexBounds bounds2;
+    bounds1.isSimpleRange = true;
+    bounds1.startKey = BSON("" << 1 << "" << 3);
+    bounds1.endKey = BSON("" << 2 << "" << 4);
+    bounds1.endKeyInclusive = true;
+
+    ASSERT_FALSE(bounds1 == bounds2);
+    ASSERT_TRUE(bounds1 != bounds2);
+}
+
+//
 // Iteration over
 //
 
@@ -267,15 +533,13 @@ TEST(IndexBoundsCheckerTest, StartKey) {
     bounds.fields.push_back(barList);
     IndexBoundsChecker it(&bounds, BSON("foo" << 1 << "bar" << 1), 1);
 
-    vector<const BSONElement*> elt(2);
-    vector<bool> inc(2);
+    IndexSeekPoint seekPoint;
+    it.getStartSeekPoint(&seekPoint);
 
-    it.getStartKey(&elt, &inc);
-
-    ASSERT_EQUALS(elt[0]->numberInt(), 7);
-    ASSERT_EQUALS(inc[0], true);
-    ASSERT_EQUALS(elt[1]->numberInt(), 0);
-    ASSERT_EQUALS(inc[1], false);
+    ASSERT_EQUALS(seekPoint.keySuffix[0]->numberInt(), 7);
+    ASSERT_EQUALS(seekPoint.suffixInclusive[0], true);
+    ASSERT_EQUALS(seekPoint.keySuffix[1]->numberInt(), 0);
+    ASSERT_EQUALS(seekPoint.suffixInclusive[1], false);
 }
 
 TEST(IndexBoundsCheckerTest, CheckEnd) {
@@ -291,36 +555,32 @@ TEST(IndexBoundsCheckerTest, CheckEnd) {
     bounds.fields.push_back(barList);
     IndexBoundsChecker it(&bounds, BSON("foo" << 1 << "bar" << 1), 1);
 
-    int keyEltsToUse;
-    bool movePastKeyElts;
-    vector<const BSONElement*> elt(2);
-    vector<bool> inc(2);
-
+    IndexSeekPoint seekPoint;
     IndexBoundsChecker::KeyState state;
 
     // Start at something in our range.
-    state = it.checkKey(BSON("" << 7 << "" << 1), &keyEltsToUse, &movePastKeyElts, &elt, &inc);
+    state = it.checkKey(BSON("" << 7 << "" << 1), &seekPoint);
     ASSERT_EQUALS(state, IndexBoundsChecker::VALID);
 
     // Second field moves past the end, but we're not done, since there's still an interval in
     // the previous field that the key hasn't advanced to.
-    state = it.checkKey(BSON("" << 20 << "" << 5), &keyEltsToUse, &movePastKeyElts, &elt, &inc);
+    state = it.checkKey(BSON("" << 20 << "" << 5), &seekPoint);
     ASSERT_EQUALS(state, IndexBoundsChecker::MUST_ADVANCE);
-    ASSERT_EQUALS(keyEltsToUse, 1);
-    ASSERT(movePastKeyElts);
+    ASSERT_EQUALS(seekPoint.prefixLen, 1);
+    ASSERT(seekPoint.prefixExclusive);
 
     // The next index key is in the second interval for 'foo' and there is a valid interval for
     // 'bar'.
-    state = it.checkKey(BSON("" << 22 << "" << 1), &keyEltsToUse, &movePastKeyElts, &elt, &inc);
+    state = it.checkKey(BSON("" << 22 << "" << 1), &seekPoint);
     ASSERT_EQUALS(state, IndexBoundsChecker::VALID);
 
     // The next index key is very close to the end of the open interval for foo, and it's past
     // the interval for 'bar'.  Since the interval for foo is open, we are asked to move
     // forward, since we possibly could.
-    state = it.checkKey(BSON("" << 29.9 << "" << 5), &keyEltsToUse, &movePastKeyElts, &elt, &inc);
+    state = it.checkKey(BSON("" << 29.9 << "" << 5), &seekPoint);
     ASSERT_EQUALS(state, IndexBoundsChecker::MUST_ADVANCE);
-    ASSERT_EQUALS(keyEltsToUse, 1);
-    ASSERT(movePastKeyElts);
+    ASSERT_EQUALS(seekPoint.prefixLen, 1);
+    ASSERT(seekPoint.prefixExclusive);
 }
 
 TEST(IndexBoundsCheckerTest, MoveIntervalForwardToNextInterval) {
@@ -336,27 +596,23 @@ TEST(IndexBoundsCheckerTest, MoveIntervalForwardToNextInterval) {
     bounds.fields.push_back(barList);
     IndexBoundsChecker it(&bounds, BSON("foo" << 1 << "bar" << 1), 1);
 
-    int keyEltsToUse;
-    bool movePastKeyElts;
-    vector<const BSONElement*> elt(2);
-    vector<bool> inc(2);
-
+    IndexSeekPoint seekPoint;
     IndexBoundsChecker::KeyState state;
 
     // Start at something in our range.
-    state = it.checkKey(BSON("" << 7 << "" << 1), &keyEltsToUse, &movePastKeyElts, &elt, &inc);
+    state = it.checkKey(BSON("" << 7 << "" << 1), &seekPoint);
     ASSERT_EQUALS(state, IndexBoundsChecker::VALID);
 
     // "foo" moves between two intervals.
-    state = it.checkKey(BSON("" << 20.5 << "" << 1), &keyEltsToUse, &movePastKeyElts, &elt, &inc);
+    state = it.checkKey(BSON("" << 20.5 << "" << 1), &seekPoint);
     ASSERT_EQUALS(state, IndexBoundsChecker::MUST_ADVANCE);
-    ASSERT_EQUALS(keyEltsToUse, 0);
+    ASSERT_EQUALS(seekPoint.prefixLen, 0);
     // Should be told to move exactly to the next interval's beginning.
-    ASSERT_EQUALS(movePastKeyElts, false);
-    ASSERT_EQUALS(elt[0]->numberInt(), 21);
-    ASSERT_EQUALS(inc[0], true);
-    ASSERT_EQUALS(elt[1]->numberInt(), 0);
-    ASSERT_EQUALS(inc[1], false);
+    ASSERT_EQUALS(seekPoint.prefixExclusive, false);
+    ASSERT_EQUALS(seekPoint.keySuffix[0]->numberInt(), 21);
+    ASSERT_EQUALS(seekPoint.suffixInclusive[0], true);
+    ASSERT_EQUALS(seekPoint.keySuffix[1]->numberInt(), 0);
+    ASSERT_EQUALS(seekPoint.suffixInclusive[1], false);
 }
 
 TEST(IndexBoundsCheckerTest, MoveIntervalForwardManyIntervals) {
@@ -370,19 +626,15 @@ TEST(IndexBoundsCheckerTest, MoveIntervalForwardManyIntervals) {
     bounds.fields.push_back(fooList);
     IndexBoundsChecker it(&bounds, BSON("foo" << 1), 1);
 
-    int keyEltsToUse;
-    bool movePastKeyElts;
-    vector<const BSONElement*> elt(1);
-    vector<bool> inc(1);
-
+    IndexSeekPoint seekPoint;
     IndexBoundsChecker::KeyState state;
 
     // Start at something in our range.
-    state = it.checkKey(BSON("" << 7), &keyEltsToUse, &movePastKeyElts, &elt, &inc);
+    state = it.checkKey(BSON("" << 7), &seekPoint);
     ASSERT_EQUALS(state, IndexBoundsChecker::VALID);
 
     // "foo" moves forward a few intervals.
-    state = it.checkKey(BSON("" << 42), &keyEltsToUse, &movePastKeyElts, &elt, &inc);
+    state = it.checkKey(BSON("" << 42), &seekPoint);
     ASSERT_EQUALS(state, IndexBoundsChecker::VALID);
 }
 
@@ -398,39 +650,34 @@ TEST(IndexBoundsCheckerTest, SimpleCheckKey) {
     bounds.fields.push_back(barList);
     IndexBoundsChecker it(&bounds, BSON("foo" << 1 << "bar" << 1), 1);
 
-    int keyEltsToUse;
-    bool movePastKeyElts;
-    vector<const BSONElement*> elt(2);
-    vector<bool> inc(2);
-
+    IndexSeekPoint seekPoint;
     IndexBoundsChecker::KeyState state;
 
     // Start at something in our range.
-    state = it.checkKey(BSON("" << 7 << "" << 1), &keyEltsToUse, &movePastKeyElts, &elt, &inc);
+    state = it.checkKey(BSON("" << 7 << "" << 1), &seekPoint);
     ASSERT_EQUALS(state, IndexBoundsChecker::VALID);
 
     // The rightmost key is past the range.  We should be told to move past the key before the
     // one whose interval we exhausted.
-    state =
-        it.checkKey(BSON("" << 7 << "" << 5.00001), &keyEltsToUse, &movePastKeyElts, &elt, &inc);
+    state = it.checkKey(BSON("" << 7 << "" << 5.00001), &seekPoint);
     ASSERT_EQUALS(state, IndexBoundsChecker::MUST_ADVANCE);
-    ASSERT_EQUALS(keyEltsToUse, 1);
-    ASSERT_EQUALS(movePastKeyElts, true);
+    ASSERT_EQUALS(seekPoint.prefixLen, 1);
+    ASSERT_EQUALS(seekPoint.prefixExclusive, true);
 
     // Move a little forward, but note that the rightmost key isn't in the interval yet.
-    state = it.checkKey(BSON("" << 7.2 << "" << 0), &keyEltsToUse, &movePastKeyElts, &elt, &inc);
+    state = it.checkKey(BSON("" << 7.2 << "" << 0), &seekPoint);
     ASSERT_EQUALS(state, IndexBoundsChecker::MUST_ADVANCE);
-    ASSERT_EQUALS(keyEltsToUse, 1);
-    ASSERT_EQUALS(movePastKeyElts, false);
-    ASSERT_EQUALS(elt[1]->numberInt(), 0);
-    ASSERT_EQUALS(inc[1], false);
+    ASSERT_EQUALS(seekPoint.prefixLen, 1);
+    ASSERT_EQUALS(seekPoint.prefixExclusive, false);
+    ASSERT_EQUALS(seekPoint.keySuffix[1]->numberInt(), 0);
+    ASSERT_EQUALS(seekPoint.suffixInclusive[1], false);
 
     // Move to the edge of both intervals, 20,5
-    state = it.checkKey(BSON("" << 20 << "" << 5), &keyEltsToUse, &movePastKeyElts, &elt, &inc);
+    state = it.checkKey(BSON("" << 20 << "" << 5), &seekPoint);
     ASSERT_EQUALS(state, IndexBoundsChecker::VALID);
 
     // And a little beyond.
-    state = it.checkKey(BSON("" << 20 << "" << 5.1), &keyEltsToUse, &movePastKeyElts, &elt, &inc);
+    state = it.checkKey(BSON("" << 20 << "" << 5.1), &seekPoint);
     ASSERT_EQUALS(state, IndexBoundsChecker::DONE);
 }
 
@@ -447,24 +694,20 @@ TEST(IndexBoundsCheckerTest, FirstKeyMovedIsOKSecondKeyMustMove) {
     bounds.fields.push_back(barList);
     IndexBoundsChecker it(&bounds, BSON("foo" << 1 << "bar" << 1), 1);
 
-    int keyEltsToUse;
-    bool movePastKeyElts;
-    vector<const BSONElement*> elt(2);
-    vector<bool> inc(2);
-
+    IndexSeekPoint seekPoint;
     IndexBoundsChecker::KeyState state;
 
     // Start at something in our range.
-    state = it.checkKey(BSON("" << 0 << "" << 1), &keyEltsToUse, &movePastKeyElts, &elt, &inc);
+    state = it.checkKey(BSON("" << 0 << "" << 1), &seekPoint);
     ASSERT_EQUALS(state, IndexBoundsChecker::VALID);
 
     // First key moves to next interval, second key needs to be advanced.
-    state = it.checkKey(BSON("" << 10 << "" << -1), &keyEltsToUse, &movePastKeyElts, &elt, &inc);
+    state = it.checkKey(BSON("" << 10 << "" << -1), &seekPoint);
     ASSERT_EQUALS(state, IndexBoundsChecker::MUST_ADVANCE);
-    ASSERT_EQUALS(keyEltsToUse, 1);
-    ASSERT_EQUALS(movePastKeyElts, false);
-    ASSERT_EQUALS(elt[1]->numberInt(), 0);
-    ASSERT_EQUALS(inc[1], false);
+    ASSERT_EQUALS(seekPoint.prefixLen, 1);
+    ASSERT_EQUALS(seekPoint.prefixExclusive, false);
+    ASSERT_EQUALS(seekPoint.keySuffix[1]->numberInt(), 0);
+    ASSERT_EQUALS(seekPoint.suffixInclusive[1], false);
 }
 
 TEST(IndexBoundsCheckerTest, SecondIntervalMustRewind) {
@@ -483,30 +726,25 @@ TEST(IndexBoundsCheckerTest, SecondIntervalMustRewind) {
     ASSERT(bounds.isValidFor(idx, 1));
     IndexBoundsChecker it(&bounds, idx, 1);
 
-    int keyEltsToUse;
-    bool movePastKeyElts;
-
-    vector<const BSONElement*> elt(2);
-    vector<bool> inc(2);
-
+    IndexSeekPoint seekPoint;
     IndexBoundsChecker::KeyState state;
 
-    state = it.checkKey(BSON("" << 25 << "" << 0), &keyEltsToUse, &movePastKeyElts, &elt, &inc);
+    state = it.checkKey(BSON("" << 25 << "" << 0), &seekPoint);
     ASSERT_EQUALS(state, IndexBoundsChecker::VALID);
 
-    state = it.checkKey(BSON("" << 25 << "" << 1), &keyEltsToUse, &movePastKeyElts, &elt, &inc);
+    state = it.checkKey(BSON("" << 25 << "" << 1), &seekPoint);
     ASSERT_EQUALS(state, IndexBoundsChecker::MUST_ADVANCE);
-    ASSERT_EQUALS(keyEltsToUse, 1);
-    ASSERT_EQUALS(movePastKeyElts, false);
-    ASSERT_EQUALS(elt[1]->numberInt(), 9);
-    ASSERT_EQUALS(inc[1], true);
+    ASSERT_EQUALS(seekPoint.prefixLen, 1);
+    ASSERT_EQUALS(seekPoint.prefixExclusive, false);
+    ASSERT_EQUALS(seekPoint.keySuffix[1]->numberInt(), 9);
+    ASSERT_EQUALS(seekPoint.suffixInclusive[1], true);
 
-    state = it.checkKey(BSON("" << 25 << "" << 9), &keyEltsToUse, &movePastKeyElts, &elt, &inc);
+    state = it.checkKey(BSON("" << 25 << "" << 9), &seekPoint);
     ASSERT_EQUALS(state, IndexBoundsChecker::VALID);
 
     // First key moved forward.  The second key moved back to a valid state but it's behind
     // the interval that the checker thought it was in.
-    state = it.checkKey(BSON("" << 26 << "" << 0), &keyEltsToUse, &movePastKeyElts, &elt, &inc);
+    state = it.checkKey(BSON("" << 26 << "" << 0), &seekPoint);
     ASSERT_EQUALS(state, IndexBoundsChecker::VALID);
 }
 
@@ -525,38 +763,34 @@ TEST(IndexBoundsCheckerTest, SimpleCheckKeyBackwards) {
     ASSERT(bounds.isValidFor(idx, 1));
     IndexBoundsChecker it(&bounds, idx, 1);
 
-    int keyEltsToUse;
-    bool movePastKeyElts;
-    vector<const BSONElement*> elt(2);
-    vector<bool> inc(2);
-
+    IndexSeekPoint seekPoint;
     IndexBoundsChecker::KeyState state;
 
     // Start at something in our range.
-    state = it.checkKey(BSON("" << 20 << "" << 5), &keyEltsToUse, &movePastKeyElts, &elt, &inc);
+    state = it.checkKey(BSON("" << 20 << "" << 5), &seekPoint);
     ASSERT_EQUALS(state, IndexBoundsChecker::VALID);
 
     // The rightmost key is past the range.  We should be told to move past the key before the
     // one whose interval we exhausted.
-    state = it.checkKey(BSON("" << 20 << "" << 0), &keyEltsToUse, &movePastKeyElts, &elt, &inc);
+    state = it.checkKey(BSON("" << 20 << "" << 0), &seekPoint);
     ASSERT_EQUALS(state, IndexBoundsChecker::MUST_ADVANCE);
-    ASSERT_EQUALS(keyEltsToUse, 1);
-    ASSERT_EQUALS(movePastKeyElts, true);
+    ASSERT_EQUALS(seekPoint.prefixLen, 1);
+    ASSERT_EQUALS(seekPoint.prefixExclusive, true);
 
     // Move a little forward, but note that the rightmost key isn't in the interval yet.
-    state = it.checkKey(BSON("" << 19 << "" << 6), &keyEltsToUse, &movePastKeyElts, &elt, &inc);
+    state = it.checkKey(BSON("" << 19 << "" << 6), &seekPoint);
     ASSERT_EQUALS(state, IndexBoundsChecker::MUST_ADVANCE);
-    ASSERT_EQUALS(keyEltsToUse, 1);
-    ASSERT_EQUALS(movePastKeyElts, false);
-    ASSERT_EQUALS(elt[1]->numberInt(), 5);
-    ASSERT_EQUALS(inc[1], true);
+    ASSERT_EQUALS(seekPoint.prefixLen, 1);
+    ASSERT_EQUALS(seekPoint.prefixExclusive, false);
+    ASSERT_EQUALS(seekPoint.keySuffix[1]->numberInt(), 5);
+    ASSERT_EQUALS(seekPoint.suffixInclusive[1], true);
 
     // Move to the edge of both intervals
-    state = it.checkKey(BSON("" << 7 << "" << 0.01), &keyEltsToUse, &movePastKeyElts, &elt, &inc);
+    state = it.checkKey(BSON("" << 7 << "" << 0.01), &seekPoint);
     ASSERT_EQUALS(state, IndexBoundsChecker::VALID);
 
     // And a little beyond.
-    state = it.checkKey(BSON("" << 7 << "" << 0), &keyEltsToUse, &movePastKeyElts, &elt, &inc);
+    state = it.checkKey(BSON("" << 7 << "" << 0), &seekPoint);
     ASSERT_EQUALS(state, IndexBoundsChecker::DONE);
 }
 
@@ -576,36 +810,32 @@ TEST(IndexBoundsCheckerTest, CheckEndBackwards) {
     ASSERT(bounds.isValidFor(idx, -1));
     IndexBoundsChecker it(&bounds, idx, -1);
 
-    int keyEltsToUse;
-    bool movePastKeyElts;
-    vector<const BSONElement*> elt(2);
-    vector<bool> inc(2);
-
+    IndexSeekPoint seekPoint;
     IndexBoundsChecker::KeyState state;
 
     // Start at something in our range.
-    state = it.checkKey(BSON("" << 30 << "" << 1), &keyEltsToUse, &movePastKeyElts, &elt, &inc);
+    state = it.checkKey(BSON("" << 30 << "" << 1), &seekPoint);
     ASSERT_EQUALS(state, IndexBoundsChecker::VALID);
 
     // Second field moves past the end, but we're not done, since there's still an interval in
     // the previous field that the key hasn't advanced to.
-    state = it.checkKey(BSON("" << 30 << "" << 5), &keyEltsToUse, &movePastKeyElts, &elt, &inc);
+    state = it.checkKey(BSON("" << 30 << "" << 5), &seekPoint);
     ASSERT_EQUALS(state, IndexBoundsChecker::MUST_ADVANCE);
-    ASSERT_EQUALS(keyEltsToUse, 1);
-    ASSERT(movePastKeyElts);
+    ASSERT_EQUALS(seekPoint.prefixLen, 1);
+    ASSERT(seekPoint.prefixExclusive);
 
     // The next index key is in the second interval for 'foo' and there is a valid interval for
     // 'bar'.
-    state = it.checkKey(BSON("" << 20 << "" << 1), &keyEltsToUse, &movePastKeyElts, &elt, &inc);
+    state = it.checkKey(BSON("" << 20 << "" << 1), &seekPoint);
     ASSERT_EQUALS(state, IndexBoundsChecker::VALID);
 
     // The next index key is very close to the end of the open interval for foo, and it's past
     // the interval for 'bar'.  Since the interval for foo is open, we are asked to move
     // forward, since we possibly could.
-    state = it.checkKey(BSON("" << 7.001 << "" << 5), &keyEltsToUse, &movePastKeyElts, &elt, &inc);
+    state = it.checkKey(BSON("" << 7.001 << "" << 5), &seekPoint);
     ASSERT_EQUALS(state, IndexBoundsChecker::MUST_ADVANCE);
-    ASSERT_EQUALS(keyEltsToUse, 1);
-    ASSERT(movePastKeyElts);
+    ASSERT_EQUALS(seekPoint.prefixLen, 1);
+    ASSERT(seekPoint.prefixExclusive);
 }
 
 //
@@ -615,7 +845,7 @@ TEST(IndexBoundsCheckerTest, CheckEndBackwards) {
 /**
  * Returns string representation of IndexBoundsChecker::Location.
  */
-string toString(IndexBoundsChecker::Location location) {
+std::string toString(IndexBoundsChecker::Location location) {
     switch (location) {
         case IndexBoundsChecker::BEHIND:
             return "BEHIND";

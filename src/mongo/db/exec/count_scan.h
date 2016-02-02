@@ -28,10 +28,8 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
 
 #include "mongo/db/exec/plan_stage.h"
-#include "mongo/db/index/btree_index_cursor.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/matcher/expression.h"
@@ -66,45 +64,29 @@ struct CountScanParams {
  * Only created through the getExecutorCount path, as count is the only operation that doesn't
  * care about its data.
  */
-class CountScan : public PlanStage {
+class CountScan final : public PlanStage {
 public:
     CountScan(OperationContext* txn, const CountScanParams& params, WorkingSet* workingSet);
-    virtual ~CountScan() {}
 
-    virtual StageState work(WorkingSetID* out);
-    virtual bool isEOF();
-    virtual void saveState();
-    virtual void restoreState(OperationContext* opCtx);
-    virtual void invalidate(OperationContext* txn, const RecordId& dl, InvalidationType type);
+    StageState work(WorkingSetID* out) final;
+    bool isEOF() final;
+    void doSaveState() final;
+    void doRestoreState() final;
+    void doDetachFromOperationContext() final;
+    void doReattachToOperationContext() final;
+    void doInvalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) final;
 
-    virtual std::vector<PlanStage*> getChildren() const;
-
-    virtual StageType stageType() const {
+    StageType stageType() const final {
         return STAGE_COUNT_SCAN;
     }
 
-    virtual PlanStageStats* getStats();
+    std::unique_ptr<PlanStageStats> getStats() final;
 
-    virtual const CommonStats* getCommonStats();
-
-    virtual const SpecificStats* getSpecificStats();
+    const SpecificStats* getSpecificStats() const final;
 
     static const char* kStageType;
 
 private:
-    /**
-     * Initialize the underlying IndexCursor
-     */
-    void initIndexCursor();
-
-    /**
-     * See if we've hit the end yet.
-     */
-    void checkEnd();
-
-    // transactional context for read locks. Not owned by us
-    OperationContext* _txn;
-
     // The WorkingSet we annotate with results.  Not owned by us.
     WorkingSet* _workingSet;
 
@@ -112,22 +94,14 @@ private:
     const IndexDescriptor* _descriptor;
     const IndexAccessMethod* _iam;
 
-    // Our start cursor is _btreeCursor.
-    boost::scoped_ptr<BtreeIndexCursor> _btreeCursor;
-
-    // Our end marker.
-    boost::scoped_ptr<BtreeIndexCursor> _endCursor;
+    std::unique_ptr<SortedDataInterface::Cursor> _cursor;
 
     // Could our index have duplicates?  If so, we use _returned to dedup.
+    bool _shouldDedup;
     unordered_set<RecordId, RecordId::Hasher> _returned;
 
     CountScanParams _params;
 
-    bool _hitEnd;
-
-    bool _shouldDedup;
-
-    CommonStats _commonStats;
     CountScanStats _specificStats;
 };
 

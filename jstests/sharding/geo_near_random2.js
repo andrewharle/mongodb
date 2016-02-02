@@ -1,16 +1,17 @@
-// this tests 1% of all points using $near and $nearSphere
+// This tests 1% of all points using $near and $nearSphere
+(function() {
+
 load("jstests/libs/geo_near_random.js");
 
 var testName = "geo_near_random2";
-var s = new ShardingTest( testName , 3 );
-
-s.stopBalancer();
+var s = new ShardingTest({ name: testName, shards: 3 });
 
 db = s.getDB("test"); // global db
 
 var test = new GeoNearRandomTest(testName);
 
 s.adminCommand({enablesharding:'test'});
+s.ensurePrimaryShard('test', 'shard0001');
 s.adminCommand({shardcollection: ('test.' + testName), key: {_id:1} });
 
 test.insertPts(5000);
@@ -28,7 +29,7 @@ for (var i = (test.nPts/10); i < test.nPts; i+= (test.nPts/10)){
 }
 
 //Turn balancer back on, for actual tests
-// s.setBalancer( true ); // SERVER-13365
+// s.startBalancer(); // SERVER-13365
 
 printShardingSizes()
 
@@ -46,4 +47,6 @@ test.testPt(test.mkPt(0.8), opts);
 test.testPt(test.mkPt(0.8), opts);
 test.testPt(test.mkPt(0.8), opts);
 
-s.stop()
+s.stop();
+
+})();

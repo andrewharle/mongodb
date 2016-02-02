@@ -27,11 +27,9 @@
  *    then also delete it in the license file.
  */
 
-
 #pragma once
 
 #include <boost/filesystem/convenience.hpp>
-#include <boost/thread/recursive_mutex.hpp>
 #include <map>
 #include <sstream>
 #include <string>
@@ -40,6 +38,7 @@
 
 #include "mongo/bson/bsonobj.h"
 #include "mongo/platform/process_id.h"
+#include "mongo/stdx/mutex.h"
 
 namespace mongo {
 
@@ -73,8 +72,6 @@ private:
 /**
  * A registry of spawned programs that are identified by a bound port or else a system pid.
  * All public member functions are thread safe.
- *
- * TODO: Clean this up to make the semantics more consistent between pids and ports
  */
 class ProgramRegistry {
 public:
@@ -83,25 +80,32 @@ public:
     ProcessId pidForPort(int port) const;
     /** @return port (-1 if doesn't exist) for a registered pid. */
     int portForPid(ProcessId pid) const;
-    /** Register an unregistered port. */
-    void registerPort(int port, ProcessId pid, int output);
-    void deletePort(int port);
-    void getRegisteredPorts(std::vector<int>& ports);
+    /** @return name for a registered program */
+    std::string programName(ProcessId pid) const;
+    /** Register an unregistered program. */
+    void registerProgram(ProcessId pid, int output, int port = 0, std::string name = "sh");
+    void deleteProgram(ProcessId pid);
 
     bool isPidRegistered(ProcessId pid) const;
-    /** Register an unregistered pid. */
-    void registerPid(ProcessId pid, int output);
-    void deletePid(ProcessId pid);
+    void getRegisteredPorts(std::vector<int>& ports);
     void getRegisteredPids(std::vector<ProcessId>& pids);
 
 private:
-    std::map<int, std::pair<ProcessId, int>> _ports;
-    std::map<ProcessId, int> _pids;
-    mutable boost::recursive_mutex _mutex;
+    std::unordered_map<int, ProcessId> _portToPidMap;
+    std::unordered_map<ProcessId, int> _outputs;
+    std::unordered_map<ProcessId, std::string> _programNames;
+    mutable stdx::recursive_mutex _mutex;
 
 #ifdef _WIN32
-public:
+private:
     std::map<ProcessId, HANDLE> _handles;
+
+public:
+    HANDLE getHandleForPid(ProcessId pid);
+    void eraseHandleForPid(ProcessId pid);
+    std::size_t countHandleForPid(ProcessId pid);
+    void insertHandleForPid(ProcessId pid, HANDLE handle);
+
 #endif
 };
 
@@ -129,6 +133,7 @@ private:
     int _port;
     int _pipe;
     ProcessId _pid;
+    std::string _name;
 };
 }
 }

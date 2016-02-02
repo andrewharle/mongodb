@@ -4,10 +4,11 @@
 (function() {
      "use strict";
 
-     var st = new ShardingTest({ shards: 2, chunkSize: 1, other: {separateConfig: true}});
+     var st = new ShardingTest({ shards: 2 });
      var db = st.s.getDB('test');
      var mongosCol = db.getCollection('skip');
      db.adminCommand({ enableSharding: 'test' });
+     st.ensurePrimaryShard('test', 'shard0001');
      db.adminCommand({ shardCollection: 'test.skip', key: { _id: 1 }});
 
      var filler = new Array(10000).toString();

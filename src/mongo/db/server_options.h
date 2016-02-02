@@ -29,6 +29,7 @@
 
 #include "mongo/db/jsobj.h"
 #include "mongo/platform/process_id.h"
+#include "mongo/s/catalog/catalog_manager.h"
 #include "mongo/util/net/listen.h"  // For DEFAULT_MAX_CONN
 
 namespace mongo {
@@ -43,12 +44,13 @@ struct ServerGlobalParams {
           indexBuildRetry(true),
           quiet(false),
           configsvr(false),
+          configsvrMode(CatalogManager::ConfigServerMode::NONE),
           cpu(false),
           objcheck(true),
           defaultProfile(0),
           slowMS(100),
           defaultLocalThresholdMillis(15),
-          moveParanoia(true),
+          moveParanoia(false),
           noUnixSocket(false),
           doFork(0),
           socket("/tmp"),
@@ -76,9 +78,10 @@ struct ServerGlobalParams {
 
     bool indexBuildRetry;  // --noIndexBuildRetry
 
-    bool quiet;  // --quiet
+    std::atomic<bool> quiet;  // --quiet NOLINT
 
-    bool configsvr;  // --configsvr
+    bool configsvr;                                  // --configsvr
+    CatalogManager::ConfigServerMode configsvrMode;  // -- configsvrMode
 
     bool cpu;  // --cpu show cpu time periodically
 
@@ -117,8 +120,7 @@ struct ServerGlobalParams {
      * Switches to enable experimental (unsupported) features.
      */
     struct ExperimentalFeatures {
-        ExperimentalFeatures() : indexStatsCmdEnabled(false), storageDetailsCmdEnabled(false) {}
-        bool indexStatsCmdEnabled;      // -- enableExperimentalIndexStatsCmd
+        ExperimentalFeatures() : storageDetailsCmdEnabled(false) {}
         bool storageDetailsCmdEnabled;  // -- enableExperimentalStorageDetailsCmd
     } experimental;
 
@@ -126,6 +128,7 @@ struct ServerGlobalParams {
 
     BSONArray argvArray;
     BSONObj parsedOpts;
+    bool isAuthEnabled = false;
     AtomicInt32 clusterAuthMode;  // --clusterAuthMode, the internal cluster auth mode
 
     enum ClusterAuthModes {

@@ -31,7 +31,7 @@
 #pragma once
 
 #include "mongo/db/storage/mmap_v1/dur_journalformat.h"
-#include "mongo/util/logfile.h"
+#include "mongo/db/storage/mmap_v1/logfile.h"
 
 namespace mongo {
 namespace dur {
@@ -69,7 +69,7 @@ public:
     }
 
     void assureLogFileOpen() {
-        SimpleMutex::scoped_lock lk(_curLogFileMutex);
+        stdx::lock_guard<SimpleMutex> lk(_curLogFileMutex);
         if (_curLogFile == 0)
             _open();
     }

@@ -28,7 +28,6 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
 #include <string>
 #include <vector>
 
@@ -59,7 +58,7 @@ public:
      * authentication conversation is finished or not.
      *
      **/
-    virtual StatusWith<bool> step(const StringData& inputData, std::string* outputData);
+    virtual StatusWith<bool> step(StringData inputData, std::string* outputData);
 
 private:
     /**

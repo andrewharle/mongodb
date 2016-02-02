@@ -35,13 +35,10 @@
 
 #include <cctype>
 #include <boost/filesystem/operations.hpp>
-#include <boost/scoped_array.hpp>
-#include <boost/scoped_ptr.hpp>
-#include <boost/shared_ptr.hpp>
 
 #include "mongo/client/dbclientcursor.h"
 #include "mongo/client/dbclientinterface.h"
-#include "mongo/db/global_environment_experiment.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/platform/unordered_set.h"
 #include "mongo/util/file.h"
@@ -50,12 +47,11 @@
 
 namespace mongo {
 
-using boost::scoped_ptr;
-using boost::shared_ptr;
-using std::auto_ptr;
 using std::endl;
 using std::set;
+using std::shared_ptr;
 using std::string;
+using std::unique_ptr;
 
 AtomicInt64 Scope::_lastVersion(1);
 
@@ -91,6 +87,9 @@ void Scope::append(BSONObjBuilder& builder, const char* fieldName, const char* s
         case NumberLong:
             builder.append(fieldName, getNumberLongLong(scopeName));
             break;
+        case NumberDecimal:
+            builder.append(fieldName, getNumberDecimal(scopeName));
+            break;
         case String:
             builder.append(fieldName, getString(scopeName));
             break;
@@ -102,8 +101,9 @@ void Scope::append(BSONObjBuilder& builder, const char* fieldName, const char* s
             builder.appendNull(fieldName);
             break;
         case Date:
-            // TODO: make signed
-            builder.appendDate(fieldName, Date_t((unsigned long long)getNumber(scopeName)));
+            builder.appendDate(
+                fieldName,
+                Date_t::fromMillisSinceEpoch(static_cast<long long>(getNumber(scopeName))));
             break;
         case Code:
             builder.appendCode(fieldName, getString(scopeName));
@@ -164,7 +164,7 @@ bool Scope::execFile(const string& filename, bool printResult, bool reportError,
         return false;
     }
     unsigned len = static_cast<unsigned>(fo);
-    boost::scoped_array<char> data(new char[len + 1]);
+    std::unique_ptr<char[]> data(new char[len + 1]);
     data[len] = 0;
     f.read(0, data.get(), len);
 
@@ -177,7 +177,7 @@ bool Scope::execFile(const string& filename, bool printResult, bool reportError,
     }
 
     StringData code(data.get() + offset, len - offset);
-    return exec(code, filename, printResult, reportError, timeoutMs);
+    return exec(code, filename, printResult, reportError, false, timeoutMs);
 }
 
 class Scope::StoredFuncModLogOpHandler : public RecoveryUnit::Change {
@@ -212,14 +212,14 @@ void Scope::loadStored(OperationContext* txn, bool ignoreNotConnected) {
     _loadedVersion = lastVersion;
     string coll = _localDBName + ".system.js";
 
-    scoped_ptr<DBClientBase> directDBClient(createDirectClient(txn));
-    auto_ptr<DBClientCursor> c =
+    unique_ptr<DBClientBase> directDBClient(createDirectClient(txn));
+    unique_ptr<DBClientCursor> c =
         directDBClient->query(coll, Query(), 0, 0, NULL, QueryOption_SlaveOk, 0);
     massert(16669, "unable to get db client cursor from query", c.get());
 
     set<string> thisTime;
     while (c->more()) {
-        BSONObj o = c->nextSafe();
+        BSONObj o = c->nextSafe().getOwned();
         BSONElement n = o["_id"];
         BSONElement v = o["value"];
 
@@ -227,7 +227,7 @@ void Scope::loadStored(OperationContext* txn, bool ignoreNotConnected) {
         uassert(10210, "value has to be set", v.type() != EOO);
 
         try {
-            setElement(n.valuestr(), v);
+            setElement(n.valuestr(), v, o);
             thisTime.insert(n.valuestr());
             _storedNames.insert(n.valuestr());
         } catch (const DBException& setElemEx) {
@@ -267,13 +267,14 @@ ScriptingFunction Scope::createFunction(const char* code) {
     //     lookup the source on an exception, but SpiderMonkey uses the value
     //     returned by JS_CompileFunction.
     ScriptingFunction defaultFunctionNumber = getFunctionCache().size() + 1;
-    ScriptingFunction& actualFunctionNumber = _cachedFunctions[code];
-    actualFunctionNumber = _createFunction(code, defaultFunctionNumber);
+    ScriptingFunction actualFunctionNumber = _createFunction(code, defaultFunctionNumber);
+    _cachedFunctions[code] = actualFunctionNumber;
     return actualFunctionNumber;
 }
 
 namespace JSFiles {
 extern const JSFile collection;
+extern const JSFile crud_api;
 extern const JSFile db;
 extern const JSFile explain_query;
 extern const JSFile explainable;
@@ -285,6 +286,7 @@ extern const JSFile utils;
 extern const JSFile utils_sh;
 extern const JSFile utils_auth;
 extern const JSFile bulk_api;
+extern const JSFile error_codes;
 }
 
 void Scope::execCoreFiles() {
@@ -296,7 +298,9 @@ void Scope::execCoreFiles() {
     execSetup(JSFiles::mr);
     execSetup(JSFiles::query);
     execSetup(JSFiles::bulk_api);
+    execSetup(JSFiles::error_codes);
     execSetup(JSFiles::collection);
+    execSetup(JSFiles::crud_api);
     execSetup(JSFiles::explain_query);
     execSetup(JSFiles::explainable);
     execSetup(JSFiles::upgrade_check);
@@ -305,10 +309,8 @@ void Scope::execCoreFiles() {
 namespace {
 class ScopeCache {
 public:
-    ScopeCache() : _mutex("ScopeCache") {}
-
-    void release(const string& poolName, const boost::shared_ptr<Scope>& scope) {
-        scoped_lock lk(_mutex);
+    void release(const string& poolName, const std::shared_ptr<Scope>& scope) {
+        stdx::lock_guard<stdx::mutex> lk(_mutex);
 
         if (scope->hasOutOfMemoryException()) {
             // make some room
@@ -333,12 +335,12 @@ public:
         _pools.push_front(toStore);
     }
 
-    boost::shared_ptr<Scope> tryAcquire(OperationContext* txn, const string& poolName) {
-        scoped_lock lk(_mutex);
+    std::shared_ptr<Scope> tryAcquire(OperationContext* txn, const string& poolName) {
+        stdx::lock_guard<stdx::mutex> lk(_mutex);
 
         for (Pools::iterator it = _pools.begin(); it != _pools.end(); ++it) {
             if (it->poolName == poolName) {
-                boost::shared_ptr<Scope> scope = it->scope;
+                std::shared_ptr<Scope> scope = it->scope;
                 _pools.erase(it);
                 scope->incTimesUsed();
                 scope->reset();
@@ -347,12 +349,18 @@ public:
             }
         }
 
-        return boost::shared_ptr<Scope>();
+        return std::shared_ptr<Scope>();
+    }
+
+    void clear() {
+        stdx::lock_guard<stdx::mutex> lk(_mutex);
+
+        _pools.clear();
     }
 
 private:
     struct ScopeAndPool {
-        boost::shared_ptr<Scope> scope;
+        std::shared_ptr<Scope> scope;
         string poolName;
     };
 
@@ -362,15 +370,19 @@ private:
 
     typedef std::deque<ScopeAndPool> Pools;  // More-recently used Scopes are kept at the front.
     Pools _pools;                            // protected by _mutex
-    mongo::mutex _mutex;
+    stdx::mutex _mutex;
 };
 
 ScopeCache scopeCache;
 }  // anonymous namespace
 
+void ScriptEngine::dropScopeCache() {
+    scopeCache.clear();
+}
+
 class PooledScope : public Scope {
 public:
-    PooledScope(const std::string& pool, const boost::shared_ptr<Scope>& real)
+    PooledScope(const std::string& pool, const std::shared_ptr<Scope>& real)
         : _pool(pool), _real(real) {}
 
     virtual ~PooledScope() {
@@ -405,6 +417,9 @@ public:
     void gc() {
         _real->gc();
     }
+    void advanceGeneration() {
+        _real->advanceGeneration();
+    }
     bool isKillPending() const {
         return _real->isKillPending();
     }
@@ -423,6 +438,9 @@ public:
     double getNumber(const char* field) {
         return _real->getNumber(field);
     }
+    Decimal128 getNumberDecimal(const char* field) {
+        return _real->getNumberDecimal(field);
+    }
     string getString(const char* field) {
         return _real->getString(field);
     }
@@ -435,11 +453,11 @@ public:
     void setNumber(const char* field, double val) {
         _real->setNumber(field, val);
     }
-    void setString(const char* field, const StringData& val) {
+    void setString(const char* field, StringData val) {
         _real->setString(field, val);
     }
-    void setElement(const char* field, const BSONElement& val) {
-        _real->setElement(field, val);
+    void setElement(const char* field, const BSONElement& val, const BSONObj& parent) {
+        _real->setElement(field, val, parent);
     }
     void setObject(const char* field, const BSONObj& obj, bool readOnly = true) {
         _real->setObject(field, obj, readOnly);
@@ -466,7 +484,7 @@ public:
                bool readOnlyRecv) {
         return _real->invoke(func, args, recv, timeoutMs, ignoreReturn, readOnlyArgs, readOnlyRecv);
     }
-    bool exec(const StringData& code,
+    bool exec(StringData code,
               const string& name,
               bool printResult,
               bool reportError,
@@ -495,21 +513,21 @@ protected:
 
 private:
     string _pool;
-    boost::shared_ptr<Scope> _real;
+    std::shared_ptr<Scope> _real;
 };
 
 /** Get a scope from the pool of scopes matching the supplied pool name */
-auto_ptr<Scope> ScriptEngine::getPooledScope(OperationContext* txn,
-                                             const string& db,
-                                             const string& scopeType) {
+unique_ptr<Scope> ScriptEngine::getPooledScope(OperationContext* txn,
+                                               const string& db,
+                                               const string& scopeType) {
     const string fullPoolName = db + scopeType;
-    boost::shared_ptr<Scope> s = scopeCache.tryAcquire(txn, fullPoolName);
+    std::shared_ptr<Scope> s = scopeCache.tryAcquire(txn, fullPoolName);
     if (!s) {
         s.reset(newScope());
         s->registerOperation(txn);
     }
 
-    auto_ptr<Scope> p;
+    unique_ptr<Scope> p;
     p.reset(new PooledScope(fullPoolName, s));
     p->setLocalDB(db);
     p->loadStored(txn, true);

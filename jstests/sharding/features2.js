@@ -1,12 +1,9 @@
-// features2.js
+(function() {
 
-s = new ShardingTest( "features2" , 2 , 1 , 1 );
-
-// The counts and the tests for "on-num-shards" only works for previous assumptions in balancer 
-// behavior and assumes migrations do not occur during count() commands.
-s.stopBalancer()
+var s = new ShardingTest({ name: "features2", shards: 2, mongos: 1 });
 
 s.adminCommand( { enablesharding : "test" } );
+s.ensurePrimaryShard('test', 'shard0001');
 
 a = s._connections[0].getDB( "test" );
 b = s._connections[1].getDB( "test" );
@@ -26,7 +23,7 @@ assert( a.foo.distinct("x").length == 0 || b.foo.distinct("x").length == 0 , "di
 
 assert.eq( 1 , s.onNumShards( "foo" ) , "A1" );
 
-s.shardGo( "foo" , { x : 1 } , { x : 2 } , { x : 3 }, null, true /* waitForDelete */ );
+s.shardColl( "foo" , { x : 1 } , { x : 2 } , { x : 3 }, null, true /* waitForDelete */ );
 
 assert.eq( 2 , s.onNumShards( "foo" ) , "A2" );
 
@@ -134,7 +131,7 @@ doMR = function( n ){
 doMR( "before" );
 
 assert.eq( 1 , s.onNumShards( "mr" ) , "E1" );
-s.shardGo( "mr" , { x : 1 } , { x : 2 } , { x : 3 }, null, true /* waitForDelete */ );
+s.shardColl( "mr" , { x : 1 } , { x : 2 } , { x : 3 }, null, true /* waitForDelete */ );
 assert.eq( 2 , s.onNumShards( "mr" ) , "E1" );
 
 doMR( "after" );
@@ -175,7 +172,14 @@ catch ( e ){
     y = e;
 }
 
-assert.eq( x.code , y.code , "assert format" )
+// As the forceerror command is written, it doesnt set a code in the reply.
+// OP_COMMAND changes will add a code of 121 (CommandFailed) if a failing command
+// does not set one, so this comparison fails as "undefined" != 121.
+//
+// TODO: Uncomment this line when OP_COMMAND is implemented in mongos (SERVER-18292)
+// as then MongoS should set code 121 as well.
+//
+// assert.eq( x.code , y.code , "assert format" )
 assert.eq( x.errmsg , y.errmsg , "assert format" )
 assert.eq( x.ok , y.ok , "assert format" )
 
@@ -194,3 +198,5 @@ delete im2.localTime;
 assert.eq( isMaster, im2 );
 
 s.stop();
+
+})();

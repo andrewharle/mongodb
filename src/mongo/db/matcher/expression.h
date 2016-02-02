@@ -30,7 +30,6 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
 
 #include "mongo/base/disallow_copying.h"
 #include "mongo/base/status.h"
@@ -38,10 +37,14 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/matcher/matchable.h"
 #include "mongo/db/matcher/match_details.h"
+#include "mongo/stdx/memory.h"
 
 namespace mongo {
 
+class MatchExpression;
 class TreeMatchExpression;
+
+typedef StatusWith<std::unique_ptr<MatchExpression>> StatusWithMatchExpression;
 
 class MatchExpression {
     MONGO_DISALLOW_COPYING(MatchExpression);
@@ -67,10 +70,13 @@ public:
         MOD,
         EXISTS,
         MATCH_IN,
+        BITS_ALL_SET,
+        BITS_ALL_CLEAR,
+        BITS_ANY_SET,
+        BITS_ANY_CLEAR,
 
         // Negations.
         NOT,
-        NIN,
         NOR,
 
         // special types
@@ -178,7 +184,7 @@ public:
     }
 
     // XXX: document
-    virtual MatchExpression* shallowClone() const = 0;
+    virtual std::unique_ptr<MatchExpression> shallowClone() const = 0;
 
     // XXX document
     virtual bool equivalent(const MatchExpression* other) const = 0;
@@ -236,7 +242,7 @@ protected:
 
 private:
     MatchType _matchType;
-    boost::scoped_ptr<TagData> _tagData;
+    std::unique_ptr<TagData> _tagData;
 };
 
 /**
@@ -255,8 +261,8 @@ public:
         return true;
     }
 
-    virtual MatchExpression* shallowClone() const {
-        return new AtomicMatchExpression();
+    virtual std::unique_ptr<MatchExpression> shallowClone() const {
+        return stdx::make_unique<AtomicMatchExpression>();
     }
 
     virtual void debugString(StringBuilder& debug, int level = 0) const;
@@ -280,8 +286,8 @@ public:
         return false;
     }
 
-    virtual MatchExpression* shallowClone() const {
-        return new FalseMatchExpression();
+    virtual std::unique_ptr<MatchExpression> shallowClone() const {
+        return stdx::make_unique<FalseMatchExpression>();
     }
 
     virtual void debugString(StringBuilder& debug, int level = 0) const;

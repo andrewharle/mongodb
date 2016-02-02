@@ -44,7 +44,7 @@ replTest.initiate({"_id" : "bgIndex",
                        {"_id" : 1, "host" : nodes[1]},
                        {"_id" : 2, "host" : nodes[2], "arbiterOnly" : true}]});
 
-var master = replTest.getMaster();
+var master = replTest.getPrimary();
 var second = replTest.getSecondary();
 
 var masterDB = master.getDB(dbname);
@@ -87,7 +87,7 @@ for (var idx = 0; idx < dropAction.length; idx++) {
     assert.commandWorked(masterDB.runCommand( dc ));
     
     jsTest.log("Waiting on replication");
-    replTest.awaitReplication();
+    replTest.awaitReplication(60*1000);
 
     // we need to assert.soon because the drop only marks the index for removal
     // the removal itself is asynchronous and may take another moment before it happens

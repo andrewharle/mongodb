@@ -116,6 +116,10 @@ RegExp.prototype.tojson = RegExp.prototype.toString;
 
 // Array
 Array.contains = function(a, x){
+    if (!Array.isArray(a)) {
+        throw new Error("The first argument to Array.contains must be an array");
+    }
+
     for (var i=0; i<a.length; i++){
         if (a[i] == x)
             return true;
@@ -124,6 +128,10 @@ Array.contains = function(a, x){
 }
 
 Array.unique = function(a){
+    if (!Array.isArray(a)) {
+        throw new Error("The first argument to Array.unique must be an array");
+    }
+
     var u = [];
     for (var i=0; i<a.length; i++){
         var o = a[i];
@@ -135,6 +143,10 @@ Array.unique = function(a){
 }
 
 Array.shuffle = function(arr){
+    if (!Array.isArray(arr)) {
+        throw new Error("The first argument to Array.shuffle must be an array");
+    }
+
     for (var i=0; i<arr.length-1; i++){
         var pos = i+Random.randInt(arr.length-i);
         var save = arr[i];
@@ -145,6 +157,10 @@ Array.shuffle = function(arr){
 }
 
 Array.tojson = function(a, indent, nolint){
+    if (!Array.isArray(a)) {
+        throw new Error("The first argument to Array.tojson must be an array");
+    }
+
     var elementSeparator = nolint ? " " : "\n";
 
     if (!indent)
@@ -178,6 +194,10 @@ Array.tojson = function(a, indent, nolint){
 }
 
 Array.fetchRefs = function(arr, coll){
+    if (!Array.isArray(arr)) {
+        throw new Error("The first argument to Array.fetchRefs must be an array");
+    }
+
     var n = [];
     for (var i=0; i<arr.length; i ++){
         var z = arr[i];
@@ -189,6 +209,10 @@ Array.fetchRefs = function(arr, coll){
 }
 
 Array.sum = function(arr){
+    if (!Array.isArray(arr)) {
+        throw new Error("The first argument to Array.sum must be an array");
+    }
+
     if (arr.length == 0)
         return null;
     var s = arr[0];
@@ -198,12 +222,20 @@ Array.sum = function(arr){
 }
 
 Array.avg = function(arr){
+    if (!Array.isArray(arr)) {
+        throw new Error("The first argument to Array.avg must be an array");
+    }
+
     if (arr.length == 0)
         return null;
     return Array.sum(arr) / arr.length;
 }
 
 Array.stdDev = function(arr){
+    if (!Array.isArray(arr)) {
+        throw new Error("The first argument to Array.stdDev must be an array");
+    }
+
     var avg = Array.avg(arr);
     var sum = 0;
 
@@ -214,18 +246,14 @@ Array.stdDev = function(arr){
     return Math.sqrt(sum / arr.length);
 }
 
-if (typeof Array.isArray != "function"){
-    Array.isArray = function(arr){
-        return arr != undefined && arr.constructor == Array
-    }
-}
-
 // Object
 Object.extend = function(dst, src, deep){
     for (var k in src){
         var v = src[k];
         if (deep && typeof(v) == "object"){
-            if ("floatApprox" in v) { // convert NumberLong properly
+            if (v.constructor === ObjectId) { // convert ObjectId properly
+                eval("v = " + tojson(v));
+            } else if ("floatApprox" in v) { // convert NumberLong properly
                 eval("v = " + tojson(v));
             } else {
                 v = Object.extend(typeof (v.length) == "number" ? [] : {}, v, true);
@@ -277,7 +305,15 @@ String.prototype.startsWith = function(str){
 }
 
 String.prototype.endsWith = function(str){
-    return new RegExp(RegExp.escape(str) + "$").test(this)
+    return this.indexOf(str, this.length - str.length) !== -1
+}
+
+// Polyfill taken from
+// https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/includes
+if (!String.prototype.includes) {
+    String.prototype.includes = function() {'use strict';
+        return String.prototype.indexOf.apply(this, arguments) !== -1;
+    };
 }
 
 // Returns a copy padded with the provided character _chr_ so it becomes (at least) _length_
@@ -325,6 +361,17 @@ if (! NumberInt.prototype) {
 
 NumberInt.prototype.tojson = function() {
     return this.toString();
+}
+
+// NumberDecimal
+if (typeof NumberDecimal !== 'undefined') {
+    if (! NumberDecimal.prototype) {
+        NumberDecimal.prototype = {}
+    }
+
+    NumberDecimal.prototype.tojson = function() {
+        return this.toString();
+    }
 }
 
 // ObjectId
@@ -604,6 +651,8 @@ tojson = function(x, indent, nolint){
         return s;
     }
     case "function":
+        if (x === MinKey || x === MaxKey)
+            return x.tojson();
         return x.toString();
     default:
         throw Error( "tojson can't handle type " + (typeof x) );
@@ -632,11 +681,7 @@ tojsonObject = function(x, indent, nolint){
     }
 
     try {
-        // modify display of min/max key for spidermonkey
-        if (x.toString() == "[object MaxKey]")
-            return "{ $maxKey : 1 }";
-        if (x.toString() == "[object MinKey]")
-            return "{ $minKey : 1 }";
+        x.toString();
     }
     catch(e) {
         // toString not callable

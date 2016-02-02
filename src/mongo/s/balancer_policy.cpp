@@ -31,26 +31,59 @@
 
 #include "mongo/platform/basic.h"
 
+#include "mongo/s/balancer_policy.h"
+
 #include <algorithm>
 
-#include "mongo/s/balancer_policy.h"
-#include "mongo/s/chunk.h"
-#include "mongo/s/config.h"
-#include "mongo/s/type_shard.h"
-#include "mongo/s/type_tags.h"
+#include "mongo/client/read_preference.h"
+#include "mongo/client/remote_command_targeter.h"
+#include "mongo/s/catalog/catalog_manager.h"
+#include "mongo/s/catalog/type_shard.h"
+#include "mongo/s/catalog/type_tags.h"
+#include "mongo/s/chunk_manager.h"
+#include "mongo/s/client/shard.h"
+#include "mongo/s/client/shard_registry.h"
+#include "mongo/s/grid.h"
+#include "mongo/s/shard_util.h"
 #include "mongo/util/log.h"
 #include "mongo/util/stringutils.h"
-#include "mongo/util/text.h"
 
 namespace mongo {
 
-using std::auto_ptr;
-using std::endl;
 using std::map;
 using std::numeric_limits;
 using std::set;
 using std::string;
 using std::vector;
+
+namespace {
+
+/**
+ * Executes the serverStatus command against the specified shard and obtains the version of the
+ * running MongoD service.
+ *
+ * The MongoD version or throws an exception. Known exception codes are:
+ *  ShardNotFound if shard by that id is not available on the registry
+ *  NoSuchKey if the version could not be retrieved
+ */
+std::string retrieveShardMongoDVersion(OperationContext* txn,
+                                       ShardId shardId,
+                                       ShardRegistry* shardRegistry) {
+    BSONObj serverStatus = uassertStatusOK(
+        shardRegistry->runCommandOnShard(txn,
+                                         shardId,
+                                         ReadPreferenceSetting{ReadPreference::PrimaryOnly},
+                                         "admin",
+                                         BSON("serverStatus" << 1)));
+    BSONElement versionElement = serverStatus["version"];
+    if (versionElement.type() != String) {
+        uassertStatusOK({ErrorCodes::NoSuchKey, "version field not found in serverStatus"});
+    }
+
+    return versionElement.str();
+}
+
+}  // namespace
 
 string TagRange::toString() const {
     return str::stream() << min << " -->> " << max << "  on  " << tag;
@@ -60,12 +93,12 @@ DistributionStatus::DistributionStatus(const ShardInfoMap& shardInfo,
                                        const ShardToChunksMap& shardToChunksMap)
     : _shardInfo(shardInfo), _shardChunks(shardToChunksMap) {
     for (ShardInfoMap::const_iterator i = _shardInfo.begin(); i != _shardInfo.end(); ++i) {
-        _shards.insert(i->first);
+        _shardIds.insert(i->first);
     }
 }
 
-const ShardInfo& DistributionStatus::shardInfo(const string& shard) const {
-    ShardInfoMap::const_iterator i = _shardInfo.find(shard);
+const ShardInfo& DistributionStatus::shardInfo(const ShardId& shardId) const {
+    ShardInfoMap::const_iterator i = _shardInfo.find(shardId);
     verify(i != _shardInfo.end());
     return i->second;
 }
@@ -74,32 +107,33 @@ unsigned DistributionStatus::totalChunks() const {
     unsigned total = 0;
 
     for (ShardToChunksMap::const_iterator i = _shardChunks.begin(); i != _shardChunks.end(); ++i) {
-        total += i->second->size();
+        total += i->second.size();
     }
 
     return total;
 }
 
-unsigned DistributionStatus::numberOfChunksInShard(const string& shard) const {
-    ShardToChunksMap::const_iterator i = _shardChunks.find(shard);
+unsigned DistributionStatus::numberOfChunksInShard(const ShardId& shardId) const {
+    ShardToChunksMap::const_iterator i = _shardChunks.find(shardId);
     if (i == _shardChunks.end()) {
         return 0;
     }
 
-    return i->second->size();
+    return i->second.size();
 }
 
-unsigned DistributionStatus::numberOfChunksInShardWithTag(const string& shard,
+unsigned DistributionStatus::numberOfChunksInShardWithTag(const ShardId& shardId,
                                                           const string& tag) const {
-    ShardToChunksMap::const_iterator i = _shardChunks.find(shard);
+    ShardToChunksMap::const_iterator i = _shardChunks.find(shardId);
     if (i == _shardChunks.end()) {
         return 0;
     }
 
     unsigned total = 0;
-    const vector<ChunkType*>& chunkList = i->second->vector();
-    for (unsigned j = 0; j < i->second->size(); j++) {
-        if (tag == getTagForChunk(*chunkList[j])) {
+
+    const vector<ChunkType>& chunkList = i->second;
+    for (unsigned j = 0; j < i->second.size(); j++) {
+        if (tag == getTagForChunk(chunkList[j])) {
             total++;
         }
     }
@@ -113,24 +147,24 @@ string DistributionStatus::getBestReceieverShard(const string& tag) const {
 
     for (ShardInfoMap::const_iterator i = _shardInfo.begin(); i != _shardInfo.end(); ++i) {
         if (i->second.isSizeMaxed()) {
-            LOG(1) << i->first << " has already reached the maximum total chunk size." << endl;
+            LOG(1) << i->first << " has already reached the maximum total chunk size.";
             continue;
         }
 
         if (i->second.isDraining()) {
-            LOG(1) << i->first << " is currently draining." << endl;
+            LOG(1) << i->first << " is currently draining.";
             continue;
         }
 
         if (!i->second.hasTag(tag)) {
-            LOG(1) << i->first << " doesn't have right tag" << endl;
+            LOG(1) << i->first << " doesn't have right tag";
             continue;
         }
 
         unsigned myChunks = numberOfChunksInShard(i->first);
         if (myChunks >= minChunks) {
             LOG(1) << i->first << " has more chunks me:" << myChunks << " best: " << best << ":"
-                   << minChunks << endl;
+                   << minChunks;
             continue;
         }
 
@@ -157,11 +191,11 @@ string DistributionStatus::getMostOverloadedShard(const string& tag) const {
     return worst;
 }
 
-const vector<ChunkType*>& DistributionStatus::getChunks(const string& shard) const {
-    ShardToChunksMap::const_iterator i = _shardChunks.find(shard);
-    verify(i != _shardChunks.end());
+const vector<ChunkType>& DistributionStatus::getChunks(const ShardId& shardId) const {
+    ShardToChunksMap::const_iterator i = _shardChunks.find(shardId);
+    invariant(i != _shardChunks.end());
 
-    return i->second->vector();
+    return i->second;
 }
 
 bool DistributionStatus::addTagRange(const TagRange& range) {
@@ -171,19 +205,19 @@ bool DistributionStatus::addTagRange(const TagRange& range) {
         const TagRange& tocheck = i->second;
 
         if (range.min == tocheck.min) {
-            LOG(1) << "have 2 ranges with the same min " << range << " " << tocheck << endl;
+            LOG(1) << "have 2 ranges with the same min " << range << " " << tocheck;
             return false;
         }
 
         if (range.min < tocheck.min) {
             if (range.max > tocheck.min) {
-                LOG(1) << "have overlapping ranges " << range << " " << tocheck << endl;
+                LOG(1) << "have overlapping ranges " << range << " " << tocheck;
                 return false;
             }
         } else {
             // range.min > tocheck.min
             if (tocheck.max > range.min) {
-                LOG(1) << "have overlapping ranges " << range << " " << tocheck << endl;
+                LOG(1) << "have overlapping ranges " << range << " " << tocheck;
                 return false;
             }
         }
@@ -213,69 +247,59 @@ string DistributionStatus::getTagForChunk(const ChunkType& chunk) const {
 }
 
 void DistributionStatus::dump() const {
-    log() << "DistributionStatus" << endl;
-    log() << "  shards" << endl;
+    log() << "DistributionStatus";
+    log() << "  shards";
+
     for (ShardInfoMap::const_iterator i = _shardInfo.begin(); i != _shardInfo.end(); ++i) {
-        log() << "      " << i->first << "\t" << i->second.toString() << endl;
+        log() << "      " << i->first << "\t" << i->second.toString();
 
         ShardToChunksMap::const_iterator j = _shardChunks.find(i->first);
         verify(j != _shardChunks.end());
 
-        const OwnedPointerVector<ChunkType>& v = *j->second;
-        for (unsigned x = 0; x < v.size(); x++)
-            log() << "          " << *v[x] << endl;
+        const vector<ChunkType>& v = j->second;
+        for (unsigned x = 0; x < v.size(); x++) {
+            log() << "          " << v[x];
+        }
     }
 
     if (_tagRanges.size() > 0) {
-        log() << " tag ranges" << endl;
+        log() << " tag ranges";
 
         for (map<BSONObj, TagRange>::const_iterator i = _tagRanges.begin(); i != _tagRanges.end();
              ++i)
-            log() << i->second.toString() << endl;
+            log() << i->second.toString();
     }
 }
 
-Status DistributionStatus::populateShardInfoMap(ShardInfoMap* shardInfo) {
+Status DistributionStatus::populateShardInfoMap(OperationContext* txn, ShardInfoMap* shardInfo) {
     try {
-        ScopedDbConnection conn(configServer.getPrimary().getConnString(), 30);
-
-        auto_ptr<DBClientCursor> cursor(conn->query(ShardType::ConfigNS, Query()));
-        uassert(28597, "Failed to load shard config", cursor.get() != NULL);
-
-        while (cursor->more()) {
-            ShardType shard;
-            std::string errMsg;
-            bool parseOk = shard.parseBSON(cursor->next(), &errMsg);
-
-            if (!parseOk) {
-                return Status(ErrorCodes::UnsupportedFormat, errMsg);
-            }
-
-            std::set<std::string> dummy;
-            ShardInfo newShardEntry(shard.getMaxSize(),
-                                    Shard::getShardDataSizeBytes(shard.getHost()) / 1024 / 1024,
-                                    shard.getDraining(),
-                                    dummy,
-                                    Shard::getShardMongoVersion(shard.getHost()));
-
-            if (shard.isTagsSet()) {
-                BSONArrayIteratorSorted tagIter(shard.getTags());
-                while (tagIter.more()) {
-                    BSONElement tagElement = tagIter.next();
-                    if (tagElement.type() != String) {
-                        return Status(ErrorCodes::UnsupportedFormat,
-                                      str::stream() << "shard tags only supports strings, "
-                                                    << "found " << typeName(tagElement.type()));
-                    }
-
-                    newShardEntry.addTag(tagElement.String());
-                }
-            }
-
-            shardInfo->insert(make_pair(shard.getName(), newShardEntry));
+        auto shardsStatus = grid.catalogManager(txn)->getAllShards(txn);
+        if (!shardsStatus.isOK()) {
+            return shardsStatus.getStatus();
         }
+        vector<ShardType> shards = std::move(shardsStatus.getValue().value);
 
-        conn.done();
+        for (const ShardType& shardData : shards) {
+            std::set<std::string> dummy;
+
+            const long long shardSizeBytes = uassertStatusOK(
+                shardutil::retrieveTotalShardSize(txn, shardData.getName(), grid.shardRegistry()));
+
+            const std::string shardMongodVersion =
+                retrieveShardMongoDVersion(txn, shardData.getName(), grid.shardRegistry());
+
+            ShardInfo newShardEntry(shardData.getMaxSizeMB(),
+                                    shardSizeBytes / 1024 / 1024,
+                                    shardData.getDraining(),
+                                    dummy,
+                                    shardMongodVersion);
+
+            for (const string& shardTag : shardData.getTags()) {
+                newShardEntry.addTag(shardTag);
+            }
+
+            shardInfo->insert(make_pair(shardData.getName(), newShardEntry));
+        }
     } catch (const DBException& ex) {
         return ex.toStatus();
     }
@@ -288,56 +312,24 @@ void DistributionStatus::populateShardToChunksMap(const ShardInfoMap& allShards,
                                                   ShardToChunksMap* shardToChunksMap) {
     // Makes sure there is an entry in shardToChunksMap for every shard.
     for (ShardInfoMap::const_iterator it = allShards.begin(); it != allShards.end(); ++it) {
-        OwnedPointerVector<ChunkType>*& chunkList = (*shardToChunksMap)[it->first];
-
-        if (chunkList == NULL) {
-            chunkList = new OwnedPointerVector<ChunkType>();
-        }
+        (*shardToChunksMap)[it->first];
     }
 
     const ChunkMap& chunkMap = chunkMgr.getChunkMap();
     for (ChunkMap::const_iterator it = chunkMap.begin(); it != chunkMap.end(); ++it) {
         const ChunkPtr chunkPtr = it->second;
 
-        auto_ptr<ChunkType> chunk(new ChunkType());
-        chunk->setNS(chunkPtr->getns());
-        chunk->setMin(chunkPtr->getMin().getOwned());
-        chunk->setMax(chunkPtr->getMax().getOwned());
-        chunk->setJumbo(chunkPtr->isJumbo());  // TODO: is this reliable?
-        const string shardName(chunkPtr->getShard().getName());
-        chunk->setShard(shardName);
+        ChunkType chunk;
+        chunk.setNS(chunkMgr.getns());
+        chunk.setMin(chunkPtr->getMin().getOwned());
+        chunk.setMax(chunkPtr->getMax().getOwned());
+        chunk.setJumbo(chunkPtr->isJumbo());  // TODO: is this reliable?
 
-        (*shardToChunksMap)[shardName]->push_back(chunk.release());
+        const string shardName(chunkPtr->getShardId());
+        chunk.setShard(shardName);
+
+        (*shardToChunksMap)[shardName].push_back(chunk);
     }
-}
-
-StatusWith<string> DistributionStatus::getTagForSingleChunk(const string& configServer,
-                                                            const string& ns,
-                                                            const ChunkType& chunk) {
-    BSONObj tagRangeDoc;
-
-    try {
-        ScopedDbConnection conn(configServer, 30);
-
-        Query query(QUERY(TagsType::ns(ns) << TagsType::min() << BSON("$lte" << chunk.getMin())
-                                           << TagsType::max() << BSON("$gte" << chunk.getMax())));
-        tagRangeDoc = conn->findOne(TagsType::ConfigNS, query);
-        conn.done();
-    } catch (const DBException& excep) {
-        return StatusWith<string>(excep.toStatus());
-    }
-
-    if (tagRangeDoc.isEmpty()) {
-        return StatusWith<string>("");
-    }
-
-    TagsType tagRange;
-    string errMsg;
-    if (!tagRange.parseBSON(tagRangeDoc, &errMsg)) {
-        return StatusWith<string>(ErrorCodes::FailedToParse, errMsg);
-    }
-
-    return StatusWith<string>(tagRange.getTag());
 }
 
 MigrateInfo* BalancerPolicy::balance(const string& ns,
@@ -352,83 +344,77 @@ MigrateInfo* BalancerPolicy::balance(const string& ns,
 
     // 1) check things we have to move
     {
-        const set<string>& shards = distribution.shards();
-        for (set<string>::const_iterator z = shards.begin(); z != shards.end(); ++z) {
-            string shard = *z;
-            const ShardInfo& info = distribution.shardInfo(shard);
+        for (const ShardId& shardId : distribution.shardIds()) {
+            const ShardInfo& info = distribution.shardInfo(shardId);
 
             if (!info.isDraining())
                 continue;
 
-            if (distribution.numberOfChunksInShard(shard) == 0)
+            if (distribution.numberOfChunksInShard(shardId) == 0)
                 continue;
 
             // now we know we need to move to chunks off this shard
             // we will if we are allowed
-            const vector<ChunkType*>& chunks = distribution.getChunks(shard);
+            const vector<ChunkType>& chunks = distribution.getChunks(shardId);
             unsigned numJumboChunks = 0;
 
             // since we have to move all chunks, lets just do in order
             for (unsigned i = 0; i < chunks.size(); i++) {
-                const ChunkType& chunkToMove = *chunks[i];
-                if (chunkToMove.isJumboSet() && chunkToMove.getJumbo()) {
+                const ChunkType& chunkToMove = chunks[i];
+                if (chunkToMove.getJumbo()) {
                     numJumboChunks++;
                     continue;
                 }
 
                 string tag = distribution.getTagForChunk(chunkToMove);
-                string to = distribution.getBestReceieverShard(tag);
+                const ShardId to = distribution.getBestReceieverShard(tag);
 
                 if (to.size() == 0) {
                     warning() << "want to move chunk: " << chunkToMove << "(" << tag << ") "
-                              << "from " << shard << " but can't find anywhere to put it" << endl;
+                              << "from " << shardId << " but can't find anywhere to put it";
                     continue;
                 }
 
-                log() << "going to move " << chunkToMove << " from " << shard << "(" << tag << ")"
-                      << " to " << to << endl;
+                log() << "going to move " << chunkToMove << " from " << shardId << "(" << tag << ")"
+                      << " to " << to;
 
-                return new MigrateInfo(ns, to, shard, chunkToMove.toBSON());
+                return new MigrateInfo(ns, to, shardId, chunkToMove.toBSON());
             }
 
-            warning() << "can't find any chunk to move from: " << shard << " but we want to. "
-                      << " numJumboChunks: " << numJumboChunks << endl;
+            warning() << "can't find any chunk to move from: " << shardId << " but we want to. "
+                      << " numJumboChunks: " << numJumboChunks;
         }
     }
 
     // 2) tag violations
     if (distribution.tags().size() > 0) {
-        const set<string>& shards = distribution.shards();
+        for (const ShardId& shardId : distribution.shardIds()) {
+            const ShardInfo& info = distribution.shardInfo(shardId);
 
-        for (set<string>::const_iterator i = shards.begin(); i != shards.end(); ++i) {
-            string shard = *i;
-            const ShardInfo& info = distribution.shardInfo(shard);
-
-            const vector<ChunkType*>& chunks = distribution.getChunks(shard);
+            const vector<ChunkType>& chunks = distribution.getChunks(shardId);
             for (unsigned j = 0; j < chunks.size(); j++) {
-                const ChunkType& chunk = *chunks[j];
+                const ChunkType& chunk = chunks[j];
                 string tag = distribution.getTagForChunk(chunk);
 
                 if (info.hasTag(tag))
                     continue;
 
                 // uh oh, this chunk is in the wrong place
-                log() << "chunk " << chunk << " is not on a shard with the right tag: " << tag
-                      << endl;
+                log() << "chunk " << chunk << " is not on a shard with the right tag: " << tag;
 
-                if (chunk.isJumboSet() && chunk.getJumbo()) {
-                    warning() << "chunk " << chunk << " is jumbo, so cannot be moved" << endl;
+                if (chunk.getJumbo()) {
+                    warning() << "chunk " << chunk << " is jumbo, so cannot be moved";
                     continue;
                 }
 
-                string to = distribution.getBestReceieverShard(tag);
+                const ShardId to = distribution.getBestReceieverShard(tag);
                 if (to.size() == 0) {
-                    log() << "no where to put it :(" << endl;
+                    log() << "no where to put it :(";
                     continue;
                 }
-                verify(to != shard);
-                log() << " going to move to: " << to << endl;
-                return new MigrateInfo(ns, to, shard, chunk.toBSON());
+                verify(to != shardId);
+                log() << " going to move to: " << to;
+                return new MigrateInfo(ns, to, shardId, chunk.toBSON());
             }
         }
     }
@@ -456,7 +442,7 @@ MigrateInfo* BalancerPolicy::balance(const string& ns,
     for (unsigned i = 0; i < tags.size(); i++) {
         string tag = tags[i];
 
-        string from = distribution.getMostOverloadedShard(tag);
+        const ShardId from = distribution.getMostOverloadedShard(tag);
         if (from.size() == 0)
             continue;
 
@@ -466,7 +452,7 @@ MigrateInfo* BalancerPolicy::balance(const string& ns,
 
         string to = distribution.getBestReceieverShard(tag);
         if (to.size() == 0) {
-            log() << "no available shards to take chunks for tag [" << tag << "]" << endl;
+            log() << "no available shards to take chunks for tag [" << tag << "]";
             return NULL;
         }
 
@@ -474,35 +460,35 @@ MigrateInfo* BalancerPolicy::balance(const string& ns,
 
         const int imbalance = max - min;
 
-        LOG(1) << "collection : " << ns << endl;
-        LOG(1) << "donor      : " << from << " chunks on " << max << endl;
-        LOG(1) << "receiver   : " << to << " chunks on " << min << endl;
-        LOG(1) << "threshold  : " << threshold << endl;
+        LOG(1) << "collection : " << ns;
+        LOG(1) << "donor      : " << from << " chunks on " << max;
+        LOG(1) << "receiver   : " << to << " chunks on " << min;
+        LOG(1) << "threshold  : " << threshold;
 
         if (imbalance < threshold)
             continue;
 
-        const vector<ChunkType*>& chunks = distribution.getChunks(from);
+        const vector<ChunkType>& chunks = distribution.getChunks(from);
         unsigned numJumboChunks = 0;
         for (unsigned j = 0; j < chunks.size(); j++) {
-            const ChunkType& chunk = *chunks[j];
+            const ChunkType& chunk = chunks[j];
             if (distribution.getTagForChunk(chunk) != tag)
                 continue;
 
-            if (chunk.isJumboSet() && chunk.getJumbo()) {
+            if (chunk.getJumbo()) {
                 numJumboChunks++;
                 continue;
             }
 
             log() << " ns: " << ns << " going to move " << chunk << " from: " << from
-                  << " to: " << to << " tag [" << tag << "]" << endl;
+                  << " to: " << to << " tag [" << tag << "]";
             return new MigrateInfo(ns, to, from, chunk.toBSON());
         }
 
         if (numJumboChunks) {
             error() << "shard: " << from << " ns: " << ns
                     << " has too many chunks, but they are all jumbo "
-                    << " numJumboChunks: " << numJumboChunks << endl;
+                    << " numJumboChunks: " << numJumboChunks;
             continue;
         }
 

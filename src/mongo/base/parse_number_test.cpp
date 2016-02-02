@@ -28,12 +28,12 @@
 
 #include "mongo/platform/basic.h"
 
+#include <cmath>
+#include <cstdint>
 #include <limits>
 
 #include "mongo/base/parse_number.h"
 #include "mongo/base/status.h"
-#include "mongo/platform/cstdint.h"
-#include "mongo/platform/float_utils.h"
 #include "mongo/util/mongoutils/str.h"  // for str::stream()!
 #include "mongo/unittest/unittest.h"
 
@@ -265,16 +265,16 @@ TEST(Double, TestParsingOverflow) {
 TEST(Double, TestParsingNan) {
     double d = 0;
     ASSERT_OK(parseNumberFromString("NaN", &d));
-    ASSERT_TRUE(isNaN(d));
+    ASSERT_TRUE(std::isnan(d));
 }
 
 TEST(Double, TestParsingInfinity) {
     double d = 0;
     ASSERT_OK(parseNumberFromString("infinity", &d));
-    ASSERT_TRUE(isInf(d));
+    ASSERT_TRUE(std::isinf(d));
     d = 0;
     ASSERT_OK(parseNumberFromString("-Infinity", &d));
-    ASSERT_TRUE(isInf(d));
+    ASSERT_TRUE(std::isinf(d));
 }
 
 TEST(Double, TestParsingNormal) {
@@ -287,7 +287,7 @@ TEST(Double, TestParsingNormal) {
     ASSERT_PARSES(double, "12e-8", 12e-8);
     ASSERT_PARSES(double, "-485.381e-8", -485.381e-8);
 
-#if !(defined(_WIN32) || defined(__sunos__))
+#if !(defined(_WIN32) || defined(__sun))
     // Parse hexadecimal representations of a double.  Hex literals not supported by MSVC, and
     // not parseable by the Windows SDK libc or the Solaris libc in the mode we build.
     // See SERVER-14131.

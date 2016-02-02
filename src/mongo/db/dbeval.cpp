@@ -38,6 +38,7 @@
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/db_raii.h"
 #include "mongo/db/introspect.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/json.h"
@@ -47,7 +48,7 @@
 
 namespace mongo {
 
-using boost::scoped_ptr;
+using std::unique_ptr;
 using std::dec;
 using std::endl;
 using std::string;
@@ -90,7 +91,7 @@ bool dbEval(OperationContext* txn,
         return false;
     }
 
-    scoped_ptr<Scope> s(globalScriptEngine->newScope());
+    unique_ptr<Scope> s(globalScriptEngine->newScope());
     s->registerOperation(txn);
 
     ScriptingFunction f = s->createFunction(code);
@@ -175,8 +176,7 @@ public:
              BSONObj& cmdObj,
              int options,
              string& errmsg,
-             BSONObjBuilder& result,
-             bool fromRepl) {
+             BSONObjBuilder& result) {
         if (cmdObj["nolock"].trueValue()) {
             return dbEval(txn, dbname, cmdObj, result, errmsg);
         }
@@ -184,7 +184,7 @@ public:
         ScopedTransaction transaction(txn, MODE_X);
         Lock::GlobalWrite lk(txn->lockState());
 
-        Client::Context ctx(txn, dbname);
+        OldClientContext ctx(txn, dbname);
 
         return dbEval(txn, dbname, cmdObj, result, errmsg);
     }

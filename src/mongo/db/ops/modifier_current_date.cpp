@@ -30,7 +30,7 @@
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/mutable/document.h"
-#include "mongo/db/global_optime.h"
+#include "mongo/db/global_timestamp.h"
 #include "mongo/db/ops/field_checker.h"
 #include "mongo/db/ops/log_builder.h"
 #include "mongo/db/ops/path_support.h"
@@ -138,7 +138,7 @@ Status ModifierCurrentDate::init(const BSONElement& modExpr,
 }
 
 Status ModifierCurrentDate::prepare(mutablebson::Element root,
-                                    const StringData& matchedField,
+                                    StringData matchedField,
                                     ExecInfo* execInfo) {
     _preparedState.reset(new PreparedState(root.getDocument()));
 
@@ -190,7 +190,7 @@ Status ModifierCurrentDate::apply() const {
         // fills in the value with place-holder/empty
 
         elemToSet = _typeIsDate ? doc.makeElementDate(lastPart, Date_t())
-                                : doc.makeElementTimestamp(lastPart, OpTime());
+                                : doc.makeElementTimestamp(lastPart, Timestamp());
 
         if (!elemToSet.ok()) {
             return Status(ErrorCodes::InternalError, "can't create new element");
@@ -222,7 +222,7 @@ Status ModifierCurrentDate::apply() const {
         if (!s.isOK())
             return s;
     } else {
-        Status s = elemToSet.setValueTimestamp(getNextGlobalOptime());
+        Status s = elemToSet.setValueTimestamp(getNextGlobalTimestamp());
         if (!s.isOK())
             return s;
     }

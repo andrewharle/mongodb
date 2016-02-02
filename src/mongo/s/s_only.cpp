@@ -31,92 +31,64 @@
 
 #include "mongo/platform/basic.h"
 
-#include "mongo/client/connpool.h"
+#include <tuple>
+
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authorization_manager_global.h"
 #include "mongo/db/auth/authorization_session.h"
-#include "mongo/db/auth/authz_session_external_state_s.h"
+#include "mongo/db/client.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/dbhelpers.h"
-#include "mongo/s/client_info.h"
-#include "mongo/s/grid.h"
-#include "mongo/s/request.h"
-#include "mongo/s/shard.h"
-#include "mongo/util/log.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/stats/counters.h"
+#include "mongo/rpc/metadata.h"
+#include "mongo/rpc/reply_builder_interface.h"
+#include "mongo/rpc/request_interface.h"
+#include "mongo/s/cluster_last_error_info.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/thread_name.h"
+#include "mongo/util/log.h"
 
-/*
-  most a pile of hacks to make linking nicer
-
- */
 namespace mongo {
 
-using std::endl;
 using std::string;
 using std::stringstream;
 
-void* remapPrivateView(void* oldPrivateAddr) {
-    log() << "remapPrivateView called in mongos, aborting" << endl;
-    fassertFailed(16462);
+
+bool isMongos() {
+    return true;
 }
 
 /** When this callback is run, we record a shard that we've used for useful work
  *  in an operation to be read later by getLastError()
 */
-void usingAShardConnection(const string& addr) {
-    ClientInfo::get()->addShardHost(addr);
+void usingAShardConnection(const std::string& addr) {
+    ClusterLastErrorInfo::get(cc()).addShardHost(addr);
 }
 
-TSP_DEFINE(Client, currentClient)
-
-Client::Client(const string& desc, AbstractMessagingPort* p)
-    : ClientBasic(p),
-      _desc(desc),
-      _connectionId(),
-      _inDirectClient(false),
-      _lastOp(0),
-      _shutdown(false) {}
-Client::~Client() {}
-bool Client::shutdown() {
-    return true;
-}
-
-void Client::initThread(const char* desc, AbstractMessagingPort* mp) {
-    // mp is non-null only for client connections, and mongos uses ClientInfo for those
-    massert(16478, "Client being used for incoming connection thread in mongos", mp == NULL);
-
-    verify(currentClient.get() == 0);
-
-    string fullDesc = desc;
-    if (str::equals("conn", desc) && mp != NULL)
-        fullDesc = str::stream() << desc << mp->connectionId();
-
-    setThreadName(fullDesc.c_str());
-
-    Client* c = new Client(fullDesc, mp);
-    currentClient.reset(c);
-    mongo::lastError.initThread();
-    c->setAuthorizationSession(new AuthorizationSession(
-        new AuthzSessionExternalStateMongos(getGlobalAuthorizationManager())));
-}
-
-string Client::clientAddress(bool includePort) const {
-    ClientInfo* ci = ClientInfo::get();
-    if (ci)
-        return ci->getRemote().toString();
-    return "";
-}
-
-// Need a version that takes a Client to match the mongod interface so the web server can call
-// execCommand and not need to worry if it's in a mongod or mongos.
+// called into by the web server. For now we just translate the parameters
+// to their old style equivalents.
 void Command::execCommand(OperationContext* txn,
-                          Command* c,
-                          int queryOptions,
-                          const char* ns,
-                          BSONObj& cmdObj,
-                          BSONObjBuilder& result,
-                          bool fromRepl) {
-    execCommandClientBasic(txn, c, *txn->getClient(), queryOptions, ns, cmdObj, result, fromRepl);
+                          Command* command,
+                          const rpc::RequestInterface& request,
+                          rpc::ReplyBuilderInterface* replyBuilder) {
+    int queryFlags = 0;
+    BSONObj cmdObj;
+
+    std::tie(cmdObj, queryFlags) = uassertStatusOK(
+        rpc::downconvertRequestMetadata(request.getCommandArgs(), request.getMetadata()));
+
+    std::string db = request.getDatabase().rawData();
+    BSONObjBuilder result;
+
+    execCommandClientBasic(txn,
+                           command,
+                           *txn->getClient(),
+                           queryFlags,
+                           request.getDatabase().rawData(),
+                           cmdObj,
+                           result);
+
+    replyBuilder->setCommandReply(result.done()).setMetadata(rpc::makeEmptyMetadata());
 }
 
 void Command::execCommandClientBasic(OperationContext* txn,
@@ -125,8 +97,7 @@ void Command::execCommandClientBasic(OperationContext* txn,
                                      int queryOptions,
                                      const char* ns,
                                      BSONObj& cmdObj,
-                                     BSONObjBuilder& result,
-                                     bool fromRepl) {
+                                     BSONObjBuilder& result) {
     std::string dbname = nsToDatabase(ns);
 
     if (cmdObj.getBoolField("help")) {
@@ -139,7 +110,7 @@ void Command::execCommandClientBasic(OperationContext* txn,
         return;
     }
 
-    Status status = _checkAuthorization(c, &client, dbname, cmdObj, fromRepl);
+    Status status = _checkAuthorization(c, &client, dbname, cmdObj);
     if (!status.isOK()) {
         appendCommandStatus(result, status);
         return;
@@ -147,21 +118,24 @@ void Command::execCommandClientBasic(OperationContext* txn,
 
     c->_commandsExecuted.increment();
 
+    if (c->shouldAffectCommandCounter()) {
+        globalOpCounters.gotCommand();
+    }
+
     std::string errmsg;
     bool ok = false;
     try {
-        ok = c->run(txn, dbname, cmdObj, queryOptions, errmsg, result, false);
+        ok = c->run(txn, dbname, cmdObj, queryOptions, errmsg, result);
     } catch (const DBException& e) {
-        int code = e.getCode();
+        result.resetToEmpty();
+        const int code = e.getCode();
 
         // Codes for StaleConfigException
-        if (code == RecvStaleConfigCode || code == SendStaleConfigCode) {
+        if (code == ErrorCodes::RecvStaleConfig || code == ErrorCodes::SendStaleConfig) {
             throw;
         }
 
-        stringstream ss;
-        ss << "exception: " << e.what();
-        errmsg = ss.str();
+        errmsg = e.what();
         result.append("code", code);
     }
 
@@ -171,4 +145,32 @@ void Command::execCommandClientBasic(OperationContext* txn,
 
     appendCommandStatus(result, ok, errmsg);
 }
+
+void Command::runAgainstRegistered(OperationContext* txn,
+                                   const char* ns,
+                                   BSONObj& jsobj,
+                                   BSONObjBuilder& anObjBuilder,
+                                   int queryOptions) {
+    // It should be impossible for this uassert to fail since there should be no way to get
+    // into this function with any other collection name.
+    uassert(16618,
+            "Illegal attempt to run a command against a namespace other than $cmd.",
+            nsToCollectionSubstring(ns) == "$cmd");
+
+    BSONElement e = jsobj.firstElement();
+    std::string commandName = e.fieldName();
+    Command* c = e.type() ? Command::findCommand(commandName) : NULL;
+    if (!c) {
+        Command::appendCommandStatus(
+            anObjBuilder, false, str::stream() << "no such cmd: " << commandName);
+        anObjBuilder.append("code", ErrorCodes::CommandNotFound);
+        Command::unknownCommands.increment();
+        return;
+    }
+
+    execCommandClientBasic(txn, c, cc(), queryOptions, ns, jsobj, anObjBuilder);
 }
+
+void Command::registerError(OperationContext* txn, const DBException& exception) {}
+
+}  // namespace mongo

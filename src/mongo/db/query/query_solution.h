@@ -28,7 +28,7 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
+#include <memory>
 
 #include "mongo/db/jsobj.h"
 #include "mongo/db/matcher/expression.h"
@@ -38,8 +38,6 @@
 #include "mongo/db/query/stage_types.h"
 
 namespace mongo {
-
-using mongo::fts::FTSQuery;
 
 class GeoNearExpression;
 
@@ -141,7 +139,7 @@ struct QuerySolutionNode {
             other->children.push_back(this->children[i]->clone());
         }
         if (NULL != this->filter) {
-            other->filter.reset(this->filter->shallowClone());
+            other->filter = this->filter->shallowClone();
         }
     }
 
@@ -150,7 +148,7 @@ struct QuerySolutionNode {
 
     // If a stage has a non-NULL filter all values outputted from that stage must pass that
     // filter.
-    boost::scoped_ptr<MatchExpression> filter;
+    std::unique_ptr<MatchExpression> filter;
 
 protected:
     /**
@@ -178,7 +176,7 @@ struct QuerySolution {
     QuerySolution() : hasBlockingStage(false), indexFilterApplied(false) {}
 
     // Owned here.
-    boost::scoped_ptr<QuerySolutionNode> root;
+    std::unique_ptr<QuerySolutionNode> root;
 
     // Any filters in root or below point into this object.  Must be owned.
     BSONObj filterData;
@@ -199,7 +197,7 @@ struct QuerySolution {
     bool indexFilterApplied;
 
     // Owned here. Used by the plan cache.
-    boost::scoped_ptr<SolutionCacheData> cacheData;
+    std::unique_ptr<SolutionCacheData> cacheData;
 
     /**
      * Output a human-readable std::string representing the plan.
@@ -247,8 +245,7 @@ struct TextNode : public QuerySolutionNode {
     BSONObjSet _sort;
 
     BSONObj indexKeyPattern;
-    std::string query;
-    std::string language;
+    std::unique_ptr<fts::FTSQuery> ftsQuery;
 
     // "Prefix" fields of a text index can handle equality predicates.  We group them with the
     // text node while creating the text leaf node and convert them into a BSONObj index prefix
@@ -458,6 +455,8 @@ struct IndexScanNode : public QuerySolutionNode {
 
     QuerySolutionNode* clone() const;
 
+    bool operator==(const IndexScanNode& other) const;
+
     BSONObjSet _sorts;
 
     BSONObj indexKeyPattern;
@@ -559,6 +558,39 @@ struct ProjectionNode : public QuerySolutionNode {
     BSONObj coveredKeyObj;
 };
 
+struct SortKeyGeneratorNode : public QuerySolutionNode {
+    StageType getType() const final {
+        return STAGE_SORT_KEY_GENERATOR;
+    }
+
+    bool fetched() const final {
+        return children[0]->fetched();
+    }
+
+    bool hasField(const std::string& field) const final {
+        return children[0]->hasField(field);
+    }
+
+    bool sortedByDiskLoc() const final {
+        return children[0]->sortedByDiskLoc();
+    }
+
+    const BSONObjSet& getSort() const final {
+        return children[0]->getSort();
+    }
+
+    QuerySolutionNode* clone() const final;
+
+    void appendToString(mongoutils::str::stream* ss, int indent) const final;
+
+    // The query predicate provided by the user. For sorted by an array field, the sort key depends
+    // on the predicate.
+    BSONObj queryObj;
+
+    // The user-supplied sort pattern.
+    BSONObj sortSpec;
+};
+
 struct SortNode : public QuerySolutionNode {
     SortNode() : limit(0) {}
     virtual ~SortNode() {}
@@ -597,8 +629,6 @@ struct SortNode : public QuerySolutionNode {
 
     BSONObj pattern;
 
-    BSONObj query;
-
     // Sum of both limit and skip count in the parsed query.
     size_t limit;
 };
@@ -628,7 +658,7 @@ struct LimitNode : public QuerySolutionNode {
 
     QuerySolutionNode* clone() const;
 
-    int limit;
+    long long limit;
 };
 
 struct SkipNode : public QuerySolutionNode {
@@ -655,7 +685,7 @@ struct SkipNode : public QuerySolutionNode {
 
     QuerySolutionNode* clone() const;
 
-    int skip;
+    long long skip;
 };
 
 // This is a standalone stage.
@@ -811,7 +841,7 @@ struct DistinctNode : public QuerySolutionNode {
     virtual ~DistinctNode() {}
 
     virtual StageType getType() const {
-        return STAGE_DISTINCT;
+        return STAGE_DISTINCT_SCAN;
     }
     virtual void appendToString(mongoutils::str::stream* ss, int indent) const;
 

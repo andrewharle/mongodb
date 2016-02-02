@@ -27,7 +27,9 @@
  */
 
 #include "mongo/client/dbclientcursor.h"
+#include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/database.h"
+#include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/exec/index_scan.h"
 #include "mongo/db/exec/plan_stage.h"
@@ -35,8 +37,8 @@
 #include "mongo/db/matcher/expression_parser.h"
 #include "mongo/db/operation_context_impl.h"
 #include "mongo/db/query/plan_executor.h"
-#include "mongo/db/catalog/collection.h"
 #include "mongo/dbtests/dbtests.h"
+#include "mongo/stdx/memory.h"
 
 /**
  * This file tests db/exec/index_scan.cpp
@@ -44,12 +46,12 @@
 
 namespace QueryStageTests {
 
-using std::auto_ptr;
+using std::unique_ptr;
 
 class IndexScanBase {
 public:
     IndexScanBase() : _client(&_txn) {
-        Client::WriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_txn, ns());
 
         for (int i = 0; i < numObj(); ++i) {
             BSONObjBuilder bob;
@@ -64,7 +66,7 @@ public:
     }
 
     virtual ~IndexScanBase() {
-        Client::WriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_txn, ns());
         _client.dropCollection(ns());
     }
 
@@ -75,21 +77,18 @@ public:
     int countResults(const IndexScanParams& params, BSONObj filterObj = BSONObj()) {
         AutoGetCollectionForRead ctx(&_txn, ns());
 
-        StatusWithMatchExpression swme = MatchExpressionParser::parse(filterObj);
-        verify(swme.isOK());
-        auto_ptr<MatchExpression> filterExpr(swme.getValue());
+        StatusWithMatchExpression statusWithMatcher = MatchExpressionParser::parse(filterObj);
+        verify(statusWithMatcher.isOK());
+        unique_ptr<MatchExpression> filterExpr = std::move(statusWithMatcher.getValue());
 
-        WorkingSet* ws = new WorkingSet();
+        unique_ptr<WorkingSet> ws = stdx::make_unique<WorkingSet>();
+        unique_ptr<IndexScan> ix =
+            stdx::make_unique<IndexScan>(&_txn, params, ws.get(), filterExpr.get());
 
-        PlanExecutor* rawExec;
-        Status status = PlanExecutor::make(&_txn,
-                                           ws,
-                                           new IndexScan(&_txn, params, ws, filterExpr.get()),
-                                           ctx.getCollection(),
-                                           PlanExecutor::YIELD_MANUAL,
-                                           &rawExec);
-        ASSERT_OK(status);
-        boost::scoped_ptr<PlanExecutor> exec(rawExec);
+        auto statusWithPlanExecutor = PlanExecutor::make(
+            &_txn, std::move(ws), std::move(ix), ctx.getCollection(), PlanExecutor::YIELD_MANUAL);
+        ASSERT_OK(statusWithPlanExecutor.getStatus());
+        unique_ptr<PlanExecutor> exec = std::move(statusWithPlanExecutor.getValue());
 
         int count = 0;
         for (RecordId dl; PlanExecutor::ADVANCED == exec->getNext(NULL, &dl);) {
@@ -100,7 +99,7 @@ public:
     }
 
     void makeGeoData() {
-        Client::WriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_txn, ns());
 
         for (int i = 0; i < numObj(); ++i) {
             double lat = double(rand()) / RAND_MAX;

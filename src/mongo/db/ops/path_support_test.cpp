@@ -28,6 +28,7 @@
 
 #include "mongo/db/ops/path_support.h"
 
+#include <cstdint>
 #include <string>
 
 #include "mongo/base/error_codes.h"
@@ -43,7 +44,7 @@
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_leaf.h"
 #include "mongo/db/matcher/expression_parser.h"
-#include "mongo/platform/cstdint.h"
+#include "mongo/db/matcher/extensions_callback_noop.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/mongoutils/str.h"
 
@@ -53,7 +54,7 @@ using namespace mongo;
 using namespace mutablebson;
 using namespace pathsupport;
 using mongoutils::str::stream;
-using std::auto_ptr;
+using std::unique_ptr;
 using std::string;
 
 class EmptyDoc : public mongo::unittest::Test {
@@ -490,8 +491,7 @@ TEST_F(ArrayDoc, NonNumericPathInArray) {
 //
 
 static MatchExpression* makeExpr(const BSONObj& exprBSON) {
-    static const WhereCallbackNoop callbackNoop;
-    return MatchExpressionParser::parse(exprBSON, callbackNoop).getValue();
+    return MatchExpressionParser::parse(exprBSON, ExtensionsCallbackNoop()).getValue().release();
 }
 
 static void assertContains(const EqualityMatches& equalities, const BSONObj& wrapped) {
@@ -508,7 +508,7 @@ static void assertContains(const EqualityMatches& equalities, const BSONObj& wra
     }
 }
 
-static void assertContains(const EqualityMatches& equalities, const StringData& path, int value) {
+static void assertContains(const EqualityMatches& equalities, StringData path, int value) {
     assertContains(equalities, BSON(path << value));
 }
 
@@ -516,7 +516,7 @@ static void assertContains(const EqualityMatches& equalities, const StringData& 
 
 TEST(ExtractEqualities, Basic) {
     BSONObj exprBSON = fromjson("{a:1}");
-    auto_ptr<MatchExpression> expr(makeExpr(exprBSON));
+    unique_ptr<MatchExpression> expr(makeExpr(exprBSON));
 
     EqualityMatches equalities;
     ASSERT_OK(extractEqualityMatches(*expr, &equalities));
@@ -526,7 +526,7 @@ TEST(ExtractEqualities, Basic) {
 
 TEST(ExtractEqualities, Multiple) {
     BSONObj exprBSON = fromjson("{a:1, b:2}");
-    auto_ptr<MatchExpression> expr(makeExpr(exprBSON));
+    unique_ptr<MatchExpression> expr(makeExpr(exprBSON));
 
     EqualityMatches equalities;
     ASSERT_OK(extractEqualityMatches(*expr, &equalities));
@@ -537,7 +537,7 @@ TEST(ExtractEqualities, Multiple) {
 
 TEST(ExtractEqualities, EqOperator) {
     BSONObj exprBSON = fromjson("{a:{$eq:1}}");
-    auto_ptr<MatchExpression> expr(makeExpr(exprBSON));
+    unique_ptr<MatchExpression> expr(makeExpr(exprBSON));
 
     EqualityMatches equalities;
     ASSERT_OK(extractEqualityMatches(*expr, &equalities));
@@ -547,7 +547,7 @@ TEST(ExtractEqualities, EqOperator) {
 
 TEST(ExtractEqualities, AndOperator) {
     BSONObj exprBSON = fromjson("{$and:[{a:{$eq:1}},{b:2}]}");
-    auto_ptr<MatchExpression> expr(makeExpr(exprBSON));
+    unique_ptr<MatchExpression> expr(makeExpr(exprBSON));
 
     EqualityMatches equalities;
     ASSERT_OK(extractEqualityMatches(*expr, &equalities));
@@ -558,7 +558,7 @@ TEST(ExtractEqualities, AndOperator) {
 
 TEST(ExtractEqualities, NestedAndOperator) {
     BSONObj exprBSON = fromjson("{$and:[{$and:[{a:{$eq:1}},{b:2}]},{c:3}]}");
-    auto_ptr<MatchExpression> expr(makeExpr(exprBSON));
+    unique_ptr<MatchExpression> expr(makeExpr(exprBSON));
 
     EqualityMatches equalities;
     ASSERT_OK(extractEqualityMatches(*expr, &equalities));
@@ -570,7 +570,7 @@ TEST(ExtractEqualities, NestedAndOperator) {
 
 TEST(ExtractEqualities, NestedPaths) {
     BSONObj exprBSON = fromjson("{'a.a':1}");
-    auto_ptr<MatchExpression> expr(makeExpr(exprBSON));
+    unique_ptr<MatchExpression> expr(makeExpr(exprBSON));
 
     EqualityMatches equalities;
     ASSERT_OK(extractEqualityMatches(*expr, &equalities));
@@ -580,7 +580,7 @@ TEST(ExtractEqualities, NestedPaths) {
 
 TEST(ExtractEqualities, SiblingPaths) {
     BSONObj exprBSON = fromjson("{'a.a':1,'a.b':{$eq:2}}");
-    auto_ptr<MatchExpression> expr(makeExpr(exprBSON));
+    unique_ptr<MatchExpression> expr(makeExpr(exprBSON));
 
     EqualityMatches equalities;
     ASSERT_OK(extractEqualityMatches(*expr, &equalities));
@@ -591,7 +591,7 @@ TEST(ExtractEqualities, SiblingPaths) {
 
 TEST(ExtractEqualities, NestedAndNestedPaths) {
     BSONObj exprBSON = fromjson("{$and:[{$and:[{'a.a':{$eq:1}},{'a.b':2}]},{'c.c.c':3}]}");
-    auto_ptr<MatchExpression> expr(makeExpr(exprBSON));
+    unique_ptr<MatchExpression> expr(makeExpr(exprBSON));
 
     EqualityMatches equalities;
     ASSERT_OK(extractEqualityMatches(*expr, &equalities));
@@ -603,7 +603,7 @@ TEST(ExtractEqualities, NestedAndNestedPaths) {
 
 TEST(ExtractEqualities, IdOnly) {
     BSONObj exprBSON = fromjson("{_id:1}");
-    auto_ptr<MatchExpression> expr(makeExpr(exprBSON));
+    unique_ptr<MatchExpression> expr(makeExpr(exprBSON));
 
     EqualityMatches equalities;
     ASSERT_OK(extractEqualityMatches(*expr, &equalities));
@@ -635,7 +635,7 @@ private:
 
 TEST(ExtractEqualities, IdOnlyMulti) {
     BSONObj exprBSON = fromjson("{_id:{$eq:1},a:1}");
-    auto_ptr<MatchExpression> expr(makeExpr(exprBSON));
+    unique_ptr<MatchExpression> expr(makeExpr(exprBSON));
 
     ImmutablePaths immutablePaths;
     immutablePaths.addPath("_id");
@@ -648,7 +648,7 @@ TEST(ExtractEqualities, IdOnlyMulti) {
 
 TEST(ExtractEqualities, IdOnlyIgnoreConflict) {
     BSONObj exprBSON = fromjson("{_id:1,a:1,'a.b':1}");
-    auto_ptr<MatchExpression> expr(makeExpr(exprBSON));
+    unique_ptr<MatchExpression> expr(makeExpr(exprBSON));
 
     ImmutablePaths immutablePaths;
     immutablePaths.addPath("_id");
@@ -661,7 +661,7 @@ TEST(ExtractEqualities, IdOnlyIgnoreConflict) {
 
 TEST(ExtractEqualities, IdOnlyNested) {
     BSONObj exprBSON = fromjson("{'_id.a':1,'_id.b':{$eq:2},c:3}");
-    auto_ptr<MatchExpression> expr(makeExpr(exprBSON));
+    unique_ptr<MatchExpression> expr(makeExpr(exprBSON));
 
     ImmutablePaths immutablePaths;
     immutablePaths.addPath("_id");
@@ -673,7 +673,7 @@ TEST(ExtractEqualities, IdOnlyNested) {
 
 TEST(ExtractEqualities, IdAndOtherImmutable) {
     BSONObj exprBSON = fromjson("{_id:1,a:1,b:2}");
-    auto_ptr<MatchExpression> expr(makeExpr(exprBSON));
+    unique_ptr<MatchExpression> expr(makeExpr(exprBSON));
 
     ImmutablePaths immutablePaths;
     immutablePaths.addPath("_id");
@@ -688,7 +688,7 @@ TEST(ExtractEqualities, IdAndOtherImmutable) {
 
 TEST(ExtractEqualities, IdAndNestedImmutable) {
     BSONObj exprBSON = fromjson("{_id:1,a:1,'c.d':3}");
-    auto_ptr<MatchExpression> expr(makeExpr(exprBSON));
+    unique_ptr<MatchExpression> expr(makeExpr(exprBSON));
 
     ImmutablePaths immutablePaths;
     immutablePaths.addPath("_id");
@@ -705,7 +705,7 @@ TEST(ExtractEqualities, IdAndNestedImmutable) {
 
 TEST(ExtractEqualities, NonFullImmutable) {
     BSONObj exprBSON = fromjson("{'a.b':1}");
-    auto_ptr<MatchExpression> expr(makeExpr(exprBSON));
+    unique_ptr<MatchExpression> expr(makeExpr(exprBSON));
 
     ImmutablePaths immutablePaths;
     immutablePaths.addPath("a");
@@ -717,7 +717,7 @@ TEST(ExtractEqualities, NonFullImmutable) {
 
 TEST(ExtractEqualities, Empty) {
     BSONObj exprBSON = fromjson("{'':0}");
-    auto_ptr<MatchExpression> expr(makeExpr(exprBSON));
+    unique_ptr<MatchExpression> expr(makeExpr(exprBSON));
 
     EqualityMatches equalities;
     ASSERT_OK(extractEqualityMatches(*expr, &equalities));
@@ -727,7 +727,7 @@ TEST(ExtractEqualities, Empty) {
 
 TEST(ExtractEqualities, EmptyMulti) {
     BSONObj exprBSON = fromjson("{'':0,a:{$eq:1}}");
-    auto_ptr<MatchExpression> expr(makeExpr(exprBSON));
+    unique_ptr<MatchExpression> expr(makeExpr(exprBSON));
 
     EqualityMatches equalities;
     ASSERT_OK(extractEqualityMatches(*expr, &equalities));
@@ -738,7 +738,7 @@ TEST(ExtractEqualities, EmptyMulti) {
 
 TEST(ExtractEqualities, EqConflict) {
     BSONObj exprBSON = fromjson("{a:1,a:1}");
-    auto_ptr<MatchExpression> expr(makeExpr(exprBSON));
+    unique_ptr<MatchExpression> expr(makeExpr(exprBSON));
 
     EqualityMatches equalities;
     ASSERT_EQUALS(extractEqualityMatches(*expr, &equalities).code(),
@@ -747,7 +747,7 @@ TEST(ExtractEqualities, EqConflict) {
 
 TEST(ExtractEqualities, PrefixConflict) {
     BSONObj exprBSON = fromjson("{a:1,'a.b':{$eq:1}}");
-    auto_ptr<MatchExpression> expr(makeExpr(exprBSON));
+    unique_ptr<MatchExpression> expr(makeExpr(exprBSON));
 
     EqualityMatches equalities;
     ASSERT_EQUALS(extractEqualityMatches(*expr, &equalities).code(),
@@ -756,7 +756,7 @@ TEST(ExtractEqualities, PrefixConflict) {
 
 TEST(ExtractEqualities, AndPrefixConflict) {
     BSONObj exprBSON = fromjson("{$and:[{a:1},{'a.b':{$eq:1}}]}");
-    auto_ptr<MatchExpression> expr(makeExpr(exprBSON));
+    unique_ptr<MatchExpression> expr(makeExpr(exprBSON));
 
     EqualityMatches equalities;
     ASSERT_EQUALS(extractEqualityMatches(*expr, &equalities).code(),
@@ -765,7 +765,7 @@ TEST(ExtractEqualities, AndPrefixConflict) {
 
 TEST(ExtractEqualities, EmptyConflict) {
     BSONObj exprBSON = fromjson("{'':0,'':{$eq:0}}");
-    auto_ptr<MatchExpression> expr(makeExpr(exprBSON));
+    unique_ptr<MatchExpression> expr(makeExpr(exprBSON));
 
     EqualityMatches equalities;
     ASSERT_EQUALS(extractEqualityMatches(*expr, &equalities).code(),
@@ -778,7 +778,7 @@ TEST(ExtractEqualities, EmptyConflict) {
 //
 
 static void assertParent(const EqualityMatches& equalities,
-                         const StringData& pathStr,
+                         StringData pathStr,
                          const BSONObj& wrapped) {
     FieldRef path(pathStr);
     BSONElement value = wrapped.firstElement();
@@ -804,13 +804,13 @@ static void assertParent(const EqualityMatches& equalities,
 }
 
 static void assertParent(const EqualityMatches& equalities,
-                         const StringData& path,
-                         const StringData& parentPath,
+                         StringData path,
+                         StringData parentPath,
                          int value) {
     assertParent(equalities, path, BSON(parentPath << value));
 }
 
-static void assertNoParent(const EqualityMatches& equalities, const StringData& pathStr) {
+static void assertNoParent(const EqualityMatches& equalities, StringData pathStr) {
     FieldRef path(pathStr);
 
     int parentPathPart;
@@ -826,7 +826,7 @@ static void assertNoParent(const EqualityMatches& equalities, const StringData& 
 
 TEST(FindParentEquality, Basic) {
     BSONObj exprBSON = fromjson("{a:1}");
-    auto_ptr<MatchExpression> expr(makeExpr(exprBSON));
+    unique_ptr<MatchExpression> expr(makeExpr(exprBSON));
     EqualityMatches equalities;
     ASSERT_OK(extractEqualityMatches(*expr, &equalities));
 
@@ -837,7 +837,7 @@ TEST(FindParentEquality, Basic) {
 
 TEST(FindParentEquality, Multi) {
     BSONObj exprBSON = fromjson("{a:1,b:2}");
-    auto_ptr<MatchExpression> expr(makeExpr(exprBSON));
+    unique_ptr<MatchExpression> expr(makeExpr(exprBSON));
     EqualityMatches equalities;
     ASSERT_OK(extractEqualityMatches(*expr, &equalities));
 
@@ -850,7 +850,7 @@ TEST(FindParentEquality, Multi) {
 
 TEST(FindParentEquality, Nested) {
     BSONObj exprBSON = fromjson("{'a.a':1}");
-    auto_ptr<MatchExpression> expr(makeExpr(exprBSON));
+    unique_ptr<MatchExpression> expr(makeExpr(exprBSON));
     EqualityMatches equalities;
     ASSERT_OK(extractEqualityMatches(*expr, &equalities));
 
@@ -862,7 +862,7 @@ TEST(FindParentEquality, Nested) {
 
 TEST(FindParentEquality, NestedMulti) {
     BSONObj exprBSON = fromjson("{'a.a':1,'a.b':2,'c.c':3}");
-    auto_ptr<MatchExpression> expr(makeExpr(exprBSON));
+    unique_ptr<MatchExpression> expr(makeExpr(exprBSON));
     EqualityMatches equalities;
     ASSERT_OK(extractEqualityMatches(*expr, &equalities));
 
@@ -879,7 +879,7 @@ TEST(FindParentEquality, NestedMulti) {
 
 TEST(FindParentEquality, Empty) {
     BSONObj exprBSON = fromjson("{'':0}");
-    auto_ptr<MatchExpression> expr(makeExpr(exprBSON));
+    unique_ptr<MatchExpression> expr(makeExpr(exprBSON));
     EqualityMatches equalities;
     ASSERT_OK(extractEqualityMatches(*expr, &equalities));
 
@@ -888,7 +888,7 @@ TEST(FindParentEquality, Empty) {
 
 TEST(FindParentEquality, EmptyMulti) {
     BSONObj exprBSON = fromjson("{'':0,a:1}");
-    auto_ptr<MatchExpression> expr(makeExpr(exprBSON));
+    unique_ptr<MatchExpression> expr(makeExpr(exprBSON));
     EqualityMatches equalities;
     ASSERT_OK(extractEqualityMatches(*expr, &equalities));
 

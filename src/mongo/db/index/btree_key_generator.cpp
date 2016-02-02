@@ -26,21 +26,27 @@
 *    it in the license file.
 */
 
+#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/index/btree_key_generator.h"
 #include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
 
-using std::set;
-using std::string;
-using std::stringstream;
-using std::vector;
-
-// Used in scanandorder.cpp to inforatively error when we try to sort keys with parallel arrays.
+// SortStage checks for this error code in order to informatively error when we try to sort keys
+// with parallel arrays.
 const int BtreeKeyGenerator::ParallelArraysCode = 10088;
 
-BtreeKeyGenerator::BtreeKeyGenerator(vector<const char*> fieldNames,
-                                     vector<BSONElement> fixed,
+namespace {
+
+const BSONObj nullObj = BSON("" << BSONNULL);
+const BSONElement nullElt = nullObj.firstElement();
+const BSONObj undefinedObj = BSON("" << BSONUndefined);
+const BSONElement undefinedElt = undefinedObj.firstElement();
+
+}  // namespace
+
+BtreeKeyGenerator::BtreeKeyGenerator(std::vector<const char*> fieldNames,
+                                     std::vector<BSONElement> fixed,
                                      bool isSparse)
     : _fieldNames(fieldNames), _isSparse(isSparse), _fixed(fixed) {
     BSONObjBuilder nullKeyBuilder;
@@ -48,11 +54,6 @@ BtreeKeyGenerator::BtreeKeyGenerator(vector<const char*> fieldNames,
         nullKeyBuilder.appendNull("");
     }
     _nullKey = nullKeyBuilder.obj();
-
-    BSONObjBuilder nullEltBuilder;
-    nullEltBuilder.appendNull("");
-    _nullObj = nullEltBuilder.obj();
-    _nullElt = _nullObj.firstElement();
 
     _isIdIndex = fieldNames.size() == 1 && std::string("_id") == fieldNames[0];
 }
@@ -73,28 +74,27 @@ void BtreeKeyGenerator::getKeys(const BSONObj& obj, BSONObjSet* keys) const {
         return;
     }
 
-    // These are mutated as part of the getKeys call.  :|
-    vector<const char*> fieldNames(_fieldNames);
-    vector<BSONElement> fixed(_fixed);
-    getKeysImpl(fieldNames, fixed, obj, keys);
+    // '_fieldNames' and '_fixed' are passed by value so that they can be mutated as part of the
+    // getKeys call.  :|
+    getKeysImpl(_fieldNames, _fixed, obj, keys);
     if (keys->empty() && !_isSparse) {
         keys->insert(_nullKey);
     }
 }
 
 static void assertParallelArrays(const char* first, const char* second) {
-    stringstream ss;
+    std::stringstream ss;
     ss << "cannot index parallel arrays [" << first << "] [" << second << "]";
     uasserted(BtreeKeyGenerator::ParallelArraysCode, ss.str());
 }
 
-BtreeKeyGeneratorV0::BtreeKeyGeneratorV0(vector<const char*> fieldNames,
-                                         vector<BSONElement> fixed,
+BtreeKeyGeneratorV0::BtreeKeyGeneratorV0(std::vector<const char*> fieldNames,
+                                         std::vector<BSONElement> fixed,
                                          bool isSparse)
     : BtreeKeyGenerator(fieldNames, fixed, isSparse) {}
 
-void BtreeKeyGeneratorV0::getKeysImpl(vector<const char*> fieldNames,
-                                      vector<BSONElement> fixed,
+void BtreeKeyGeneratorV0::getKeysImpl(std::vector<const char*> fieldNames,
+                                      std::vector<BSONElement> fixed,
                                       const BSONObj& obj,
                                       BSONObjSet* keys) const {
     BSONElement arrElt;
@@ -108,7 +108,7 @@ void BtreeKeyGeneratorV0::getKeysImpl(vector<const char*> fieldNames,
         BSONElement e = obj.getFieldDottedOrArray(fieldNames[i]);
 
         if (e.eoo()) {
-            e = _nullElt;  // no matching field
+            e = nullElt;  // no matching field
             numNotFound++;
         }
 
@@ -132,7 +132,8 @@ void BtreeKeyGeneratorV0::getKeysImpl(vector<const char*> fieldNames,
     }
 
     bool allFound = true;  // have we found elements for all field names in the key spec?
-    for (vector<const char*>::const_iterator i = fieldNames.begin(); i != fieldNames.end(); ++i) {
+    for (std::vector<const char*>::const_iterator i = fieldNames.begin(); i != fieldNames.end();
+         ++i) {
         if (**i != '\0') {
             allFound = false;
             break;
@@ -151,7 +152,7 @@ void BtreeKeyGeneratorV0::getKeysImpl(vector<const char*> fieldNames,
         if (arrElt.eoo()) {
             // no terminal array element to expand
             BSONObjBuilder b(_sizeTracker);
-            for (vector<BSONElement>::iterator i = fixed.begin(); i != fixed.end(); ++i)
+            for (std::vector<BSONElement>::iterator i = fixed.begin(); i != fixed.end(); ++i)
                 b.appendAs(*i, "");
             keys->insert(b.obj());
         } else {
@@ -206,24 +207,18 @@ void BtreeKeyGeneratorV0::getKeysImpl(vector<const char*> fieldNames,
     }
 }
 
-BtreeKeyGeneratorV1::BtreeKeyGeneratorV1(vector<const char*> fieldNames,
-                                         vector<BSONElement> fixed,
+BtreeKeyGeneratorV1::BtreeKeyGeneratorV1(std::vector<const char*> fieldNames,
+                                         std::vector<BSONElement> fixed,
                                          bool isSparse)
-    : BtreeKeyGenerator(fieldNames, fixed, isSparse) {
-    BSONObjBuilder b;
-    b.appendUndefined("");
-    _undefinedObj = b.obj();
-    _undefinedElt = _undefinedObj.firstElement();
-}
+    : BtreeKeyGenerator(fieldNames, fixed, isSparse), _emptyPositionalInfo(fieldNames.size()) {}
 
 BSONElement BtreeKeyGeneratorV1::extractNextElement(const BSONObj& obj,
-                                                    const BSONObj& arr,
-                                                    const char*& field,
-                                                    bool& arrayNestedArray) const {
-    string firstField = mongoutils::str::before(field, '.');
+                                                    const PositionalPathInfo& positionalInfo,
+                                                    const char** field,
+                                                    bool* arrayNestedArray) const {
+    std::string firstField = mongoutils::str::before(*field, '.');
     bool haveObjField = !obj.getField(firstField).eoo();
-    BSONElement arrField = arr.getField(firstField);
-    bool haveArrField = !arrField.eoo();
+    BSONElement arrField = positionalInfo.positionallyIndexedElt;
 
     // An index component field name cannot exist in both a document
     // array and one of that array's children.
@@ -231,59 +226,65 @@ BSONElement BtreeKeyGeneratorV1::extractNextElement(const BSONObj& obj,
             mongoutils::str::stream()
                 << "Ambiguous field name found in array (do not use numeric field names in "
                    "embedded elements in an array), field: '" << arrField.fieldName()
-                << "' for array: " << arr,
-            !haveObjField || !haveArrField);
+                << "' for array: " << positionalInfo.arrayObj,
+            !haveObjField || !positionalInfo.hasPositionallyIndexedElt());
 
-    arrayNestedArray = false;
+    *arrayNestedArray = false;
     if (haveObjField) {
-        return obj.getFieldDottedOrArray(field);
-    } else if (haveArrField) {
+        return obj.getFieldDottedOrArray(*field);
+    } else if (positionalInfo.hasPositionallyIndexedElt()) {
         if (arrField.type() == Array) {
-            arrayNestedArray = true;
+            *arrayNestedArray = true;
         }
-        return arr.getFieldDottedOrArray(field);
+        *field = positionalInfo.remainingPath;
+        return positionalInfo.dottedElt;
     }
     return BSONElement();
 }
 
-void BtreeKeyGeneratorV1::_getKeysArrEltFixed(vector<const char*>& fieldNames,
-                                              vector<BSONElement>& fixed,
-                                              const BSONElement& arrEntry,
-                                              BSONObjSet* keys,
-                                              unsigned numNotFound,
-                                              const BSONElement& arrObjElt,
-                                              const set<unsigned>& arrIdxs,
-                                              bool mayExpandArrayUnembedded) const {
-    // set up any terminal array values
-    for (set<unsigned>::const_iterator j = arrIdxs.begin(); j != arrIdxs.end(); ++j) {
-        if (*fieldNames[*j] == '\0') {
-            fixed[*j] = mayExpandArrayUnembedded ? arrEntry : arrObjElt;
+void BtreeKeyGeneratorV1::_getKeysArrEltFixed(
+    std::vector<const char*>* fieldNames,
+    std::vector<BSONElement>* fixed,
+    const BSONElement& arrEntry,
+    BSONObjSet* keys,
+    unsigned numNotFound,
+    const BSONElement& arrObjElt,
+    const std::set<unsigned>& arrIdxs,
+    bool mayExpandArrayUnembedded,
+    const std::vector<PositionalPathInfo>& positionalInfo) const {
+    // Set up any terminal array values.
+    for (std::set<unsigned>::const_iterator j = arrIdxs.begin(); j != arrIdxs.end(); ++j) {
+        unsigned idx = *j;
+        if (*(*fieldNames)[idx] == '\0') {
+            (*fixed)[idx] = mayExpandArrayUnembedded ? arrEntry : arrObjElt;
         }
     }
-    // recurse
-    getKeysImplWithArray(fieldNames,
-                         fixed,
+
+    // Recurse.
+    getKeysImplWithArray(*fieldNames,
+                         *fixed,
                          arrEntry.type() == Object ? arrEntry.embeddedObject() : BSONObj(),
                          keys,
                          numNotFound,
-                         arrObjElt.embeddedObject());
+                         positionalInfo);
 }
 
-void BtreeKeyGeneratorV1::getKeysImpl(vector<const char*> fieldNames,
-                                      vector<BSONElement> fixed,
+void BtreeKeyGeneratorV1::getKeysImpl(std::vector<const char*> fieldNames,
+                                      std::vector<BSONElement> fixed,
                                       const BSONObj& obj,
                                       BSONObjSet* keys) const {
-    getKeysImplWithArray(fieldNames, fixed, obj, keys, 0, BSONObj());
+    getKeysImplWithArray(fieldNames, fixed, obj, keys, 0, _emptyPositionalInfo);
 }
 
-void BtreeKeyGeneratorV1::getKeysImplWithArray(vector<const char*> fieldNames,
-                                               vector<BSONElement> fixed,
-                                               const BSONObj& obj,
-                                               BSONObjSet* keys,
-                                               unsigned numNotFound,
-                                               const BSONObj& array) const {
+void BtreeKeyGeneratorV1::getKeysImplWithArray(
+    std::vector<const char*> fieldNames,
+    std::vector<BSONElement> fixed,
+    const BSONObj& obj,
+    BSONObjSet* keys,
+    unsigned numNotFound,
+    const std::vector<PositionalPathInfo>& positionalInfo) const {
     BSONElement arrElt;
-    set<unsigned> arrIdxs;
+    std::set<unsigned> arrIdxs;
     bool mayExpandArrayUnembedded = true;
     for (unsigned i = 0; i < fieldNames.size(); ++i) {
         if (*fieldNames[i] == '\0') {
@@ -292,11 +293,12 @@ void BtreeKeyGeneratorV1::getKeysImplWithArray(vector<const char*> fieldNames,
 
         bool arrayNestedArray;
         // Extract element matching fieldName[ i ] from object xor array.
-        BSONElement e = extractNextElement(obj, array, fieldNames[i], arrayNestedArray);
+        BSONElement e =
+            extractNextElement(obj, positionalInfo[i], &fieldNames[i], &arrayNestedArray);
 
         if (e.eoo()) {
             // if field not present, set to null
-            fixed[i] = _nullElt;
+            fixed[i] = nullElt;
             // done expanding this field name
             fieldNames[i] = "";
             numNotFound++;
@@ -324,27 +326,63 @@ void BtreeKeyGeneratorV1::getKeysImplWithArray(vector<const char*> fieldNames,
             return;
         }
         BSONObjBuilder b(_sizeTracker);
-        for (vector<BSONElement>::iterator i = fixed.begin(); i != fixed.end(); ++i) {
+        for (std::vector<BSONElement>::iterator i = fixed.begin(); i != fixed.end(); ++i) {
             b.appendAs(*i, "");
         }
         keys->insert(b.obj());
     } else if (arrElt.embeddedObject().firstElement().eoo()) {
         // Empty array, so set matching fields to undefined.
-        _getKeysArrEltFixed(
-            fieldNames, fixed, _undefinedElt, keys, numNotFound, arrElt, arrIdxs, true);
+        _getKeysArrEltFixed(&fieldNames,
+                            &fixed,
+                            undefinedElt,
+                            keys,
+                            numNotFound,
+                            arrElt,
+                            arrIdxs,
+                            true,
+                            _emptyPositionalInfo);
     } else {
-        // Non empty array that can be expanded, so generate a key for each member.
         BSONObj arrObj = arrElt.embeddedObject();
+
+        // For positional key patterns, e.g. {'a.1.b': 1}, we lookup the indexed array element
+        // and then traverse the remainder of the field path up front. This prevents us from
+        // having to look up the indexed element again on each recursive call (i.e. once per
+        // array element).
+        std::vector<PositionalPathInfo> subPositionalInfo(fixed.size());
+        for (size_t i = 0; i < fieldNames.size(); ++i) {
+            if (*fieldNames[i] == '\0') {
+                // We've reached the end of the path.
+                continue;
+            }
+
+            StringData part = fieldNames[i];
+            part = part.substr(0, part.find('.'));
+            subPositionalInfo[i].positionallyIndexedElt = arrObj[part];
+            if (subPositionalInfo[i].positionallyIndexedElt.eoo()) {
+                // Not indexing an array by position.
+                continue;
+            }
+
+            // We're indexing an array element by its position. Traverse the remainder of the
+            // field path now.
+            subPositionalInfo[i].arrayObj = arrObj;
+            subPositionalInfo[i].remainingPath = fieldNames[i];
+            subPositionalInfo[i].dottedElt =
+                arrObj.getFieldDottedOrArray(subPositionalInfo[i].remainingPath);
+        }
+
+        // Generate a key for each element of the indexed array.
         BSONObjIterator i(arrObj);
         while (i.more()) {
-            _getKeysArrEltFixed(fieldNames,
-                                fixed,
+            _getKeysArrEltFixed(&fieldNames,
+                                &fixed,
                                 i.next(),
                                 keys,
                                 numNotFound,
                                 arrElt,
                                 arrIdxs,
-                                mayExpandArrayUnembedded);
+                                mayExpandArrayUnembedded,
+                                subPositionalInfo);
         }
     }
 }

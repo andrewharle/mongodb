@@ -41,21 +41,22 @@ using namespace mongo;
 
 namespace {
 
-using std::auto_ptr;
+using std::unique_ptr;
 
-static const char* ns = "somebogusns";
+static const NamespaceString nss("test.collection");
 
 /**
  * Utility functions to create a CanonicalQuery
  */
-CanonicalQuery* canonicalize(const char* queryStr, const char* sortStr, const char* projStr) {
+unique_ptr<CanonicalQuery> canonicalize(const char* queryStr,
+                                        const char* sortStr,
+                                        const char* projStr) {
     BSONObj queryObj = fromjson(queryStr);
     BSONObj sortObj = fromjson(sortStr);
     BSONObj projObj = fromjson(projStr);
-    CanonicalQuery* cq;
-    Status result = CanonicalQuery::canonicalize(ns, queryObj, sortObj, projObj, &cq);
-    ASSERT_OK(result);
-    return cq;
+    auto statusWithCQ = CanonicalQuery::canonicalize(nss, queryObj, sortObj, projObj);
+    ASSERT_OK(statusWithCQ.getStatus());
+    return std::move(statusWithCQ.getValue());
 }
 
 //
@@ -72,26 +73,27 @@ CanonicalQuery* canonicalize(const char* queryStr, const char* sortStr, const ch
 void testAllowedIndices(const char* hintKeyPatterns[],
                         const char* indexCatalogKeyPatterns[],
                         const char* expectedFilteredKeyPatterns[]) {
+    PlanCache planCache;
     QuerySettings querySettings;
     AllowedIndices* allowedIndicesRaw;
 
     // getAllowedIndices should return false when query shape is not yet in query settings.
-    auto_ptr<CanonicalQuery> cq(canonicalize("{a: 1}", "{}", "{}"));
-    ASSERT_FALSE(querySettings.getAllowedIndices(*cq, &allowedIndicesRaw));
+    unique_ptr<CanonicalQuery> cq(canonicalize("{a: 1}", "{}", "{}"));
+    PlanCacheKey key = planCache.computeKey(*cq);
+    ASSERT_FALSE(querySettings.getAllowedIndices(key, &allowedIndicesRaw));
 
     // Add entry to query settings.
-    const PlanCacheKey& key = cq->getPlanCacheKey();
     std::vector<BSONObj> indexKeyPatterns;
     for (int i = 0; hintKeyPatterns[i] != NULL; ++i) {
         indexKeyPatterns.push_back(fromjson(hintKeyPatterns[i]));
     }
-    querySettings.setAllowedIndices(*cq, indexKeyPatterns);
+    querySettings.setAllowedIndices(*cq, key, indexKeyPatterns);
 
     // Index entry vector should contain 1 entry after filtering.
-    ASSERT_TRUE(querySettings.getAllowedIndices(*cq, &allowedIndicesRaw));
+    ASSERT_TRUE(querySettings.getAllowedIndices(key, &allowedIndicesRaw));
     ASSERT_FALSE(key.empty());
     ASSERT(NULL != allowedIndicesRaw);
-    auto_ptr<AllowedIndices> allowedIndices(allowedIndicesRaw);
+    unique_ptr<AllowedIndices> allowedIndices(allowedIndicesRaw);
 
     // Indexes from index catalog.
     std::vector<IndexEntry> indexEntries;

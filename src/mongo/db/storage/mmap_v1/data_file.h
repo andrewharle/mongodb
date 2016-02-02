@@ -114,9 +114,9 @@ private:
       DataFileHeader
       ----------------------
       Extent (for a particular namespace)
-        Record
+        MmapV1RecordHeader
         ...
-        Record (some chained for unused space)
+        MmapV1RecordHeader (some chained for unused space)
       ----------------------
       more Extents...
       ----------------------
@@ -126,8 +126,9 @@ class DataFileHeader {
 public:
     DataFileVersion version;
     int fileLength;
-    /* unused is the portion of the file that doesn't belong to any allocated extents. -1 = no more
-     * */
+    /**
+     * unused is the portion of the file that doesn't belong to any allocated extents. -1 = no more
+     */
     DiskLoc unused;
     int unusedLength;
     DiskLoc freeListStart;

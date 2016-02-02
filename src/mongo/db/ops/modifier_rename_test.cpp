@@ -28,6 +28,8 @@
 
 #include "mongo/db/ops/modifier_rename.h"
 
+#include <cstdint>
+
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/mutable/algorithm.h"
@@ -36,7 +38,6 @@
 #include "mongo/db/jsobj.h"
 #include "mongo/db/json.h"
 #include "mongo/db/ops/log_builder.h"
-#include "mongo/platform/cstdint.h"
 #include "mongo/unittest/unittest.h"
 
 namespace {
@@ -64,9 +65,7 @@ public:
                             ModifierInterface::Options::normal()));
     }
 
-    Status prepare(Element root,
-                   const StringData& matchedField,
-                   ModifierInterface::ExecInfo* execInfo) {
+    Status prepare(Element root, StringData matchedField, ModifierInterface::ExecInfo* execInfo) {
         return _mod.prepare(root, matchedField, execInfo);
     }
 
@@ -155,12 +154,6 @@ TEST(MoveOnSamePath, MoveDown) {
         mod.init(fromjson("{'b':'b.a'}").firstElement(), ModifierInterface::Options::normal()));
 }
 
-TEST(MoveOnSamePath, MoveToSelf) {
-    ModifierRename mod;
-    ASSERT_NOT_OK(
-        mod.init(fromjson("{'b.a':'b.a'}").firstElement(), ModifierInterface::Options::normal()));
-}
-
 TEST(MissingTo, SimpleNumberAtRoot) {
     Document doc(fromjson("{a: 2}"));
     Mod setMod(fromjson("{$rename: {'a':'b'}}"));
@@ -223,48 +216,6 @@ TEST(SimpleReplace, FromDottedElement) {
     Document logDoc;
     LogBuilder logBuilder(logDoc.root());
     BSONObj logObj = fromjson("{$set:{ 'b': {d: 6}}, $unset: {'a.c': true}}");
-    ASSERT_OK(setMod.log(&logBuilder));
-    ASSERT_EQUALS(logDoc, logObj);
-}
-
-TEST(SimpleReplace, RenameToExistingFieldDoesNotReorderFields) {
-    Document doc(fromjson("{a: 1, b: 2, c: 3}"));
-    Mod setMod(fromjson("{$rename: {a: 'b'}}"));
-
-    ModifierInterface::ExecInfo execInfo;
-    ASSERT_OK(setMod.prepare(doc.root(), "", &execInfo));
-    ASSERT_EQUALS(execInfo.fieldRef[0]->dottedField(), "a");
-    ASSERT_EQUALS(execInfo.fieldRef[1]->dottedField(), "b");
-    ASSERT_FALSE(execInfo.noOp);
-
-    ASSERT_OK(setMod.apply());
-    ASSERT_FALSE(doc.isInPlaceModeEnabled());
-    ASSERT_EQUALS(doc, fromjson("{b: 1, c: 3}"));
-
-    Document logDoc;
-    LogBuilder logBuilder(logDoc.root());
-    BSONObj logObj = fromjson("{$set: {b: 1}, $unset: {a: true}}");
-    ASSERT_OK(setMod.log(&logBuilder));
-    ASSERT_EQUALS(logDoc, logObj);
-}
-
-TEST(SimpleReplace, RenameToExistingNestedFieldDoesNotReorderFields) {
-    Document doc(fromjson("{a: {b: {c: 1, d: 2}}, b: 3, c: {d: 4}}"));
-    Mod setMod(fromjson("{$rename: {'c.d': 'a.b.c'}}"));
-
-    ModifierInterface::ExecInfo execInfo;
-    ASSERT_OK(setMod.prepare(doc.root(), "", &execInfo));
-    ASSERT_EQUALS(execInfo.fieldRef[0]->dottedField(), "c.d");
-    ASSERT_EQUALS(execInfo.fieldRef[1]->dottedField(), "a.b.c");
-    ASSERT_FALSE(execInfo.noOp);
-
-    ASSERT_OK(setMod.apply());
-    ASSERT_FALSE(doc.isInPlaceModeEnabled());
-    ASSERT_EQUALS(doc, fromjson("{a: {b: {c: 4, d: 2}}, b: 3, c: {}}"));
-
-    Document logDoc;
-    LogBuilder logBuilder(logDoc.root());
-    BSONObj logObj = fromjson("{$set: {'a.b.c': 4}, $unset: {'c.d': true}}");
     ASSERT_OK(setMod.log(&logBuilder));
     ASSERT_EQUALS(logDoc, logObj);
 }

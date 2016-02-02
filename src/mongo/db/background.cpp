@@ -32,12 +32,12 @@
 
 #include "mongo/db/background.h"
 
-#include <boost/shared_ptr.hpp>
-#include <boost/thread.hpp>
 #include <iostream>
 #include <string>
 
 #include "mongo/base/disallow_copying.h"
+#include "mongo/stdx/condition_variable.h"
+#include "mongo/stdx/thread.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/map_util.h"
 #include "mongo/util/mongoutils/str.h"
@@ -45,7 +45,7 @@
 
 namespace mongo {
 
-using boost::shared_ptr;
+using std::shared_ptr;
 
 namespace {
 
@@ -57,7 +57,7 @@ public:
 
     void recordBegin();
     int recordEnd();
-    void awaitNoBgOps(boost::unique_lock<boost::mutex>& lk);
+    void awaitNoBgOps(stdx::unique_lock<stdx::mutex>& lk);
 
     int getOpsInProgCount() const {
         return _opsInProgCount;
@@ -65,16 +65,15 @@ public:
 
 private:
     int _opsInProgCount;
-    boost::condition_variable _noOpsInProg;
+    stdx::condition_variable _noOpsInProg;
 };
 
-typedef StringMap<boost::shared_ptr<BgInfo>> BgInfoMap;
+typedef StringMap<std::shared_ptr<BgInfo>> BgInfoMap;
 typedef BgInfoMap::const_iterator BgInfoMapIterator;
 
-// Static data for this file is never destroyed.
-boost::mutex& m = *(new boost::mutex());
-BgInfoMap& dbsInProg = *(new BgInfoMap());
-BgInfoMap& nsInProg = *(new BgInfoMap());
+stdx::mutex m;
+BgInfoMap dbsInProg;
+BgInfoMap nsInProg;
 
 void BgInfo::recordBegin() {
     ++_opsInProgCount;
@@ -89,19 +88,19 @@ int BgInfo::recordEnd() {
     return _opsInProgCount;
 }
 
-void BgInfo::awaitNoBgOps(boost::unique_lock<boost::mutex>& lk) {
+void BgInfo::awaitNoBgOps(stdx::unique_lock<stdx::mutex>& lk) {
     while (_opsInProgCount > 0)
         _noOpsInProg.wait(lk);
 }
 
-void recordBeginAndInsert(BgInfoMap* bgiMap, const StringData& key) {
-    boost::shared_ptr<BgInfo>& bgInfo = bgiMap->get(key);
+void recordBeginAndInsert(BgInfoMap* bgiMap, StringData key) {
+    std::shared_ptr<BgInfo>& bgInfo = bgiMap->get(key);
     if (!bgInfo)
         bgInfo.reset(new BgInfo);
     bgInfo->recordBegin();
 }
 
-void recordEndAndRemove(BgInfoMap* bgiMap, const StringData& key) {
+void recordEndAndRemove(BgInfoMap* bgiMap, StringData key) {
     BgInfoMapIterator iter = bgiMap->find(key);
     fassert(17431, iter != bgiMap->end());
     if (0 == iter->second->recordEnd()) {
@@ -109,27 +108,25 @@ void recordEndAndRemove(BgInfoMap* bgiMap, const StringData& key) {
     }
 }
 
-void awaitNoBgOps(boost::unique_lock<boost::mutex>& lk, BgInfoMap* bgiMap, const StringData& key) {
-    boost::shared_ptr<BgInfo> bgInfo =
-        mapFindWithDefault(*bgiMap, key, boost::shared_ptr<BgInfo>());
+void awaitNoBgOps(stdx::unique_lock<stdx::mutex>& lk, BgInfoMap* bgiMap, StringData key) {
+    std::shared_ptr<BgInfo> bgInfo = mapFindWithDefault(*bgiMap, key, std::shared_ptr<BgInfo>());
     if (!bgInfo)
         return;
     bgInfo->awaitNoBgOps(lk);
 }
 
 }  // namespace
-
-bool BackgroundOperation::inProgForDb(const StringData& db) {
-    boost::mutex::scoped_lock lk(m);
+bool BackgroundOperation::inProgForDb(StringData db) {
+    stdx::lock_guard<stdx::mutex> lk(m);
     return dbsInProg.find(db) != dbsInProg.end();
 }
 
-bool BackgroundOperation::inProgForNs(const StringData& ns) {
-    boost::mutex::scoped_lock lk(m);
+bool BackgroundOperation::inProgForNs(StringData ns) {
+    stdx::lock_guard<stdx::mutex> lk(m);
     return nsInProg.find(ns) != nsInProg.end();
 }
 
-void BackgroundOperation::assertNoBgOpInProgForDb(const StringData& db) {
+void BackgroundOperation::assertNoBgOpInProgForDb(StringData db) {
     uassert(ErrorCodes::BackgroundOperationInProgressForDatabase,
             mongoutils::str::stream()
                 << "cannot perform operation: a background operation is currently running for "
@@ -137,7 +134,7 @@ void BackgroundOperation::assertNoBgOpInProgForDb(const StringData& db) {
             !inProgForDb(db));
 }
 
-void BackgroundOperation::assertNoBgOpInProgForNs(const StringData& ns) {
+void BackgroundOperation::assertNoBgOpInProgForNs(StringData ns) {
     uassert(ErrorCodes::BackgroundOperationInProgressForNamespace,
             mongoutils::str::stream()
                 << "cannot perform operation: a background operation is currently running for "
@@ -145,30 +142,30 @@ void BackgroundOperation::assertNoBgOpInProgForNs(const StringData& ns) {
             !inProgForNs(ns));
 }
 
-void BackgroundOperation::awaitNoBgOpInProgForDb(const StringData& db) {
-    boost::unique_lock<boost::mutex> lk(m);
+void BackgroundOperation::awaitNoBgOpInProgForDb(StringData db) {
+    stdx::unique_lock<stdx::mutex> lk(m);
     awaitNoBgOps(lk, &dbsInProg, db);
 }
 
-void BackgroundOperation::awaitNoBgOpInProgForNs(const StringData& ns) {
-    boost::unique_lock<boost::mutex> lk(m);
+void BackgroundOperation::awaitNoBgOpInProgForNs(StringData ns) {
+    stdx::unique_lock<stdx::mutex> lk(m);
     awaitNoBgOps(lk, &nsInProg, ns);
 }
 
-BackgroundOperation::BackgroundOperation(const StringData& ns) : _ns(ns) {
-    boost::mutex::scoped_lock lk(m);
+BackgroundOperation::BackgroundOperation(StringData ns) : _ns(ns) {
+    stdx::lock_guard<stdx::mutex> lk(m);
     recordBeginAndInsert(&dbsInProg, _ns.db());
     recordBeginAndInsert(&nsInProg, _ns.ns());
 }
 
 BackgroundOperation::~BackgroundOperation() {
-    boost::mutex::scoped_lock lk(m);
+    stdx::lock_guard<stdx::mutex> lk(m);
     recordEndAndRemove(&dbsInProg, _ns.db());
     recordEndAndRemove(&nsInProg, _ns.ns());
 }
 
 void BackgroundOperation::dump(std::ostream& ss) {
-    boost::mutex::scoped_lock lk(m);
+    stdx::lock_guard<stdx::mutex> lk(m);
     if (nsInProg.size()) {
         ss << "\n<b>Background Jobs in Progress</b>\n";
         for (BgInfoMapIterator i = nsInProg.begin(); i != nsInProg.end(); ++i)

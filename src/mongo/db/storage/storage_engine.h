@@ -42,6 +42,7 @@ namespace mongo {
 class DatabaseCatalogEntry;
 class OperationContext;
 class RecoveryUnit;
+class SnapshotManager;
 struct StorageGlobalParams;
 class StorageEngineLockFile;
 class StorageEngineMetadata;
@@ -152,7 +153,7 @@ public:
      * It should not be deleted by any caller.
      */
     virtual DatabaseCatalogEntry* getDatabaseCatalogEntry(OperationContext* opCtx,
-                                                          const StringData& db) = 0;
+                                                          StringData db) = 0;
 
     /**
      * Returns whether the storage engine supports its own locking locking below the collection
@@ -164,8 +165,7 @@ public:
     virtual bool supportsDocLocking() const = 0;
 
     /**
-     * Returns if the engine supports a journalling concept.
-     * This controls whether awaitCommit gets called or fsync to ensure data is on disk.
+     * Returns whether the engine supports a journalling concept or not.
      */
     virtual bool isDurable() const = 0;
 
@@ -179,17 +179,52 @@ public:
     /**
      * Closes all file handles associated with a database.
      */
-    virtual Status closeDatabase(OperationContext* txn, const StringData& db) = 0;
+    virtual Status closeDatabase(OperationContext* txn, StringData db) = 0;
 
     /**
      * Deletes all data and metadata for a database.
      */
-    virtual Status dropDatabase(OperationContext* txn, const StringData& db) = 0;
+    virtual Status dropDatabase(OperationContext* txn, StringData db) = 0;
 
     /**
      * @return number of files flushed
      */
     virtual int flushAllFiles(bool sync) = 0;
+
+    /**
+     * Transitions the storage engine into backup mode.
+     *
+     * During backup mode the storage engine must stabilize its on-disk files, and avoid
+     * any internal processing that may involve file I/O, such as online compaction, so
+     * a filesystem level backup may be performed.
+     *
+     * Storage engines that do not support this feature should use the default implementation.
+     * Storage engines that implement this must also implement endBackup().
+     *
+     * For Storage engines that implement beginBackup the _inBackupMode variable is provided
+     * to avoid multiple instance enterting/leaving backup concurrently.
+     *
+     * If this function returns an OK status, MongoDB can call endBackup to signal the storage
+     * engine that filesystem writes may continue. This function should return a non-OK status if
+     * filesystem changes cannot be stopped to allow for online backup. If the function should be
+     * retried, returns a non-OK status. This function may throw a WriteConflictException, which
+     * should trigger a retry by the caller. All other exceptions should be treated as errors.
+     */
+    virtual Status beginBackup(OperationContext* txn) {
+        return Status(ErrorCodes::CommandNotSupported,
+                      "The current storage engine doesn't support backup mode");
+    }
+
+    /**
+     * Transitions the storage engine out of backup mode.
+     *
+     * Storage engines that do not support this feature should use the default implementation.
+     *
+     * Storage engines implementing this feature should fassert when unable to leave backup mode.
+     */
+    virtual void endBackup(OperationContext* txn) {
+        return;
+    }
 
     /**
      * Recover as much data as possible from a potentially corrupt RecordStore.
@@ -207,9 +242,19 @@ public:
      * override this method if they have clean-up to do that is different from unclean shutdown.
      * MongoDB will not call into the storage subsystem after calling this function.
      *
+     * On error, the storage engine should assert and crash.
      * There is intentionally no uncleanShutdown().
      */
     virtual void cleanShutdown() = 0;
+
+    /**
+     * Returns the SnapshotManager for this StorageEngine or NULL if not supported.
+     *
+     * Pointer remains owned by the StorageEngine, not the caller.
+     */
+    virtual SnapshotManager* getSnapshotManager() const {
+        return nullptr;
+    }
 
 protected:
     /**

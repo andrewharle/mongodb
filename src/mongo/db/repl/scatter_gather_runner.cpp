@@ -41,15 +41,20 @@
 namespace mongo {
 namespace repl {
 
+using executor::RemoteCommandRequest;
+
 ScatterGatherRunner::ScatterGatherRunner(ScatterGatherAlgorithm* algorithm)
     : _algorithm(algorithm), _started(false) {}
 
 ScatterGatherRunner::~ScatterGatherRunner() {}
 
-static void startTrampoline(const ReplicationExecutor::CallbackData& cbData,
+static void startTrampoline(const ReplicationExecutor::CallbackArgs& cbData,
                             ScatterGatherRunner* runner,
                             StatusWith<ReplicationExecutor::EventHandle>* result) {
-    *result = runner->start(cbData.executor);
+    // TODO: remove static cast once ScatterGatherRunner is designed to work with a generic
+    // TaskExecutor.
+    ReplicationExecutor* executor = static_cast<ReplicationExecutor*>(cbData.executor);
+    *result = runner->start(executor);
 }
 
 Status ScatterGatherRunner::run(ReplicationExecutor* executor) {
@@ -84,7 +89,7 @@ StatusWith<ReplicationExecutor::EventHandle> ScatterGatherRunner::start(
     const ReplicationExecutor::RemoteCommandCallbackFn cb =
         stdx::bind(&ScatterGatherRunner::_processResponse, stdx::placeholders::_1, this);
 
-    std::vector<ReplicationExecutor::RemoteCommandRequest> requests = _algorithm->getRequests();
+    std::vector<RemoteCommandRequest> requests = _algorithm->getRequests();
     for (size_t i = 0; i < requests.size(); ++i) {
         const StatusWith<ReplicationExecutor::CallbackHandle> cbh =
             executor->scheduleRemoteCommand(requests[i], cb);
@@ -110,7 +115,7 @@ void ScatterGatherRunner::cancel(ReplicationExecutor* executor) {
 }
 
 void ScatterGatherRunner::_processResponse(
-    const ReplicationExecutor::RemoteCommandCallbackData& cbData, ScatterGatherRunner* runner) {
+    const ReplicationExecutor::RemoteCommandCallbackArgs& cbData, ScatterGatherRunner* runner) {
     // It is possible that the ScatterGatherRunner has already gone out of scope, if the
     // response indicates the callback was canceled.  In that case, do not access any members
     // of "runner" and return immediately.
@@ -121,7 +126,10 @@ void ScatterGatherRunner::_processResponse(
     ++runner->_actualResponses;
     runner->_algorithm->processResponse(cbData.request, cbData.response);
     if (runner->_algorithm->hasReceivedSufficientResponses()) {
-        runner->_signalSufficientResponsesReceived(cbData.executor);
+        // TODO: remove static cast once ScatterGatherRunner is designed to work with a generic
+        // TaskExecutor.
+        ReplicationExecutor* executor = static_cast<ReplicationExecutor*>(cbData.executor);
+        runner->_signalSufficientResponsesReceived(executor);
     } else {
         invariant(runner->_actualResponses < runner->_callbacks.size());
     }

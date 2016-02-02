@@ -1,12 +1,12 @@
 /*
- * This is a regression test for SERVER-16189, to make sure a replica set with both 2.8 and 2.6
- * nodes can be initialized from a 2.6 node.
+ * This is a regression test for SERVER-16189, to make sure a replica set with both current and 
+ * prior version nodes can be initialized from the prior version node.
  */
 
 (function() {
     "use strict";
     var name = "initialize_from_old";
-    var oldVersion = '2.6';
+    var oldVersion = 'last-stable';
     var newVersion = 'latest';
     var nodes = {
         n0: {binVersion: oldVersion},

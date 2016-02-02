@@ -28,13 +28,16 @@
 
 #include "mongo/db/index/external_key_generator.h"
 
-#include "mongo/db/fts/fts_index_format.h"
-#include "mongo/db/index/s2_common.h"
+#include <cmath>
+#include <string>
+
+#include "mongo/db/fts/fts_spec.h"
 #include "mongo/db/index_names.h"
 #include "mongo/db/index/2d_common.h"
 #include "mongo/db/index/btree_key_generator.h"
 #include "mongo/db/index/expression_keys_private.h"
 #include "mongo/db/index/expression_params.h"
+#include "mongo/db/index/s2_common.h"
 #include "mongo/db/jsobj.h"
 
 namespace mongo {
@@ -43,15 +46,15 @@ namespace {
 void getKeysForUpgradeChecking(const BSONObj& infoObj, const BSONObj& doc, BSONObjSet* keys) {
     BSONObj keyPattern = infoObj.getObjectField("key");
 
-    string type = IndexNames::findPluginName(keyPattern);
+    std::string type = IndexNames::findPluginName(keyPattern);
 
     if (IndexNames::GEO_2D == type) {
         TwoDIndexingParams params;
         ExpressionParams::parseTwoDParams(infoObj, &params);
         ExpressionKeysPrivate::get2DKeys(doc, params, keys, NULL);
     } else if (IndexNames::GEO_HAYSTACK == type) {
-        string geoField;
-        vector<string> otherFields;
+        std::string geoField;
+        std::vector<std::string> otherFields;
         double bucketSize;
         ExpressionParams::parseHaystackParams(infoObj, &geoField, &otherFields, &bucketSize);
         ExpressionKeysPrivate::getHaystackKeys(doc, geoField, otherFields, bucketSize, keys);
@@ -65,7 +68,7 @@ void getKeysForUpgradeChecking(const BSONObj& infoObj, const BSONObj& doc, BSONO
     } else if (IndexNames::HASHED == type) {
         HashSeed seed;
         int version;
-        string field;
+        std::string field;
         ExpressionParams::parseHashParams(infoObj, &seed, &version, &field);
         ExpressionKeysPrivate::getHashKeys(
             doc, field, seed, version, infoObj["sparse"].trueValue(), keys);
@@ -159,7 +162,7 @@ int keyV1Size(const BSONObj& obj) {
             }
             case NumberDouble: {
                 double d = e._numberDouble();
-                if (isNaN(d)) {
+                if (std::isnan(d)) {
                     return traditionalSize;
                 }
                 size += 1;

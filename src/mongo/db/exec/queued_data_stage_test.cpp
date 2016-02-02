@@ -32,25 +32,27 @@
 
 #include "mongo/db/exec/queued_data_stage.h"
 #include "mongo/db/exec/working_set.h"
+#include "mongo/stdx/memory.h"
 #include "mongo/unittest/unittest.h"
 
 using namespace mongo;
 
 namespace {
 
-using std::auto_ptr;
+using std::unique_ptr;
+using stdx::make_unique;
 
 //
 // Basic test that we get out valid stats objects.
 //
 TEST(QueuedDataStageTest, getValidStats) {
     WorkingSet ws;
-    auto_ptr<QueuedDataStage> mock(new QueuedDataStage(&ws));
+    auto mock = make_unique<QueuedDataStage>(nullptr, &ws);
     const CommonStats* commonStats = mock->getCommonStats();
     ASSERT_EQUALS(commonStats->works, static_cast<size_t>(0));
     const SpecificStats* specificStats = mock->getSpecificStats();
     ASSERT(specificStats);
-    auto_ptr<PlanStageStats> allStats(mock->getStats());
+    unique_ptr<PlanStageStats> allStats(mock->getStats());
     ASSERT_EQUALS(allStats->stageType, mock->stageType());
 }
 
@@ -60,7 +62,7 @@ TEST(QueuedDataStageTest, getValidStats) {
 TEST(QueuedDataStageTest, validateStats) {
     WorkingSet ws;
     WorkingSetID wsID;
-    auto_ptr<QueuedDataStage> mock(new QueuedDataStage(&ws));
+    auto mock = make_unique<QueuedDataStage>(nullptr, &ws);
 
     // make sure that we're at all zero
     const CommonStats* stats = mock->getCommonStats();
@@ -80,8 +82,8 @@ TEST(QueuedDataStageTest, validateStats) {
     ASSERT_EQUALS(stats->needTime, 1U);
 
     // advanced, with pushed data
-    const WorkingSetMember member;
-    mock->pushBack(member);
+    WorkingSetID id = ws.allocate();
+    mock->pushBack(id);
     mock->work(&wsID);
     ASSERT_EQUALS(stats->works, 2U);
     ASSERT_EQUALS(stats->advanced, 1U);
@@ -91,7 +93,7 @@ TEST(QueuedDataStageTest, validateStats) {
     ASSERT_EQUALS(stats->yields, 1U);
 
     // unyields
-    mock->restoreState(NULL);
+    mock->restoreState();
     ASSERT_EQUALS(stats->unyields, 1U);
 
     // invalidates
@@ -101,7 +103,7 @@ TEST(QueuedDataStageTest, validateStats) {
 
     // and now we are d1U, but must trigger EOF with getStats()
     ASSERT_FALSE(stats->isEOF);
-    auto_ptr<PlanStageStats> allStats(mock->getStats());
+    unique_ptr<PlanStageStats> allStats(mock->getStats());
     ASSERT_TRUE(stats->isEOF);
 }
 }

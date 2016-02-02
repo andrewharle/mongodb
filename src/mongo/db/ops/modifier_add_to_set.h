@@ -28,7 +28,6 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
 
 #include "mongo/base/disallow_copying.h"
 #include "mongo/bson/mutable/document.h"
@@ -56,9 +55,7 @@ public:
      *  document and fills in 'execInfo' accordingly. Returns OK if the document has a
      *  valid array to set-union to, othwise returns a status describing the error.
      */
-    virtual Status prepare(mutablebson::Element root,
-                           const StringData& matchedField,
-                           ExecInfo* execInfo);
+    virtual Status prepare(mutablebson::Element root, StringData matchedField, ExecInfo* execInfo);
 
     /** Updates the Element used in prepare with the effects of the $addToSet operation. */
     virtual Status apply() const;
@@ -78,7 +75,7 @@ private:
     mutablebson::Element _val;
 
     struct PreparedState;
-    boost::scoped_ptr<PreparedState> _preparedState;
+    std::unique_ptr<PreparedState> _preparedState;
 };
 
 }  // namespace mongo

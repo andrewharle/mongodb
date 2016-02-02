@@ -21,7 +21,8 @@
  * 9) Soon, the secondary should be applying the oplog again, which we should
  *    witness as an increase in the count of documents stored on the secondary.
  */
-
+(function() {
+"use strict";
 // Load utility methods for replica set tests
 load("jstests/replsets/rslib.js");
 
@@ -30,7 +31,16 @@ var replTest = new ReplSetTest({name: 'testSet', nodes: 2, oplogSize: 5});
 var nodes = replTest.startSet();
 // This will wait for initiation
 replTest.initiate();
-var master = replTest.getMaster();
+var master = replTest.getPrimary();
+
+var ret = master.getDB("admin").fsyncLock();
+if (!ret.ok) {
+    assert.commandFailedWithCode(ret, ErrorCodes.CommandNotSupported);
+    jsTestLog("Storage Engine does not support fsyncLock, so bailing");
+    return;
+}
+master.getDB("admin").fsyncUnlock();
+
 var docNum = 100;
 for(var i=0; i<docNum; i++) {
     master.getDB("foo").bar.save({a: i});
@@ -38,7 +48,7 @@ for(var i=0; i<docNum; i++) {
 waitForAllMembers(master.getDB("foo"));
 replTest.awaitReplication();
 
-// Calling getMaster also makes available the liveNodes structure, which looks like this:
+// Calling getPrimary also makes available the liveNodes structure, which looks like this:
 // liveNodes = {master: masterNode, slaves: [slave1, slave2] }
 var slaves = replTest.liveNodes.slaves;
 slaves[0].setSlaveOk();
@@ -53,10 +63,11 @@ for (var i=0; i<docNum; i++) {
 // this should work just fine.
 var slave0count = slaves[0].getDB("foo").bar.count();
 assert.eq(slave0count, 100, "Doc count in fsync lock wrong. Expected (=100), found " + slave0count);
-assert(slaves[0].getDB("admin").$cmd.sys.unlock.findOne().ok);
+assert(slaves[0].getDB("admin").fsyncUnlock().ok);
 
 // The secondary should have equal or more documents than what it had before.
 assert.soon(function() {
         return slaves[0].getDB("foo").bar.count() > 100
     }, "count of documents stored on the secondary did not increase");
 replTest.stopSet();
+}());

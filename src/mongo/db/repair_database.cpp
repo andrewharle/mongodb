@@ -32,22 +32,23 @@
 
 #include "mongo/db/repair_database.h"
 
-#include <boost/scoped_ptr.hpp>
-
-#include "mongo/db/background.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bson_validate.h"
-#include "mongo/db/catalog/collection.h"
+#include "mongo/db/background.h"
 #include "mongo/db/catalog/collection_catalog_entry.h"
-#include "mongo/db/catalog/database.h"
+#include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/database_catalog_entry.h"
+#include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/database_holder.h"
+#include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/catalog/index_create.h"
 #include "mongo/db/catalog/index_key_validate.h"
+#include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/storage/mmap_v1/mmap_v1_engine.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/util/log.h"
+#include "mongo/util/scopeguard.h"
 
 namespace mongo {
 
@@ -86,8 +87,8 @@ Status rebuildIndexesOnCollection(OperationContext* txn,
     if (indexSpecs.empty())
         return Status::OK();
 
-    boost::scoped_ptr<Collection> collection;
-    boost::scoped_ptr<MultiIndexBlock> indexer;
+    std::unique_ptr<Collection> collection;
+    std::unique_ptr<MultiIndexBlock> indexer;
     {
         // These steps are combined into a single WUOW to ensure there are no commits without
         // the indexes.
@@ -129,22 +130,21 @@ Status rebuildIndexesOnCollection(OperationContext* txn,
     long long dataSize = 0;
 
     RecordStore* rs = collection->getRecordStore();
-    boost::scoped_ptr<RecordIterator> it(rs->getIterator(txn));
-    while (!it->isEOF()) {
-        RecordId id = it->curr();
-        RecordData data = it->dataFor(id);
-        invariant(id == it->getNext());
+    auto cursor = rs->getCursor(txn);
+    while (auto record = cursor->next()) {
+        RecordId id = record->id;
+        RecordData& data = record->data;
 
         Status status = validateBSON(data.data(), data.size());
         if (!status.isOK()) {
             log() << "Invalid BSON detected at " << id << ": " << status << ". Deleting.";
-            it->saveState();
+            cursor->save();  // 'data' is no longer valid.
             {
                 WriteUnitOfWork wunit(txn);
                 rs->deleteRecord(txn, id);
                 wunit.commit();
             }
-            it->restoreState(txn);
+            cursor->restore();
             continue;
         }
 
@@ -180,6 +180,8 @@ Status repairDatabase(OperationContext* txn,
                       const std::string& dbName,
                       bool preserveClonedFilesOnFailure,
                       bool backupOriginalFiles) {
+    DisableDocumentValidation validationDisabler(txn);
+
     // We must hold some form of lock here
     invariant(txn->lockState()->isLocked());
     invariant(dbName.find('.') == string::npos);
@@ -206,18 +208,27 @@ Status repairDatabase(OperationContext* txn,
 
     // Close the db to invalidate all current users and caches.
     dbHolder().close(txn, dbName);
-    // Open the db after everything finishes
-    class OpenDbInDestructor {
-    public:
-        OpenDbInDestructor(OperationContext* txn, const std::string& db) : _dbName(db), _txn(txn) {}
-        ~OpenDbInDestructor() {
-            dbHolder().openDb(_txn, _dbName);
-        }
+    ON_BLOCK_EXIT([&dbName, &txn] {
+        try {
+            // Open the db after everything finishes.
+            auto db = dbHolder().openDb(txn, dbName);
 
-    private:
-        const std::string& _dbName;
-        OperationContext* _txn;
-    } dbOpener(txn, dbName);
+            // Set the minimum snapshot for all Collections in this db. This ensures that readers
+            // using majority readConcern level can only use the collections after their repaired
+            // versions are in the committed view.
+            auto replCoord = repl::ReplicationCoordinator::get(txn);
+            auto snapshotName = replCoord->reserveSnapshotName(txn);
+            replCoord->forceSnapshotCreation();  // Ensure a newer snapshot is created even if idle.
+
+            for (auto&& collection : *db) {
+                collection->setMinimumVisibleSnapshot(snapshotName);
+            }
+        } catch (...) {
+            severe() << "Unexpected exception encountered while reopening database after repair.";
+            std::terminate();  // Logs additional info about the specific error.
+        }
+    });
+
     DatabaseCatalogEntry* dbce = engine->getDatabaseCatalogEntry(txn, dbName);
 
     std::list<std::string> colls;

@@ -28,6 +28,18 @@
 
 #include "wt_internal.h"
 
+/*
+ * This is an implementation of George Marsaglia's multiply-with-carry pseudo-
+ * random number generator.  Computationally fast, with reasonable randomness
+ * properties, and a claimed period of > 2^60.
+ *
+ * Be very careful about races here. Multiple threads can call __wt_random
+ * concurrently, and it is okay if those concurrent calls get the same return
+ * value. What is *not* okay is if reading/writing the shared state races and
+ * uses two different values for m_w or m_z. That can result in a stored value
+ * of zero, in which case they will be stuck on zero forever. Take a local copy
+ * of the values to avoid that, and read/write in atomic, 8B chunks.
+ */
 #undef	M_W
 #define	M_W(r)	r.x.w
 #undef	M_Z
@@ -50,17 +62,6 @@ __wt_random_init(WT_RAND_STATE volatile * rnd_state)
 /*
  * __wt_random --
  *	Return a 32-bit pseudo-random number.
- *
- * This is an implementation of George Marsaglia's multiply-with-carry pseudo-
- * random number generator.  Computationally fast, with reasonable randomness
- * properties.
- *
- * We have to be very careful about races here.  Multiple threads can call
- * __wt_random concurrently, and it is okay if those concurrent calls get the
- * same return value.  What is *not* okay is if reading the shared state races
- * with an update and uses two different values for m_w or m_z.  That could
- * result in a value of zero, in which case they would be stuck on zero
- * forever.  Take local copies of the shared values to avoid this.
  */
 uint32_t
 __wt_random(WT_RAND_STATE volatile * rnd_state)

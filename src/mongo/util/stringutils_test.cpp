@@ -62,7 +62,7 @@ TEST(LexNumCmp, Simple1) {
     ASSERT_EQUALS(0, LexNumCmp::cmp("a.b.c", "a.b.c", false));
 }
 
-void assertCmp(int expected, const StringData& s1, const StringData& s2, bool lexOnly = false) {
+void assertCmp(int expected, StringData s1, StringData s2, bool lexOnly = false) {
     mongo::LexNumCmp cmp(lexOnly);
     ASSERT_EQUALS(expected, cmp.cmp(s1, s2, lexOnly));
     ASSERT_EQUALS(expected, cmp.cmp(s1, s2));

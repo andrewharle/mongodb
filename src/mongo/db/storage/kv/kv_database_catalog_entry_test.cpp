@@ -30,23 +30,16 @@
 
 #include "mongo/db/storage/kv/kv_database_catalog_entry.h"
 
-#include "mongo/base/init.h"
 #include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/global_environment_experiment.h"
-#include "mongo/db/global_environment_noop.h"
 #include "mongo/db/operation_context_noop.h"
 #include "mongo/db/storage/devnull/devnull_kv_engine.h"
 #include "mongo/db/storage/kv/kv_storage_engine.h"
+#include "mongo/stdx/memory.h"
 #include "mongo/unittest/unittest.h"
 
 namespace {
 
 using namespace mongo;
-
-MONGO_INITIALIZER(SetGlobalEnvironment)(InitializerContext* context) {
-    setGlobalEnvironment(new GlobalEnvironmentNoop());
-    return Status::OK();
-}
 
 TEST(KVDatabaseCatalogEntryTest, CreateCollectionValidNamespace) {
     KVStorageEngine storageEngine(new DevNullKVEngine());
@@ -77,8 +70,8 @@ TEST(KVDatabaseCatalogEntryTest, CreateCollectionEmptyNamespace) {
 class InvalidRecordStoreKVEngine : public DevNullKVEngine {
 public:
     virtual Status createRecordStore(OperationContext* opCtx,
-                                     const StringData& ns,
-                                     const StringData& ident,
+                                     StringData ns,
+                                     StringData ident,
                                      const CollectionOptions& options) {
         if (ns == "fail.me") {
             return Status(ErrorCodes::BadValue, "failed to create record store");

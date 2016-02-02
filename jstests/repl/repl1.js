@@ -1,4 +1,10 @@
 // Test basic replication functionality
+//
+// There is no automatic fail-over in a master/slave deployment, so if the master goes down, no new
+// master will be elected. Therefore if the master is using an ephemeral storage engine, it cannot
+// be restarted without losing all data. This test expects that restarting the master will maintain
+// the node's data, so cannot be run with ephemeral storage engines.
+// @tags: [requires_persistence]
 
 var baseName = "jstests_repl1test";
 
@@ -6,7 +12,7 @@ soonCount = function( count ) {
     assert.soon( function() { 
 //                print( "check count" );
 //                print( "count: " + s.getDB( baseName ).z.find().count() );
-                return s.getDB( baseName ).a.find().itcount() == count; 
+                return s.getDB( baseName ).a.find().count() == count; 
                 } );    
 }
 
@@ -45,7 +51,7 @@ doTest = function( signal ) {
     for( i = 1010; i < 1020; ++i )
         am.save( { _id: new ObjectId(), i: i } );
 
-    assert.soon( function() { return as.find().itcount() == 1020; } );
+    assert.soon( function() { return as.find().count() == 1020; } );
     assert.eq( 1, as.find( { i: 1019 } ).count() );
 
     assert.automsg( "m.getDB( 'local' ).getCollection( 'oplog.$main' ).stats().size > 0" );
@@ -54,4 +60,3 @@ doTest = function( signal ) {
 }
 
 doTest( 15 ); // SIGTERM
-doTest( 9 );  // SIGKILL

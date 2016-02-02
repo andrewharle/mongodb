@@ -42,14 +42,14 @@ namespace mongo {
 using boost::intrusive_ptr;
 using std::vector;
 
-const char DocumentSourceRedact::redactName[] = "$redact";
-
 DocumentSourceRedact::DocumentSourceRedact(const intrusive_ptr<ExpressionContext>& expCtx,
                                            const intrusive_ptr<Expression>& expression)
     : DocumentSource(expCtx), _expression(expression) {}
 
+REGISTER_DOCUMENT_SOURCE(redact, DocumentSourceRedact::createFromBson);
+
 const char* DocumentSourceRedact::getSourceName() const {
-    return redactName;
+    return "$redact";
 }
 
 static const Value descendVal = Value("descend");
@@ -92,7 +92,7 @@ Value DocumentSourceRedact::redactValue(const Value& in) {
                 newArr.push_back(arr[i]);
             }
         }
-        return Value::consume(newArr);
+        return Value(std::move(newArr));
     } else {
         return in;
     }
@@ -128,8 +128,9 @@ boost::optional<Document> DocumentSourceRedact::redactObject() {
     }
 }
 
-void DocumentSourceRedact::optimize() {
+intrusive_ptr<DocumentSource> DocumentSourceRedact::optimize() {
     _expression = _expression->optimize();
+    return this;
 }
 
 Value DocumentSourceRedact::serialize(bool explain) const {

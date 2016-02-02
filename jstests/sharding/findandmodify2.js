@@ -1,7 +1,8 @@
-var s = new ShardingTest({ name: "find_and_modify_sharded_2", shards: 2, verbose: 2, mongos: 1, other: { chunksize: 1 }});
+var s = new ShardingTest({ name: "find_and_modify_sharded_2", shards: 2, mongos: 1, other: { chunkSize: 1 }});
 s.adminCommand( { enablesharding : "test" } );
 
 var db = s.getDB( "test" );
+s.ensurePrimaryShard('test', 'shard0001');
 var primary = s.getServer( "test" ).getDB( "test" );
 var secondary = s.getOther( primary ).getDB( "test" );
 

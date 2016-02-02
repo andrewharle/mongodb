@@ -29,9 +29,9 @@ config.members[0].priority = 2;
 config.members[2].priority = 0;
   
 replTest.initiate(config);
-replTest.waitForState(replTest.nodes[0], replTest.PRIMARY, 60 * 1000);
+replTest.waitForState(replTest.nodes[0], ReplSetTest.State.PRIMARY, 60 * 1000);
 
-var master = replTest.getMaster().getDB("test");
+var master = replTest.getPrimary().getDB("test");
 var server0 = master;
 var server1 = replTest.liveNodes.slaves[0];
 
@@ -62,12 +62,12 @@ replTest.restart(1);
 
 
 print("check sync");
-replTest.awaitReplication();
+replTest.awaitReplication(60 * 1000);
 
 
 print("add data");
 reconnect(server1);
-master = replTest.getMaster().getDB("test");
+master = replTest.getPrimary().getDB("test");
 for (var i=0;i<1000;i++) {
     master.bar.insert({x:i});
 }

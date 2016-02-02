@@ -30,12 +30,13 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
 
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/client/dbclientinterface.h"
-#include "mongo/client/export_macros.h"
+#include "mongo/stdx/mutex.h"
+#include "mongo/stdx/functional.h"
+#include "mongo/util/concurrency/mutex.h"
 
 namespace mongo {
 
@@ -53,13 +54,22 @@ namespace mongo {
  * The class checks if a command is read or write style, and sends to a single
  * node if a read lock command and to all in two phases with a write style command.
  */
-class MONGO_CLIENT_API SyncClusterConnection : public DBClientBase {
+class SyncClusterConnection : public DBClientBase {
 public:
     using DBClientBase::query;
     using DBClientBase::update;
     using DBClientBase::remove;
 
     class QueryHandler;
+
+    /**
+     * Hook run on the response of an isMaster request.  Run on the DBClientConnections that
+     * SyncClusterConnection uses under the hood.  Used to detect and signal when the catalog
+     * manager needs swapping.
+     */
+    using ConnectionValidationHook = stdx::function<Status(
+        const HostAndPort& host, const executor::RemoteCommandResponse& isMasterReply)>;
+
 
     /**
      * @param commaSeparated should be 3 hosts comma separated
@@ -73,14 +83,15 @@ public:
     ~SyncClusterConnection();
 
     /**
+     * Sets the ConnectionValidationHook that will be used for the DBClientConnections created by
+     * all future constructed SyncClusterConnections.
+     */
+    static void setConnectionValidationHook(ConnectionValidationHook hook);
+
+    /**
      * @return true if all servers are up and ready for writes
      */
     bool prepare(std::string& errmsg);
-
-    /**
-     * runs fsync on all servers
-     */
-    bool fsync(std::string& errmsg);
 
     // --- from DBClientInterface
 
@@ -89,18 +100,18 @@ public:
                             const BSONObj* fieldsToReturn,
                             int queryOptions);
 
-    virtual std::auto_ptr<DBClientCursor> query(const std::string& ns,
-                                                Query query,
-                                                int nToReturn,
-                                                int nToSkip,
-                                                const BSONObj* fieldsToReturn,
-                                                int queryOptions,
-                                                int batchSize);
-
-    virtual std::auto_ptr<DBClientCursor> getMore(const std::string& ns,
-                                                  long long cursorId,
+    virtual std::unique_ptr<DBClientCursor> query(const std::string& ns,
+                                                  Query query,
                                                   int nToReturn,
-                                                  int options);
+                                                  int nToSkip,
+                                                  const BSONObj* fieldsToReturn,
+                                                  int queryOptions,
+                                                  int batchSize);
+
+    virtual std::unique_ptr<DBClientCursor> getMore(const std::string& ns,
+                                                    long long cursorId,
+                                                    int nToReturn,
+                                                    int options);
 
     virtual void insert(const std::string& ns, BSONObj obj, int flags = 0);
 
@@ -112,7 +123,6 @@ public:
 
     virtual bool call(Message& toSend, Message& response, bool assertOk, std::string* actualServer);
     virtual void say(Message& toSend, bool isRetry = false, std::string* actualServer = 0);
-    virtual void sayPiggyBack(Message& toSend);
 
     virtual void killCursor(long long cursorID);
 
@@ -123,6 +133,10 @@ public:
         return false;
     }
     virtual bool isStillConnected();
+
+    int getMinWireVersion() final;
+    int getMaxWireVersion() final;
+
     virtual std::string toString() const {
         return _toString();
     }
@@ -150,8 +164,17 @@ public:
         return false;
     }
 
-    virtual void setRunCommandHook(DBClientWithCommands::RunCommandHookFunc func);
-    virtual void setPostRunCommandHook(DBClientWithCommands::PostRunCommandHookFunc func);
+    // This override of runCommand intentionally calls findOne to construct a legacy
+    // OP_QUERY command. The reason for this is that delicate logic for targeting/locking
+    // config servers is in SyncClusterConnection::findOne, and refactoring that logic
+    // is both risky and of dubious value as we move to config server replica sets (CSRS).
+    bool runCommand(const std::string& dbname,
+                    const BSONObj& cmd,
+                    BSONObj& info,
+                    int options) final;
+
+    void setRequestMetadataWriter(rpc::RequestMetadataWriter writer) final;
+    void setReplyMetadataReader(rpc::ReplyMetadataReader reader) final;
 
     /**
      * Allow custom query processing through an external (e.g. mongos-only) service.
@@ -170,13 +193,13 @@ private:
                           const BSONObj& cmd,
                           BSONObj& info,
                           int options = 0);
-    std::auto_ptr<DBClientCursor> _queryOnActive(const std::string& ns,
-                                                 Query query,
-                                                 int nToReturn,
-                                                 int nToSkip,
-                                                 const BSONObj* fieldsToReturn,
-                                                 int queryOptions,
-                                                 int batchSize);
+    std::unique_ptr<DBClientCursor> _queryOnActive(const std::string& ns,
+                                                   Query query,
+                                                   int nToReturn,
+                                                   int nToSkip,
+                                                   const BSONObj* fieldsToReturn,
+                                                   int queryOptions,
+                                                   int batchSize);
     int _lockType(const std::string& name);
     void _checkLast();
     void _connect(const std::string& host);
@@ -188,9 +211,9 @@ private:
     std::vector<BSONObj> _lastErrors;
 
     // Optionally attached by user
-    boost::scoped_ptr<QueryHandler> _customQueryHandler;
+    std::unique_ptr<QueryHandler> _customQueryHandler;
 
-    mongo::mutex _mutex;
+    stdx::mutex _mutex;
     std::map<std::string, int> _lockTypes;
     // End mutex
 
@@ -212,19 +235,19 @@ public:
 
     /**
      * Returns a cursor on one of the hosts with the desired results for the query.
-     * May throw or return an empty auto_ptr on failure.
+     * May throw or return an empty unique_ptr on failure.
      */
-    virtual std::auto_ptr<DBClientCursor> handleQuery(const std::vector<std::string>& hosts,
-                                                      const std::string& ns,
-                                                      Query query,
-                                                      int nToReturn,
-                                                      int nToSkip,
-                                                      const BSONObj* fieldsToReturn,
-                                                      int queryOptions,
-                                                      int batchSize) = 0;
+    virtual std::unique_ptr<DBClientCursor> handleQuery(const std::vector<std::string>& hosts,
+                                                        const std::string& ns,
+                                                        Query query,
+                                                        int nToReturn,
+                                                        int nToSkip,
+                                                        const BSONObj* fieldsToReturn,
+                                                        int queryOptions,
+                                                        int batchSize) = 0;
 };
 
-class MONGO_CLIENT_API UpdateNotTheSame : public UserException {
+class UpdateNotTheSame : public UserException {
 public:
     UpdateNotTheSame(int code,
                      const std::string& msg,

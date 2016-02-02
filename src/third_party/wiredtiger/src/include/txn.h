@@ -21,12 +21,48 @@
 	((t1) <= (t2))
 
 #define	WT_TXNID_LT(t1, t2)						\
-	((t1) != (t2) && WT_TXNID_LE(t1, t2))
+	((t1) < (t2))
 
 #define	WT_SESSION_TXN_STATE(s) (&S2C(s)->txn_global.states[(s)->id])
 
 #define	WT_SESSION_IS_CHECKPOINT(s)					\
 	((s)->id != 0 && (s)->id == S2C(s)->txn_global.checkpoint_id)
+
+/*
+ * Perform an operation at the specified isolation level.
+ *
+ * This is fiddly: we can't cope with operations that begin transactions
+ * (leaving an ID allocated), and operations must not move our published
+ * snap_min forwards (or updates we need could be freed while this operation is
+ * in progress).  Check for those cases: the bugs they cause are hard to debug.
+ */
+#define	WT_WITH_TXN_ISOLATION(s, iso, op) do {				\
+	WT_TXN_ISOLATION saved_iso = (s)->isolation;		        \
+	WT_TXN_ISOLATION saved_txn_iso = (s)->txn.isolation;		\
+	WT_TXN_STATE *txn_state = WT_SESSION_TXN_STATE(s);		\
+	WT_TXN_STATE saved_state = *txn_state;				\
+	(s)->txn.forced_iso++;						\
+	(s)->isolation = (s)->txn.isolation = (iso);			\
+	op;								\
+	(s)->isolation = saved_iso;					\
+	(s)->txn.isolation = saved_txn_iso;				\
+	WT_ASSERT((s), (s)->txn.forced_iso > 0);                        \
+	(s)->txn.forced_iso--;						\
+	WT_ASSERT((s), txn_state->id == saved_state.id &&		\
+	    (txn_state->snap_min == saved_state.snap_min ||		\
+	    saved_state.snap_min == WT_TXN_NONE));			\
+	txn_state->snap_min = saved_state.snap_min;			\
+} while (0)
+
+struct __wt_named_snapshot {
+	const char *name;
+
+	TAILQ_ENTRY(__wt_named_snapshot) q;
+
+	uint64_t snap_min, snap_max;
+	uint64_t *snapshot;
+	uint32_t snapshot_count;
+};
 
 struct WT_COMPILER_TYPE_ALIGN(WT_CACHE_LINE_ALIGNMENT) __wt_txn_state {
 	volatile uint64_t id;
@@ -60,13 +96,17 @@ struct __wt_txn_global {
 	volatile uint64_t checkpoint_gen;
 	volatile uint64_t checkpoint_pinned;
 
+	/* Named snapshot state. */
+	WT_RWLOCK *nsnap_rwlock;
+	volatile uint64_t nsnap_oldest_id;
+	TAILQ_HEAD(__wt_nsnap_qh, __wt_named_snapshot) nsnaph;
+
 	WT_TXN_STATE *states;		/* Per-session transaction states */
 };
 
 typedef enum __wt_txn_isolation {
-	WT_ISO_EVICTION,		/* Internal: eviction context */
-	WT_ISO_READ_UNCOMMITTED,
 	WT_ISO_READ_COMMITTED,
+	WT_ISO_READ_UNCOMMITTED,
 	WT_ISO_SNAPSHOT
 } WT_TXN_ISOLATION;
 
@@ -79,29 +119,29 @@ typedef enum __wt_txn_isolation {
 struct __wt_txn_op {
 	uint32_t fileid;
 	enum {
-		TXN_OP_BASIC,
-		TXN_OP_INMEM,
-		TXN_OP_REF,
-		TXN_OP_TRUNCATE_COL,
-		TXN_OP_TRUNCATE_ROW
+		WT_TXN_OP_BASIC,
+		WT_TXN_OP_INMEM,
+		WT_TXN_OP_REF,
+		WT_TXN_OP_TRUNCATE_COL,
+		WT_TXN_OP_TRUNCATE_ROW
 	} type;
 	union {
-		/* TXN_OP_BASIC, TXN_OP_INMEM */
+		/* WT_TXN_OP_BASIC, WT_TXN_OP_INMEM */
 		WT_UPDATE *upd;
-		/* TXN_OP_REF */
+		/* WT_TXN_OP_REF */
 		WT_REF *ref;
-		/* TXN_OP_TRUNCATE_COL */
+		/* WT_TXN_OP_TRUNCATE_COL */
 		struct {
 			uint64_t start, stop;
 		} truncate_col;
-		/* TXN_OP_TRUNCATE_ROW */
+		/* WT_TXN_OP_TRUNCATE_ROW */
 		struct {
 			WT_ITEM start, stop;
 			enum {
-				TXN_TRUNC_ALL,
-				TXN_TRUNC_BOTH,
-				TXN_TRUNC_START,
-				TXN_TRUNC_STOP
+				WT_TXN_TRUNC_ALL,
+				WT_TXN_TRUNC_BOTH,
+				WT_TXN_TRUNC_START,
+				WT_TXN_TRUNC_STOP
 			} mode;
 		} truncate_row;
 	} u;
@@ -115,6 +155,8 @@ struct __wt_txn {
 	uint64_t id;
 
 	WT_TXN_ISOLATION isolation;
+
+	uint32_t forced_iso;	/* Isolation is currently forced. */
 
 	/*
 	 * Snapshot data:
@@ -140,14 +182,17 @@ struct __wt_txn {
 
 	/* Checkpoint status. */
 	WT_LSN		ckpt_lsn;
-	bool		full_ckpt;
 	uint32_t	ckpt_nsnapshot;
 	WT_ITEM		*ckpt_snapshot;
+	bool		full_ckpt;
 
 #define	WT_TXN_AUTOCOMMIT	0x01
 #define	WT_TXN_ERROR		0x02
-#define	WT_TXN_HAS_ID	        0x04
+#define	WT_TXN_HAS_ID		0x04
 #define	WT_TXN_HAS_SNAPSHOT	0x08
-#define	WT_TXN_RUNNING		0x10
+#define	WT_TXN_NAMED_SNAPSHOT	0x10
+#define	WT_TXN_READONLY		0x20
+#define	WT_TXN_RUNNING		0x40
+#define	WT_TXN_SYNC_SET		0x80
 	uint32_t flags;
 };

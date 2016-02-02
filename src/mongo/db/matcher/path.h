@@ -30,19 +30,17 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
 
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/bson/bsonobjiterator.h"
 #include "mongo/db/field_ref.h"
 
 namespace mongo {
 
 class ElementPath {
 public:
-    Status init(const StringData& path);
+    Status init(StringData path);
 
     void setTraverseNonleafArrays(bool b) {
         _shouldTraverseNonleafArrays = b;
@@ -168,7 +166,7 @@ private:
         bool more();
         BSONElement next();
 
-        bool isArrayOffsetMatch(const StringData& fieldName) const;
+        bool isArrayOffsetMatch(StringData fieldName) const;
         bool nextEntireRest() const {
             return nextPieceOfPath.size() == restOfPath.size();
         }
@@ -180,12 +178,12 @@ private:
 
         BSONElement _theArray;
         BSONElement _current;
-        boost::scoped_ptr<BSONObjIterator> _iterator;
+        std::unique_ptr<BSONObjIterator> _iterator;
     };
 
     ArrayIterationState _arrayIterationState;
 
-    boost::scoped_ptr<ElementIterator> _subCursor;
-    boost::scoped_ptr<ElementPath> _subCursorPath;
+    std::unique_ptr<ElementIterator> _subCursor;
+    std::unique_ptr<ElementPath> _subCursorPath;
 };
 }

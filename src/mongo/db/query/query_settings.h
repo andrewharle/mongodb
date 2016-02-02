@@ -30,12 +30,14 @@
 
 #include <string>
 #include <vector>
-#include <boost/thread/mutex.hpp>
+
 #include "mongo/base/disallow_copying.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/index_entry.h"
+#include "mongo/db/query/plan_cache.h"
 #include "mongo/platform/unordered_map.h"
+#include "mongo/stdx/mutex.h"
 
 namespace mongo {
 
@@ -104,7 +106,7 @@ public:
      * Returns false and sets allowedIndicesOut to NULL otherwise.
      * Caller owns AllowedIndices.
      */
-    bool getAllowedIndices(const CanonicalQuery& query, AllowedIndices** allowedIndicesOut) const;
+    bool getAllowedIndices(const PlanCacheKey& query, AllowedIndices** allowedIndicesOut) const;
 
     /**
      * Returns copies all overrides for the collection..
@@ -118,12 +120,13 @@ public:
      * frees resources for existing entry before replacing.
      */
     void setAllowedIndices(const CanonicalQuery& canonicalQuery,
+                           const PlanCacheKey& key,
                            const std::vector<BSONObj>& indexes);
 
     /**
      * Removes single entry from query settings. No effect if query shape is not found.
      */
-    void removeAllowedIndices(const CanonicalQuery& canonicalQuery);
+    void removeAllowedIndices(const PlanCacheKey& canonicalQuery);
 
     /**
      * Clears all allowed indices from query settings.
@@ -142,7 +145,7 @@ private:
     /**
      * Protects data in query settings.
      */
-    mutable boost::mutex _mutex;
+    mutable stdx::mutex _mutex;
 };
 
 }  // namespace mongo

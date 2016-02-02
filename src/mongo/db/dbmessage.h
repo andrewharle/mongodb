@@ -75,7 +75,8 @@ namespace mongo {
       int nToSkip;
       int nToReturn; // how many you want back as the beginning of the cursor data (0=no limit)
                      // greater than zero is simply a hint on how many objects to send back per
-                     // "cursor batch". a negative number indicates a hard limit.
+                     // "cursor batch".
+                     // a negative number indicates a hard limit.
       JSObject query;
       [JSObject fieldsToReturn]
    dbGetMore:
@@ -116,15 +117,15 @@ public:
     }
 
     int64_t getCursorId() const {
-        return storage().readLE<int64_t>(offsetof(Layout, cursorId));
+        return storage().read<LittleEndian<int64_t>>(offsetof(Layout, cursorId));
     }
 
     int32_t getStartingFrom() const {
-        return storage().readLE<int32_t>(offsetof(Layout, startingFrom));
+        return storage().read<LittleEndian<int32_t>>(offsetof(Layout, startingFrom));
     }
 
     int32_t getNReturned() const {
-        return storage().readLE<int32_t>(offsetof(Layout, nReturned));
+        return storage().read<LittleEndian<int32_t>>(offsetof(Layout, nReturned));
     }
 
     const char* data() const {
@@ -155,23 +156,23 @@ public:
     }
 
     void setCursorId(int64_t value) {
-        storage().writeLE(value, offsetof(Layout, cursorId));
+        storage().write(tagLittleEndian(value), offsetof(Layout, cursorId));
     }
 
     void setStartingFrom(int32_t value) {
-        storage().writeLE(value, offsetof(Layout, startingFrom));
+        storage().write(tagLittleEndian(value), offsetof(Layout, startingFrom));
     }
 
     void setNReturned(int32_t value) {
-        storage().writeLE(value, offsetof(Layout, nReturned));
+        storage().write(tagLittleEndian(value), offsetof(Layout, nReturned));
     }
 
     int32_t getResultFlags() {
-        return DataView(msgdata().data()).readLE<int32_t>();
+        return DataView(msgdata().data()).read<LittleEndian<int32_t>>();
     }
 
     void setResultFlags(int32_t value) {
-        DataView(msgdata().data()).writeLE(value);
+        DataView(msgdata().data()).write(tagLittleEndian(value));
     }
 
     void setResultFlagsToOk() {
@@ -191,7 +192,7 @@ private:
 class Value : public EncodedValueStorage<Layout, ConstView, View> {
 public:
     Value() {
-        BOOST_STATIC_ASSERT(sizeof(Value) == sizeof(Layout));
+        static_assert(sizeof(Value) == sizeof(Layout), "sizeof(Value) == sizeof(Layout)");
     }
 
     Value(ZeroInitTag_t zit) : EncodedValueStorage<Layout, ConstView, View>(zit) {}
@@ -206,7 +207,7 @@ public:
 */
 class DbMessage {
     // Assume sizeof(int) == 4 bytes
-    BOOST_STATIC_ASSERT(sizeof(int) == 4);
+    static_assert(sizeof(int) == 4, "sizeof(int) == 4");
 
 public:
     // Note: DbMessage constructor reads the first 4 bytes and stores it in reserved
@@ -303,7 +304,7 @@ public:
         if (d.moreJSObjs()) {
             fields = d.nextJsObj();
         }
-        queryOptions = DataView(d.msg().header().data()).readLE<int32_t>();
+        queryOptions = DataView(d.msg().header().data()).read<LittleEndian<int32_t>>();
     }
 };
 
@@ -311,22 +312,66 @@ public:
  * A response to a DbMessage.
  */
 struct DbResponse {
-    Message* response;
+    Message response;
     MSGID responseTo;
     std::string exhaustNS; /* points to ns if exhaust mode. 0=normal mode*/
-    DbResponse(Message* r, MSGID rt) : response(r), responseTo(rt) {}
-    DbResponse() {
-        response = 0;
+    DbResponse(Message r, MSGID rt) : response(std::move(r)), responseTo(rt) {}
+    DbResponse() = default;
+};
+
+/**
+ * Prepares query replies to legacy finds (opReply to dbQuery) in place. This is also used for
+ * command responses that don't use the new dbCommand protocol.
+ */
+class OpQueryReplyBuilder {
+    MONGO_DISALLOW_COPYING(OpQueryReplyBuilder);
+
+public:
+    OpQueryReplyBuilder();
+
+    /**
+     * Returns the BufBuilder that should be used for placing result objects. It will be positioned
+     * where the first (or next) object should go.
+     *
+     * You must finish the BSONObjBuilder that uses this (by destruction or calling doneFast())
+     * before calling any more methods on this object.
+     */
+    BufBuilder& bufBuilderForResults() {
+        return _buffer;
     }
-    ~DbResponse() {
-        delete response;
-    }
+
+    /**
+     * Finishes the reply and transfers the message buffer into 'out'.
+     */
+    void putInMessage(Message* out,
+                      int queryResultFlags,
+                      int nReturned,
+                      int startingFrom = 0,
+                      long long cursorId = 0);
+
+    /**
+     * Finishes the reply and sends the message out to 'destination'.
+     */
+    void send(AbstractMessagingPort* destination,
+              int queryResultFlags,
+              Message& requestMsg,  // should be const but MessagePort::reply takes non-const.
+              int nReturned,
+              int startingFrom = 0,
+              long long cursorId = 0);
+
+    /**
+     * Similar to send() but used for replying to a command.
+     */
+    void sendCommandReply(AbstractMessagingPort* destination, Message& requestMsg);
+
+private:
+    BufBuilder _buffer;
 };
 
 void replyToQuery(int queryResultFlags,
                   AbstractMessagingPort* p,
                   Message& requestMsg,
-                  void* data,
+                  const void* data,
                   int size,
                   int nReturned,
                   int startingFrom = 0,

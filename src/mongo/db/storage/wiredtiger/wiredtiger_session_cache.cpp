@@ -33,9 +33,13 @@
 
 #include "mongo/db/storage/wiredtiger/wiredtiger_session_cache.h"
 
+#include "mongo/base/error_codes.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_kv_engine.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_util.h"
+#include "mongo/stdx/memory.h"
+#include "mongo/stdx/thread.h"
 #include "mongo/util/log.h"
+#include "mongo/util/scopeguard.h"
 
 namespace mongo {
 
@@ -108,45 +112,69 @@ void WiredTigerSession::closeAllCursors() {
 }
 
 namespace {
-AtomicUInt64 nextCursorId(1);
+AtomicUInt64 nextTableId(1);
 }
 // static
-uint64_t WiredTigerSession::genCursorId() {
-    return nextCursorId.fetchAndAdd(1);
+uint64_t WiredTigerSession::genTableId() {
+    return nextTableId.fetchAndAdd(1);
 }
 
 // -----------------------
 
 WiredTigerSessionCache::WiredTigerSessionCache(WiredTigerKVEngine* engine)
-    : _engine(engine), _conn(engine->getConnection()), _shuttingDown(0) {}
+    : _engine(engine), _conn(engine->getConnection()), _snapshotManager(_conn), _shuttingDown(0) {}
 
 WiredTigerSessionCache::WiredTigerSessionCache(WT_CONNECTION* conn)
-    : _engine(NULL), _conn(conn), _shuttingDown(0) {}
+    : _engine(NULL), _conn(conn), _snapshotManager(_conn), _shuttingDown(0) {}
 
 WiredTigerSessionCache::~WiredTigerSessionCache() {
     shuttingDown();
 }
 
 void WiredTigerSessionCache::shuttingDown() {
-    if (_shuttingDown.load())
-        return;
-    _shuttingDown.store(1);
+    uint32_t actual = _shuttingDown.load();
+    uint32_t expected;
 
-    {
-        // This ensures that any calls, which are currently inside of getSession/releaseSession
-        // will be able to complete before we start cleaning up the pool. Any others, which are
-        // about to enter will return immediately because of _shuttingDown == true.
-        boost::lock_guard<boost::shared_mutex> lk(_shutdownLock);
+    // Try to atomically set _shuttingDown flag, but just return if another thread was first.
+    do {
+        expected = actual;
+        actual = _shuttingDown.compareAndSwap(expected, expected | kShuttingDownMask);
+        if (actual & kShuttingDownMask)
+            return;
+    } while (actual != expected);
+
+    // Spin as long as there are threads in releaseSession
+    while (_shuttingDown.load() != kShuttingDownMask) {
+        sleepmillis(1);
     }
 
     closeAll();
+    _snapshotManager.shutdown();
 }
 
-void WiredTigerSessionCache::waitUntilDurable(WiredTigerSession* session) {
+void WiredTigerSessionCache::waitUntilDurable(bool forceCheckpoint) {
+    const int shuttingDown = _shuttingDown.fetchAndAdd(1);
+    ON_BLOCK_EXIT([this] { _shuttingDown.fetchAndSubtract(1); });
+
+    uassert(ErrorCodes::ShutdownInProgress,
+            "Cannot wait for durability because a shutdown is in progress",
+            !(shuttingDown & kShuttingDownMask));
+
+    // When forcing a checkpoint with journaling enabled, don't synchronize with other
+    // waiters, as a log flush is much cheaper than a full checkpoint.
+    if (forceCheckpoint && _engine->isDurable()) {
+        WiredTigerSession* session = getSession();
+        ON_BLOCK_EXIT([this, session] { releaseSession(session); });
+        WT_SESSION* s = session->getSession();
+        invariantWTOK(s->checkpoint(s, NULL));
+        LOG(4) << "created checkpoint (forced)";
+        return;
+    }
+
     uint32_t start = _lastSyncTime.load();
     // Do the remainder in a critical section that ensures only a single thread at a time
     // will attempt to synchronize.
-    boost::unique_lock<boost::mutex> lk(_lastSyncMutex);
+    stdx::unique_lock<stdx::mutex> lk(_lastSyncMutex);
     uint32_t current = _lastSyncTime.loadRelaxed();  // synchronized with writes through mutex
     if (current != start) {
         // Someone else synced already since we read lastSyncTime, so we're done!
@@ -155,13 +183,17 @@ void WiredTigerSessionCache::waitUntilDurable(WiredTigerSession* session) {
     _lastSyncTime.store(current + 1);
 
     // Nobody has synched yet, so we have to sync ourselves.
+    WiredTigerSession* session = getSession();
+    ON_BLOCK_EXIT([this, session] { releaseSession(session); });
     WT_SESSION* s = session->getSession();
 
     // Use the journal when available, or a checkpoint otherwise.
     if (_engine->isDurable()) {
         invariantWTOK(s->log_flush(s, "sync=on"));
+        LOG(4) << "flushed journal";
     } else {
         invariantWTOK(s->checkpoint(s, NULL));
+        LOG(4) << "created checkpoint";
     }
 }
 
@@ -170,7 +202,7 @@ void WiredTigerSessionCache::closeAll() {
     SessionCache swap;
 
     {
-        boost::lock_guard<boost::mutex> lock(_cacheLock);
+        stdx::lock_guard<stdx::mutex> lock(_cacheLock);
         _epoch.fetchAndAdd(1);
         _sessions.swap(swap);
     }
@@ -180,15 +212,17 @@ void WiredTigerSessionCache::closeAll() {
     }
 }
 
-WiredTigerSession* WiredTigerSessionCache::getSession() {
-    boost::shared_lock<boost::shared_mutex> shutdownLock(_shutdownLock);
+bool WiredTigerSessionCache::isEphemeral() {
+    return _engine && _engine->isEphemeral();
+}
 
+WiredTigerSession* WiredTigerSessionCache::getSession() {
     // We should never be able to get here after _shuttingDown is set, because no new
     // operations should be allowed to start.
-    invariant(!_shuttingDown.loadRelaxed());
+    invariant(!(_shuttingDown.loadRelaxed() & kShuttingDownMask));
 
     {
-        boost::lock_guard<boost::mutex> lock(_cacheLock);
+        stdx::lock_guard<stdx::mutex> lock(_cacheLock);
         if (!_sessions.empty()) {
             // Get the most recently used session so that if we discard sessions, we're
             // discarding older ones
@@ -206,8 +240,10 @@ void WiredTigerSessionCache::releaseSession(WiredTigerSession* session) {
     invariant(session);
     invariant(session->cursorsOut() == 0);
 
-    boost::shared_lock<boost::shared_mutex> shutdownLock(_shutdownLock);
-    if (_shuttingDown.loadRelaxed()) {
+    const int shuttingDown = _shuttingDown.fetchAndAdd(1);
+    ON_BLOCK_EXIT([this] { _shuttingDown.fetchAndSubtract(1); });
+
+    if (shuttingDown & kShuttingDownMask) {
         // Leak the session in order to avoid race condition with clean shutdown, where the
         // storage engine is ripped from underneath transactions, which are not "active"
         // (i.e., do not have any locks), but are just about to delete the recovery unit.
@@ -228,7 +264,7 @@ void WiredTigerSessionCache::releaseSession(WiredTigerSession* session) {
     uint64_t currentEpoch = _epoch.load();
 
     if (session->_getEpoch() == currentEpoch) {  // check outside of lock to reduce contention
-        boost::lock_guard<boost::mutex> lock(_cacheLock);
+        stdx::lock_guard<stdx::mutex> lock(_cacheLock);
         if (session->_getEpoch() == _epoch.load()) {  // recheck inside the lock for correctness
             returnedToCache = true;
             _sessions.push_back(session);

@@ -1,8 +1,7 @@
 // Tests that updates can't change immutable fields (used in sharded system)
 var st = new ShardingTest({shards : 2,
                            mongos : 1,
-                           verbose : 0,
-                           other : {separateConfig : 1}})
+                           verbose : 0})
 st.stopBalancer();
 
 var mongos = st.s;
@@ -11,6 +10,7 @@ var coll = mongos.getCollection(jsTestName() + ".coll1");
 var shard0 = st.shard0;
 
 printjson(config.adminCommand({enableSharding : coll.getDB() + ""}))
+st.ensurePrimaryShard(coll.getDB().getName(), 'shard0000');
 printjson(config.adminCommand({shardCollection : "" + coll, key : {a : 1}}))
 
 var getDirectShardedConn = function( st, collName ) {
@@ -26,6 +26,7 @@ var getDirectShardedConn = function( st, collName ) {
                        authoritative : true,
                        configdb : configConnStr,
                        version : maxChunk.lastmod,
+                       shard: 'shard0000',
                        versionEpoch : maxChunk.lastmodEpoch };
 
     printjson( ssvInitCmd );

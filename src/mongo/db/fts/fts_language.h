@@ -30,6 +30,9 @@
 
 #pragma once
 
+#include "mongo/db/fts/fts_basic_phrase_matcher.h"
+#include "mongo/db/fts/fts_phrase_matcher.h"
+#include "mongo/db/fts/fts_unicode_phrase_matcher.h"
 #include "mongo/db/fts/fts_util.h"
 #include "mongo/base/status_with.h"
 
@@ -39,8 +42,11 @@ namespace mongo {
 
 namespace fts {
 
+class FTSTokenizer;
+
+// Legacy language initialization.
 #define MONGO_FTS_LANGUAGE_DECLARE(language, name, version)                                    \
-    FTSLanguage language;                                                                      \
+    BasicFTSLanguage language;                                                                 \
     MONGO_INITIALIZER_GENERAL(language, MONGO_NO_PREREQUISITES, ("FTSAllLanguagesRegistered")) \
     (::mongo::InitializerContext * context) {                                                  \
         FTSLanguage::registerLanguage(name, version, &language);                               \
@@ -53,7 +59,7 @@ namespace fts {
  *
  * Recommended usage:
  *
- *     StatusWithFTSLanguage swl = FTSLanguage::make( "en", TEXT_INDEX_VERSION_2 );
+ *     StatusWithFTSLanguage swl = FTSLanguage::make( "en", TEXT_INDEX_VERSION_3 );
  *     if ( !swl.getStatus().isOK() ) {
  *         // Error.
  *     }
@@ -70,6 +76,8 @@ public:
     /** Create an uninitialized language. */
     FTSLanguage();
 
+    virtual ~FTSLanguage() {}
+
     /**
      * Returns the language as a std::string in canonical form (lowercased English name).  It is
      * an error to call str() on an uninitialized language.
@@ -77,12 +85,22 @@ public:
     const std::string& str() const;
 
     /**
-     * Register std::string 'languageName' as a new language with text index version
-     * 'textIndexVersion'.  Saves the resulting language to out-argument 'languageOut'.
-     * Subsequent calls to FTSLanguage::make() will recognize the newly-registered language
-     * string.
+     * Returns a new FTSTokenizer instance for this language.
+     * Lifetime is scoped to FTSLanguage (which are currently all process lifetime).
      */
-    static void registerLanguage(const StringData& languageName,
+    virtual std::unique_ptr<FTSTokenizer> createTokenizer() const = 0;
+
+    /**
+     * Returns a reference to the phrase matcher instance that this language owns.
+     */
+    virtual const FTSPhraseMatcher& getPhraseMatcher() const = 0;
+
+    /**
+     * Register std::string 'languageName' as a new language with the text index version
+     * 'textIndexVersion'.  Saves the resulting language to out-argument 'languageOut'.
+     * Subsequent calls to FTSLanguage::make() will recognize the newly-registered language string.
+     */
+    static void registerLanguage(StringData languageName,
                                  TextIndexVersion textIndexVersion,
                                  FTSLanguage* languageOut);
 
@@ -92,25 +110,25 @@ public:
      * newly-registered alias.
      */
     static void registerLanguageAlias(const FTSLanguage* language,
-                                      const StringData& alias,
+                                      StringData alias,
                                       TextIndexVersion textIndexVersion);
 
     /**
-     * Return the FTSLanguage associated with the given language string.  Returns an error
-     * Status if an invalid language std::string is passed.
+     * Return the FTSLanguage associated with the given language string and the given text index
+     * version.  Returns an error Status if an invalid language std::string is passed.
      *
-     * For textIndexVersion=TEXT_INDEX_VERSION_2, language strings are
+     * For textIndexVersion >= TEXT_INDEX_VERSION_2, language strings are
      * case-insensitive, and need to be in one of the two following forms:
      * - English name, like "spanish".
      * - Two-letter code, like "es".
      *
-     * For textIndexVersion=TEXT_INDEX_VERSION_1, no validation or normalization of
+     * For textIndexVersion == TEXT_INDEX_VERSION_1, no validation or normalization of
      * language strings is performed.  This is necessary to preserve indexing behavior for
      * documents with language strings like "en": for compatibility, text data in these
      * documents needs to be processed with the English stemmer and the empty stopword list
      * (since "en" is recognized by Snowball but not the stopword processing logic).
      */
-    static StatusWith<const FTSLanguage*> make(const StringData& langName,
+    static StatusWith<const FTSLanguage*> make(StringData langName,
                                                TextIndexVersion textIndexVersion);
 
 private:
@@ -120,8 +138,35 @@ private:
 
 typedef StatusWith<const FTSLanguage*> StatusWithFTSLanguage;
 
-extern FTSLanguage languagePorterV1;
-extern FTSLanguage languageEnglishV2;
-extern FTSLanguage languageFrenchV2;
+/**
+ * FTSLanguage implementation that returns a BasicFTSTokenizer and BasicFTSPhraseMatcher for ASCII
+ * aware case folding in FTS.
+ */
+class BasicFTSLanguage : public FTSLanguage {
+public:
+    std::unique_ptr<FTSTokenizer> createTokenizer() const final;
+    const FTSPhraseMatcher& getPhraseMatcher() const final;
+
+private:
+    BasicFTSPhraseMatcher _basicPhraseMatcher;
+};
+
+/**
+ * FTSLanguage implementation that returns a UnicodeFTSTokenizer and UnicodeFTSPhraseMatcher for
+ * Unicode aware case folding and diacritic removal in FTS.
+ */
+class UnicodeFTSLanguage : public FTSLanguage {
+public:
+    UnicodeFTSLanguage(const std::string& languageName) : _unicodePhraseMatcher(languageName) {}
+    std::unique_ptr<FTSTokenizer> createTokenizer() const final;
+    const FTSPhraseMatcher& getPhraseMatcher() const final;
+
+private:
+    UnicodeFTSPhraseMatcher _unicodePhraseMatcher;
+};
+
+extern BasicFTSLanguage languagePorterV1;
+extern BasicFTSLanguage languageEnglishV2;
+extern BasicFTSLanguage languageFrenchV2;
 }
 }

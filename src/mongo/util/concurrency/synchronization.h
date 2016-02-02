@@ -29,10 +29,9 @@
 
 #pragma once
 
-#include <boost/thread/condition.hpp>
-#include <boost/noncopyable.hpp>
+#include "mongo/stdx/condition_variable.h"
 
-#include "mutex.h"
+#include "mongo/util/concurrency/mutex.h"
 
 namespace mongo {
 
@@ -63,7 +62,9 @@ void registerThreadIdleCallback(ThreadIdleCallback callback);
  *
  * This class is thread-safe.
  */
-class Notification : boost::noncopyable {
+class Notification {
+    MONGO_DISALLOW_COPYING(Notification);
+
 public:
     Notification();
 
@@ -78,16 +79,18 @@ public:
     void notifyOne();
 
 private:
-    mongo::mutex _mutex;  // protects state below
+    stdx::mutex _mutex;  // protects state below
     unsigned long long lookFor;
     unsigned long long cur;
-    boost::condition _condition;  // cond over _notified being true
+    stdx::condition_variable _condition;  // cond over _notified being true
 };
 
 /** establishes a synchronization point between threads. N threads are waits and one is notifier.
     threadsafe.
 */
-class NotifyAll : boost::noncopyable {
+class NotifyAll {
+    MONGO_DISALLOW_COPYING(NotifyAll);
+
 public:
     NotifyAll();
 
@@ -112,8 +115,8 @@ public:
     }
 
 private:
-    mongo::mutex _mutex;
-    boost::condition _condition;
+    stdx::mutex _mutex;
+    stdx::condition_variable _condition;
     When _lastDone;
     When _lastReturned;
     unsigned _nWaiting;

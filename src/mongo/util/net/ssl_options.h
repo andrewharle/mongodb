@@ -27,11 +27,11 @@
 
 #pragma once
 
+#include "mongo/util/net/ssl_manager.h"
+
 #include <vector>
 
 #include "mongo/base/status.h"
-#include "mongo/client/export_macros.h"
-#include "mongo/util/net/ssl_manager.h"
 
 namespace mongo {
 
@@ -42,8 +42,8 @@ class Environment;
 
 namespace moe = mongo::optionenvironment;
 
-struct MONGO_CLIENT_API SSLGlobalParams {
-    enum Protocols { TLS1_0, TLS1_1, TLS1_2 };
+struct SSLParams {
+    enum class Protocols { TLS1_0, TLS1_1, TLS1_2 };
     AtomicInt32 sslMode;             // --sslMode - the SSL operation mode, see enum SSLModes
     bool sslOnNormalPorts;           // --sslOnNormalPorts (deprecated)
     std::string sslPEMKeyFile;       // --sslPEMKeyFile
@@ -59,7 +59,7 @@ struct MONGO_CLIENT_API SSLGlobalParams {
     bool sslAllowInvalidCertificates;             // --sslAllowInvalidCertificates
     bool sslAllowInvalidHostnames;                // --sslAllowInvalidHostnames
 
-    SSLGlobalParams() {
+    SSLParams() {
         sslMode.store(SSLMode_disabled);
     }
 
@@ -86,7 +86,7 @@ struct MONGO_CLIENT_API SSLGlobalParams {
     };
 };
 
-extern MONGO_CLIENT_API SSLGlobalParams sslGlobalParams;
+extern SSLParams sslGlobalParams;
 
 Status addSSLServerOptions(moe::OptionSection* options);
 

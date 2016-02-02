@@ -29,6 +29,7 @@
 #pragma once
 
 #include "mongo/base/status.h"
+#include "mongo/client/connection_string.h"
 #include "mongo/db/server_options.h"
 #include "mongo/util/options_parser/environment.h"
 #include "mongo/util/options_parser/option_section.h"
@@ -43,10 +44,9 @@ class Environment;
 namespace moe = mongo::optionenvironment;
 
 struct MongosGlobalParams {
-    std::vector<std::string> configdbs;
-    bool upgrade;
+    ConnectionString configdbs;
 
-    MongosGlobalParams() : upgrade(false) {}
+    MongosGlobalParams() = default;
 };
 
 extern MongosGlobalParams mongosGlobalParams;
@@ -80,5 +80,7 @@ Status canonicalizeMongosOptions(moe::Environment* params);
 
 Status storeMongosOptions(const moe::Environment& params, const std::vector<std::string>& args);
 
+// This function should eventually go away, but needs to be here now because the sorter and
+// the version manager must know at runtime which binary it is in.
 bool isMongos();
 }

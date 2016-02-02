@@ -31,27 +31,23 @@
 #include "mongo/db/exec/filter.h"
 #include "mongo/db/exec/scoped_timer.h"
 #include "mongo/db/exec/working_set_common.h"
+#include "mongo/stdx/memory.h"
 #include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
 
-using std::auto_ptr;
+using std::unique_ptr;
 using std::vector;
+using stdx::make_unique;
 
 // static
 const char* OrStage::kStageType = "OR";
 
-OrStage::OrStage(WorkingSet* ws, bool dedup, const MatchExpression* filter)
-    : _ws(ws), _filter(filter), _currentChild(0), _dedup(dedup), _commonStats(kStageType) {}
-
-OrStage::~OrStage() {
-    for (size_t i = 0; i < _children.size(); ++i) {
-        delete _children[i];
-    }
-}
+OrStage::OrStage(OperationContext* opCtx, WorkingSet* ws, bool dedup, const MatchExpression* filter)
+    : PlanStage(kStageType, opCtx), _ws(ws), _filter(filter), _currentChild(0), _dedup(dedup) {}
 
 void OrStage::addChild(PlanStage* child) {
-    _children.push_back(child);
+    _children.emplace_back(child);
 }
 
 bool OrStage::isEOF() {
@@ -66,10 +62,6 @@ PlanStage::StageState OrStage::work(WorkingSetID* out) {
 
     if (isEOF()) {
         return PlanStage::IS_EOF;
-    }
-
-    if (0 == _specificStats.matchTested.size()) {
-        _specificStats.matchTested = vector<size_t>(_children.size(), 0);
     }
 
     WorkingSetID id = WorkingSet::INVALID_ID;
@@ -96,9 +88,6 @@ PlanStage::StageState OrStage::work(WorkingSetID* out) {
         }
 
         if (Filter::passes(member, _filter)) {
-            if (NULL != _filter) {
-                ++_specificStats.matchTested[_currentChild];
-            }
             // Match!  return it.
             *out = id;
             ++_commonStats.advanced;
@@ -120,7 +109,7 @@ PlanStage::StageState OrStage::work(WorkingSetID* out) {
             ++_commonStats.needTime;
             return PlanStage::NEED_TIME;
         }
-    } else if (PlanStage::FAILURE == childStatus) {
+    } else if (PlanStage::FAILURE == childStatus || PlanStage::DEAD == childStatus) {
         *out = id;
         // If a stage fails, it may create a status WSM to indicate why it
         // failed, in which case 'id' is valid.  If ID is invalid, we
@@ -134,38 +123,19 @@ PlanStage::StageState OrStage::work(WorkingSetID* out) {
         return childStatus;
     } else if (PlanStage::NEED_TIME == childStatus) {
         ++_commonStats.needTime;
-    } else if (PlanStage::NEED_FETCH == childStatus) {
-        ++_commonStats.needFetch;
+    } else if (PlanStage::NEED_YIELD == childStatus) {
+        ++_commonStats.needYield;
         *out = id;
     }
 
-    // NEED_TIME, ERROR, NEED_FETCH, pass them up.
+    // NEED_TIME, ERROR, NEED_YIELD, pass them up.
     return childStatus;
 }
 
-void OrStage::saveState() {
-    ++_commonStats.yields;
-    for (size_t i = 0; i < _children.size(); ++i) {
-        _children[i]->saveState();
-    }
-}
-
-void OrStage::restoreState(OperationContext* opCtx) {
-    ++_commonStats.unyields;
-    for (size_t i = 0; i < _children.size(); ++i) {
-        _children[i]->restoreState(opCtx);
-    }
-}
-
-void OrStage::invalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) {
-    ++_commonStats.invalidates;
-
+void OrStage::doInvalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) {
+    // TODO remove this since calling isEOF is illegal inside of doInvalidate().
     if (isEOF()) {
         return;
-    }
-
-    for (size_t i = 0; i < _children.size(); ++i) {
-        _children[i]->invalidate(txn, dl, type);
     }
 
     // If we see DL again it is not the same record as it once was so we still want to
@@ -179,11 +149,7 @@ void OrStage::invalidate(OperationContext* txn, const RecordId& dl, Invalidation
     }
 }
 
-vector<PlanStage*> OrStage::getChildren() const {
-    return _children;
-}
-
-PlanStageStats* OrStage::getStats() {
+unique_ptr<PlanStageStats> OrStage::getStats() {
     _commonStats.isEOF = isEOF();
 
     // Add a BSON representation of the filter to the stats tree, if there is one.
@@ -193,20 +159,16 @@ PlanStageStats* OrStage::getStats() {
         _commonStats.filter = bob.obj();
     }
 
-    auto_ptr<PlanStageStats> ret(new PlanStageStats(_commonStats, STAGE_OR));
-    ret->specific.reset(new OrStats(_specificStats));
+    unique_ptr<PlanStageStats> ret = make_unique<PlanStageStats>(_commonStats, STAGE_OR);
+    ret->specific = make_unique<OrStats>(_specificStats);
     for (size_t i = 0; i < _children.size(); ++i) {
-        ret->children.push_back(_children[i]->getStats());
+        ret->children.emplace_back(_children[i]->getStats());
     }
 
-    return ret.release();
+    return ret;
 }
 
-const CommonStats* OrStage::getCommonStats() {
-    return &_commonStats;
-}
-
-const SpecificStats* OrStage::getSpecificStats() {
+const SpecificStats* OrStage::getSpecificStats() const {
     return &_specificStats;
 }
 

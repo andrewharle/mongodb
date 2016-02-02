@@ -31,7 +31,6 @@
 
 #pragma once
 
-#include <boost/shared_ptr.hpp>
 #include <string>
 #include <vector>
 
@@ -141,10 +140,10 @@ private:
                      std::vector<std::string>& headers);
 
 
-    const boost::scoped_ptr<AdminAccess> _webUsers;
+    const std::unique_ptr<AdminAccess> _webUsers;
 };
 
-void webServerListenThread(boost::shared_ptr<DbWebServer> dbWebServer);
+void webServerListenThread(std::shared_ptr<DbWebServer> dbWebServer);
 
 std::string prettyHostName();
 };

@@ -48,17 +48,13 @@ class ReplSetConfig;
 class StringData;
 class UserName;
 
-namespace mutablebson {
-class Document;
-}  // namespace mutablebson
-
 namespace audit {
 
 /**
  * Logs the result of an authentication attempt.
  */
 void logAuthentication(ClientBasic* client,
-                       const StringData& mechanism,
+                       StringData mechanism,
                        const UserName& user,
                        ErrorCodes::Error result);
 
@@ -87,22 +83,12 @@ void logDeleteAuthzCheck(ClientBasic* client,
                          ErrorCodes::Error result);
 
 /**
- * Logs the result of an authorization check for the "unlock" pseudo-command.
- */
-void logFsyncUnlockAuthzCheck(ClientBasic* client, ErrorCodes::Error result);
-
-/**
  * Logs the result of an authorization check for an OP_GET_MORE wire protocol message.
  */
 void logGetMoreAuthzCheck(ClientBasic* client,
                           const NamespaceString& ns,
                           long long cursorId,
                           ErrorCodes::Error result);
-
-/**
- * Logs the result of an authorization check for an "inprog" pseudo-command.
- */
-void logInProgAuthzCheck(ClientBasic* client, const BSONObj& filter, ErrorCodes::Error result);
 
 /**
  * Logs the result of an authorization check for an OP_INSERT wire protocol message.
@@ -119,11 +105,6 @@ void logKillCursorsAuthzCheck(ClientBasic* client,
                               const NamespaceString& ns,
                               long long cursorId,
                               ErrorCodes::Error result);
-
-/**
- * Logs the result of an authorization check for a "killop" pseudo-command.
- */
-void logKillOpAuthzCheck(ClientBasic* client, const BSONObj& filter, ErrorCodes::Error result);
 
 /**
  * Logs the result of an authorization check for an OP_QUERY wire protocol message.
@@ -161,7 +142,7 @@ void logDropUser(ClientBasic* client, const UserName& username);
 /**
  * Logs the result of a dropAllUsersFromDatabase command.
  */
-void logDropAllUsersFromDatabase(ClientBasic* client, const StringData& dbname);
+void logDropAllUsersFromDatabase(ClientBasic* client, StringData dbname);
 
 /**
  * Logs the result of a updateUser command.
@@ -210,7 +191,7 @@ void logDropRole(ClientBasic* client, const RoleName& role);
 /**
  * Logs the result of a dropAllRolesForDatabase command.
  */
-void logDropAllRolesFromDatabase(ClientBasic* client, const StringData& dbname);
+void logDropAllRolesFromDatabase(ClientBasic* client, StringData dbname);
 
 /**
  * Logs the result of a grantRolesToRole command.
@@ -248,7 +229,7 @@ void logReplSetReconfig(ClientBasic* client, const BSONObj* oldConfig, const BSO
 /**
  * Logs the result of an ApplicationMessage command.
  */
-void logApplicationMessage(ClientBasic* client, const StringData& msg);
+void logApplicationMessage(ClientBasic* client, StringData msg);
 
 /**
  * Logs the result of a shutdown command.
@@ -260,75 +241,70 @@ void logShutdown(ClientBasic* client);
  */
 void logCreateIndex(ClientBasic* client,
                     const BSONObj* indexSpec,
-                    const StringData& indexname,
-                    const StringData& nsname);
+                    StringData indexname,
+                    StringData nsname);
 
 /**
  * Logs the result of a createCollection command.
  */
-void logCreateCollection(ClientBasic* client, const StringData& nsname);
+void logCreateCollection(ClientBasic* client, StringData nsname);
 
 /**
  * Logs the result of a createDatabase command.
  */
-void logCreateDatabase(ClientBasic* client, const StringData& dbname);
+void logCreateDatabase(ClientBasic* client, StringData dbname);
 
 
 /**
  * Logs the result of a dropIndex command.
  */
-void logDropIndex(ClientBasic* client, const StringData& indexname, const StringData& nsname);
+void logDropIndex(ClientBasic* client, StringData indexname, StringData nsname);
 
 /**
  * Logs the result of a dropCollection command.
  */
-void logDropCollection(ClientBasic* client, const StringData& nsname);
+void logDropCollection(ClientBasic* client, StringData nsname);
 
 /**
  * Logs the result of a dropDatabase command.
  */
-void logDropDatabase(ClientBasic* client, const StringData& dbname);
+void logDropDatabase(ClientBasic* client, StringData dbname);
 
 /**
  * Logs a collection rename event.
  */
-void logRenameCollection(ClientBasic* client, const StringData& source, const StringData& target);
+void logRenameCollection(ClientBasic* client, StringData source, StringData target);
 
 /**
  * Logs the result of a enableSharding command.
  */
-void logEnableSharding(ClientBasic* client, const StringData& dbname);
+void logEnableSharding(ClientBasic* client, StringData dbname);
 
 /**
  * Logs the result of a addShard command.
  */
 void logAddShard(ClientBasic* client,
-                 const StringData& name,
+                 StringData name,
                  const std::string& servers,
                  long long maxSize);
 
 /**
  * Logs the result of a removeShard command.
  */
-void logRemoveShard(ClientBasic* client, const StringData& shardname);
+void logRemoveShard(ClientBasic* client, StringData shardname);
 
 /**
  * Logs the result of a shardCollection command.
  */
-void logShardCollection(ClientBasic* client,
-                        const StringData& ns,
-                        const BSONObj& keyPattern,
-                        bool unique);
+void logShardCollection(ClientBasic* client, StringData ns, const BSONObj& keyPattern, bool unique);
 
 
 /*
  * Appends an array of user/db pairs and an array of role/db pairs
- * to the provided Document. The users and roles are extracted from the current client.
+ * to the provided metadata builder. The users and roles are extracted from the current client.
  * They are to be the impersonated users and roles for a Command run by an internal user.
  */
-void appendImpersonatedUsers(BSONObjBuilder* cmd);
-const char cmdOptionImpersonatedUsers[] = "impersonatedUsers";
-const char cmdOptionImpersonatedRoles[] = "impersonatedRoles";
+void writeImpersonatedUsersToMetadata(BSONObjBuilder* metadataBob);
 
 /*
  * Looks for an 'impersonatedUsers' field.  This field is used by mongos to
@@ -340,12 +316,10 @@ const char cmdOptionImpersonatedRoles[] = "impersonatedRoles";
  * command BSON to efficiently remove the field before returning.
  *
  * cmdObj [in, out]: If any impersonated users field exists, it will be parsed and removed.
- * authSession [in]: current authorization session
  * parsedUserNames [out]: populated with parsed usernames
  * fieldIsPresent [out]: true if impersonatedUsers field was present in the object
  */
 void parseAndRemoveImpersonatedUsersField(BSONObj cmdObj,
-                                          AuthorizationSession* authSession,
                                           std::vector<UserName>* parsedUserNames,
                                           bool* fieldIsPresent);
 
@@ -359,12 +333,10 @@ void parseAndRemoveImpersonatedUsersField(BSONObj cmdObj,
  * command BSON to efficiently remove the field before returning.
  *
  * cmdObj [in, out]: If any impersonated roles field exists, it will be parsed and removed.
- * authSession [in]: current authorization session
  * parsedRoleNames [out]: populated with parsed user rolenames
  * fieldIsPresent [out]: true if impersonatedRoles field was present in the object
  */
 void parseAndRemoveImpersonatedRolesField(BSONObj cmdObj,
-                                          AuthorizationSession* authSession,
                                           std::vector<RoleName>* parsedRoleNames,
                                           bool* fieldIsPresent);
 

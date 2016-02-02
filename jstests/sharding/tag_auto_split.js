@@ -1,10 +1,15 @@
-// test to make sure that tag ranges get split
+// Test to make sure that tag ranges get split
+(function() {
 
-s = new ShardingTest( "tag_auto_split", 2, 0, 1, { nopreallocj : true, enableBalancer : true } );
+var s = new ShardingTest({ name: "tag_auto_split",
+                           shards: 2,
+                           mongos: 1,
+                           other: { enableBalancer : true } });
 
 db = s.getDB( "test" );
 
 s.adminCommand( { enablesharding : "test" } )
+s.ensurePrimaryShard('test', 'shard0001');
 s.adminCommand( { shardcollection : "test.foo" , key : { _id : 1 } } );
 
 assert.eq( 1, s.config.chunks.count() );
@@ -24,11 +29,15 @@ printjson( sh.status() );
 s.stop();
 
 //test without full shard key on tags
-s = new ShardingTest( "tag_auto_split2", 2, 0, 1, { nopreallocj : true, enableBalancer : true } );
+s = new ShardingTest({ name: "tag_auto_split2",
+                       shards: 2,
+                       mongos: 1,
+                       other: { enableBalancer : true } });
 
 db = s.getDB( "test" );
 
 s.adminCommand( { enablesharding : "test" } )
+s.ensurePrimaryShard('test', 'shard0001');
 s.adminCommand( { shardcollection : "test.foo" , key : { _id : 1, a : 1 } } );
 
 assert.eq( 1, s.config.chunks.count() );
@@ -61,3 +70,5 @@ assert.eq( 1, s.config.chunks.find( {min : {_id : 10 , a : MinKey} } ).count(),
            "bad chunk range boundary" );
 
 s.stop();
+
+})();

@@ -54,7 +54,7 @@
         var msg = "";
         profileItems.forEach(function(d) {
             msg += "profile doc: " + d.ns + " " + d.op + " " +
-                tojson(d.query ? d.query : d.command);
+                tojson(d.query ? d.query : d.command) + '\n';
         });
         msg += tojson(db.system.profile.stats());
 

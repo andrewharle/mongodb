@@ -32,14 +32,16 @@
 
 #include <set>
 
+#include "mongo/bson/json.h"
 #include "mongo/bson/mutable/document.h"
 #include "mongo/client/replica_set_monitor.h"
 #include "mongo/client/sasl_client_authenticate.h"
+#include "mongo/config.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/internal_user_auth.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/server_parameters.h"
-#include "mongo/db/storage_options.h"
+#include "mongo/db/storage/storage_options.h"
 #include "mongo/logger/parse_log_component_settings.h"
 #include "mongo/util/mongoutils/str.h"
 #include "mongo/util/net/ssl_manager.h"
@@ -90,8 +92,7 @@ public:
              BSONObj& cmdObj,
              int,
              string& errmsg,
-             BSONObjBuilder& result,
-             bool fromRepl) {
+             BSONObjBuilder& result) {
         bool all = *cmdObj.firstElement().valuestrsafe() == '*';
 
         int before = result.len();
@@ -140,8 +141,7 @@ public:
              BSONObj& cmdObj,
              int,
              string& errmsg,
-             BSONObjBuilder& result,
-             bool fromRepl) {
+             BSONObjBuilder& result) {
         int numSet = 0;
         bool found = false;
 
@@ -445,13 +445,13 @@ public:
 
     std::string sslModeStr() {
         switch (sslGlobalParams.sslMode.load()) {
-            case SSLGlobalParams::SSLMode_disabled:
+            case SSLParams::SSLMode_disabled:
                 return "disabled";
-            case SSLGlobalParams::SSLMode_allowSSL:
+            case SSLParams::SSLMode_allowSSL:
                 return "allowSSL";
-            case SSLGlobalParams::SSLMode_preferSSL:
+            case SSLParams::SSLMode_preferSSL:
                 return "preferSSL";
-            case SSLGlobalParams::SSLMode_requireSSL:
+            case SSLParams::SSLMode_requireSSL:
                 return "requireSSL";
             default:
                 return "undefined";
@@ -474,7 +474,7 @@ public:
     }
 
     virtual Status setFromString(const std::string& str) {
-#ifndef MONGO_SSL
+#ifndef MONGO_CONFIG_SSL
         return Status(ErrorCodes::IllegalOperation,
                       mongoutils::str::stream()
                           << "Unable to set sslMode, SSL support is not compiled into server");
@@ -486,10 +486,10 @@ public:
         }
 
         int oldMode = sslGlobalParams.sslMode.load();
-        if (str == "preferSSL" && oldMode == SSLGlobalParams::SSLMode_allowSSL) {
-            sslGlobalParams.sslMode.store(SSLGlobalParams::SSLMode_preferSSL);
-        } else if (str == "requireSSL" && oldMode == SSLGlobalParams::SSLMode_preferSSL) {
-            sslGlobalParams.sslMode.store(SSLGlobalParams::SSLMode_requireSSL);
+        if (str == "preferSSL" && oldMode == SSLParams::SSLMode_allowSSL) {
+            sslGlobalParams.sslMode.store(SSLParams::SSLMode_preferSSL);
+        } else if (str == "requireSSL" && oldMode == SSLParams::SSLMode_preferSSL) {
+            sslGlobalParams.sslMode.store(SSLParams::SSLMode_requireSSL);
         } else {
             return Status(ErrorCodes::BadValue,
                           mongoutils::str::stream()
@@ -540,7 +540,7 @@ public:
     }
 
     virtual Status setFromString(const std::string& str) {
-#ifndef MONGO_SSL
+#ifndef MONGO_CONFIG_SSL
         return Status(ErrorCodes::IllegalOperation,
                       mongoutils::str::stream() << "Unable to set clusterAuthMode, "
                                                 << "SSL support is not compiled into server");
@@ -555,15 +555,14 @@ public:
         int oldMode = serverGlobalParams.clusterAuthMode.load();
         int sslMode = sslGlobalParams.sslMode.load();
         if (str == "sendX509" && oldMode == ServerGlobalParams::ClusterAuthMode_sendKeyFile) {
-            if (sslMode == SSLGlobalParams::SSLMode_disabled ||
-                sslMode == SSLGlobalParams::SSLMode_allowSSL) {
+            if (sslMode == SSLParams::SSLMode_disabled || sslMode == SSLParams::SSLMode_allowSSL) {
                 return Status(ErrorCodes::BadValue,
                               mongoutils::str::stream()
                                   << "Illegal state transition for clusterAuthMode, "
                                   << "need to enable SSL for outgoing connections");
             }
             serverGlobalParams.clusterAuthMode.store(ServerGlobalParams::ClusterAuthMode_sendX509);
-#ifdef MONGO_SSL
+#ifdef MONGO_CONFIG_SSL
             setInternalUserAuthParams(
                 BSON(saslCommandMechanismFieldName
                      << "MONGODB-X509" << saslCommandUserDBFieldName << "$external"
@@ -582,20 +581,15 @@ public:
     }
 } clusterAuthModeSetting;
 
-ExportedServerParameter<bool> QuietSetting(
-    ServerParameterSet::getGlobal(), "quiet", &serverGlobalParams.quiet, true, true);
+ExportedServerParameter<bool, ServerParameterType::kStartupAndRuntime> QuietSetting(
+    ServerParameterSet::getGlobal(), "quiet", &serverGlobalParams.quiet);
 
-ExportedServerParameter<int> MaxConsecutiveFailedChecksSetting(
+ExportedServerParameter<int, ServerParameterType::kRuntimeOnly> MaxConsecutiveFailedChecksSetting(
     ServerParameterSet::getGlobal(),
     "replMonitorMaxFailedChecks",
-    &ReplicaSetMonitor::maxConsecutiveFailedChecks,
-    false,  // allowedToChangeAtStartup
-    true);  // allowedToChangeAtRuntime
+    &ReplicaSetMonitor::maxConsecutiveFailedChecks);
 
-ExportedServerParameter<bool> TraceExceptionsSetting(ServerParameterSet::getGlobal(),
-                                                     "traceExceptions",
-                                                     &DBException::traceExceptions,
-                                                     false,  // allowedToChangeAtStartup
-                                                     true);  // allowedToChangeAtRuntime
+ExportedServerParameter<bool, ServerParameterType::kRuntimeOnly> TraceExceptionsSetting(
+    ServerParameterSet::getGlobal(), "traceExceptions", &DBException::traceExceptions);
 }
 }

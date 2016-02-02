@@ -30,8 +30,6 @@
 
 #pragma once
 
-#include <boost/noncopyable.hpp>
-#include <boost/scoped_ptr.hpp>
 #include <string>
 #include <vector>
 
@@ -56,15 +54,22 @@ class State;
 
 // ------------  function interfaces -----------
 
-class Mapper : boost::noncopyable {
+class Mapper {
+    MONGO_DISALLOW_COPYING(Mapper);
+
 public:
     virtual ~Mapper() {}
     virtual void init(State* state) = 0;
 
     virtual void map(const BSONObj& o) = 0;
+
+protected:
+    Mapper() = default;
 };
 
-class Finalizer : boost::noncopyable {
+class Finalizer {
+    MONGO_DISALLOW_COPYING(Finalizer);
+
 public:
     virtual ~Finalizer() {}
     virtual void init(State* state) = 0;
@@ -73,9 +78,14 @@ public:
      * this takes a tuple and returns a tuple
      */
     virtual BSONObj finalize(const BSONObj& tuple) = 0;
+
+protected:
+    Finalizer() = default;
 };
 
-class Reducer : boost::noncopyable {
+class Reducer {
+    MONGO_DISALLOW_COPYING(Reducer);
+
 public:
     Reducer() : numReduces(0) {}
     virtual ~Reducer() {}
@@ -94,7 +104,9 @@ public:
  * used as a holder for Scope and ScriptingFunction
  * visitor like pattern as Scope is gotten from first access
  */
-class JSFunction : boost::noncopyable {
+class JSFunction {
+    MONGO_DISALLOW_COPYING(JSFunction);
+
 public:
     /**
      * @param type (map|reduce|finalize)
@@ -198,9 +210,9 @@ public:
 
     // functions
 
-    boost::scoped_ptr<Mapper> mapper;
-    boost::scoped_ptr<Reducer> reducer;
-    boost::scoped_ptr<Finalizer> finalizer;
+    std::unique_ptr<Mapper> mapper;
+    std::unique_ptr<Reducer> reducer;
+    std::unique_ptr<Finalizer> finalizer;
 
     BSONObj mapParams;
     BSONObj scopeSetup;
@@ -360,7 +372,7 @@ public:
     void switchMode(bool jsMode);
     void bailFromJS();
 
-    Collection* getCollectionOrUassert(Database* db, const StringData& ns);
+    Collection* getCollectionOrUassert(Database* db, StringData ns);
 
     const Config& _config;
     DBDirectClient _db;
@@ -376,10 +388,10 @@ protected:
     int _add(InMemory* im, const BSONObj& a);
 
     OperationContext* _txn;
-    boost::scoped_ptr<Scope> _scope;
+    std::unique_ptr<Scope> _scope;
     bool _onDisk;  // if the end result of this map reduce is disk or not
 
-    boost::scoped_ptr<InMemory> _temp;
+    std::unique_ptr<InMemory> _temp;
     long _size;      // bytes in _temp
     long _dupCount;  // number of duplicate key entries
 

@@ -29,9 +29,11 @@
 */
 
 #pragma once
-#include "mongo/platform/basic.h"
+
+#include "mongo/base/status_with.h"
 #include "mongo/db/jsobj.h"
-#include "top.h"
+#include "mongo/db/stats/top.h"
+#include "mongo/platform/basic.h"
 #include "mongo/util/background.h"
 
 /**
@@ -39,7 +41,7 @@
  */
 namespace mongo {
 
-class SnapshotThread;
+class StatsSnapshotThread;
 
 /**
  * stores a point in time snapshot
@@ -51,7 +53,7 @@ class SnapshotData {
     unsigned long long _created;
     Top::UsageMap _usage;
 
-    friend class SnapshotThread;
+    friend class StatsSnapshotThread;
     friend class SnapshotDelta;
     friend class Snapshots;
 };
@@ -62,10 +64,6 @@ class SnapshotData {
 class SnapshotDelta {
 public:
     SnapshotDelta(const SnapshotData& older, const SnapshotData& newer);
-
-    unsigned long long start() const {
-        return _older._created;
-    }
 
     unsigned long long elapsed() const {
         return _elapsed;
@@ -80,35 +78,39 @@ private:
     unsigned long long _elapsed;
 };
 
+struct SnapshotDiff {
+    Top::UsageMap usageDiff;
+    unsigned long long timeElapsed;
+
+    SnapshotDiff() = default;
+    SnapshotDiff(Top::UsageMap map, unsigned long long elapsed)
+        : usageDiff(std::move(map)), timeElapsed(elapsed) {}
+};
+
 class Snapshots {
 public:
-    Snapshots(int n = 100);
+    Snapshots();
 
     const SnapshotData* takeSnapshot();
 
-    int numDeltas() const {
-        return _stored - 1;
-    }
-
-    const SnapshotData& getPrev(int numBack = 0);
-    std::auto_ptr<SnapshotDelta> computeDelta(int numBack = 0);
+    StatusWith<SnapshotDiff> computeDelta();
 
 private:
-    mongo::mutex _lock;
-    int _n;
-    boost::scoped_array<SnapshotData> _snapshots;
+    stdx::mutex _lock;
+    static const int kNumSnapshots = 2;
+    SnapshotData _snapshots[kNumSnapshots];
     int _loc;
     int _stored;
 };
 
-class SnapshotThread : public BackgroundJob {
+class StatsSnapshotThread : public BackgroundJob {
 public:
     virtual std::string name() const {
-        return "snapshot";
+        return "statsSnapshot";
     }
     void run();
 };
 
 extern Snapshots statsSnapshots;
-extern SnapshotThread snapshotThread;
+extern StatsSnapshotThread statsSnapshotThread;
 }

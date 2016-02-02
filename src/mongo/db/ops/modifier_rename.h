@@ -28,7 +28,6 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
 #include <string>
 
 #include "mongo/base/disallow_copying.h"
@@ -67,9 +66,7 @@ public:
      *   -- The 'to' field is not on the path (or the same path) as the 'from' field
      *   -- Neither 'to' nor 'from' have an array ancestor
      */
-    virtual Status prepare(mutablebson::Element root,
-                           const StringData& matchedField,
-                           ExecInfo* execInfo);
+    virtual Status prepare(mutablebson::Element root, StringData matchedField, ExecInfo* execInfo);
 
     /**
      * We will transform the document by first making sure that the 'to' element
@@ -90,7 +87,7 @@ private:
 
     // The state carried over from prepare for apply/log
     struct PreparedState;
-    boost::scoped_ptr<PreparedState> _preparedState;
+    std::unique_ptr<PreparedState> _preparedState;
 };
 
 }  // namespace mongo

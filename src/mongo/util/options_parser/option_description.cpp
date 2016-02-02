@@ -28,14 +28,13 @@
 #include "mongo/util/options_parser/option_description.h"
 
 #include <algorithm>
-#include <boost/shared_ptr.hpp>
 
 #include "mongo/util/assert_util.h"
 
 namespace mongo {
 namespace optionenvironment {
 
-using boost::shared_ptr;
+using std::shared_ptr;
 
 namespace {
 /**
@@ -267,7 +266,7 @@ OptionDescription& OptionDescription::positional(int start, int end) {
 }
 
 OptionDescription& OptionDescription::addConstraint(Constraint* c) {
-    _constraints.push_back(boost::shared_ptr<Constraint>(c));
+    _constraints.push_back(std::shared_ptr<Constraint>(c));
     return *this;
 }
 

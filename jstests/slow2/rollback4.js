@@ -1,4 +1,6 @@
 // Test a large rollback SERVER-2737
+(function() {
+'use strict';
 
 var replTest = new ReplSetTest({ name: 'unicomplex', 
                                  nodes: 3, 
@@ -8,21 +10,24 @@ var nodes = replTest.nodeList();
 
 var conns = replTest.startSet();
 var r = replTest.initiate({ "_id": "unicomplex",
-                          "members": [
-                                      { "_id": 0, "host": nodes[0], priority: 2 },
-                                      { "_id": 1, "host": nodes[1] },
-                                      { "_id": 2, "host": nodes[2], arbiterOnly: true}]
+                            "settings": {
+                                "heartbeatTimeoutSecs":30
+                            },
+                            "members": [
+                                { "_id": 0, "host": nodes[0], priority: 2 },
+                                { "_id": 1, "host": nodes[1] },
+                                { "_id": 2, "host": nodes[2], arbiterOnly: true}]
                           }, 'replSetInitiate', 600000);
 
-replTest.waitForState(replTest.nodes[0], replTest.PRIMARY, 60 * 1000);
+replTest.waitForState(replTest.nodes[0], ReplSetTest.State.PRIMARY, 60 * 1000);
 // Make sure we have a master
-var master = replTest.getMaster();
+var master = replTest.getPrimary();
 var b_conn = conns[1];
 b_conn.setSlaveOk();
 var B = b_conn.getDB("admin");
 
 // Make sure we have an arbiter
-replTest.waitForState(conns[2], replTest.ARBITER, 10000);
+replTest.waitForState(conns[2], ReplSetTest.State.ARBITER, 10000);
 
 // Wait for initial replication
 replTest.awaitReplication();
@@ -46,8 +51,8 @@ replTest.stop( 0 );
 // node reports that it is primary, while in the refactored implementation (2.7.8+) it takes place
 // after the node reports that it is primary via heartbeats, but before ismaster indicates that the
 // node will accept writes.
-replTest.waitForState(conns[1], replTest.PRIMARY, 5 * 60 * 1000);
-master = replTest.getMaster(5 * 60 * 1000);
+replTest.waitForState(conns[1], ReplSetTest.State.PRIMARY, 5 * 60 * 1000);
+master = replTest.getPrimary(5 * 60 * 1000);
 
 // Save to new master, forcing rollback of old master
 master.getDB( 'db' ).c.save( big );
@@ -55,4 +60,7 @@ master.getDB( 'db' ).c.save( big );
 // Restart old master
 replTest.restart( 0 );
 // Wait five minutes to ensure there is enough time for rollback
+replTest.awaitSecondaryNodes(5*60*1000);
 replTest.awaitReplication(5*60*1000);
+
+});

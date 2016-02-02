@@ -1,4 +1,7 @@
 // check replica set authentication
+//
+// This test requires users to persist across a restart.
+// @tags: [requires_persistence]
 
 load("jstests/replsets/rslib.js");
 
@@ -6,57 +9,57 @@ var name = "rs_auth1";
 var port = allocatePorts(5);
 var path = "jstests/libs/";
 
+// These keyFiles have their permissions set to 600 later in the test.
+var key1_600 = path+"key1";
+var key2_600 = path+"key2";
+
+// This keyFile has its permissions set to 644 later in the test.
+var key1_644 = path+"key1_644";
 
 print("try starting mongod with auth");
 var m = MongoRunner.runMongod({auth : "", port : port[4], dbpath : MongoRunner.dataDir + "/wrong-auth"});
 
 assert.eq(m.getDB("local").auth("__system", ""), 0);
 
-stopMongod(port[4]);
+MongoRunner.stopMongod(m);
 
 
 print("reset permissions");
-run("chmod", "644", path+"key1");
-run("chmod", "644", path+"key2");
+run("chmod", "644", key1_644);
 
 
 print("try starting mongod");
-m = runMongoProgram( "mongod", "--keyFile", path+"key1", "--port", port[0], "--dbpath", MongoRunner.dataPath + name);
+m = runMongoProgram( "mongod", "--keyFile", key1_644, "--port", port[0], "--dbpath", MongoRunner.dataPath + name);
 
 
 print("should fail with wrong permissions");
 assert.eq(m, _isWindows()? 100 : 1, "mongod should exit w/ 1 (EXIT_FAILURE): permissions too open");
-stopMongod(port[0]);
-
-
-print("change permissions on #1 & #2");
-run("chmod", "600", path+"key1");
-run("chmod", "600", path+"key2");
-
+MongoRunner.stopMongod(port[0]);
 
 print("add a user to server0: foo");
-m = startMongodTest( port[0], name+"-0", 0 );
+m = MongoRunner.runMongod({dbpath: MongoRunner.dataPath + name + "-0"});
 m.getDB("admin").createUser({user: "foo", pwd: "bar", roles: jsTest.adminUserRoles});
 m.getDB("test").createUser({user: "bar", pwd: "baz", roles: jsTest.basicUserRoles});
 print("make sure user is written before shutting down");
-stopMongod(port[0]);
+MongoRunner.stopMongod(m);
 
 print("start up rs");
 var rs = new ReplSetTest({"name" : name, "nodes" : 3, "startPort" : port[0]});
 print("restart 0 with keyFile");
-m = rs.restart(0, {"keyFile" : path+"key1"});
+m = rs.restart(0, {"keyFile" : key1_600});
 print("restart 1 with keyFile");
-rs.start(1, {"keyFile" : path+"key1"});
+rs.start(1, {"keyFile" : key1_600});
 print("restart 2 with keyFile");
-rs.start(2, {"keyFile" : path+"key1"});
+rs.start(2, {"keyFile" : key1_600});
 
 var result = m.getDB("admin").auth("foo", "bar");
 assert.eq(result, 1, "login failed");
 print("Initializing replSet with config: " + tojson(rs.getReplSetConfig()));
 result = m.getDB("admin").runCommand({replSetInitiate : rs.getReplSetConfig()});
 assert.eq(result.ok, 1, "couldn't initiate: "+tojson(result));
+m.getDB('admin').logout(); // In case this node doesn't become primary, make sure its not auth'd
 
-var master = rs.getMaster();
+var master = rs.getPrimary();
 rs.awaitSecondaryNodes();
 var mId = rs.getNodeId(master);
 var slave = rs.liveNodes.slaves[0];
@@ -74,7 +77,7 @@ function doQueryOn(p) {
         r = p.getDB("test").foo.findOne();
     }, [], "find did not throw, returned: " + tojson(r)).toString();
     printjson(error);
-    assert.gt(error.indexOf("not authorized for query on test.foo"), -1, "error was non-auth");
+    assert.gt(error.indexOf("not authorized"), -1, "error was non-auth");
 };
 
 doQueryOn(slave);
@@ -104,7 +107,7 @@ assert.writeOK(bulk.execute({ w: 3, wtimeout: 60000 }));
 print("fail over");
 rs.stop(mId);
 
-master = rs.getMaster();
+master = rs.getPrimary();
 
 print("add some more data 1");
 master.getDB("test").auth("bar", "baz");
@@ -115,8 +118,8 @@ for (var i=0; i<1000; i++) {
 assert.writeOK(bulk.execute({ w: 2 }));
 
 print("resync");
-rs.restart(mId, {"keyFile" : path+"key1"});
-master = rs.getMaster();
+rs.restart(mId, {"keyFile" : key1_600});
+master = rs.getPrimary();
 
 print("add some more data 2");
 bulk = master.getDB("test").foo.initializeUnorderedBulkOp();
@@ -126,8 +129,11 @@ for (var i=0; i<1000; i++) {
 bulk.execute({ w:3, wtimeout:60000 });
 
 print("add member with wrong key");
-var conn = new MongodRunner(port[3], MongoRunner.dataPath+name+"-3", null, null, ["--replSet","rs_auth1","--rest","--oplogSize","2", "--keyFile", path+"key2"], {no_bind : true});
-conn.start();
+var conn = MongoRunner.runMongod({dbpath: MongoRunner.dataPath + name + "-3",
+                                  port: port[3],
+                                  replSet: "rs_auth1",
+                                  oplogSize: 2,
+                                  keyFile: key2_600});
 
 
 master.getDB("admin").auth("foo", "bar");
@@ -140,7 +146,7 @@ try {
 catch (e) {
     print("error: "+e);
 }
-master = rs.getMaster();
+master = rs.getPrimary();
 master.getDB("admin").auth("foo", "bar");
 
 
@@ -155,12 +161,15 @@ for (var i = 0; i<10; i++) {
 
 
 print("stop member");
-stopMongod(port[3]);
+MongoRunner.stopMongod(conn);
 
 
 print("start back up with correct key");
-conn = new MongodRunner(port[3], MongoRunner.dataPath+name+"-3", null, null, ["--replSet","rs_auth1","--rest","--oplogSize","2", "--keyFile", path+"key1"], {no_bind : true});
-conn.start();
+var conn = MongoRunner.runMongod({dbpath: MongoRunner.dataPath + name + "-3",
+                                  port: port[3],
+                                  replSet: "rs_auth1",
+                                  oplogSize: 2,
+                                  keyFile: key1_600});
 
 wait(function() {
     try {

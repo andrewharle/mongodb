@@ -38,11 +38,11 @@
 
 namespace mongo {
 
-using std::auto_ptr;
+using std::unique_ptr;
 
 TEST(NotMatchExpression, MatchesScalar) {
     BSONObj baseOperand = BSON("$lt" << 5);
-    auto_ptr<ComparisonMatchExpression> lt(new LTMatchExpression());
+    unique_ptr<ComparisonMatchExpression> lt(new LTMatchExpression());
     ASSERT(lt->init("a", baseOperand["$lt"]).isOK());
     NotMatchExpression notOp;
     ASSERT(notOp.init(lt.release()).isOK());
@@ -52,7 +52,7 @@ TEST(NotMatchExpression, MatchesScalar) {
 
 TEST(NotMatchExpression, MatchesArray) {
     BSONObj baseOperand = BSON("$lt" << 5);
-    auto_ptr<ComparisonMatchExpression> lt(new LTMatchExpression());
+    unique_ptr<ComparisonMatchExpression> lt(new LTMatchExpression());
     ASSERT(lt->init("a", baseOperand["$lt"]).isOK());
     NotMatchExpression notOp;
     ASSERT(notOp.init(lt.release()).isOK());
@@ -64,7 +64,7 @@ TEST(NotMatchExpression, MatchesArray) {
 
 TEST(NotMatchExpression, ElemMatchKey) {
     BSONObj baseOperand = BSON("$lt" << 5);
-    auto_ptr<ComparisonMatchExpression> lt(new LTMatchExpression());
+    unique_ptr<ComparisonMatchExpression> lt(new LTMatchExpression());
     ASSERT(lt->init("a", baseOperand["$lt"]).isOK());
     NotMatchExpression notOp;
     ASSERT(notOp.init(lt.release()).isOK());
@@ -81,7 +81,7 @@ TEST(NotMatchExpression, ElemMatchKey) {
 /*
   TEST( NotMatchExpression, MatchesIndexKey ) {
   BSONObj baseOperand = BSON( "$lt" << 5 );
-  auto_ptr<ComparisonMatchExpression> lt( new ComparisonMatchExpression() );
+  unique_ptr<ComparisonMatchExpression> lt( new ComparisonMatchExpression() );
   ASSERT( lt->init( "a", baseOperand[ "$lt" ] ).isOK() );
   NotMatchExpression notOp;
   ASSERT( notOp.init( lt.release() ).isOK() );
@@ -97,7 +97,7 @@ TEST( AndOp, MatchesElementSingleClause ) {
     BSONObj baseOperand = BSON( "$lt" << 5 );
     BSONObj match = BSON( "a" << 4 );
     BSONObj notMatch = BSON( "a" << 5 );
-    auto_ptr<ComparisonMatchExpression> lt( new ComparisonMatchExpression() );
+    unique_ptr<ComparisonMatchExpression> lt( new ComparisonMatchExpression() );
     ASSERT( lt->init( "", baseOperand[ "$lt" ] ).isOK() );
     OwnedPointerVector<MatchMatchExpression> subMatchExpressions;
     subMatchExpressions.mutableVector().push_back( lt.release() );
@@ -127,11 +127,11 @@ TEST(AndOp, MatchesElementThreeClauses) {
     BSONObj notMatch3 = BSON("a"
                              << "r");
 
-    auto_ptr<ComparisonMatchExpression> sub1(new LTMatchExpression());
+    unique_ptr<ComparisonMatchExpression> sub1(new LTMatchExpression());
     ASSERT(sub1->init("a", baseOperand1["$lt"]).isOK());
-    auto_ptr<ComparisonMatchExpression> sub2(new GTMatchExpression());
+    unique_ptr<ComparisonMatchExpression> sub2(new GTMatchExpression());
     ASSERT(sub2->init("a", baseOperand2["$gt"]).isOK());
-    auto_ptr<RegexMatchExpression> sub3(new RegexMatchExpression());
+    unique_ptr<RegexMatchExpression> sub3(new RegexMatchExpression());
     ASSERT(sub3->init("a", "1", "").isOK());
 
     AndMatchExpression andOp;
@@ -147,9 +147,9 @@ TEST(AndOp, MatchesElementThreeClauses) {
 
 TEST(AndOp, MatchesSingleClause) {
     BSONObj baseOperand = BSON("$ne" << 5);
-    auto_ptr<ComparisonMatchExpression> eq(new EqualityMatchExpression());
+    unique_ptr<ComparisonMatchExpression> eq(new EqualityMatchExpression());
     ASSERT(eq->init("a", baseOperand["$ne"]).isOK());
-    auto_ptr<NotMatchExpression> ne(new NotMatchExpression());
+    unique_ptr<NotMatchExpression> ne(new NotMatchExpression());
     ASSERT(ne->init(eq.release()).isOK());
 
     AndMatchExpression andOp;
@@ -166,13 +166,13 @@ TEST(AndOp, MatchesThreeClauses) {
     BSONObj baseOperand2 = BSON("$lt" << 10);
     BSONObj baseOperand3 = BSON("$lt" << 100);
 
-    auto_ptr<ComparisonMatchExpression> sub1(new GTMatchExpression());
+    unique_ptr<ComparisonMatchExpression> sub1(new GTMatchExpression());
     ASSERT(sub1->init("a", baseOperand1["$gt"]).isOK());
 
-    auto_ptr<ComparisonMatchExpression> sub2(new LTMatchExpression());
+    unique_ptr<ComparisonMatchExpression> sub2(new LTMatchExpression());
     ASSERT(sub2->init("a", baseOperand2["$lt"]).isOK());
 
-    auto_ptr<ComparisonMatchExpression> sub3(new LTMatchExpression());
+    unique_ptr<ComparisonMatchExpression> sub3(new LTMatchExpression());
     ASSERT(sub3->init("b", baseOperand3["$lt"]).isOK());
 
     AndMatchExpression andOp;
@@ -191,10 +191,10 @@ TEST(AndOp, ElemMatchKey) {
     BSONObj baseOperand1 = BSON("a" << 1);
     BSONObj baseOperand2 = BSON("b" << 2);
 
-    auto_ptr<ComparisonMatchExpression> sub1(new EqualityMatchExpression());
+    unique_ptr<ComparisonMatchExpression> sub1(new EqualityMatchExpression());
     ASSERT(sub1->init("a", baseOperand1["a"]).isOK());
 
-    auto_ptr<ComparisonMatchExpression> sub2(new EqualityMatchExpression());
+    unique_ptr<ComparisonMatchExpression> sub2(new EqualityMatchExpression());
     ASSERT(sub2->init("b", baseOperand2["b"]).isOK());
 
     AndMatchExpression andOp;
@@ -217,9 +217,9 @@ TEST(AndOp, ElemMatchKey) {
 TEST( AndOp, MatchesIndexKeyWithoutUnknown ) {
     BSONObj baseOperand1 = BSON( "$gt" << 1 );
     BSONObj baseOperand2 = BSON( "$lt" << 5 );
-    auto_ptr<ComparisonMatchExpression> sub1( new ComparisonMatchExpression() );
+    unique_ptr<ComparisonMatchExpression> sub1( new ComparisonMatchExpression() );
     ASSERT( sub1->init( "a", baseOperand1[ "$gt" ] ).isOK() );
-    auto_ptr<ComparisonMatchExpression> sub2( new ComparisonMatchExpression() );
+    unique_ptr<ComparisonMatchExpression> sub2( new ComparisonMatchExpression() );
     ASSERT( sub2->init( "a", baseOperand2[ "$lt" ] ).isOK() );
     OwnedPointerVector<MatchMatchExpression> subMatchExpressions;
     subMatchExpressions.mutableVector().push_back( sub1.release() );
@@ -240,11 +240,11 @@ TEST( AndOp, MatchesIndexKeyWithUnknown ) {
     BSONObj baseOperand2 = BSON( "$lt" << 5 );
     // This part will return PartialMatchResult_Unknown.
     BSONObj baseOperand3 = BSON( "$ne" << 5 );
-    auto_ptr<ComparisonMatchExpression> sub1( new ComparisonMatchExpression() );
+    unique_ptr<ComparisonMatchExpression> sub1( new ComparisonMatchExpression() );
     ASSERT( sub1->init( "a", baseOperand1[ "$gt" ] ).isOK() );
-    auto_ptr<ComparisonMatchExpression> sub2( new ComparisonMatchExpression() );
+    unique_ptr<ComparisonMatchExpression> sub2( new ComparisonMatchExpression() );
     ASSERT( sub2->init( "a", baseOperand2[ "$lt" ] ).isOK() );
-    auto_ptr<NeOp> sub3( new NeOp() );
+    unique_ptr<NeOp> sub3( new NeOp() );
     ASSERT( sub3->init( "a", baseOperand3[ "$ne" ] ).isOK() );
     OwnedPointerVector<MatchMatchExpression> subMatchExpressions;
     subMatchExpressions.mutableVector().push_back( sub1.release() );
@@ -267,7 +267,7 @@ TEST( OrOp, MatchesElementSingleClause ) {
     BSONObj baseOperand = BSON( "$lt" << 5 );
     BSONObj match = BSON( "a" << 4 );
     BSONObj notMatch = BSON( "a" << 5 );
-    auto_ptr<ComparisonMatchExpression> lt( new ComparisonMatchExpression() );
+    unique_ptr<ComparisonMatchExpression> lt( new ComparisonMatchExpression() );
     ASSERT( lt->init( "a", baseOperand[ "$lt" ] ).isOK() );
     OwnedPointerVector<MatchMatchExpression> subMatchExpressions;
     subMatchExpressions.mutableVector().push_back( lt.release() );
@@ -291,11 +291,11 @@ TEST( OrOp, MatchesElementThreeClauses ) {
     BSONObj match2 = BSON( "a" << 11 );
     BSONObj match3 = BSON( "a" << 5 );
     BSONObj notMatch = BSON( "a" << "6" );
-    auto_ptr<ComparisonMatchExpression> sub1( new ComparisonMatchExpression() );
+    unique_ptr<ComparisonMatchExpression> sub1( new ComparisonMatchExpression() );
     ASSERT( sub1->init( "a", baseOperand1[ "$lt" ] ).isOK() );
-    auto_ptr<ComparisonMatchExpression> sub2( new ComparisonMatchExpression() );
+    unique_ptr<ComparisonMatchExpression> sub2( new ComparisonMatchExpression() );
     ASSERT( sub2->init( "a", baseOperand2[ "$gt" ] ).isOK() );
-    auto_ptr<ComparisonMatchExpression> sub3( new ComparisonMatchExpression() );
+    unique_ptr<ComparisonMatchExpression> sub3( new ComparisonMatchExpression() );
     ASSERT( sub3->init( "a", baseOperand3[ "a" ] ).isOK() );
     OwnedPointerVector<MatchMatchExpression> subMatchExpressions;
     subMatchExpressions.mutableVector().push_back( sub1.release() );
@@ -311,9 +311,9 @@ TEST( OrOp, MatchesElementThreeClauses ) {
 */
 TEST(OrOp, MatchesSingleClause) {
     BSONObj baseOperand = BSON("$ne" << 5);
-    auto_ptr<ComparisonMatchExpression> eq(new EqualityMatchExpression());
+    unique_ptr<ComparisonMatchExpression> eq(new EqualityMatchExpression());
     ASSERT(eq->init("a", baseOperand["$ne"]).isOK());
-    auto_ptr<NotMatchExpression> ne(new NotMatchExpression());
+    unique_ptr<NotMatchExpression> ne(new NotMatchExpression());
     ASSERT(ne->init(eq.release()).isOK());
 
     OrMatchExpression orOp;
@@ -329,11 +329,11 @@ TEST(OrOp, MatchesThreeClauses) {
     BSONObj baseOperand1 = BSON("$gt" << 10);
     BSONObj baseOperand2 = BSON("$lt" << 0);
     BSONObj baseOperand3 = BSON("b" << 100);
-    auto_ptr<ComparisonMatchExpression> sub1(new GTMatchExpression());
+    unique_ptr<ComparisonMatchExpression> sub1(new GTMatchExpression());
     ASSERT(sub1->init("a", baseOperand1["$gt"]).isOK());
-    auto_ptr<ComparisonMatchExpression> sub2(new LTMatchExpression());
+    unique_ptr<ComparisonMatchExpression> sub2(new LTMatchExpression());
     ASSERT(sub2->init("a", baseOperand2["$lt"]).isOK());
-    auto_ptr<ComparisonMatchExpression> sub3(new EqualityMatchExpression());
+    unique_ptr<ComparisonMatchExpression> sub3(new EqualityMatchExpression());
     ASSERT(sub3->init("b", baseOperand3["b"]).isOK());
 
     OrMatchExpression orOp;
@@ -353,9 +353,9 @@ TEST(OrOp, MatchesThreeClauses) {
 TEST(OrOp, ElemMatchKey) {
     BSONObj baseOperand1 = BSON("a" << 1);
     BSONObj baseOperand2 = BSON("b" << 2);
-    auto_ptr<ComparisonMatchExpression> sub1(new EqualityMatchExpression());
+    unique_ptr<ComparisonMatchExpression> sub1(new EqualityMatchExpression());
     ASSERT(sub1->init("a", baseOperand1["a"]).isOK());
-    auto_ptr<ComparisonMatchExpression> sub2(new EqualityMatchExpression());
+    unique_ptr<ComparisonMatchExpression> sub2(new EqualityMatchExpression());
     ASSERT(sub2->init("b", baseOperand2["b"]).isOK());
 
     OrMatchExpression orOp;
@@ -377,9 +377,9 @@ TEST(OrOp, ElemMatchKey) {
 TEST( OrOp, MatchesIndexKeyWithoutUnknown ) {
     BSONObj baseOperand1 = BSON( "$gt" << 5 );
     BSONObj baseOperand2 = BSON( "$lt" << 1 );
-    auto_ptr<ComparisonMatchExpression> sub1( new ComparisonMatchExpression() );
+    unique_ptr<ComparisonMatchExpression> sub1( new ComparisonMatchExpression() );
     ASSERT( sub1->init( "a", baseOperand1[ "$gt" ] ).isOK() );
-    auto_ptr<ComparisonMatchExpression> sub2( new ComparisonMatchExpression() );
+    unique_ptr<ComparisonMatchExpression> sub2( new ComparisonMatchExpression() );
     ASSERT( sub2->init( "a", baseOperand2[ "$lt" ] ).isOK() );
     OwnedPointerVector<MatchMatchExpression> subMatchExpressions;
     subMatchExpressions.mutableVector().push_back( sub1.release() );
@@ -400,11 +400,11 @@ TEST( OrOp, MatchesIndexKeyWithUnknown ) {
     BSONObj baseOperand2 = BSON( "$lt" << 1 );
     // This part will return PartialMatchResult_Unknown.
     BSONObj baseOperand3 = BSON( "$ne" << 5 );
-    auto_ptr<ComparisonMatchExpression> sub1( new ComparisonMatchExpression() );
+    unique_ptr<ComparisonMatchExpression> sub1( new ComparisonMatchExpression() );
     ASSERT( sub1->init( "a", baseOperand1[ "$gt" ] ).isOK() );
-    auto_ptr<ComparisonMatchExpression> sub2( new ComparisonMatchExpression() );
+    unique_ptr<ComparisonMatchExpression> sub2( new ComparisonMatchExpression() );
     ASSERT( sub2->init( "a", baseOperand2[ "$lt" ] ).isOK() );
-    auto_ptr<NeOp> sub3( new NeOp() );
+    unique_ptr<NeOp> sub3( new NeOp() );
     ASSERT( sub3->init( "a", baseOperand3[ "$ne" ] ).isOK() );
     OwnedPointerVector<MatchMatchExpression> subMatchExpressions;
     subMatchExpressions.mutableVector().push_back( sub1.release() );
@@ -427,7 +427,7 @@ TEST( NorOp, MatchesElementSingleClause ) {
     BSONObj baseOperand = BSON( "$lt" << 5 );
     BSONObj match = BSON( "a" << 5 );
     BSONObj notMatch = BSON( "a" << 4 );
-    auto_ptr<ComparisonMatchExpression> lt( new ComparisonMatchExpression() );
+    unique_ptr<ComparisonMatchExpression> lt( new ComparisonMatchExpression() );
     ASSERT( lt->init( "a", baseOperand[ "$lt" ] ).isOK() );
     OwnedPointerVector<MatchMatchExpression> subMatchExpressions;
     subMatchExpressions.mutableVector().push_back( lt.release() );
@@ -451,11 +451,11 @@ TEST( NorOp, MatchesElementThreeClauses ) {
     BSONObj notMatch2 = BSON( "a" << 11 );
     BSONObj notMatch3 = BSON( "a" << 5 );
     BSONObj match = BSON( "a" << "6" );
-    auto_ptr<ComparisonMatchExpression> sub1( new ComparisonMatchExpression() );
+    unique_ptr<ComparisonMatchExpression> sub1( new ComparisonMatchExpression() );
     ASSERT( sub1->init( "a", baseOperand1[ "$lt" ] ).isOK() );
-    auto_ptr<ComparisonMatchExpression> sub2( new ComparisonMatchExpression() );
+    unique_ptr<ComparisonMatchExpression> sub2( new ComparisonMatchExpression() );
     ASSERT( sub2->init( "a", baseOperand2[ "$gt" ] ).isOK() );
-    auto_ptr<ComparisonMatchExpression> sub3( new ComparisonMatchExpression() );
+    unique_ptr<ComparisonMatchExpression> sub3( new ComparisonMatchExpression() );
     ASSERT( sub3->init( "a", baseOperand3[ "a" ] ).isOK() );
     OwnedPointerVector<MatchMatchExpression> subMatchExpressions;
     subMatchExpressions.mutableVector().push_back( sub1.release() );
@@ -472,9 +472,9 @@ TEST( NorOp, MatchesElementThreeClauses ) {
 
 TEST(NorOp, MatchesSingleClause) {
     BSONObj baseOperand = BSON("$ne" << 5);
-    auto_ptr<ComparisonMatchExpression> eq(new EqualityMatchExpression());
+    unique_ptr<ComparisonMatchExpression> eq(new EqualityMatchExpression());
     ASSERT(eq->init("a", baseOperand["$ne"]).isOK());
-    auto_ptr<NotMatchExpression> ne(new NotMatchExpression());
+    unique_ptr<NotMatchExpression> ne(new NotMatchExpression());
     ASSERT(ne->init(eq.release()).isOK());
 
     NorMatchExpression norOp;
@@ -491,11 +491,11 @@ TEST(NorOp, MatchesThreeClauses) {
     BSONObj baseOperand2 = BSON("$lt" << 0);
     BSONObj baseOperand3 = BSON("b" << 100);
 
-    auto_ptr<ComparisonMatchExpression> sub1(new GTMatchExpression());
+    unique_ptr<ComparisonMatchExpression> sub1(new GTMatchExpression());
     ASSERT(sub1->init("a", baseOperand1["$gt"]).isOK());
-    auto_ptr<ComparisonMatchExpression> sub2(new LTMatchExpression());
+    unique_ptr<ComparisonMatchExpression> sub2(new LTMatchExpression());
     ASSERT(sub2->init("a", baseOperand2["$lt"]).isOK());
-    auto_ptr<ComparisonMatchExpression> sub3(new EqualityMatchExpression());
+    unique_ptr<ComparisonMatchExpression> sub3(new EqualityMatchExpression());
     ASSERT(sub3->init("b", baseOperand3["b"]).isOK());
 
     NorMatchExpression norOp;
@@ -515,9 +515,9 @@ TEST(NorOp, MatchesThreeClauses) {
 TEST(NorOp, ElemMatchKey) {
     BSONObj baseOperand1 = BSON("a" << 1);
     BSONObj baseOperand2 = BSON("b" << 2);
-    auto_ptr<ComparisonMatchExpression> sub1(new EqualityMatchExpression());
+    unique_ptr<ComparisonMatchExpression> sub1(new EqualityMatchExpression());
     ASSERT(sub1->init("a", baseOperand1["a"]).isOK());
-    auto_ptr<ComparisonMatchExpression> sub2(new EqualityMatchExpression());
+    unique_ptr<ComparisonMatchExpression> sub2(new EqualityMatchExpression());
     ASSERT(sub2->init("b", baseOperand2["b"]).isOK());
 
     NorMatchExpression norOp;
@@ -545,11 +545,11 @@ TEST(NorOp, Equivalent) {
     ASSERT(sub2.init("b", baseOperand2["b"]).isOK());
 
     NorMatchExpression e1;
-    e1.add(sub1.shallowClone());
-    e1.add(sub2.shallowClone());
+    e1.add(sub1.shallowClone().release());
+    e1.add(sub2.shallowClone().release());
 
     NorMatchExpression e2;
-    e2.add(sub1.shallowClone());
+    e2.add(sub1.shallowClone().release());
 
     ASSERT(e1.equivalent(&e1));
     ASSERT(!e1.equivalent(&e2));
@@ -558,7 +558,7 @@ TEST(NorOp, Equivalent) {
 /**
 TEST( NorOp, MatchesIndexKey ) {
     BSONObj baseOperand = BSON( "a" << 5 );
-    auto_ptr<ComparisonMatchExpression> eq( new ComparisonMatchExpression() );
+    unique_ptr<ComparisonMatchExpression> eq( new ComparisonMatchExpression() );
     ASSERT( eq->init( "a", baseOperand[ "a" ] ).isOK() );
     OwnedPointerVector<MatchMatchExpression> subMatchExpressions;
     subMatchExpressions.mutableVector().push_back( eq.release() );

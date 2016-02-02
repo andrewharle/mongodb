@@ -41,13 +41,13 @@
 #include "mongo/db/storage/mmap_v1/extent_manager.h"
 #include "mongo/db/storage/mmap_v1/record_access_tracker.h"
 #include "mongo/platform/atomic_word.h"
-#include "mongo/util/concurrency/mutex.h"
+#include "mongo/stdx/mutex.h"
 
 namespace mongo {
 
 class DataFile;
 class DataFileVersion;
-class Record;
+class MmapV1RecordHeader;
 class OperationContext;
 
 struct Extent;
@@ -81,7 +81,7 @@ public:
      *        while a bit odd, this is not a layer violation as extents
      *        are a peer to the .ns file, without any layering
      */
-    MmapV1ExtentManager(const StringData& dbname, const StringData& path, bool directoryPerDB);
+    MmapV1ExtentManager(StringData dbname, StringData path, bool directoryPerDB);
 
     /**
      * opens all current files, not thread safe
@@ -111,24 +111,24 @@ public:
     void freeListStats(OperationContext* txn, int* numExtents, int64_t* totalFreeSizeBytes) const;
 
     /**
-     * @param loc - has to be for a specific Record
+     * @param loc - has to be for a specific MmapV1RecordHeader
      * Note(erh): this sadly cannot be removed.
-     * A Record DiskLoc has an offset from a file, while a RecordStore really wants an offset
-     * from an extent.  This intrinsically links an original record store to the original extent
-     * manager.
+     * A MmapV1RecordHeader DiskLoc has an offset from a file, while a RecordStore really wants an
+     * offset from an extent.  This intrinsically links an original record store to the original
+     * extent manager.
      */
-    Record* recordForV1(const DiskLoc& loc) const;
+    MmapV1RecordHeader* recordForV1(const DiskLoc& loc) const;
 
-    RecordFetcher* recordNeedsFetch(const DiskLoc& loc) const;
+    std::unique_ptr<RecordFetcher> recordNeedsFetch(const DiskLoc& loc) const final;
 
     /**
-     * @param loc - has to be for a specific Record (not an Extent)
+     * @param loc - has to be for a specific MmapV1RecordHeader (not an Extent)
      * Note(erh) see comment on recordFor
      */
     Extent* extentForV1(const DiskLoc& loc) const;
 
     /**
-     * @param loc - has to be for a specific Record (not an Extent)
+     * @param loc - has to be for a specific MmapV1RecordHeader (not an Extent)
      * Note(erh) see comment on recordFor
      */
     DiskLoc extentLocForV1(const DiskLoc& loc) const;
@@ -169,7 +169,7 @@ private:
      * Shared record retrieval logic used by the public recordForV1() and likelyInPhysicalMem()
      * above.
      */
-    Record* _recordForV1(const DiskLoc& loc) const;
+    MmapV1RecordHeader* _recordForV1(const DiskLoc& loc) const;
 
     DiskLoc _getFreeListStart() const;
     DiskLoc _getFreeListEnd() const;
@@ -202,7 +202,7 @@ private:
      */
     class FilesArray {
     public:
-        FilesArray() : _writersMutex("MmapV1ExtentManager"), _size(0) {}
+        FilesArray() : _size(0) {}
         ~FilesArray();
 
         /**
@@ -232,7 +232,7 @@ private:
         void push_back(DataFile* val);
 
     private:
-        mutex _writersMutex;
+        stdx::mutex _writersMutex;
         AtomicInt32 _size;  // number of files in the array
         DataFile* _files[DiskLoc::MaxFiles];
     };

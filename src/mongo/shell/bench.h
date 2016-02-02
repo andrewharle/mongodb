@@ -30,15 +30,11 @@
 
 #include <string>
 
-#include <boost/scoped_ptr.hpp>
-#include <boost/shared_ptr.hpp>
-#include <boost/thread/condition.hpp>
-#include <boost/noncopyable.hpp>
-#include <boost/thread/mutex.hpp>
-
 #include "mongo/client/dbclientinterface.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/platform/atomic_word.h"
+#include "mongo/stdx/condition_variable.h"
+#include "mongo/stdx/mutex.h"
 #include "mongo/util/timer.h"
 
 namespace pcrecpp {
@@ -50,7 +46,9 @@ namespace mongo {
 /**
  * Configuration object describing a bench run activity.
  */
-class BenchRunConfig : private boost::noncopyable {
+class BenchRunConfig {
+    MONGO_DISALLOW_COPYING(BenchRunConfig);
+
 public:
     /**
      * Create a new BenchRunConfig object, and initialize it from the BSON
@@ -108,10 +106,10 @@ public:
     bool handleErrors;
     bool hideErrors;
 
-    boost::shared_ptr<pcrecpp::RE> trapPattern;
-    boost::shared_ptr<pcrecpp::RE> noTrapPattern;
-    boost::shared_ptr<pcrecpp::RE> watchPattern;
-    boost::shared_ptr<pcrecpp::RE> noWatchPattern;
+    std::shared_ptr<pcrecpp::RE> trapPattern;
+    std::shared_ptr<pcrecpp::RE> noTrapPattern;
+    std::shared_ptr<pcrecpp::RE> watchPattern;
+    std::shared_ptr<pcrecpp::RE> noWatchPattern;
 
     /**
      * Operation description.  A BSON array of objects, each describing a single
@@ -139,7 +137,9 @@ private:
  *
  * Not thread safe.  Expected use is one instance per thread during parallel execution.
  */
-class BenchRunEventCounter : private boost::noncopyable {
+class BenchRunEventCounter {
+    MONGO_DISALLOW_COPYING(BenchRunEventCounter);
+
 public:
     /// Constructs a zeroed out counter.
     BenchRunEventCounter();
@@ -195,7 +195,9 @@ private:
  *
  * In all cases, the counter objects must outlive the trace object.
  */
-class BenchRunEventTrace : private boost::noncopyable {
+class BenchRunEventTrace {
+    MONGO_DISALLOW_COPYING(BenchRunEventTrace);
+
 public:
     explicit BenchRunEventTrace(BenchRunEventCounter* eventCounter) {
         initialize(eventCounter, eventCounter, false);
@@ -236,7 +238,9 @@ private:
 /**
  * Statistics object representing the result of a bench run activity.
  */
-class BenchRunStats : private boost::noncopyable {
+class BenchRunStats {
+    MONGO_DISALLOW_COPYING(BenchRunStats);
+
 public:
     BenchRunStats();
     ~BenchRunStats();
@@ -265,7 +269,9 @@ public:
  *
  * Logically, the states are "starting up", "running" and "finished."
  */
-class BenchRunState : private boost::noncopyable {
+class BenchRunState {
+    MONGO_DISALLOW_COPYING(BenchRunState);
+
 public:
     enum State { BRS_STARTING_UP, BRS_RUNNING, BRS_FINISHED };
 
@@ -326,8 +332,8 @@ public:
     void onWorkerFinished();
 
 private:
-    boost::mutex _mutex;
-    boost::condition _stateChangeCondition;
+    stdx::mutex _mutex;
+    stdx::condition_variable _stateChangeCondition;
     unsigned _numUnstartedWorkers;
     unsigned _numActiveWorkers;
     AtomicUInt32 _isShuttingDown;
@@ -339,7 +345,9 @@ private:
  *
  * Represents the behavior of one thread working in a bench run activity.
  */
-class BenchRunWorker : private boost::noncopyable {
+class BenchRunWorker {
+    MONGO_DISALLOW_COPYING(BenchRunWorker);
+
 public:
     /**
      * Create a new worker, performing one thread's worth of the activity described in
@@ -393,7 +401,9 @@ private:
 /**
  * Object representing a "bench run" activity.
  */
-class BenchRunner : private boost::noncopyable {
+class BenchRunner {
+    MONGO_DISALLOW_COPYING(BenchRunner);
+
 public:
     /**
      * Utility method to create a new bench runner from a BSONObj representation
@@ -459,14 +469,14 @@ public:
 
 private:
     // TODO: Same as for createWithConfig.
-    static boost::mutex _staticMutex;
+    static stdx::mutex _staticMutex;
     static std::map<OID, BenchRunner*> _activeRuns;
 
     OID _oid;
     BenchRunState _brState;
     Timer* _brTimer;
     unsigned long long _microsElapsed;
-    boost::scoped_ptr<BenchRunConfig> _config;
+    std::unique_ptr<BenchRunConfig> _config;
     std::vector<BenchRunWorker*> _workers;
 };
 

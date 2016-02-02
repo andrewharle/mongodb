@@ -28,28 +28,18 @@
 
 #include "mongo/platform/basic.h"
 
-#include "mongo/base/init.h"
 #include "mongo/base/status.h"
-#include "mongo/bson/util/builder.h"
-#include "mongo/client/dbclientinterface.h"
 #include "mongo/db/auth/action_set.h"
 #include "mongo/db/auth/resource_pattern.h"
 #include "mongo/db/auth/authorization_session.h"
-#include "mongo/db/catalog/collection.h"
+#include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/cloner.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/commands/copydb.h"
-#include "mongo/db/commands/rename_collection.h"
-#include "mongo/db/dbhelpers.h"
-#include "mongo/db/index_builder.h"
-#include "mongo/db/instance.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/db/namespace_string.h"
-#include "mongo/db/repl/oplog.h"
-#include "mongo/db/operation_context_impl.h"
-#include "mongo/db/storage_options.h"
 
-namespace mongo {
+namespace {
+
+using namespace mongo;
 
 using std::set;
 using std::string;
@@ -74,7 +64,7 @@ public:
 
     virtual void help(stringstream& help) const {
         help << "clone this database from an instance of the db on another host\n";
-        help << "{ clone : \"host13\" }";
+        help << "{clone: \"host13\"[, slaveOk: <bool>]}";
     }
 
     virtual Status checkAuthForCommand(ClientBasic* client,
@@ -83,7 +73,11 @@ public:
         ActionSet actions;
         actions.addAction(ActionType::insert);
         actions.addAction(ActionType::createIndex);
-        if (!client->getAuthorizationSession()->isAuthorizedForActionsOnResource(
+        if (shouldBypassDocumentValidationForCommand(cmdObj)) {
+            actions.addAction(ActionType::bypassDocumentValidation);
+        }
+
+        if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
                 ResourcePattern::forDatabaseName(dbname), actions)) {
             return Status(ErrorCodes::Unauthorized, "Unauthorized");
         }
@@ -95,15 +89,20 @@ public:
                      BSONObj& cmdObj,
                      int,
                      string& errmsg,
-                     BSONObjBuilder& result,
-                     bool fromRepl) {
+                     BSONObjBuilder& result) {
+        boost::optional<DisableDocumentValidation> maybeDisableValidation;
+        if (shouldBypassDocumentValidationForCommand(cmdObj)) {
+            maybeDisableValidation.emplace(txn);
+        }
+
         string from = cmdObj.getStringField("clone");
         if (from.empty())
             return false;
 
         CloneOptions opts;
         opts.fromDB = dbname;
-        opts.logForRepl = !fromRepl;
+        opts.slaveOk = cmdObj["slaveOk"].trueValue();
+        opts.mayBeInterrupted = true;
 
         // See if there's any collections we should ignore
         if (cmdObj["collsToIgnore"].type() == Array) {
@@ -123,15 +122,16 @@ public:
         Lock::DBLock dbXLock(txn->lockState(), dbname, MODE_X);
 
         Cloner cloner;
-        bool rval = cloner.go(txn, dbname, from, opts, &clonedColls, errmsg);
+        Status status = cloner.copyDb(txn, dbname, from, opts, &clonedColls);
 
         BSONArrayBuilder barr;
         barr.append(clonedColls);
 
         result.append("clonedColls", barr.arr());
 
-        return rval;
+        return appendCommandStatus(result, status);
     }
+
 } cmdClone;
 
-}  // namespace mongo
+}  // namespace

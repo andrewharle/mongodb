@@ -218,7 +218,7 @@ bool ParsedResource::getCluster() const {
     return _cluster;
 }
 
-void ParsedResource::setDb(const StringData& db) {
+void ParsedResource::setDb(StringData db) {
     _db = db.toString();
     _isDbSet = true;
 }
@@ -236,7 +236,7 @@ const std::string& ParsedResource::getDb() const {
     return _db;
 }
 
-void ParsedResource::setCollection(const StringData& collection) {
+void ParsedResource::setCollection(StringData collection) {
     _collection = collection.toString();
     _isCollectionSet = true;
 }

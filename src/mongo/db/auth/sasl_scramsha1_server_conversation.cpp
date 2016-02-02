@@ -34,7 +34,6 @@
 
 #include <boost/algorithm/string/join.hpp>
 #include <boost/algorithm/string/replace.hpp>
-#include <boost/scoped_ptr.hpp>
 
 #include "mongo/crypto/crypto.h"
 #include "mongo/crypto/mechanism_scram.h"
@@ -49,14 +48,14 @@
 
 namespace mongo {
 
-using boost::scoped_ptr;
+using std::unique_ptr;
 using std::string;
 
 SaslSCRAMSHA1ServerConversation::SaslSCRAMSHA1ServerConversation(
     SaslAuthenticationSession* saslAuthSession)
     : SaslServerConversation(saslAuthSession), _step(0), _authMessage(""), _nonce("") {}
 
-StatusWith<bool> SaslSCRAMSHA1ServerConversation::step(const StringData& inputData,
+StatusWith<bool> SaslSCRAMSHA1ServerConversation::step(StringData inputData,
                                                        std::string* outputData) {
     std::vector<std::string> input = StringSplitter::split(inputData.toString(), ",");
     _step++;
@@ -201,7 +200,7 @@ StatusWith<bool> SaslSCRAMSHA1ServerConversation::_firstStep(std::vector<string>
     const int nonceLenQWords = 3;
     uint64_t binaryNonce[nonceLenQWords];
 
-    scoped_ptr<SecureRandom> sr(SecureRandom::create());
+    unique_ptr<SecureRandom> sr(SecureRandom::create());
 
     binaryNonce[0] = sr->nextInt64();
     binaryNonce[1] = sr->nextInt64();

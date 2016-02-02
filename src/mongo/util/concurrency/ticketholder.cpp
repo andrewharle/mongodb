@@ -30,6 +30,9 @@
 #include "mongo/platform/basic.h"
 
 #include "mongo/util/concurrency/ticketholder.h"
+
+#include <iostream>
+
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
 
@@ -84,7 +87,7 @@ void TicketHolder::release() {
 }
 
 Status TicketHolder::resize(int newSize) {
-    boost::mutex::scoped_lock lk(_resizeMutex);
+    stdx::lock_guard<stdx::mutex> lk(_resizeMutex);
 
     if (newSize < 5)
         return Status(ErrorCodes::BadValue,
@@ -125,33 +128,33 @@ int TicketHolder::outof() const {
 
 #else
 
-TicketHolder::TicketHolder(int num) : _outof(num), _num(num), _mutex("TicketHolder") {}
+TicketHolder::TicketHolder(int num) : _outof(num), _num(num) {}
 
-TicketHolder::~TicketHolder() {}
+TicketHolder::~TicketHolder() = default;
 
 bool TicketHolder::tryAcquire() {
-    scoped_lock lk(_mutex);
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
     return _tryAcquire();
 }
 
 void TicketHolder::waitForTicket() {
-    scoped_lock lk(_mutex);
+    stdx::unique_lock<stdx::mutex> lk(_mutex);
 
     while (!_tryAcquire()) {
-        _newTicket.wait(lk.boost());
+        _newTicket.wait(lk);
     }
 }
 
 void TicketHolder::release() {
     {
-        scoped_lock lk(_mutex);
+        stdx::lock_guard<stdx::mutex> lk(_mutex);
         _num++;
     }
     _newTicket.notify_one();
 }
 
 Status TicketHolder::resize(int newSize) {
-    scoped_lock lk(_mutex);
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
 
     int used = _outof.load() - _num;
     if (used > newSize) {

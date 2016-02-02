@@ -38,26 +38,26 @@
 #include <sys/un.h>
 #include <errno.h>
 
-#ifdef __openbsd__
+#ifdef __OpenBSD__
 #include <sys/uio.h>
 #endif
 
 #endif  // not _WIN32
 
-#include <boost/scoped_ptr.hpp>
+#include <cstdint>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "mongo/base/disallow_copying.h"
+#include "mongo/config.h"
 #include "mongo/logger/log_severity.h"
 #include "mongo/platform/compiler.h"
-#include "mongo/platform/cstdint.h"
 #include "mongo/util/assert_util.h"
 
 namespace mongo {
 
-#ifdef MONGO_SSL
+#ifdef MONGO_CONFIG_SSL
 class SSLManagerInterface;
 class SSLConnection;
 #endif
@@ -68,6 +68,9 @@ extern const int portRecvFlags;
 const int SOCK_FAMILY_UNKNOWN_ERROR = 13078;
 
 void disableNagle(int sock);
+
+// Generate a string representation for getaddrinfo return codes
+std::string getAddrInfoStrError(int code);
 
 #if defined(_WIN32)
 
@@ -155,8 +158,6 @@ private:
     struct sockaddr_storage sa;
     bool _isValid;
 };
-
-extern SockAddr unknownAddress;  // ( "0.0.0.0", 0 )
 
 /** this is not cache and does a syscall */
 std::string getHostName();
@@ -316,7 +317,7 @@ public:
         return _awaitingHandshake;
     }
 
-#ifdef MONGO_SSL
+#ifdef MONGO_CONFIG_SSL
     /** secures inline
      *  ssl - Pointer to the global SSLManager.
      *  remoteHost - The hostname of the remote server.
@@ -371,8 +372,8 @@ private:
     long long _bytesOut;
     time_t _lastValidityCheckAtSecs;
 
-#ifdef MONGO_SSL
-    boost::scoped_ptr<SSLConnection> _sslConnection;
+#ifdef MONGO_CONFIG_SSL
+    std::unique_ptr<SSLConnection> _sslConnection;
     SSLManagerInterface* _sslManager;
 #endif
     logger::LogSeverity _logLevel;  // passed to log() when logging errors

@@ -34,6 +34,7 @@
 
 #include "mongo/bson/util/builder.h"
 #include "mongo/db/write_concern_options.h"
+#include "mongo/s/client/multi_command_dispatch.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/log.h"
 
@@ -124,27 +125,6 @@ Status extractGLEErrors(const BSONObj& gleResponse, GLEErrors* errors) {
         errors->wcError->setErrMessage(jNote);
     }
 
-    // See if we had a version error reported as a writeback id - this is the only kind of
-    // write error where the write concern may still be enforced.
-    // The actual version that was stale is lost in the writeback itself.
-    const int opsSinceWriteback = gleResponse["writebackSince"].numberInt();
-    const bool hadWriteback = !gleResponse["writeback"].eoo();
-
-    if (hadWriteback && opsSinceWriteback == 0) {
-        // We shouldn't have a previous write error
-        dassert(!errors->writeError.get());
-        if (errors->writeError.get()) {
-            // Somehow there was a write error *and* a writeback from the last write
-            warning() << "both a write error and a writeback were reported "
-                      << "when processing a legacy write: " << errors->writeError->toBSON() << endl;
-        }
-
-        errors->writeError.reset(new WriteErrorDetail);
-        errors->writeError->setErrCode(ErrorCodes::StaleShardVersion);
-        errors->writeError->setErrInfo(BSON("downconvert" << true));  // For debugging
-        errors->writeError->setErrMessage("shard version was stale");
-    }
-
     return Status::OK();
 }
 
@@ -206,7 +186,7 @@ BSONObj stripNonWCInfo(const BSONObj& gleResponse) {
 
 // Adds a wOpTime and a wElectionId field to a set of gle options
 static BSONObj buildGLECmdWithOpTime(const BSONObj& gleOptions,
-                                     const OpTime& opTime,
+                                     const repl::OpTime& opTime,
                                      const OID& electionId) {
     BSONObjBuilder builder;
     BSONObjIterator it(gleOptions);
@@ -224,13 +204,13 @@ static BSONObj buildGLECmdWithOpTime(const BSONObj& gleOptions,
 
         builder.append(el);
     }
-    builder.appendTimestamp("wOpTime", opTime.asDate());
+    opTime.append(&builder, "wOpTime");
     builder.appendOID("wElectionId", const_cast<OID*>(&electionId));
     return builder.obj();
 }
 
 Status enforceLegacyWriteConcern(MultiCommandDispatch* dispatcher,
-                                 const StringData& dbName,
+                                 StringData dbName,
                                  const BSONObj& options,
                                  const HostOpTimeMap& hostOpTimes,
                                  vector<LegacyWCResponse>* legacyWCResponses) {
@@ -241,16 +221,15 @@ Status enforceLegacyWriteConcern(MultiCommandDispatch* dispatcher,
     for (HostOpTimeMap::const_iterator it = hostOpTimes.begin(); it != hostOpTimes.end(); ++it) {
         const ConnectionString& shardEndpoint = it->first;
         const HostOpTime hot = it->second;
-        const OpTime& opTime = hot.opTime;
+        const repl::OpTime& opTime = hot.opTime;
         const OID& electionId = hot.electionId;
 
         LOG(3) << "enforcing write concern " << options << " on " << shardEndpoint.toString()
-               << " at opTime " << opTime.toStringPretty() << " with electionID " << electionId;
+               << " at opTime " << opTime.getTimestamp().toStringPretty() << " with electionID "
+               << electionId;
 
         BSONObj gleCmd = buildGLECmdWithOpTime(options, opTime, electionId);
-
-        RawBSONSerializable gleCmdSerial(gleCmd);
-        dispatcher->addCommand(shardEndpoint, dbName, gleCmdSerial);
+        dispatcher->addCommand(shardEndpoint, dbName, gleCmd);
     }
 
     dispatcher->sendAll();
@@ -310,4 +289,5 @@ Status enforceLegacyWriteConcern(MultiCommandDispatch* dispatcher,
                                               : ErrorCodes::MultipleErrorsOccurred,
                   builder.str());
 }
-}
+
+}  // namespace mongo

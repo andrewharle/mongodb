@@ -47,8 +47,8 @@
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/log.h"
 
-#if defined(__linux__) || defined(__APPLE__) || defined(__freebsd__) || defined(__sunos__) || \
-    defined(__openbsd__)
+#if defined(__linux__) || defined(__APPLE__) || defined(__FreeBSD__) || defined(__sun) || \
+    defined(__OpenBSD__)
 #define FASTPATH_UNIX 1
 #endif
 
@@ -61,13 +61,12 @@
 #include <ifaddrs.h>
 #include <netdb.h>
 
-#ifdef __freebsd__
+#ifdef __FreeBSD__
 #include <netinet/in.h>
 #endif
 
 #elif defined(_WIN32)
 #include <boost/asio/detail/socket_ops.hpp>
-#include <boost/scoped_array.hpp>
 #include <boost/system/error_code.hpp>
 #include <iphlpapi.h>
 #include <winsock2.h>
@@ -192,14 +191,19 @@ bool isSelf(const HostAndPort& hostAndPort) {
 
     try {
         DBClientConnection conn;
-        std::string errmsg;
         conn.setSoTimeout(30);  // 30 second timeout
-        if (!conn.connect(hostAndPort, errmsg)) {
+
+        // We need to avoid the isMaster call triggered by a normal connect, which would
+        // cause a deadlock. 'isSelf' is called by the Replication Coordinator when validating
+        // a replica set configuration document, but the 'isMaster' command requires a lock on the
+        // replication coordinator to execute. As such we call we call 'connectSocketOnly', which
+        // does not call 'isMaster'.
+        if (!conn.connectSocketOnly(hostAndPort).isOK()) {
             return false;
         }
 
         if (getGlobalAuthorizationManager()->isAuthEnabled() && isInternalAuthSet()) {
-            if (!authenticateInternalUser(&conn)) {
+            if (!conn.authenticateInternalUser()) {
                 return false;
             }
         }
@@ -209,7 +213,7 @@ bool isSelf(const HostAndPort& hostAndPort) {
 
         return me;
     } catch (const std::exception& e) {
-        warning() << "could't check isSelf (" << hostAndPort << ") " << e.what() << std::endl;
+        warning() << "couldn't check isSelf (" << hostAndPort << ") " << e.what() << std::endl;
     }
 
     return false;
@@ -263,7 +267,7 @@ std::vector<std::string> getBoundAddrs(const bool ipv6enabled) {
     // for the rare case that the adapter config changes between calls
 
     ULONG adaptersLen = 15 * 1024;
-    boost::scoped_array<char> buf(new char[adaptersLen]);
+    std::unique_ptr<char[]> buf(new char[adaptersLen]);
     IP_ADAPTER_ADDRESSES* adapters = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buf.get());
     DWORD err;
 

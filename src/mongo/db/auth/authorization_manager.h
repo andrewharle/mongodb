@@ -28,9 +28,6 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
-#include <boost/thread/condition_variable.hpp>
-#include <boost/thread/mutex.hpp>
 #include <memory>
 #include <string>
 
@@ -47,13 +44,17 @@
 #include "mongo/db/jsobj.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/platform/unordered_map.h"
+#include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/functional.h"
+#include "mongo/stdx/mutex.h"
 
 namespace mongo {
 
+class AuthorizationSession;
 class AuthzManagerExternalState;
-class UserDocumentParser;
 class OperationContext;
+class ServiceContext;
+class UserDocumentParser;
 
 /**
  * Internal secret key info.
@@ -70,8 +71,12 @@ class AuthorizationManager {
     MONGO_DISALLOW_COPYING(AuthorizationManager);
 
 public:
+    static AuthorizationManager* get(ServiceContext* service);
+    static AuthorizationManager* get(ServiceContext& service);
+    static void set(ServiceContext* service, std::unique_ptr<AuthorizationManager> authzManager);
+
     // The newly constructed AuthorizationManager takes ownership of "externalState"
-    explicit AuthorizationManager(AuthzManagerExternalState* externalState);
+    explicit AuthorizationManager(std::unique_ptr<AuthzManagerExternalState> externalState);
 
     ~AuthorizationManager();
 
@@ -154,6 +159,10 @@ public:
                                  const RoleName& roleName,
                                  mutablebson::Element result);
 
+    /**
+     * Returns a new AuthorizationSession for use with this AuthorizationManager.
+     */
+    std::unique_ptr<AuthorizationSession> makeAuthorizationSession();
 
     /**
      * Sets whether or not access control enforcement is enabled for this manager.
@@ -189,104 +198,11 @@ public:
      */
     bool hasAnyPrivilegeDocuments(OperationContext* txn);
 
-    /**
-     * Updates the auth schema version document to reflect the current state of the system.
-     * 'foundSchemaVersion' is the authSchemaVersion to update with.
-     */
-    Status writeAuthSchemaVersionIfNeeded(OperationContext* txn, int foundSchemaVersion);
-
-    /**
-     * Creates the given user object in the given database.
-     * 'writeConcern' contains the arguments to be passed to getLastError to block for
-     * successful completion of the write.
-     */
-    Status insertPrivilegeDocument(OperationContext* txn,
-                                   const std::string& dbname,
-                                   const BSONObj& userObj,
-                                   const BSONObj& writeConcern) const;
-
-    /**
-     * Updates the given user object with the given update modifier.
-     * 'writeConcern' contains the arguments to be passed to getLastError to block for
-     * successful completion of the write.
-     */
-    Status updatePrivilegeDocument(OperationContext* txn,
-                                   const UserName& user,
-                                   const BSONObj& updateObj,
-                                   const BSONObj& writeConcern) const;
-
-    /*
-     * Removes users for the given database matching the given query.
-     * Writes into *numRemoved the number of user documents that were modified.
-     * 'writeConcern' contains the arguments to be passed to getLastError to block for
-     * successful completion of the write.
-     */
-    Status removePrivilegeDocuments(OperationContext* txn,
-                                    const BSONObj& query,
-                                    const BSONObj& writeConcern,
-                                    int* numRemoved) const;
-
-    /**
-     * Creates the given role object in the given database.
-     * 'writeConcern' contains the arguments to be passed to getLastError to block for
-     * successful completion of the write.
-     */
-    Status insertRoleDocument(OperationContext* txn,
-                              const BSONObj& roleObj,
-                              const BSONObj& writeConcern) const;
-
-    /**
-     * Updates the given role object with the given update modifier.
-     * 'writeConcern' contains the arguments to be passed to getLastError to block for
-     * successful completion of the write.
-     */
-    Status updateRoleDocument(OperationContext* txn,
-                              const RoleName& role,
-                              const BSONObj& updateObj,
-                              const BSONObj& writeConcern) const;
-
-    /**
-     * Updates documents matching "query" according to "updatePattern" in "collectionName".
-     * Should only be called on collections with authorization documents in them
-     * (ie admin.system.users and admin.system.roles).
-     */
-    Status updateAuthzDocuments(OperationContext* txn,
-                                const NamespaceString& collectionName,
-                                const BSONObj& query,
-                                const BSONObj& updatePattern,
-                                bool upsert,
-                                bool multi,
-                                const BSONObj& writeConcern,
-                                int* nMatched) const;
-
-    /*
-     * Removes roles matching the given query.
-     * Writes into *numRemoved the number of role documents that were modified.
-     * 'writeConcern' contains the arguments to be passed to getLastError to block for
-     * successful completion of the write.
-     */
-    Status removeRoleDocuments(OperationContext* txn,
-                               const BSONObj& query,
-                               const BSONObj& writeConcern,
-                               int* numRemoved) const;
-
-    /**
-     * Finds all documents matching "query" in "collectionName".  For each document returned,
-     * calls the function resultProcessor on it.
-     * Should only be called on collections with authorization documents in them
-     * (ie admin.system.users and admin.system.roles).
-     */
-    Status queryAuthzDocument(OperationContext* txn,
-                              const NamespaceString& collectionName,
-                              const BSONObj& query,
-                              const BSONObj& projection,
-                              const stdx::function<void(const BSONObj&)>& resultProcessor);
-
     // Checks to see if "doc" is a valid privilege document, assuming it is stored in the
     // "system.users" collection of database "dbname".
     //
     // Returns Status::OK() if the document is good, or Status(ErrorCodes::BadValue), otherwise.
-    Status checkValidPrivilegeDocument(const StringData& dbname, const BSONObj& doc);
+    Status checkValidPrivilegeDocument(StringData dbname, const BSONObj& doc);
 
     // Given a database name and a readOnly flag return an ActionSet describing all the actions
     // that an old-style user with those attributes should be given.
@@ -316,7 +232,10 @@ public:
      *
      * If the role does not exist, returns ErrorCodes::RoleNotFound.
      */
-    Status getRoleDescription(const RoleName& roleName, bool showPrivileges, BSONObj* result);
+    Status getRoleDescription(OperationContext* txn,
+                              const RoleName& roleName,
+                              bool showPrivileges,
+                              BSONObj* result);
 
     /**
      * Writes into "result" documents describing the roles that are defined on the given
@@ -331,7 +250,8 @@ public:
      * the document will contain a "warnings" array, with std::string messages describing
      * inconsistencies.
      */
-    Status getRoleDescriptionsForDB(const std::string dbname,
+    Status getRoleDescriptionsForDB(OperationContext* txn,
+                                    const std::string dbname,
                                     bool showPrivileges,
                                     bool showBuiltinRoles,
                                     std::vector<BSONObj>* result);
@@ -385,50 +305,6 @@ public:
     Status _initializeUserFromPrivilegeDocument(User* user, const BSONObj& privDoc);
 
     /**
-     * Tries to acquire the global lock guarding modifications to all persistent data related
-     * to authorization, namely the admin.system.users, admin.system.roles, and
-     * admin.system.version collections.  This serializes all writers to the authorization
-     * documents, but does not impact readers.
-     */
-    bool tryAcquireAuthzUpdateLock(const StringData& why);
-
-    /**
-     * Releases the lock guarding modifications to persistent authorization data, which must
-     * already be held.
-     */
-    void releaseAuthzUpdateLock();
-
-    /**
-     * Performs one step in the process of upgrading the stored authorization data to the
-     * newest schema.
-     *
-     * On success, returns Status::OK(), and *isDone will indicate whether there are more
-     * steps to perform.
-     *
-     * If the authorization data is already fully upgraded, returns Status::OK and sets *isDone
-     * to true, so this is safe to call on a fully upgraded system.
-     *
-     * On failure, returns a status other than Status::OK().  In this case, is is typically safe
-     * to try again.
-     */
-    Status upgradeSchemaStep(OperationContext* txn, const BSONObj& writeConcern, bool* isDone);
-
-    /**
-     * Performs up to maxSteps steps in the process of upgrading the stored authorization data
-     * to the newest schema.  Behaves as if by repeatedly calling upgradeSchemaStep up to
-     * maxSteps times until either it completes the upgrade or returns a non-OK status.
-     *
-     * Invalidates the user cache before the first step and after each attempted step.
-     *
-     * Returns Status::OK() to indicate that the upgrade process has completed successfully.
-     * Returns ErrorCodes::OperationIncomplete to indicate that progress was made, but that more
-     * steps must be taken to complete the process.  Other returns indicate a failure to make
-     * progress performing the upgrade, and the specific code and message in the returned status
-     * may provide additional information.
-     */
-    Status upgradeSchema(OperationContext* txn, int maxSteps, const BSONObj& writeConcern);
-
-    /**
      * Hook called by replication code to let the AuthorizationManager observe changes
      * to relevant collections.
      */
@@ -436,14 +312,7 @@ public:
                const char* opstr,
                const char* ns,
                const BSONObj& obj,
-               BSONObj* patt,
-               bool* b);
-
-    /**
-     * Getter and setter for the auth delay for failed login attempts.
-     */
-    uint32_t getAuthFailedDelay();
-    void setAuthFailedDelay(const Milliseconds& delay);
+               BSONObj* patt);
 
 private:
     /**
@@ -479,7 +348,7 @@ private:
      */
     Status _fetchUserV2(OperationContext* txn,
                         const UserName& userName,
-                        std::auto_ptr<User>* acquiredUser);
+                        std::unique_ptr<User>* acquiredUser);
 
     /**
      * True if access control enforcement is enabled in this AuthorizationManager.
@@ -495,9 +364,9 @@ private:
     bool _privilegeDocsExist;
 
     // Protects _privilegeDocsExist
-    mutable boost::mutex _privilegeDocsExistMutex;
+    mutable stdx::mutex _privilegeDocsExistMutex;
 
-    boost::scoped_ptr<AuthzManagerExternalState> _externalState;
+    std::unique_ptr<AuthzManagerExternalState> _externalState;
 
     /**
      * Cached value of the authorization schema version.
@@ -535,23 +404,13 @@ private:
      * Protects _userCache, _cacheGeneration, _version and _isFetchPhaseBusy.  Manipulated
      * via CacheGuard.
      */
-    boost::mutex _cacheMutex;
+    stdx::mutex _cacheMutex;
 
     /**
      * Condition used to signal that it is OK for another CacheGuard to enter a fetch phase.
      * Manipulated via CacheGuard.
      */
-    boost::condition_variable _fetchPhaseIsReady;
-
-    /**
-     * Protects access to _authDelayMs.
-     */
-    mongo::mutex _authFailedDelayMutex;
-
-    /**
-     * Delay in ms before returning an error after a failed login attempt. Default is 0 ms.
-     */
-    Milliseconds _authFailedDelay;
+    stdx::condition_variable _fetchPhaseIsReady;
 };
 
 }  // namespace mongo

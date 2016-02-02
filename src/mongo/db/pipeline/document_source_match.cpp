@@ -31,6 +31,7 @@
 #include <cctype>
 
 #include "mongo/db/jsobj.h"
+#include "mongo/db/matcher/extensions_callback_noop.h"
 #include "mongo/db/matcher/matcher.h"
 #include "mongo/db/pipeline/document.h"
 #include "mongo/db/pipeline/document_source.h"
@@ -43,14 +44,18 @@ using boost::intrusive_ptr;
 using std::string;
 using std::vector;
 
-const char DocumentSourceMatch::matchName[] = "$match";
+REGISTER_DOCUMENT_SOURCE(match, DocumentSourceMatch::createFromBson);
 
 const char* DocumentSourceMatch::getSourceName() const {
-    return matchName;
+    return "$match";
 }
 
 Value DocumentSourceMatch::serialize(bool explain) const {
     return Value(DOC(getSourceName() << Document(getQuery())));
+}
+
+intrusive_ptr<DocumentSource> DocumentSourceMatch::optimize() {
+    return getQuery().isEmpty() ? nullptr : this;
 }
 
 boost::optional<Document> DocumentSourceMatch::getNext() {
@@ -92,7 +97,7 @@ bool DocumentSourceMatch::coalesce(const intrusive_ptr<DocumentSource>& nextSour
 
     // Replace our matcher with the $and of ours and theirs.
     matcher.reset(new Matcher(BSON("$and" << BSON_ARRAY(getQuery() << otherMatch->getQuery())),
-                              MatchExpressionParser::WhereCallback()));
+                              ExtensionsCallbackNoop()));
 
     return true;
 }
@@ -103,7 +108,7 @@ namespace {
 // the Match expression has been successfully parsed so they can assume that
 // input is well formed.
 
-bool isAllDigits(const StringData& str) {
+bool isAllDigits(StringData str) {
     if (str.empty())
         return false;
 
@@ -114,7 +119,7 @@ bool isAllDigits(const StringData& str) {
     return true;
 }
 
-bool isFieldnameRedactSafe(const StringData& fieldName) {
+bool isFieldnameRedactSafe(StringData fieldName) {
     // Can't have numeric elements in the dotted path since redacting elements from an array
     // would change the indexes.
 
@@ -157,6 +162,10 @@ Document redactSafePortionDollarOps(BSONObj expr) {
             case BSONObj::opREGEX:
             case BSONObj::opOPTIONS:
             case BSONObj::opMOD:
+            case BSONObj::opBITS_ALL_SET:
+            case BSONObj::opBITS_ALL_CLEAR:
+            case BSONObj::opBITS_ANY_SET:
+            case BSONObj::opBITS_ANY_CLEAR:
                 output[field.fieldNameStringData()] = Value(field);
                 break;
 
@@ -195,7 +204,7 @@ Document redactSafePortionDollarOps(BSONObj expr) {
                     }
                 }
                 if (!matches.empty())
-                    output[field.fieldNameStringData()] = Value::consume(matches);
+                    output[field.fieldNameStringData()] = Value(std::move(matches));
 
                 break;
             }
@@ -217,7 +226,6 @@ Document redactSafePortionDollarOps(BSONObj expr) {
 
             // These are never allowed
             case BSONObj::Equality:  // This actually means unknown
-            case BSONObj::opMAX_DISTANCE:
             case BSONObj::opNEAR:
             case BSONObj::NE:
             case BSONObj::opSIZE:
@@ -251,7 +259,7 @@ Document redactSafePortionTopLevel(BSONObj query) {
                 }
 
                 if (!okClauses.empty())
-                    output["$or"] = Value::consume(okClauses);
+                    output["$or"] = Value(std::move(okClauses));
             } else if (str::equals(field.fieldName(), "$and")) {
                 // $and can include subset of elements (like $all).
                 vector<Value> okClauses;
@@ -261,7 +269,7 @@ Document redactSafePortionTopLevel(BSONObj query) {
                         okClauses.push_back(Value(clause));
                 }
                 if (!okClauses.empty())
-                    output["$and"] = Value::consume(okClauses);
+                    output["$and"] = Value(std::move(okClauses));
             }
 
             continue;
@@ -352,6 +360,6 @@ BSONObj DocumentSourceMatch::getQuery() const {
 DocumentSourceMatch::DocumentSourceMatch(const BSONObj& query,
                                          const intrusive_ptr<ExpressionContext>& pExpCtx)
     : DocumentSource(pExpCtx),
-      matcher(new Matcher(query.getOwned(), MatchExpressionParser::WhereCallback())),
+      matcher(new Matcher(query.getOwned(), ExtensionsCallbackNoop())),
       _isTextQuery(isTextQuery(query)) {}
 }

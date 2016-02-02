@@ -1,17 +1,15 @@
 // Test that when user flags are set on a collection,
 // then collection is sharded, flags get carried over.
+(function() {
 
-if ( typeof(TestData) != "object" ||
-     !TestData.storageEngine ||
-     TestData.storageEngine == "mmapv1" ) {
-
+if (jsTest.options().storageEngine === "mmapv1") {
     // the dbname and collection we'll be working with
     var dbname = "testDB";
     var coll = "userFlagsColl";
     var ns = dbname + "." + coll;
 
     // First create fresh collection on a new standalone mongod
-    var newShardConn = startMongodTest( 29000 );
+    var newShardConn = MongoRunner.runMongod({});
     var db1 = newShardConn.getDB( dbname );
     var t = db1.getCollection( coll );
     print(t);
@@ -41,8 +39,8 @@ if ( typeof(TestData) != "object" ||
     assert.eq( collstats.userFlags , 0 , "modified collection should have userFlags = 0 ");
 
     // start up a new sharded cluster, and add previous mongod
-    var s = new ShardingTest( "user_flags", 1 );
-    assert( s.admin.runCommand( { addshard: "localhost:29000" , name: "myShard" } ).ok,
+    var s = new ShardingTest({ name: "user_flags", shards: 1 });
+    assert( s.admin.runCommand( { addshard: newShardConn.host , name: "myShard" } ).ok,
             "did not accept new shard" );
 
     // enable sharding of the collection. Only 1 chunk initially, so move it to
@@ -60,7 +58,8 @@ if ( typeof(TestData) != "object" ||
     assert.eq( shard2stats.count , numdocs , "moveChunk didn't succeed" );
     assert.eq( shard2stats.userFlags , 0 , "new shard should also have userFlags = 0 ");
 
-    stopMongod( 29000 );
+    MongoRunner.stopMongod(newShardConn);
     s.stop();
-
 }
+
+})();

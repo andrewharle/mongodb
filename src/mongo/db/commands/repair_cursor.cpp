@@ -28,13 +28,17 @@
 *    it in the license file.
 */
 
+#include "mongo/platform/basic.h"
+
 #include <memory>
 
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/db_raii.h"
 #include "mongo/db/exec/multi_iterator.h"
+#include "mongo/db/query/cursor_response.h"
 
 namespace mongo {
 
@@ -57,7 +61,7 @@ public:
         ActionSet actions;
         actions.addAction(ActionType::find);
         Privilege p(parseResourcePattern(dbname, cmdObj), actions);
-        if (client->getAuthorizationSession()->isAuthorizedForPrivilege(p))
+        if (AuthorizationSession::get(client)->isAuthorizedForPrivilege(p))
             return Status::OK();
         return Status(ErrorCodes::Unauthorized, "Unauthorized");
     }
@@ -67,8 +71,7 @@ public:
                      BSONObj& cmdObj,
                      int options,
                      string& errmsg,
-                     BSONObjBuilder& result,
-                     bool fromRepl = false) {
+                     BSONObjBuilder& result) {
         NamespaceString ns(parseNs(dbname, cmdObj));
 
         AutoGetCollectionForRead ctx(txn, ns.ns());
@@ -79,32 +82,36 @@ public:
                 result, Status(ErrorCodes::NamespaceNotFound, "ns does not exist: " + ns.ns()));
         }
 
-        std::auto_ptr<RecordIterator> iter(collection->getRecordStore()->getIteratorForRepair(txn));
-        if (iter.get() == NULL) {
+        auto cursor = collection->getRecordStore()->getCursorForRepair(txn);
+        if (!cursor) {
             return appendCommandStatus(
                 result, Status(ErrorCodes::CommandNotSupported, "repair iterator not supported"));
         }
 
-        std::auto_ptr<WorkingSet> ws(new WorkingSet());
-        std::auto_ptr<MultiIteratorStage> stage(new MultiIteratorStage(txn, ws.get(), collection));
-        stage->addIterator(iter.release());
+        std::unique_ptr<WorkingSet> ws(new WorkingSet());
+        std::unique_ptr<MultiIteratorStage> stage(
+            new MultiIteratorStage(txn, ws.get(), collection));
+        stage->addIterator(std::move(cursor));
 
-        PlanExecutor* rawExec;
-        Status execStatus = PlanExecutor::make(
-            txn, ws.release(), stage.release(), collection, PlanExecutor::YIELD_AUTO, &rawExec);
-        invariant(execStatus.isOK());
-        std::auto_ptr<PlanExecutor> exec(rawExec);
+        auto statusWithPlanExecutor = PlanExecutor::make(
+            txn, std::move(ws), std::move(stage), collection, PlanExecutor::YIELD_AUTO);
+        invariant(statusWithPlanExecutor.isOK());
+        std::unique_ptr<PlanExecutor> exec = std::move(statusWithPlanExecutor.getValue());
 
         // 'exec' will be used in getMore(). It was automatically registered on construction
         // due to the auto yield policy, so it could yield during plan selection. We deregister
         // it now so that it can be registed with ClientCursor.
         exec->deregisterExec();
         exec->saveState();
+        exec->detachFromOperationContext();
 
         // ClientCursors' constructor inserts them into a global map that manages their
         // lifetimes. That is why the next line isn't leaky.
         ClientCursor* cc =
-            new ClientCursor(collection->getCursorManager(), exec.release(), ns.ns());
+            new ClientCursor(collection->getCursorManager(),
+                             exec.release(),
+                             ns.ns(),
+                             txn->recoveryUnit()->isReadingFromMajorityCommittedSnapshot());
 
         appendCursorResponseObject(cc->cursorid(), ns.ns(), BSONArray(), &result);
 

@@ -31,6 +31,7 @@
 
 #include "mongo/util/net/ssl_manager.h"
 
+#include <boost/algorithm/string.hpp>
 #include <boost/date_time/posix_time/posix_time.hpp>
 #include <boost/thread/recursive_mutex.hpp>
 #include <boost/thread/tss.hpp>
@@ -41,18 +42,21 @@
 
 #include "mongo/base/init.h"
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/config.h"
 #include "mongo/platform/atomic_word.h"
+#include "mongo/stdx/memory.h"
 #include "mongo/util/concurrency/mutex.h"
-#include "mongo/util/exit.h"
 #include "mongo/util/debug_util.h"
+#include "mongo/util/exit.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
 #include "mongo/util/net/sock.h"
 #include "mongo/util/net/ssl_expiration.h"
 #include "mongo/util/net/ssl_options.h"
 #include "mongo/util/scopeguard.h"
+#include "mongo/util/text.h"
 
-#ifdef MONGO_SSL
+#ifdef MONGO_CONFIG_SSL
 #include <openssl/evp.h>
 #include <openssl/x509v3.h>
 #endif
@@ -61,14 +65,13 @@ using std::endl;
 
 namespace mongo {
 
-SSLGlobalParams sslGlobalParams;
+SSLParams sslGlobalParams;
 
-#ifndef MONGO_SSL
-const std::string getSSLVersion(const std::string& prefix, const std::string& suffix) {
-    return "";
+const SSLParams& getSSLGlobalParams() {
+    return sslGlobalParams;
 }
-#else
 
+#ifdef MONGO_CONFIG_SSL
 // Old copies of OpenSSL will not have constants to disable protocols they don't support.
 // Define them to values we can OR together safely to generically disable these protocols across
 // all versions of OpenSSL.
@@ -78,11 +81,6 @@ const std::string getSSLVersion(const std::string& prefix, const std::string& su
 #ifndef SSL_OP_NO_TLSv1_2
 #define SSL_OP_NO_TLSv1_2 0
 #endif
-
-
-const std::string getSSLVersion(const std::string& prefix, const std::string& suffix) {
-    return prefix + SSLeay_version(SSLEAY_VERSION) + suffix;
-}
 
 namespace {
 
@@ -121,8 +119,9 @@ public:
     }
 
     static void init() {
-        while ((int)_mutex.size() < CRYPTO_num_locks())
-            _mutex.push_back(new boost::recursive_mutex);
+        while ((int)_mutex.size() < CRYPTO_num_locks()) {
+            _mutex.emplace_back(stdx::make_unique<stdx::recursive_mutex>());
+        }
     }
 
     static SSLThreadInfo* get() {
@@ -141,7 +140,7 @@ private:
     // Note: see SERVER-8734 for why we are using a recursive mutex here.
     // Once the deadlock fix in OpenSSL is incorporated into most distros of
     // Linux, this can be changed back to a nonrecursive mutex.
-    static std::vector<boost::recursive_mutex*> _mutex;
+    static std::vector<std::unique_ptr<stdx::recursive_mutex>> _mutex;
     static boost::thread_specific_ptr<SSLThreadInfo> _thread;
 };
 
@@ -153,77 +152,51 @@ void _ssl_locking_callback(int mode, int type, const char* file, int line) {
     SSLThreadInfo::get()->lock_callback(mode, type, file, line);
 }
 
+// We only want to free SSL_CTX objects if they have been populated. OpenSSL seems to perform this
+// check before freeing them, but because it does not document this, we should protect ourselves.
+void _free_ssl_context(SSL_CTX* ctx) {
+    if (ctx != nullptr) {
+        SSL_CTX_free(ctx);
+    }
+}
+
 AtomicUInt32 SSLThreadInfo::_next;
-std::vector<boost::recursive_mutex*> SSLThreadInfo::_mutex;
+std::vector<std::unique_ptr<stdx::recursive_mutex>> SSLThreadInfo::_mutex;
 boost::thread_specific_ptr<SSLThreadInfo> SSLThreadInfo::_thread;
 
 ////////////////////////////////////////////////////////////////
 
-SimpleMutex sslManagerMtx("SSL Manager");
+SimpleMutex sslManagerMtx;
 SSLManagerInterface* theSSLManager = NULL;
+using UniqueSSLContext = std::unique_ptr<SSL_CTX, decltype(&_free_ssl_context)>;
 static const int BUFFER_SIZE = 8 * 1024;
 static const int DATE_LEN = 128;
 
-struct Params {
-    Params(const std::string& pemfile,
-           const std::string& pempwd,
-           const std::string& clusterfile,
-           const std::string& clusterpwd,
-           const std::vector<SSLGlobalParams::Protocols>& disabledProtocols,
-           const std::string& cafile = "",
-           const std::string& crlfile = "",
-           const std::string& cipherConfig = "",
-           bool weakCertificateValidation = false,
-           bool allowInvalidCertificates = false,
-           bool allowInvalidHostnames = false,
-           bool fipsMode = false)
-        : pemfile(pemfile),
-          pempwd(pempwd),
-          clusterfile(clusterfile),
-          clusterpwd(clusterpwd),
-          cafile(cafile),
-          crlfile(crlfile),
-          cipherConfig(cipherConfig),
-          disabledProtocols(disabledProtocols),
-          weakCertificateValidation(weakCertificateValidation),
-          allowInvalidCertificates(allowInvalidCertificates),
-          allowInvalidHostnames(allowInvalidHostnames),
-          fipsMode(fipsMode){};
-
-    std::string pemfile;
-    std::string pempwd;
-    std::string clusterfile;
-    std::string clusterpwd;
-    std::string cafile;
-    std::string crlfile;
-    std::string cipherConfig;
-    std::vector<SSLGlobalParams::Protocols> disabledProtocols;
-    bool weakCertificateValidation;
-    bool allowInvalidCertificates;
-    bool allowInvalidHostnames;
-    bool fipsMode;
-};
-
 class SSLManager : public SSLManagerInterface {
 public:
-    explicit SSLManager(const Params& params, bool isServer);
+    explicit SSLManager(const SSLParams& params, bool isServer);
 
-    virtual ~SSLManager();
+    /**
+     * Initializes an OpenSSL context according to the provided settings. Only settings which are
+     * acceptable on non-blocking connections are set.
+     */
+    Status initSSLContext(SSL_CTX* context, const SSLParams& params) final;
 
     virtual SSLConnection* connect(Socket* socket);
 
     virtual SSLConnection* accept(Socket* socket, const char* initialBytes, int len);
 
-    virtual std::string parseAndValidatePeerCertificate(const SSLConnection* conn,
-                                                        const std::string& remoteHost);
+    virtual std::string parseAndValidatePeerCertificateDeprecated(const SSLConnection* conn,
+                                                                  const std::string& remoteHost);
+
+    StatusWith<boost::optional<std::string>> parseAndValidatePeerCertificate(
+        SSL* conn, const std::string& remoteHost) final;
 
     virtual void cleanupThreadLocals();
 
     virtual const SSLConfiguration& getSSLConfiguration() const {
         return _sslConfiguration;
     }
-
-    virtual std::string getSSLErrorMessage(int code);
 
     virtual int SSL_read(SSLConnection* conn, void* buf, int num);
 
@@ -240,8 +213,8 @@ public:
     virtual void SSL_free(SSLConnection* conn);
 
 private:
-    SSL_CTX* _serverContext;  // SSL context for incoming connections
-    SSL_CTX* _clientContext;  // SSL context for outgoing connections
+    UniqueSSLContext _serverContext;  // SSL context for incoming connections
+    UniqueSSLContext _clientContext;  // SSL context for outgoing connections
     std::string _password;
     bool _weakValidation;
     bool _allowInvalidCertificates;
@@ -261,9 +234,10 @@ private:
     MONGO_COMPILER_NORETURN void _handleSSLError(int code, int ret);
 
     /*
-     * Init the SSL context using parameters provided in params.
+     * Init the SSL context using parameters provided in params. This SSL context will
+     * be configured for blocking send/receive.
      */
-    bool _initSSLContext(SSL_CTX** context, const Params& params);
+    bool _initSynchronousSSLContext(UniqueSSLContext* context, const SSLParams& params);
 
     /*
      * Converts time from OpenSSL return value to unsigned long long
@@ -300,12 +274,6 @@ private:
     bool _setupCRL(SSL_CTX* context, const std::string& crlFile);
 
     /*
-     * Activate FIPS 140-2 mode, if the server started with a command line
-     * parameter.
-     */
-    void _setupFIPS();
-
-    /*
      * sub function for checking the result of an SSL operation
      */
     bool _doneWithSSLOp(SSLConnection* conn, int status);
@@ -327,33 +295,65 @@ private:
     static int verify_cb(int ok, X509_STORE_CTX* ctx);
 };
 
+void setupFIPS() {
+// Turn on FIPS mode if requested, OPENSSL_FIPS must be defined by the OpenSSL headers
+#if defined(MONGO_CONFIG_HAVE_FIPS_MODE_SET)
+    int status = FIPS_mode_set(1);
+    if (!status) {
+        severe() << "can't activate FIPS mode: "
+                 << SSLManagerInterface::getSSLErrorMessage(ERR_get_error()) << endl;
+        fassertFailedNoTrace(16703);
+    }
+    log() << "FIPS 140-2 mode activated" << endl;
+#else
+    severe() << "this version of mongodb was not compiled with FIPS support";
+    fassertFailedNoTrace(17089);
+#endif
+}
 }  // namespace
 
 // Global variable indicating if this is a server or a client instance
 bool isSSLServer = false;
 
-MONGO_INITIALIZER(SSLManager)(InitializerContext* context) {
-    SimpleMutex::scoped_lock lck(sslManagerMtx);
-    if (sslGlobalParams.sslMode.load() != SSLGlobalParams::SSLMode_disabled) {
-        const Params params(sslGlobalParams.sslPEMKeyFile,
-                            sslGlobalParams.sslPEMKeyPassword,
-                            sslGlobalParams.sslClusterFile,
-                            sslGlobalParams.sslClusterPassword,
-                            sslGlobalParams.sslDisabledProtocols,
-                            sslGlobalParams.sslCAFile,
-                            sslGlobalParams.sslCRLFile,
-                            sslGlobalParams.sslCipherConfig,
-                            sslGlobalParams.sslWeakCertificateValidation,
-                            sslGlobalParams.sslAllowInvalidCertificates,
-                            sslGlobalParams.sslAllowInvalidHostnames,
-                            sslGlobalParams.sslFIPSMode);
-        theSSLManager = new SSLManager(params, isSSLServer);
+
+MONGO_INITIALIZER(SetupOpenSSL)(InitializerContext*) {
+    SSL_library_init();
+    SSL_load_error_strings();
+    ERR_load_crypto_strings();
+
+    if (sslGlobalParams.sslFIPSMode) {
+        setupFIPS();
+    }
+
+    // Add all digests and ciphers to OpenSSL's internal table
+    // so that encryption/decryption is backwards compatible
+    OpenSSL_add_all_algorithms();
+
+    // Setup OpenSSL multithreading callbacks
+    CRYPTO_set_id_callback(_ssl_id_callback);
+    CRYPTO_set_locking_callback(_ssl_locking_callback);
+
+    SSLThreadInfo::init();
+    SSLThreadInfo::get();
+
+    return Status::OK();
+}
+
+MONGO_INITIALIZER_WITH_PREREQUISITES(SSLManager, ("SetupOpenSSL"))(InitializerContext*) {
+    stdx::lock_guard<SimpleMutex> lck(sslManagerMtx);
+    if (sslGlobalParams.sslMode.load() != SSLParams::SSLMode_disabled) {
+        theSSLManager = new SSLManager(sslGlobalParams, isSSLServer);
     }
     return Status::OK();
 }
 
+std::unique_ptr<SSLManagerInterface> SSLManagerInterface::create(const SSLParams& params,
+                                                                 bool isServer) {
+    return stdx::make_unique<SSLManager>(params, isServer);
+}
+
 SSLManagerInterface* getSSLManager() {
-    SimpleMutex::scoped_lock lck(sslManagerMtx);
+    stdx::lock_guard<SimpleMutex> lck(sslManagerMtx);
     if (theSSLManager)
         return theSSLManager;
     return NULL;
@@ -411,6 +411,42 @@ SSLConnection::~SSLConnection() {
     }
 }
 
+namespace {
+void canonicalizeClusterDN(std::vector<std::string>* dn) {
+    // remove all RDNs we don't care about
+    for (size_t i = 0; i < dn->size(); i++) {
+        std::string& comp = dn->at(i);
+        boost::algorithm::trim(comp);
+        if (!mongoutils::str::startsWith(comp.c_str(), "DC=") &&
+            !mongoutils::str::startsWith(comp.c_str(), "O=") &&
+            !mongoutils::str::startsWith(comp.c_str(), "OU=")) {
+            dn->erase(dn->begin() + i);
+            i--;
+        }
+    }
+    std::stable_sort(dn->begin(), dn->end());
+}
+}
+
+bool SSLConfiguration::isClusterMember(StringData subjectName) const {
+    std::vector<std::string> clientRDN = StringSplitter::split(subjectName.toString(), ",");
+    std::vector<std::string> serverRDN = StringSplitter::split(serverSubjectName, ",");
+
+    canonicalizeClusterDN(&clientRDN);
+    canonicalizeClusterDN(&serverRDN);
+
+    if (clientRDN.size() == 0 || clientRDN.size() != serverRDN.size()) {
+        return false;
+    }
+
+    for (size_t i = 0; i < serverRDN.size(); i++) {
+        if (clientRDN[i] != serverRDN[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
 BSONObj SSLConfiguration::getServerStatusBSON() const {
     BSONObjBuilder security;
     security.append("SSLServerSubjectName", serverSubjectName);
@@ -421,44 +457,25 @@ BSONObj SSLConfiguration::getServerStatusBSON() const {
 
 SSLManagerInterface::~SSLManagerInterface() {}
 
-SSLManager::SSLManager(const Params& params, bool isServer)
-    : _serverContext(NULL),
-      _clientContext(NULL),
-      _weakValidation(params.weakCertificateValidation),
-      _allowInvalidCertificates(params.allowInvalidCertificates),
-      _allowInvalidHostnames(params.allowInvalidHostnames) {
-    SSL_library_init();
-    SSL_load_error_strings();
-    ERR_load_crypto_strings();
-
-    if (params.fipsMode) {
-        _setupFIPS();
-    }
-
-    // Add all digests and ciphers to OpenSSL's internal table
-    // so that encryption/decryption is backwards compatible
-    OpenSSL_add_all_algorithms();
-
-    // Setup OpenSSL multithreading callbacks
-    CRYPTO_set_id_callback(_ssl_id_callback);
-    CRYPTO_set_locking_callback(_ssl_locking_callback);
-
-    SSLThreadInfo::init();
-    SSLThreadInfo::get();
-
-    if (!_initSSLContext(&_clientContext, params)) {
+SSLManager::SSLManager(const SSLParams& params, bool isServer)
+    : _serverContext(nullptr, _free_ssl_context),
+      _clientContext(nullptr, _free_ssl_context),
+      _weakValidation(params.sslWeakCertificateValidation),
+      _allowInvalidCertificates(params.sslAllowInvalidCertificates),
+      _allowInvalidHostnames(params.sslAllowInvalidHostnames) {
+    if (!_initSynchronousSSLContext(&_clientContext, params)) {
         uasserted(16768, "ssl initialization problem");
     }
 
     // pick the certificate for use in outgoing connections,
     std::string clientPEM;
-    if (!isServer || params.clusterfile.empty()) {
+    if (!isServer || params.sslClusterFile.empty()) {
         // We are either a client, or a server without a cluster key,
         // so use the PEM key file, if specified
-        clientPEM = params.pemfile;
+        clientPEM = params.sslPEMKeyFile;
     } else {
         // We are a server with a cluster key, so use the cluster key file
-        clientPEM = params.clusterfile;
+        clientPEM = params.sslClusterFile;
     }
 
     if (!clientPEM.empty()) {
@@ -468,11 +485,11 @@ SSLManager::SSLManager(const Params& params, bool isServer)
     }
     // SSL server specific initialization
     if (isServer) {
-        if (!_initSSLContext(&_serverContext, params)) {
+        if (!_initSynchronousSSLContext(&_serverContext, params)) {
             uasserted(16562, "ssl initialization problem");
         }
 
-        if (!_parseAndValidateCertificate(params.pemfile,
+        if (!_parseAndValidateCertificate(params.sslPEMKeyFile,
                                           &_sslConfiguration.serverSubjectName,
                                           &_sslConfiguration.serverCertificateExpirationDate)) {
             uasserted(16942, "ssl initialization problem");
@@ -480,19 +497,6 @@ SSLManager::SSLManager(const Params& params, bool isServer)
 
         static CertificateExpirationMonitor task =
             CertificateExpirationMonitor(_sslConfiguration.serverCertificateExpirationDate);
-    }
-}
-
-SSLManager::~SSLManager() {
-    CRYPTO_set_id_callback(0);
-    ERR_free_strings();
-    EVP_cleanup();
-
-    if (NULL != _serverContext) {
-        SSL_CTX_free(_serverContext);
-    }
-    if (NULL != _clientContext) {
-        SSL_CTX_free(_clientContext);
     }
 }
 
@@ -558,51 +562,26 @@ void SSLManager::SSL_free(SSLConnection* conn) {
     return ::SSL_free(conn->ssl);
 }
 
-void SSLManager::_setupFIPS() {
-// Turn on FIPS mode if requested.
-// OPENSSL_FIPS must be defined by the OpenSSL headers, plus MONGO_SSL_FIPS
-// must be defined via a MongoDB build flag.
-#if defined(MONGO_HAVE_FIPS_MODE_SET)
-    int status = FIPS_mode_set(1);
-    if (!status) {
-        severe() << "can't activate FIPS mode: " << getSSLErrorMessage(ERR_get_error()) << endl;
-        fassertFailedNoTrace(16703);
-    }
-    log() << "FIPS 140-2 mode activated" << endl;
-#else
-    severe() << "this version of mongodb was not compiled with FIPS support";
-    fassertFailedNoTrace(17089);
-#endif
-}
-
-bool SSLManager::_initSSLContext(SSL_CTX** context, const Params& params) {
-    *context = SSL_CTX_new(SSLv23_method());
-    massert(15864,
-            mongoutils::str::stream()
-                << "can't create SSL Context: " << getSSLErrorMessage(ERR_get_error()),
-            context);
-
+Status SSLManager::initSSLContext(SSL_CTX* context, const SSLParams& params) {
     // SSL_OP_ALL - Activate all bug workaround options, to support buggy client SSL's.
     // SSL_OP_NO_SSLv2 - Disable SSL v2 support
     // SSL_OP_NO_SSLv3 - Disable SSL v3 support
     long supportedProtocols = SSL_OP_ALL | SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3;
 
-    // Set the supported TLS protocols. Allow --disabledProtocols to disable selected ciphers.
-    if (!params.disabledProtocols.empty()) {
-        for (std::vector<SSLGlobalParams::Protocols>::const_iterator it =
-                 params.disabledProtocols.begin();
-             it != params.disabledProtocols.end();
-             ++it) {
-            if (*it == SSLGlobalParams::TLS1_0) {
+    // Set the supported TLS protocols. Allow --sslDisabledProtocols to disable selected
+    // ciphers.
+    if (!params.sslDisabledProtocols.empty()) {
+        for (const SSLParams::Protocols& protocol : params.sslDisabledProtocols) {
+            if (protocol == SSLParams::Protocols::TLS1_0) {
                 supportedProtocols |= SSL_OP_NO_TLSv1;
-            } else if (*it == SSLGlobalParams::TLS1_1) {
+            } else if (protocol == SSLParams::Protocols::TLS1_1) {
                 supportedProtocols |= SSL_OP_NO_TLSv1_1;
-            } else if (*it == SSLGlobalParams::TLS1_2) {
+            } else if (protocol == SSLParams::Protocols::TLS1_2) {
                 supportedProtocols |= SSL_OP_NO_TLSv1_2;
             }
         }
     }
-    SSL_CTX_set_options(*context, supportedProtocols);
+    ::SSL_CTX_set_options(context, supportedProtocols);
 
     // HIGH - Enable strong ciphers
     // !EXPORT - Disable export ciphers (40/56 bit)
@@ -611,54 +590,63 @@ bool SSLManager::_initSSLContext(SSL_CTX** context, const Params& params) {
     std::string cipherConfig = "HIGH:!EXPORT:!aNULL@STRENGTH";
 
     // Allow the cipher configuration string to be overriden by --sslCipherConfig
-    if (!params.cipherConfig.empty()) {
-        cipherConfig = params.cipherConfig;
+    if (!params.sslCipherConfig.empty()) {
+        cipherConfig = params.sslCipherConfig;
     }
 
-    massert(28615,
-            mongoutils::str::stream()
-                << "can't set supported cipher suites: " << getSSLErrorMessage(ERR_get_error()),
-            SSL_CTX_set_cipher_list(*context, cipherConfig.c_str()));
+    if (0 == ::SSL_CTX_set_cipher_list(context, cipherConfig.c_str())) {
+        return Status(ErrorCodes::InvalidSSLConfiguration,
+                      str::stream() << "Can not set supported cipher suites: "
+                                    << getSSLErrorMessage(ERR_get_error()));
+    }
+
+    // We use the address of the context as the session id context.
+    if (0 == ::SSL_CTX_set_session_id_context(
+                 context, reinterpret_cast<unsigned char*>(&context), sizeof(context))) {
+        return Status(ErrorCodes::InvalidSSLConfiguration,
+                      str::stream() << "Can not store ssl session id context: "
+                                    << getSSLErrorMessage(ERR_get_error()));
+    }
+
+    if (!params.sslClusterFile.empty()) {
+        ::EVP_set_pw_prompt("Enter cluster certificate passphrase");
+        if (!_setupPEM(context, params.sslClusterFile, params.sslClusterPassword)) {
+            return Status(ErrorCodes::InvalidSSLConfiguration, "Can not set up ssl clusterFile.");
+        }
+    } else if (!params.sslPEMKeyFile.empty()) {
+        // Use the pemfile for everything else
+        ::EVP_set_pw_prompt("Enter PEM passphrase");
+        if (!_setupPEM(context, params.sslPEMKeyFile, params.sslPEMKeyPassword)) {
+            return Status(ErrorCodes::InvalidSSLConfiguration, "Can not set up PEM key file.");
+        }
+    }
+
+    if (!params.sslCAFile.empty()) {
+        // Set up certificate validation with a certificate authority
+        if (!_setupCA(context, params.sslCAFile)) {
+            return Status(ErrorCodes::InvalidSSLConfiguration, "Can not set up CA file.");
+        }
+    }
+
+    if (!params.sslCRLFile.empty()) {
+        if (!_setupCRL(context, params.sslCRLFile)) {
+            return Status(ErrorCodes::InvalidSSLConfiguration, "Can not set up CRL file.");
+        }
+    }
+
+    return Status::OK();
+}
+
+bool SSLManager::_initSynchronousSSLContext(UniqueSSLContext* contextPtr, const SSLParams& params) {
+    UniqueSSLContext context(SSL_CTX_new(SSLv23_method()), _free_ssl_context);
+
+    uassertStatusOK(initSSLContext(context.get(), params));
 
     // If renegotiation is needed, don't return from recv() or send() until it's successful.
     // Note: this is for blocking sockets only.
-    SSL_CTX_set_mode(*context, SSL_MODE_AUTO_RETRY);
+    SSL_CTX_set_mode(context.get(), SSL_MODE_AUTO_RETRY);
 
-    massert(28607,
-            mongoutils::str::stream()
-                << "can't store ssl session id context: " << getSSLErrorMessage(ERR_get_error()),
-            SSL_CTX_set_session_id_context(*context,
-                                           static_cast<unsigned char*>(static_cast<void*>(context)),
-                                           sizeof(*context)));
-
-    // Use the clusterfile for internal outgoing SSL connections if specified
-    if (context == &_clientContext && !params.clusterfile.empty()) {
-        EVP_set_pw_prompt("Enter cluster certificate passphrase");
-        if (!_setupPEM(*context, params.clusterfile, params.clusterpwd)) {
-            return false;
-        }
-    }
-    // Use the pemfile for everything else
-    else if (!params.pemfile.empty()) {
-        EVP_set_pw_prompt("Enter PEM passphrase");
-        if (!_setupPEM(*context, params.pemfile, params.pempwd)) {
-            return false;
-        }
-    }
-
-    if (!params.cafile.empty()) {
-        // Set up certificate validation with a certificate authority
-        if (!_setupCA(*context, params.cafile)) {
-            return false;
-        }
-    }
-
-    if (!params.crlfile.empty()) {
-        if (!_setupCRL(*context, params.crlfile)) {
-            return false;
-        }
-    }
-
+    *contextPtr = std::move(context);
     return true;
 }
 
@@ -741,7 +729,7 @@ bool SSLManager::_parseAndValidateCertificate(const std::string& keyFile,
             fassertFailedNoTrace(28652);
         }
 
-        *serverCertificateExpirationDate = Date_t(notAfterMillis);
+        *serverCertificateExpirationDate = Date_t::fromMillisSinceEpoch(notAfterMillis);
     }
 
     return true;
@@ -887,7 +875,8 @@ bool SSLManager::_doneWithSSLOp(SSLConnection* conn, int status) {
 }
 
 SSLConnection* SSLManager::connect(Socket* socket) {
-    std::auto_ptr<SSLConnection> sslConn(new SSLConnection(_clientContext, socket, NULL, 0));
+    std::unique_ptr<SSLConnection> sslConn =
+        stdx::make_unique<SSLConnection>(_clientContext.get(), socket, (const char*)NULL, 0);
 
     int ret;
     do {
@@ -901,8 +890,8 @@ SSLConnection* SSLManager::connect(Socket* socket) {
 }
 
 SSLConnection* SSLManager::accept(Socket* socket, const char* initialBytes, int len) {
-    std::auto_ptr<SSLConnection> sslConn(
-        new SSLConnection(_serverContext, socket, initialBytes, len));
+    std::unique_ptr<SSLConnection> sslConn =
+        stdx::make_unique<SSLConnection>(_serverContext.get(), socket, initialBytes, len);
 
     int ret;
     do {
@@ -931,35 +920,38 @@ bool SSLManager::_hostNameMatch(const char* nameToMatch, const char* certHostNam
     }
 }
 
-std::string SSLManager::parseAndValidatePeerCertificate(const SSLConnection* conn,
-                                                        const std::string& remoteHost) {
+StatusWith<boost::optional<std::string>> SSLManager::parseAndValidatePeerCertificate(
+    SSL* conn, const std::string& remoteHost) {
     // only set if a CA cert has been provided
     if (!_sslConfiguration.hasCA)
-        return "";
+        return {boost::none};
 
-    X509* peerCert = SSL_get_peer_certificate(conn->ssl);
+    X509* peerCert = SSL_get_peer_certificate(conn);
 
     if (NULL == peerCert) {  // no certificate presented by peer
         if (_weakValidation) {
             warning() << "no SSL certificate provided by peer" << endl;
         } else {
-            error() << "no SSL certificate provided by peer; connection rejected" << endl;
-            throw SocketException(SocketException::CONNECT_ERROR, "");
+            auto msg = "no SSL certificate provided by peer; connection rejected";
+            error() << msg;
+            return Status(ErrorCodes::SSLHandshakeFailed, msg);
         }
-        return "";
+        return {boost::none};
     }
     ON_BLOCK_EXIT(X509_free, peerCert);
 
-    long result = SSL_get_verify_result(conn->ssl);
+    long result = SSL_get_verify_result(conn);
 
     if (result != X509_V_OK) {
         if (_allowInvalidCertificates) {
-            warning() << "SSL peer certificate validation failed:"
+            warning() << "SSL peer certificate validation failed: "
                       << X509_verify_cert_error_string(result);
         } else {
-            error() << "SSL peer certificate validation failed:"
-                    << X509_verify_cert_error_string(result);
-            throw SocketException(SocketException::CONNECT_ERROR, "");
+            str::stream msg;
+            msg << "SSL peer certificate validation failed: "
+                << X509_verify_cert_error_string(result);
+            error() << msg.ss.str();
+            return Status(ErrorCodes::SSLHandshakeFailed, msg);
         }
     }
 
@@ -969,7 +961,7 @@ std::string SSLManager::parseAndValidatePeerCertificate(const SSLConnection* con
     // If this is an SSL client context (on a MongoDB server or client)
     // perform hostname validation of the remote server
     if (remoteHost.empty()) {
-        return peerSubjectName;
+        return boost::make_optional(peerSubjectName);
     }
 
     // Try to match using the Subject Alternate Name, if it exists.
@@ -1011,19 +1003,32 @@ std::string SSLManager::parseAndValidatePeerCertificate(const SSLConnection* con
         if (_allowInvalidCertificates || _allowInvalidHostnames) {
             warning() << "The server certificate does not match the host name " << remoteHost;
         } else {
-            error() << "The server certificate does not match the host name " << remoteHost;
-            throw SocketException(SocketException::CONNECT_ERROR, "");
+            str::stream msg;
+            msg << "The server certificate does not match the host name " << remoteHost;
+            error() << msg.ss.str();
+            return Status(ErrorCodes::SSLHandshakeFailed, msg);
         }
     }
 
-    return peerSubjectName;
+    return boost::make_optional(peerSubjectName);
+}
+
+std::string SSLManager::parseAndValidatePeerCertificateDeprecated(const SSLConnection* conn,
+                                                                  const std::string& remoteHost) {
+    auto swPeerSubjectName = parseAndValidatePeerCertificate(conn->ssl, remoteHost);
+    // We can't use uassertStatusOK here because we need to throw a SocketException.
+    if (!swPeerSubjectName.isOK()) {
+        throw SocketException(SocketException::CONNECT_ERROR,
+                              swPeerSubjectName.getStatus().reason());
+    }
+    return swPeerSubjectName.getValue().get_value_or("");
 }
 
 void SSLManager::cleanupThreadLocals() {
     ERR_remove_state(0);
 }
 
-std::string SSLManager::getSSLErrorMessage(int code) {
+std::string SSLManagerInterface::getSSLErrorMessage(int code) {
     // 120 from the SSL documentation for ERR_error_string
     static const size_t msglen = 120;
 
@@ -1071,5 +1076,13 @@ void SSLManager::_handleSSLError(int code, int ret) {
     }
     throw SocketException(SocketException::CONNECT_ERROR, "");
 }
-#endif  // #ifdef MONGO_SSL
+#else
+
+MONGO_INITIALIZER(SSLManager)(InitializerContext*) {
+    // we need a no-op initializer so that we can depend on SSLManager as a prerequisite in
+    // non-SSL builds.
+    return Status::OK();
+}
+
+#endif  // #ifdef MONGO_CONFIG_SSL
 }

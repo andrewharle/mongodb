@@ -175,10 +175,8 @@ assert.commandWorked(explain);
 // .snapshot()
 explain = t.explain().find().snapshot().finish();
 assert.commandWorked(explain);
-assert(isIxscan(explain.queryPlanner.winningPlan));
 explain = t.find().snapshot().explain();
 assert.commandWorked(explain);
-assert(isIxscan(explain.queryPlanner.winningPlan));
 
 // .next()
 explain = t.explain().find().next();
@@ -261,6 +259,24 @@ assert(planHasStage(explain.queryPlanner.winningPlan, "COUNT_SCAN"));
 
 explain = t.explain().group({key: "a", initial: {}, reduce: function() { } });
 assert.commandWorked(explain);
+
+//
+// .distinct()
+//
+
+explain = t.explain().distinct('_id');
+assert.commandWorked(explain);
+assert(planHasStage(explain.queryPlanner.winningPlan, "PROJECTION"));
+assert(planHasStage(explain.queryPlanner.winningPlan, "DISTINCT_SCAN"));
+
+explain = t.explain().distinct('a');
+assert.commandWorked(explain);
+assert(planHasStage(explain.queryPlanner.winningPlan, "PROJECTION"));
+assert(planHasStage(explain.queryPlanner.winningPlan, "DISTINCT_SCAN"));
+
+explain = t.explain().distinct('b');
+assert.commandWorked(explain);
+assert(planHasStage(explain.queryPlanner.winningPlan, "COLLSCAN"));
 
 //
 // .remove()
@@ -357,6 +373,40 @@ assert.eq(3, stage.nMatched);
 assert.eq(3, stage.nWouldModify);
 
 //
+// .findAndModify()
+//
+
+// Basic findAndModify with update.
+explain = t.explain("executionStats").findAndModify({query: {a: 3}, update: {$set: {b: 3}}});
+assert.commandWorked(explain);
+assert.eq(1, explain.executionStats.totalDocsExamined);
+
+// Document should not have been updated.
+assert.eq(1, t.findOne({a: 3})["b"]);
+
+// Basic findAndModify with delete.
+explain = t.explain("executionStats").findAndModify({query: {a: 3}, remove: true});
+assert.commandWorked(explain);
+assert.eq(1, explain.executionStats.totalDocsExamined);
+
+// Delete shouldn't have happened.
+assert.eq(10, t.count());
+
+// findAndModify with upsert flag set that should do an insert.
+explain = t.explain("executionStats").findAndModify(
+    {query: {a: 15}, update: {$set: {b: 3}}, upsert: true});
+assert.commandWorked(explain);
+stage = explain.executionStats.executionStages;
+if ("SINGLE_SHARD" === stage.stage) {
+    stage = stage.shards[0].executionStages;
+}
+assert.eq(stage.stage, "UPDATE");
+assert(stage.wouldInsert);
+
+// Make sure that the insert didn't actually happen.
+assert.eq(10, t.count());
+
+//
 // Error cases.
 //
 
@@ -386,4 +436,9 @@ assert.throws(function() {
 // Missing "initial" for explaining a group.
 assert.throws(function() {
     t.explain().group({key: "a", reduce: function() { } });
+});
+
+// Can't specify both remove and update in a findAndModify
+assert.throws(function() {
+    t.explain().findAndModify({remove: true, update: {$set: {b: 3}}});
 });

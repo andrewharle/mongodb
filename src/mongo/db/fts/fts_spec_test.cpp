@@ -156,6 +156,9 @@ TEST(FTSSpec, FixWeights1) {
     assertFixFailure("{key: {a: 'text'}, weights: {$a: 1}}");
     assertFixFailure("{key: {a: 'text'}, weights: {'a.$a': 1}}");
     assertFixFailure("{key: {a: 'text'}, weights: {'a.$**': 1}}");
+
+    assertFixFailure("{key: {_fts: 'text', _ftsx: 1}, weights: {}}");
+    assertFixFailure("{key: {_fts: 'text', _ftsx: 1}}");
 }
 
 TEST(FTSSpec, FixLanguageOverride1) {
@@ -174,8 +177,11 @@ TEST(FTSSpec, FixTextIndexVersion1) {
     assertFixSuccess("{key: {a: 'text'}, textIndexVersion: 2.0}}");
     assertFixSuccess("{key: {a: 'text'}, textIndexVersion: NumberInt(2)}}");
     assertFixSuccess("{key: {a: 'text'}, textIndexVersion: NumberLong(2)}}");
+    assertFixSuccess("{key: {a: 'text'}, textIndexVersion: 3.0}");
+    assertFixSuccess("{key: {a: 'text'}, textIndexVersion: NumberInt(3)}}");
+    assertFixSuccess("{key: {a: 'text'}, textIndexVersion: NumberLong(3)}}");
 
-    assertFixFailure("{key: {a: 'text'}, textIndexVersion: 3}");
+    assertFixFailure("{key: {a: 'text'}, textIndexVersion: 4}");
     assertFixFailure("{key: {a: 'text'}, textIndexVersion: '2'}");
     assertFixFailure("{key: {a: 'text'}, textIndexVersion: {}}");
 }

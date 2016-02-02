@@ -28,7 +28,7 @@
 
 #pragma once
 
-#include "mongo/bson/optime.h"
+#include "mongo/bson/timestamp.h"
 #include "mongo/db/repl/member_state.h"
 #include "mongo/db/repl/repl_set_heartbeat_response.h"
 #include "mongo/util/time_support.h"
@@ -65,21 +65,25 @@ public:
     const std::string& getLastHeartbeatMsg() const {
         return _lastResponse.getHbMsg();
     }
-    const std::string& getSyncSource() const {
+    const HostAndPort& getSyncSource() const {
         return _lastResponse.getSyncingTo();
     }
     OpTime getOpTime() const {
         return _lastResponse.getOpTime();
     }
     int getConfigVersion() const {
-        return _lastResponse.getVersion();
+        return _lastResponse.getConfigVersion();
     }
     bool hasAuthIssue() const {
         return _authIssue;
     }
 
-    OpTime getElectionTime() const {
+    Timestamp getElectionTime() const {
         return _lastResponse.getElectionTime();
+    }
+
+    long long getTerm() const {
+        return _lastResponse.getTerm();
     }
 
     // Returns true if the last heartbeat data explicilty stated that the node
@@ -101,7 +105,7 @@ public:
     /**
      * Sets values in this object from the results of a successful heartbeat command.
      */
-    void setUpValues(Date_t now, const HostAndPort& host, ReplSetHeartbeatResponse hbResponse);
+    void setUpValues(Date_t now, const HostAndPort& host, ReplSetHeartbeatResponse&& hbResponse);
 
     /**
      * Sets values in this object from the results of a erroring/failed heartbeat command.

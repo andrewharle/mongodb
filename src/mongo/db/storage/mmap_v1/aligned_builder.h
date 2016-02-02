@@ -108,7 +108,7 @@ public:
         appendBuf(&s, sizeof(T));
     }
 
-    void appendStr(const StringData& str, bool includeEOO = true) {
+    void appendStr(StringData str, bool includeEOO = true) {
         const unsigned len = str.size() + (includeEOO ? 1 : 0);
         verify(len < (unsigned)BSONObjMaxUserSize);
         str.copyTo(grow(len), includeEOO);

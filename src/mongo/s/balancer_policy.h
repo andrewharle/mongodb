@@ -28,27 +28,21 @@
 *    then also delete it in the license file.
 */
 
-#ifndef S_BALANCER_POLICY_HEADER
-#define S_BALANCER_POLICY_HEADER
+#pragma once
 
-#include <boost/noncopyable.hpp>
-
-#include "mongo/base/status_with.h"
-#include "mongo/base/owned_pointer_vector.h"
+#include "mongo/base/disallow_copying.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/s/shard.h"
-#include "mongo/s/type_chunk.h"
+#include "mongo/s/catalog/type_chunk.h"
+#include "mongo/s/client/shard.h"
 
 namespace mongo {
 
 class ChunkManager;
+class OperationContext;
 
 struct ChunkInfo {
     const BSONObj min;
     const BSONObj max;
-
-    ChunkInfo(const BSONObj& a_min, const BSONObj& a_max)
-        : min(a_min.getOwned()), max(a_max.getOwned()) {}
 
     ChunkInfo(const BSONObj& chunk)
         : min(chunk[ChunkType::min()].Obj().getOwned()),
@@ -56,6 +50,7 @@ struct ChunkInfo {
 
     std::string toString() const;
 };
+
 
 struct TagRange {
     BSONObj min;
@@ -66,8 +61,10 @@ struct TagRange {
 
     TagRange(const BSONObj& a_min, const BSONObj& a_max, const std::string& a_tag)
         : min(a_min.getOwned()), max(a_max.getOwned()), tag(a_tag) {}
+
     std::string toString() const;
 };
+
 
 class ShardInfo {
 public:
@@ -120,23 +117,27 @@ private:
     std::string _mongoVersion;
 };
 
-struct MigrateInfo {
-    const std::string ns;
-    const std::string to;
-    const std::string from;
-    const ChunkInfo chunk;
 
+struct MigrateInfo {
     MigrateInfo(const std::string& a_ns,
-                const std::string& a_to,
-                const std::string& a_from,
+                const ShardId& a_to,
+                const ShardId& a_from,
                 const BSONObj& a_chunk)
         : ns(a_ns), to(a_to), from(a_from), chunk(a_chunk) {}
+
+    const std::string ns;
+    const ShardId to;
+    const ShardId from;
+    const ChunkInfo chunk;
 };
 
-typedef std::map<std::string, ShardInfo> ShardInfoMap;
-typedef std::map<std::string, OwnedPointerVector<ChunkType>*> ShardToChunksMap;
+typedef std::map<ShardId, ShardInfo> ShardInfoMap;
+typedef std::map<ShardId, std::vector<ChunkType>> ShardToChunksMap;
 
-class DistributionStatus : boost::noncopyable {
+
+class DistributionStatus {
+    MONGO_DISALLOW_COPYING(DistributionStatus);
+
 public:
     DistributionStatus(const ShardInfoMap& shardInfo, const ShardToChunksMap& shardToChunksMap);
 
@@ -168,13 +169,13 @@ public:
     unsigned totalChunks() const;
 
     /** @return number of chunks in this shard */
-    unsigned numberOfChunksInShard(const std::string& shard) const;
+    unsigned numberOfChunksInShard(const ShardId& shardId) const;
 
     /** @return number of chunks in this shard with the given tag */
-    unsigned numberOfChunksInShardWithTag(const std::string& shard, const std::string& tag) const;
+    unsigned numberOfChunksInShardWithTag(const ShardId& shardId, const std::string& tag) const;
 
     /** @return chunks for the shard */
-    const std::vector<ChunkType*>& getChunks(const std::string& shard) const;
+    const std::vector<ChunkType>& getChunks(const ShardId& shardId) const;
 
     /** @return all tags we know about, not include "" */
     const std::set<std::string>& tags() const {
@@ -184,13 +185,13 @@ public:
     /** @return the right tag for chunk, possibly "" */
     std::string getTagForChunk(const ChunkType& chunk) const;
 
-    /** @return all shards we know about */
-    const std::set<std::string>& shards() const {
-        return _shards;
+    /** @return all shard ids we know about */
+    const std::set<ShardId>& shardIds() const {
+        return _shardIds;
     }
 
     /** @return the ShardInfo for the shard */
-    const ShardInfo& shardInfo(const std::string& shard) const;
+    const ShardInfo& shardInfo(const ShardId& shardId) const;
 
     /** writes all state to log() */
     void dump() const;
@@ -199,7 +200,7 @@ public:
      * Retrieves shard metadata information from the config server as well as some stats
      * from the shards.
      */
-    static Status populateShardInfoMap(ShardInfoMap* shardInfo);
+    static Status populateShardInfoMap(OperationContext* txn, ShardInfoMap* shardInfo);
 
     /**
      * Note: jumbo and versions are not set.
@@ -208,22 +209,14 @@ public:
                                          const ChunkManager& chunkMgr,
                                          ShardToChunksMap* shardToChunksMap);
 
-    /**
-     * Returns the tag of the given chunk by querying the config server.
-     *
-     * TODO: add a way to incrementally update chunk tags metadata so this is not needed.
-     */
-    static StatusWith<std::string> getTagForSingleChunk(const std::string& configServer,
-                                                        const std::string& ns,
-                                                        const ChunkType& chunk);
-
 private:
     const ShardInfoMap& _shardInfo;
     const ShardToChunksMap& _shardChunks;
     std::map<BSONObj, TagRange> _tagRanges;
     std::set<std::string> _allTags;
-    std::set<std::string> _shards;
+    std::set<ShardId> _shardIds;
 };
+
 
 class BalancerPolicy {
 public:
@@ -243,7 +236,4 @@ public:
                                 int balancedLastTime);
 };
 
-
 }  // namespace mongo
-
-#endif  // S_BALANCER_POLICY_HEADER

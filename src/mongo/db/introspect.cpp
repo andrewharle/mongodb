@@ -36,14 +36,17 @@
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/user_set.h"
-#include "mongo/db/curop.h"
-#include "mongo/db/jsobj.h"
 #include "mongo/db/catalog/collection.h"
+#include "mongo/db/client.h"
+#include "mongo/db/curop.h"
+#include "mongo/db/db_raii.h"
+#include "mongo/db/jsobj.h"
 #include "mongo/util/log.h"
+#include "mongo/util/scopeguard.h"
 
 namespace mongo {
 
-using boost::scoped_ptr;
+using std::unique_ptr;
 using std::endl;
 using std::string;
 
@@ -77,7 +80,7 @@ void _appendUserInfo(const CurOp& c, BSONObjBuilder& builder, AuthorizationSessi
 }  // namespace
 
 
-void profile(OperationContext* txn, int op) {
+void profile(OperationContext* txn, NetworkOp op) {
     // Initialize with 1kb at start in order to avoid realloc later
     BufBuilder profileBufBuilder(1024);
 
@@ -86,27 +89,27 @@ void profile(OperationContext* txn, int op) {
     {
         Locker::LockerInfo lockerInfo;
         txn->lockState()->getLockerInfo(&lockerInfo);
-        txn->getCurOp()->debug().append(*txn->getCurOp(), lockerInfo.stats, b);
+        CurOp::get(txn)->debug().append(*CurOp::get(txn), lockerInfo.stats, b);
     }
 
     b.appendDate("ts", jsTime());
     b.append("client", txn->getClient()->clientAddress());
 
-    AuthorizationSession* authSession = txn->getClient()->getAuthorizationSession();
-    _appendUserInfo(*txn->getCurOp(), b, authSession);
+    AuthorizationSession* authSession = AuthorizationSession::get(txn->getClient());
+    _appendUserInfo(*CurOp::get(txn), b, authSession);
 
     const BSONObj p = b.done();
 
     const bool wasLocked = txn->lockState()->isLocked();
 
-    const string dbName(nsToDatabase(txn->getCurOp()->getNS()));
+    const string dbName(nsToDatabase(CurOp::get(txn)->getNS()));
 
     try {
         bool acquireDbXLock = false;
         while (true) {
             ScopedTransaction scopedXact(txn, MODE_IX);
 
-            boost::scoped_ptr<AutoGetDb> autoGetDb;
+            std::unique_ptr<AutoGetDb> autoGetDb;
             if (acquireDbXLock) {
                 autoGetDb.reset(new AutoGetDb(txn, dbName, MODE_X));
                 if (autoGetDb->getDb()) {
@@ -120,7 +123,7 @@ void profile(OperationContext* txn, int op) {
             if (!db) {
                 // Database disappeared
                 log() << "note: not profiling because db went away for "
-                      << txn->getCurOp()->getNS();
+                      << CurOp::get(txn)->getNS();
                 break;
             }
 
@@ -145,8 +148,9 @@ void profile(OperationContext* txn, int op) {
             }
         }
     } catch (const AssertionException& assertionEx) {
-        warning() << "Caught Assertion while trying to profile " << opToString(op) << " against "
-                  << txn->getCurOp()->getNS() << ": " << assertionEx.toString() << endl;
+        warning() << "Caught Assertion while trying to profile " << networkOpToString(op)
+                  << " against " << CurOp::get(txn)->getNS() << ": " << assertionEx.toString()
+                  << endl;
     }
 }
 
@@ -174,6 +178,9 @@ Status createProfileCollection(OperationContext* txn, Database* db) {
     collectionOptions.cappedSize = 1024 * 1024;
 
     WriteUnitOfWork wunit(txn);
+    bool shouldReplicateWrites = txn->writesAreReplicated();
+    txn->setReplicatedWrites(false);
+    ON_BLOCK_EXIT(&OperationContext::setReplicatedWrites, txn, shouldReplicateWrites);
     invariant(db->createCollection(txn, dbProfilingNS, collectionOptions));
     wunit.commit();
 

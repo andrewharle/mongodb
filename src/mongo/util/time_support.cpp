@@ -29,31 +29,34 @@
 
 #include "mongo/util/time_support.h"
 
+#include <boost/thread/tss.hpp>
+#include <cstdint>
 #include <cstdio>
 #include <string>
 #include <iostream>
-#include <boost/thread/thread.hpp>
-#include <boost/thread/tss.hpp>
-#include <boost/thread/xtime.hpp>
 
 #include "mongo/base/init.h"
 #include "mongo/base/parse_number.h"
 #include "mongo/bson/util/builder.h"
-#include "mongo/platform/cstdint.h"
+#include "mongo/stdx/thread.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/mongoutils/str.h"
 
 #ifdef _WIN32
 #include <boost/date_time/filetime_functions.hpp>
 #include "mongo/util/concurrency/mutex.h"
+#include "mongo/util/system_tick_source.h"
 #include "mongo/util/timer.h"
 
 // NOTE(schwerin): MSVC's _snprintf is not a drop-in replacement for C99's snprintf().  In
 // particular, when the target buffer is too small, behaviors differ.  Consult the documentation
 // from MSDN and form the BSD or Linux man pages before using.
+#if _MSC_VER < 1900
 #define snprintf _snprintf
 #endif
+#endif
 
-#ifdef __sunos__
+#ifdef __sun
 // Some versions of Solaris do not have timegm defined, so fall back to our implementation when
 // building on Solaris.  See SERVER-13446.
 extern "C" time_t timegm(struct tm* const tmp);
@@ -61,13 +64,87 @@ extern "C" time_t timegm(struct tm* const tmp);
 
 namespace mongo {
 
-bool Date_t::isFormatable() const {
+namespace {
+template <typename Stream>
+Stream& streamPut(Stream& os, Microseconds us) {
+    return os << us.count() << "\xce\xbcs";
+}
+
+template <typename Stream>
+Stream& streamPut(Stream& os, Milliseconds ms) {
+    return os << ms.count() << "ms";
+}
+
+template <typename Stream>
+Stream& streamPut(Stream& os, Seconds s) {
+    return os << s.count() << 's';
+}
+}  // namespace
+
+std::ostream& operator<<(std::ostream& os, Microseconds us) {
+    return streamPut(os, us);
+}
+
+std::ostream& operator<<(std::ostream& os, Milliseconds ms) {
+    return streamPut(os, ms);
+}
+std::ostream& operator<<(std::ostream& os, Seconds s) {
+    return streamPut(os, s);
+}
+
+template <typename Allocator>
+StringBuilderImpl<Allocator>& operator<<(StringBuilderImpl<Allocator>& os, Microseconds us) {
+    return streamPut(os, us);
+}
+
+template <typename Allocator>
+StringBuilderImpl<Allocator>& operator<<(StringBuilderImpl<Allocator>& os, Milliseconds ms) {
+    return streamPut(os, ms);
+}
+
+template <typename Allocator>
+StringBuilderImpl<Allocator>& operator<<(StringBuilderImpl<Allocator>& os, Seconds s) {
+    return streamPut(os, s);
+}
+
+template StringBuilderImpl<StackAllocator>& operator<<(StringBuilderImpl<StackAllocator>&,
+                                                       Microseconds);
+template StringBuilderImpl<StackAllocator>& operator<<(StringBuilderImpl<StackAllocator>&,
+                                                       Milliseconds);
+template StringBuilderImpl<StackAllocator>& operator<<(StringBuilderImpl<StackAllocator>&, Seconds);
+template StringBuilderImpl<TrivialAllocator>& operator<<(StringBuilderImpl<TrivialAllocator>&,
+                                                         Microseconds);
+template StringBuilderImpl<TrivialAllocator>& operator<<(StringBuilderImpl<TrivialAllocator>&,
+                                                         Milliseconds);
+template StringBuilderImpl<TrivialAllocator>& operator<<(StringBuilderImpl<TrivialAllocator>&,
+                                                         Seconds);
+
+Date_t Date_t::max() {
+    return fromMillisSinceEpoch(std::numeric_limits<long long>::max());
+}
+
+Date_t Date_t::now() {
+    return fromMillisSinceEpoch(curTimeMillis64());
+}
+
+Date_t::Date_t(stdx::chrono::system_clock::time_point tp)
+    : millis(durationCount<Milliseconds>(tp - stdx::chrono::system_clock::from_time_t(0))) {}
+
+stdx::chrono::system_clock::time_point Date_t::toSystemTimePoint() const {
+    return stdx::chrono::system_clock::from_time_t(0) + toDurationSinceEpoch();
+}
+
+bool Date_t::isFormattable() const {
+    if (millis < 0) {
+        return false;
+    }
     if (sizeof(time_t) == sizeof(int32_t)) {
-        return millis < 2147483647000ULL;  // "2038-01-19T03:14:07Z"
+        return millis < 2147483647000LL;  // "2038-01-19T03:14:07Z"
     } else {
-        return millis < 32535215999000ULL;  // "3000-12-31T23:59:59Z"
+        return millis < 32535215999000LL;  // "3000-12-31T23:59:59Z"
     }
 }
+
 
 // jsTime_virtual_skew is just for testing. a test command manipulates it.
 long long jsTime_virtual_skew = 0;
@@ -87,17 +164,6 @@ void time_t_to_Struct(time_t t, struct tm* buf, bool local) {
     else
         gmtime_r(&t, buf);
 #endif
-}
-
-std::string time_t_to_String(time_t t) {
-    char buf[64];
-#if defined(_WIN32)
-    ctime_s(buf, sizeof(buf), &t);
-#else
-    ctime_r(&t, buf);
-#endif
-    buf[24] = 0;  // don't want the \n
-    return buf;
 }
 
 std::string time_t_to_String_short(time_t t) {
@@ -126,16 +192,11 @@ string terseCurrentTime(bool colonsOk) {
     return buf;
 }
 
-#define MONGO_ISO_DATE_FMT_NO_TZ "%Y-%m-%dT%H:%M:%S"
-string timeToISOString(time_t time) {
-    struct tm t;
-    time_t_to_Struct(time, &t);
-
-    const char* fmt = MONGO_ISO_DATE_FMT_NO_TZ "Z";
-    char buf[32];
-    fassert(16227, strftime(buf, sizeof(buf), fmt, &t) == 20);
-    return buf;
+string terseUTCCurrentTime() {
+    return terseCurrentTime(false) + "Z";
 }
+
+#define MONGO_ISO_DATE_FMT_NO_TZ "%Y-%m-%dT%H:%M:%S"
 
 namespace {
 struct DateStringBuffer {
@@ -145,7 +206,7 @@ struct DateStringBuffer {
 };
 
 void _dateToISOString(Date_t date, bool local, DateStringBuffer* result) {
-    invariant(date.isFormatable());
+    invariant(date.isFormattable());
     static const int bufSize = DateStringBuffer::dataCapacity;
     char* const buf = result->data;
     struct tm t;
@@ -247,8 +308,8 @@ void outputDateAsCtime(std::ostream& os, Date_t date) {
 }
 
 namespace {
-StringData getNextToken(const StringData& currentString,
-                        const StringData& terminalChars,
+StringData getNextToken(StringData currentString,
+                        StringData terminalChars,
                         size_t startIndex,
                         size_t* endIndex) {
     size_t index = startIndex;
@@ -275,7 +336,7 @@ StringData getNextToken(const StringData& currentString,
 }
 
 // Check to make sure that the string only consists of digits
-bool isOnlyDigits(const StringData& toCheck) {
+bool isOnlyDigits(StringData toCheck) {
     StringData digits("0123456789");
     for (StringData::const_iterator iterator = toCheck.begin(); iterator != toCheck.end();
          iterator++) {
@@ -286,7 +347,7 @@ bool isOnlyDigits(const StringData& toCheck) {
     return true;
 }
 
-Status parseTimeZoneFromToken(const StringData& tzStr, int* tzAdjSecs) {
+Status parseTimeZoneFromToken(StringData tzStr, int* tzAdjSecs) {
     *tzAdjSecs = 0;
 
     if (!tzStr.empty()) {
@@ -356,7 +417,7 @@ Status parseTimeZoneFromToken(const StringData& tzStr, int* tzAdjSecs) {
     return Status::OK();
 }
 
-Status parseMillisFromToken(const StringData& millisStr, int* resultMillis) {
+Status parseMillisFromToken(StringData millisStr, int* resultMillis) {
     *resultMillis = 0;
 
     if (!millisStr.empty()) {
@@ -392,12 +453,12 @@ Status parseMillisFromToken(const StringData& millisStr, int* resultMillis) {
     return Status::OK();
 }
 
-Status parseTmFromTokens(const StringData& yearStr,
-                         const StringData& monthStr,
-                         const StringData& dayStr,
-                         const StringData& hourStr,
-                         const StringData& minStr,
-                         const StringData& secStr,
+Status parseTmFromTokens(StringData yearStr,
+                         StringData monthStr,
+                         StringData dayStr,
+                         StringData hourStr,
+                         StringData minStr,
+                         StringData secStr,
                          std::tm* resultTm) {
     memset(resultTm, 0, sizeof(*resultTm));
 
@@ -520,7 +581,7 @@ Status parseTmFromTokens(const StringData& yearStr,
     return Status::OK();
 }
 
-Status parseTm(const StringData& dateString, std::tm* resultTm, int* resultMillis, int* tzAdjSecs) {
+Status parseTm(StringData dateString, std::tm* resultTm, int* resultMillis, int* tzAdjSecs) {
     size_t yearEnd = std::string::npos;
     size_t monthEnd = std::string::npos;
     size_t dayEnd = std::string::npos;
@@ -608,7 +669,7 @@ Status parseTm(const StringData& dateString, std::tm* resultTm, int* resultMilli
 
 }  // namespace
 
-StatusWith<Date_t> dateFromISOString(const StringData& dateString) {
+StatusWith<Date_t> dateFromISOString(StringData dateString) {
     std::tm theTime;
     int millis = 0;
     int tzAdjSecs = 0;
@@ -671,28 +732,27 @@ StatusWith<Date_t> dateFromISOString(const StringData& dateString) {
 
     resultMillis += (tzAdjSecs * 1000);
 
-    return StatusWith<Date_t>(resultMillis);
+    if (resultMillis > static_cast<unsigned long long>(std::numeric_limits<long long>::max())) {
+        return {ErrorCodes::BadValue, str::stream() << dateString << " is too far in the future"};
+    }
+    return Date_t::fromMillisSinceEpoch(static_cast<long long>(resultMillis));
 }
 
 #undef MONGO_ISO_DATE_FMT_NO_TZ
 
-void Date_t::toTm(tm* buf) {
-    time_t dtime = toTimeT();
-#if defined(_WIN32)
-    gmtime_s(buf, &dtime);
-#else
-    gmtime_r(&dtime, buf);
-#endif
-}
-
 std::string Date_t::toString() const {
-    return time_t_to_String(toTimeT());
+    if (isFormattable()) {
+        return dateToISOStringLocal(*this);
+    } else {
+        return str::stream() << "Date(" << millis << ")";
+    }
 }
 
 time_t Date_t::toTimeT() const {
-    verify((long long)millis >= 0);  // TODO when millis is signed, delete
-    verify(((long long)millis / 1000) < (std::numeric_limits<time_t>::max)());
-    return millis / 1000;
+    const auto secs = millis / 1000;
+    verify(secs >= std::numeric_limits<time_t>::min());
+    verify(secs <= std::numeric_limits<time_t>::max());
+    return secs;
 }
 
 boost::gregorian::date currentDate() {
@@ -719,51 +779,16 @@ bool toPointInTime(const string& str, boost::posix_time::ptime* timeOfDay) {
     return true;
 }
 
-#if defined(_WIN32)
 void sleepsecs(int s) {
-    Sleep(s * 1000);
+    stdx::this_thread::sleep_for(Seconds(s));
 }
+
 void sleepmillis(long long s) {
-    fassert(16228, s <= 0xffffffff);
-    Sleep((DWORD)s);
+    stdx::this_thread::sleep_for(Milliseconds(s));
 }
 void sleepmicros(long long s) {
-    if (s <= 0)
-        return;
-    boost::xtime xt;
-    boost::xtime_get(&xt, MONGO_BOOST_TIME_UTC);
-    xt.sec += (int)(s / 1000000);
-    xt.nsec += (int)((s % 1000000) * 1000);
-    if (xt.nsec >= 1000000000) {
-        xt.nsec -= 1000000000;
-        xt.sec++;
-    }
-    boost::thread::sleep(xt);
+    stdx::this_thread::sleep_for(Microseconds(s));
 }
-#else
-void sleepsecs(int s) {
-    struct timespec t;
-    t.tv_sec = s;
-    t.tv_nsec = 0;
-    if (nanosleep(&t, 0)) {
-        std::cout << "nanosleep failed" << std::endl;
-    }
-}
-void sleepmicros(long long s) {
-    if (s <= 0)
-        return;
-    struct timespec t;
-    t.tv_sec = (int)(s / 1000000);
-    t.tv_nsec = 1000 * (s % 1000000);
-    struct timespec out;
-    if (nanosleep(&t, &out)) {
-        std::cout << "nanosleep failed" << std::endl;
-    }
-}
-void sleepmillis(long long s) {
-    sleepmicros(s * 1000);
-}
-#endif
 
 void Backoff::nextSleepMillis() {
     // Get the current time
@@ -833,24 +858,16 @@ long long getJSTimeVirtualThreadSkew() {
 }
 
 /** Date_t is milliseconds since epoch */
-Date_t jsTime();
+Date_t jsTime() {
+    return Date_t::now() + Milliseconds(getJSTimeVirtualThreadSkew()) +
+        Milliseconds(getJSTimeVirtualSkew());
+}
 
-/** warning this will wrap */
-unsigned curTimeMicros();
-
-unsigned long long curTimeMicros64();
 #ifdef _WIN32  // no gettimeofday on windows
 unsigned long long curTimeMillis64() {
-    boost::xtime xt;
-    boost::xtime_get(&xt, MONGO_BOOST_TIME_UTC);
-    return ((unsigned long long)xt.sec) * 1000 + xt.nsec / 1000000;
-}
-Date_t jsTime() {
-    boost::xtime xt;
-    boost::xtime_get(&xt, MONGO_BOOST_TIME_UTC);
-    unsigned long long t = xt.nsec / 1000000;
-    return ((unsigned long long)xt.sec * 1000) + t + getJSTimeVirtualSkew() +
-        getJSTimeVirtualThreadSkew();
+    using stdx::chrono::system_clock;
+    return static_cast<unsigned long long>(
+        durationCount<Milliseconds>(system_clock::now() - system_clock::from_time_t(0)));
 }
 
 static unsigned long long getFiletime() {
@@ -868,8 +885,8 @@ static unsigned long long getPerfCounter() {
 static unsigned long long baseFiletime = 0;
 static unsigned long long basePerfCounter = 0;
 static unsigned long long resyncInterval = 0;
-static SimpleMutex _curTimeMicros64ReadMutex("curTimeMicros64Read");
-static SimpleMutex _curTimeMicros64ResyncMutex("curTimeMicros64Resync");
+static SimpleMutex _curTimeMicros64ReadMutex;
+static SimpleMutex _curTimeMicros64ResyncMutex;
 
 typedef WINBASEAPI VOID(WINAPI* pGetSystemTimePreciseAsFileTime)(_Out_ LPFILETIME
                                                                      lpSystemTimeAsFileTime);
@@ -887,7 +904,7 @@ MONGO_INITIALIZER(Init32TimeSupport)(InitializerContext*) {
 }
 
 static unsigned long long resyncTime() {
-    SimpleMutex::scoped_lock lkResync(_curTimeMicros64ResyncMutex);
+    stdx::lock_guard<SimpleMutex> lkResync(_curTimeMicros64ResyncMutex);
     unsigned long long ftOld;
     unsigned long long ftNew;
     ftOld = ftNew = getFiletime();
@@ -899,10 +916,10 @@ static unsigned long long resyncTime() {
 
     // Make sure that we use consistent values for baseFiletime and basePerfCounter.
     //
-    SimpleMutex::scoped_lock lkRead(_curTimeMicros64ReadMutex);
+    stdx::lock_guard<SimpleMutex> lkRead(_curTimeMicros64ReadMutex);
     baseFiletime = ftNew;
     basePerfCounter = newPerfCounter;
-    resyncInterval = 60 * Timer::getCountsPerSecond();
+    resyncInterval = 60 * SystemTickSource::get()->getTicksPerSecond();
     return newPerfCounter;
 }
 
@@ -929,7 +946,7 @@ unsigned long long curTimeMicros64() {
 
     // Make sure that we use consistent values for baseFiletime and basePerfCounter.
     //
-    SimpleMutex::scoped_lock lkRead(_curTimeMicros64ReadMutex);
+    stdx::lock_guard<SimpleMutex> lkRead(_curTimeMicros64ReadMutex);
 
     // Compute the current time in FILETIME format by adding our base FILETIME and an offset
     // from that time based on QueryPerformanceCounter.  The math is (logically) to compute the
@@ -939,20 +956,14 @@ unsigned long long curTimeMicros64() {
     // truncation while using only integer instructions.
     //
     unsigned long long computedTime = baseFiletime +
-        ((perfCounter - basePerfCounter) * 10 * 1000 * 1000) / Timer::getCountsPerSecond();
+        ((perfCounter - basePerfCounter) * 10 * 1000 * 1000) /
+            SystemTickSource::get()->getTicksPerSecond();
 
     // Convert the computed FILETIME into microseconds since the Unix epoch (1/1/1970).
     //
     return boost::date_time::winapi::file_time_to_microseconds(computedTime);
 }
 
-unsigned curTimeMicros() {
-    boost::xtime xt;
-    boost::xtime_get(&xt, MONGO_BOOST_TIME_UTC);
-    unsigned t = xt.nsec / 1000;
-    unsigned secs = xt.sec % 1024;
-    return secs * 1000000 + t;
-}
 #else
 #include <sys/time.h>
 unsigned long long curTimeMillis64() {
@@ -960,23 +971,11 @@ unsigned long long curTimeMillis64() {
     gettimeofday(&tv, NULL);
     return ((unsigned long long)tv.tv_sec) * 1000 + tv.tv_usec / 1000;
 }
-Date_t jsTime() {
-    timeval tv;
-    gettimeofday(&tv, NULL);
-    unsigned long long t = tv.tv_usec / 1000;
-    return ((unsigned long long)tv.tv_sec * 1000) + t + getJSTimeVirtualSkew() +
-        getJSTimeVirtualThreadSkew();
-}
+
 unsigned long long curTimeMicros64() {
     timeval tv;
     gettimeofday(&tv, NULL);
     return (((unsigned long long)tv.tv_sec) * 1000 * 1000) + tv.tv_usec;
-}
-unsigned curTimeMicros() {
-    timeval tv;
-    gettimeofday(&tv, NULL);
-    unsigned secs = tv.tv_sec % 1024;
-    return secs * 1000 * 1000 + tv.tv_usec;
 }
 #endif
 

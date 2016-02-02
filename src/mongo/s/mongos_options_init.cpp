@@ -28,6 +28,8 @@
 
 #include "mongo/s/mongos_options.h"
 
+#include <iostream>
+
 #include "mongo/util/options_parser/startup_option_init.h"
 #include "mongo/util/options_parser/startup_options.h"
 #include "mongo/util/quick_exit.h"
@@ -63,9 +65,7 @@ MONGO_STARTUP_OPTIONS_VALIDATE(MongosOptions)(InitializerContext* context) {
 }
 
 MONGO_INITIALIZER_GENERAL(MongosOptions_Store,
-                          ("BeginStartupOptionStorage",
-                           "CreateAuthorizationManager"),  // Requried to call
-                                                           // getGlobalAuthorizationManager().
+                          ("BeginStartupOptionStorage"),
                           ("EndStartupOptionStorage"))
 (InitializerContext* context) {
     Status ret = storeMongosOptions(moe::startupOptionsParsed, context->args());

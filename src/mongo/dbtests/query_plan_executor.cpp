@@ -26,18 +26,18 @@
  *    then also delete it in the license file.
  */
 
-#include <boost/scoped_ptr.hpp>
-#include <boost/shared_ptr.hpp>
 
-#include "mongo/db/clientcursor.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/database.h"
+#include "mongo/db/clientcursor.h"
+#include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/exec/collection_scan.h"
 #include "mongo/db/exec/fetch.h"
 #include "mongo/db/exec/index_scan.h"
 #include "mongo/db/exec/pipeline_proxy.h"
 #include "mongo/db/exec/plan_stage.h"
+#include "mongo/db/exec/working_set_common.h"
 #include "mongo/db/json.h"
 #include "mongo/db/matcher/expression_parser.h"
 #include "mongo/db/operation_context_impl.h"
@@ -46,40 +46,43 @@
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/query_solution.h"
 #include "mongo/dbtests/dbtests.h"
+#include "mongo/stdx/memory.h"
 
 namespace QueryPlanExecutor {
 
-using boost::scoped_ptr;
-using boost::shared_ptr;
-using std::auto_ptr;
+using std::shared_ptr;
 using std::string;
+using std::unique_ptr;
+using stdx::make_unique;
+
+static const NamespaceString nss("unittests.QueryPlanExecutor");
 
 class PlanExecutorBase {
 public:
     PlanExecutorBase() : _client(&_txn) {}
 
     virtual ~PlanExecutorBase() {
-        _client.dropCollection(ns());
+        _client.dropCollection(nss.ns());
     }
 
     void addIndex(const BSONObj& obj) {
-        ASSERT_OK(dbtests::createIndex(&_txn, ns(), obj));
+        ASSERT_OK(dbtests::createIndex(&_txn, nss.ns(), obj));
     }
 
     void insert(const BSONObj& obj) {
-        _client.insert(ns(), obj);
+        _client.insert(nss.ns(), obj);
     }
 
     void remove(const BSONObj& obj) {
-        _client.remove(ns(), obj);
+        _client.remove(nss.ns(), obj);
     }
 
     void dropCollection() {
-        _client.dropCollection(ns());
+        _client.dropCollection(nss.ns());
     }
 
     void update(BSONObj& query, BSONObj& updateSpec) {
-        _client.update(ns(), query, updateSpec, false, false);
+        _client.update(nss.ns(), query, updateSpec, false, false);
     }
 
     /**
@@ -93,22 +96,22 @@ public:
         CollectionScanParams csparams;
         csparams.collection = coll;
         csparams.direction = CollectionScanParams::FORWARD;
-        auto_ptr<WorkingSet> ws(new WorkingSet());
+        unique_ptr<WorkingSet> ws(new WorkingSet());
 
-        // Canonicalize the query
-        CanonicalQuery* cq;
-        verify(CanonicalQuery::canonicalize(ns(), filterObj, &cq).isOK());
-        verify(NULL != cq);
+        // Canonicalize the query.
+        auto statusWithCQ = CanonicalQuery::canonicalize(nss, filterObj);
+        verify(statusWithCQ.isOK());
+        unique_ptr<CanonicalQuery> cq = std::move(statusWithCQ.getValue());
+        verify(NULL != cq.get());
 
         // Make the stage.
-        auto_ptr<PlanStage> root(new CollectionScan(&_txn, csparams, ws.get(), cq->root()));
+        unique_ptr<PlanStage> root(new CollectionScan(&_txn, csparams, ws.get(), cq.get()->root()));
 
-        PlanExecutor* exec;
         // Hand the plan off to the executor.
-        Status stat = PlanExecutor::make(
-            &_txn, ws.release(), root.release(), cq, coll, PlanExecutor::YIELD_MANUAL, &exec);
-        ASSERT_OK(stat);
-        return exec;
+        auto statusWithPlanExecutor = PlanExecutor::make(
+            &_txn, std::move(ws), std::move(root), std::move(cq), coll, PlanExecutor::YIELD_MANUAL);
+        ASSERT_OK(statusWithPlanExecutor.getStatus());
+        return statusWithPlanExecutor.getValue().release();
     }
 
     /**
@@ -124,43 +127,36 @@ public:
      *
      * The caller takes ownership of the returned PlanExecutor*.
      */
-    PlanExecutor* makeIndexScanExec(Client::Context& context,
-                                    BSONObj& indexSpec,
-                                    int start,
-                                    int end) {
+    PlanExecutor* makeIndexScanExec(Database* db, BSONObj& indexSpec, int start, int end) {
         // Build the index scan stage.
         IndexScanParams ixparams;
-        ixparams.descriptor = getIndex(context.db(), indexSpec);
+        ixparams.descriptor = getIndex(db, indexSpec);
         ixparams.bounds.isSimpleRange = true;
         ixparams.bounds.startKey = BSON("" << start);
         ixparams.bounds.endKey = BSON("" << end);
         ixparams.bounds.endKeyInclusive = true;
         ixparams.direction = 1;
 
-        const Collection* coll = context.db()->getCollection(ns());
+        const Collection* coll = db->getCollection(nss.ns());
 
-        auto_ptr<WorkingSet> ws(new WorkingSet());
+        unique_ptr<WorkingSet> ws(new WorkingSet());
         IndexScan* ix = new IndexScan(&_txn, ixparams, ws.get(), NULL);
-        auto_ptr<PlanStage> root(new FetchStage(&_txn, ws.get(), ix, NULL, coll));
+        unique_ptr<PlanStage> root(new FetchStage(&_txn, ws.get(), ix, NULL, coll));
 
-        CanonicalQuery* cq;
-        verify(CanonicalQuery::canonicalize(ns(), BSONObj(), &cq).isOK());
-        verify(NULL != cq);
+        auto statusWithCQ = CanonicalQuery::canonicalize(nss, BSONObj());
+        verify(statusWithCQ.isOK());
+        unique_ptr<CanonicalQuery> cq = std::move(statusWithCQ.getValue());
+        verify(NULL != cq.get());
 
-        PlanExecutor* exec;
         // Hand the plan off to the executor.
-        Status stat = PlanExecutor::make(
-            &_txn, ws.release(), root.release(), cq, coll, PlanExecutor::YIELD_MANUAL, &exec);
-        ASSERT_OK(stat);
-        return exec;
-    }
-
-    static const char* ns() {
-        return "unittests.QueryPlanExecutor";
+        auto statusWithPlanExecutor = PlanExecutor::make(
+            &_txn, std::move(ws), std::move(root), std::move(cq), coll, PlanExecutor::YIELD_MANUAL);
+        ASSERT_OK(statusWithPlanExecutor.getStatus());
+        return statusWithPlanExecutor.getValue().release();
     }
 
     size_t numCursors() {
-        AutoGetCollectionForRead ctx(&_txn, ns());
+        AutoGetCollectionForRead ctx(&_txn, nss.ns());
         Collection* collection = ctx.getCollection();
         if (!collection)
             return 0;
@@ -169,18 +165,18 @@ public:
 
     void registerExec(PlanExecutor* exec) {
         // TODO: This is not correct (create collection under S-lock)
-        AutoGetCollectionForRead ctx(&_txn, ns());
+        AutoGetCollectionForRead ctx(&_txn, nss.ns());
         WriteUnitOfWork wunit(&_txn);
-        Collection* collection = ctx.getDb()->getOrCreateCollection(&_txn, ns());
+        Collection* collection = ctx.getDb()->getOrCreateCollection(&_txn, nss.ns());
         collection->getCursorManager()->registerExecutor(exec);
         wunit.commit();
     }
 
     void deregisterExec(PlanExecutor* exec) {
         // TODO: This is not correct (create collection under S-lock)
-        AutoGetCollectionForRead ctx(&_txn, ns());
+        AutoGetCollectionForRead ctx(&_txn, nss.ns());
         WriteUnitOfWork wunit(&_txn);
-        Collection* collection = ctx.getDb()->getOrCreateCollection(&_txn, ns());
+        Collection* collection = ctx.getDb()->getOrCreateCollection(&_txn, nss.ns());
         collection->getCursorManager()->deregisterExecutor(exec);
         wunit.commit();
     }
@@ -190,7 +186,7 @@ protected:
 
 private:
     IndexDescriptor* getIndex(Database* db, const BSONObj& obj) {
-        Collection* collection = db->getCollection(ns());
+        Collection* collection = db->getCollection(nss.ns());
         return collection->getIndexCatalog()->findIndexByKeyPattern(&_txn, obj);
     }
 
@@ -204,14 +200,14 @@ private:
 class DropCollScan : public PlanExecutorBase {
 public:
     void run() {
-        Client::WriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_txn, nss.ns());
         insert(BSON("_id" << 1));
         insert(BSON("_id" << 2));
 
         BSONObj filterObj = fromjson("{_id: {$gt: 0}}");
 
         Collection* coll = ctx.getCollection();
-        scoped_ptr<PlanExecutor> exec(makeCollScanExec(coll, filterObj));
+        unique_ptr<PlanExecutor> exec(makeCollScanExec(coll, filterObj));
         registerExec(exec.get());
 
         BSONObj objOut;
@@ -233,14 +229,14 @@ public:
 class DropIndexScan : public PlanExecutorBase {
 public:
     void run() {
-        Client::WriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_txn, nss.ns());
         insert(BSON("_id" << 1 << "a" << 6));
         insert(BSON("_id" << 2 << "a" << 7));
         insert(BSON("_id" << 3 << "a" << 8));
         BSONObj indexSpec = BSON("a" << 1);
         addIndex(indexSpec);
 
-        scoped_ptr<PlanExecutor> exec(makeIndexScanExec(ctx.ctx(), indexSpec, 7, 10));
+        unique_ptr<PlanExecutor> exec(makeIndexScanExec(ctx.db(), indexSpec, 7, 10));
         registerExec(exec.get());
 
         BSONObj objOut;
@@ -262,7 +258,7 @@ public:
 class DropIndexScanAgg : public PlanExecutorBase {
 public:
     void run() {
-        Client::WriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_txn, nss.ns());
 
         insert(BSON("_id" << 1 << "a" << 6));
         insert(BSON("_id" << 2 << "a" << 7));
@@ -271,11 +267,11 @@ public:
         addIndex(indexSpec);
 
         // Create the PlanExecutor which feeds the aggregation pipeline.
-        boost::shared_ptr<PlanExecutor> innerExec(makeIndexScanExec(ctx.ctx(), indexSpec, 7, 10));
+        std::shared_ptr<PlanExecutor> innerExec(makeIndexScanExec(ctx.db(), indexSpec, 7, 10));
 
         // Create the aggregation pipeline.
         boost::intrusive_ptr<ExpressionContext> expCtx =
-            new ExpressionContext(&_txn, NamespaceString(ns()));
+            new ExpressionContext(&_txn, NamespaceString(nss.ns()));
 
         string errmsg;
         BSONObj inputBson = fromjson("{$match: {a: {$gte: 7, $lte: 10}}}");
@@ -283,16 +279,14 @@ public:
         ASSERT_EQUALS(errmsg, "");
 
         // Create the output PlanExecutor that pulls results from the pipeline.
-        std::auto_ptr<WorkingSet> ws(new WorkingSet());
-        std::auto_ptr<PipelineProxyStage> proxy(
-            new PipelineProxyStage(pipeline, innerExec, ws.get()));
+        auto ws = make_unique<WorkingSet>();
+        auto proxy = make_unique<PipelineProxyStage>(&_txn, pipeline, innerExec, ws.get());
         Collection* collection = ctx.getCollection();
 
-        PlanExecutor* rawExec;
-        Status status = PlanExecutor::make(
-            &_txn, ws.release(), proxy.release(), collection, PlanExecutor::YIELD_MANUAL, &rawExec);
-        ASSERT_OK(status);
-        boost::scoped_ptr<PlanExecutor> outerExec(rawExec);
+        auto statusWithPlanExecutor = PlanExecutor::make(
+            &_txn, std::move(ws), std::move(proxy), collection, PlanExecutor::YIELD_MANUAL);
+        ASSERT_OK(statusWithPlanExecutor.getStatus());
+        unique_ptr<PlanExecutor> outerExec = std::move(statusWithPlanExecutor.getValue());
 
         // Only the outer executor gets registered.
         registerExec(outerExec.get());
@@ -357,13 +351,13 @@ protected:
 class SnapshotControl : public SnapshotBase {
 public:
     void run() {
-        Client::WriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_txn, nss.ns());
         setupCollection();
 
         BSONObj filterObj = fromjson("{a: {$gte: 2}}");
 
         Collection* coll = ctx.getCollection();
-        scoped_ptr<PlanExecutor> exec(makeCollScanExec(coll, filterObj));
+        unique_ptr<PlanExecutor> exec(makeCollScanExec(coll, filterObj));
 
         BSONObj objOut;
         ASSERT_EQUALS(PlanExecutor::ADVANCED, exec->getNext(&objOut, NULL));
@@ -384,13 +378,13 @@ public:
 class SnapshotTest : public SnapshotBase {
 public:
     void run() {
-        Client::WriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_txn, nss.ns());
         setupCollection();
         BSONObj indexSpec = BSON("_id" << 1);
         addIndex(indexSpec);
 
         BSONObj filterObj = fromjson("{a: {$gte: 2}}");
-        scoped_ptr<PlanExecutor> exec(makeIndexScanExec(ctx.ctx(), indexSpec, 2, 5));
+        unique_ptr<PlanExecutor> exec(makeIndexScanExec(ctx.db(), indexSpec, 2, 5));
 
         BSONObj objOut;
         ASSERT_EQUALS(PlanExecutor::ADVANCED, exec->getNext(&objOut, NULL));
@@ -415,7 +409,7 @@ using mongo::ClientCursor;
 class Invalidate : public PlanExecutorBase {
 public:
     void run() {
-        Client::WriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_txn, nss.ns());
         insert(BSON("a" << 1 << "b" << 1));
 
         BSONObj filterObj = fromjson("{_id: {$gt: 0}, b: {$gt: 0}}");
@@ -424,12 +418,12 @@ public:
         PlanExecutor* exec = makeCollScanExec(coll, filterObj);
 
         // Make a client cursor from the runner.
-        new ClientCursor(coll->getCursorManager(), exec, ns(), 0, BSONObj());
+        new ClientCursor(coll->getCursorManager(), exec, nss.ns(), false, 0, BSONObj());
 
         // There should be one cursor before invalidation,
         // and zero cursors after invalidation.
         ASSERT_EQUALS(1U, numCursors());
-        coll->getCursorManager()->invalidateAll(false);
+        coll->getCursorManager()->invalidateAll(false, "Invalidate Test");
         ASSERT_EQUALS(0U, numCursors());
     }
 };
@@ -441,7 +435,7 @@ public:
 class InvalidatePinned : public PlanExecutorBase {
 public:
     void run() {
-        Client::WriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_txn, nss.ns());
         insert(BSON("a" << 1 << "b" << 1));
 
         Collection* collection = ctx.getCollection();
@@ -451,18 +445,22 @@ public:
 
         // Make a client cursor from the runner.
         ClientCursor* cc =
-            new ClientCursor(collection->getCursorManager(), exec, ns(), 0, BSONObj());
+            new ClientCursor(collection->getCursorManager(), exec, nss.ns(), false, 0, BSONObj());
         ClientCursorPin ccPin(collection->getCursorManager(), cc->cursorid());
 
         // If the cursor is pinned, it sticks around,
         // even after invalidation.
         ASSERT_EQUALS(1U, numCursors());
-        collection->getCursorManager()->invalidateAll(false);
+        const std::string invalidateReason("InvalidatePinned Test");
+        collection->getCursorManager()->invalidateAll(false, invalidateReason);
         ASSERT_EQUALS(1U, numCursors());
 
         // The invalidation should have killed the runner.
         BSONObj objOut;
         ASSERT_EQUALS(PlanExecutor::DEAD, exec->getNext(&objOut, NULL));
+        ASSERT(WorkingSetCommon::isValidStatusMemberObject(objOut));
+        const Status status = WorkingSetCommon::getMemberObjectStatus(objOut);
+        ASSERT(status.reason().find(invalidateReason) != string::npos);
 
         // Deleting the underlying cursor should cause the
         // number of cursors to return to 0.
@@ -479,19 +477,19 @@ class Timeout : public PlanExecutorBase {
 public:
     void run() {
         {
-            Client::WriteContext ctx(&_txn, ns());
+            OldClientWriteContext ctx(&_txn, nss.ns());
             insert(BSON("a" << 1 << "b" << 1));
         }
 
         {
-            AutoGetCollectionForRead ctx(&_txn, ns());
+            AutoGetCollectionForRead ctx(&_txn, nss.ns());
             Collection* collection = ctx.getCollection();
 
             BSONObj filterObj = fromjson("{_id: {$gt: 0}, b: {$gt: 0}}");
             PlanExecutor* exec = makeCollScanExec(collection, filterObj);
 
             // Make a client cursor from the runner.
-            new ClientCursor(collection->getCursorManager(), exec, ns(), 0, BSONObj());
+            new ClientCursor(collection->getCursorManager(), exec, nss.ns(), false, 0, BSONObj());
         }
 
         // There should be one cursor before timeout,

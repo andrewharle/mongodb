@@ -7,6 +7,45 @@
  */
 
 /*
+ * __wt_cond_wait --
+ *	Wait on a mutex, optionally timing out.
+ */
+static inline int
+__wt_cond_wait(WT_SESSION_IMPL *session, WT_CONDVAR *cond, uint64_t usecs)
+{
+	bool notused;
+
+	return (__wt_cond_wait_signal(session, cond, usecs, &notused));
+}
+
+/*
+ * __wt_strdup --
+ *	ANSI strdup function.
+ */
+static inline int
+__wt_strdup(WT_SESSION_IMPL *session, const char *str, void *retp)
+{
+	return (__wt_strndup(
+	    session, str, (str == NULL) ? 0 : strlen(str), retp));
+}
+
+/*
+ * __wt_seconds --
+ *	Return the seconds since the Epoch.
+ */
+static inline int
+__wt_seconds(WT_SESSION_IMPL *session, time_t *timep)
+{
+	struct timespec t;
+
+	WT_RET(__wt_epoch(session, &t));
+
+	*timep = t.tv_sec;
+
+	return (0);
+}
+
+/*
  * __wt_verbose --
  * 	Verbose message.
  */

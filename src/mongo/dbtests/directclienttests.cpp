@@ -33,6 +33,7 @@
 
 #include <iostream>
 
+#include "mongo/db/client.h"
 #include "mongo/db/db.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/json.h"
@@ -43,22 +44,17 @@
 
 namespace DirectClientTests {
 
-using std::auto_ptr;
+using std::unique_ptr;
 using std::vector;
 
 class ClientBase {
 public:
     ClientBase() {
-        _prevError = mongo::lastError._get(false);
-        mongo::lastError.release();
-        mongo::lastError.reset(new LastError());
+        mongo::LastError::get(cc()).reset();
     }
     virtual ~ClientBase() {
-        mongo::lastError.reset(_prevError);
+        mongo::LastError::get(cc()).reset();
     }
-
-private:
-    LastError* _prevError;
 };
 
 const char* ns = "a.b";
@@ -133,7 +129,7 @@ public:
         OperationContextImpl txn;
         DBDirectClient client(&txn);
 
-        auto_ptr<DBClientCursor> cursor = client.query("", Query(), 1);
+        unique_ptr<DBClientCursor> cursor = client.query("", Query(), 1);
         ASSERT(cursor->more());
         BSONObj result = cursor->next().getOwned();
         ASSERT(result.hasField("$err"));
@@ -147,7 +143,7 @@ public:
         OperationContextImpl txn;
         DBDirectClient client(&txn);
 
-        auto_ptr<DBClientCursor> cursor = client.getMore("", 1, 1);
+        unique_ptr<DBClientCursor> cursor = client.getMore("", 1, 1);
         ASSERT(cursor->more());
         BSONObj result = cursor->next().getOwned();
         ASSERT(result.hasField("$err"));

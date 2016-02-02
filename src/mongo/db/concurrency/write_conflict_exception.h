@@ -42,10 +42,10 @@
 #define MONGO_WRITE_CONFLICT_RETRY_LOOP_END(PTXN, OPSTR, NSSTR) \
     catch (const ::mongo::WriteConflictException& wce) {        \
         const OperationContext* ptxn = (PTXN);                  \
-        ++ptxn->getCurOp()->debug().writeConflicts;             \
+        ++CurOp::get(ptxn)->debug().writeConflicts;             \
         wce.logAndBackoff(wcr__Attempts, (OPSTR), (NSSTR));     \
         ++wcr__Attempts;                                        \
-        ptxn->recoveryUnit()->commitAndRestart();               \
+        ptxn->recoveryUnit()->abandonSnapshot();                \
         continue;                                               \
     }                                                           \
     break;                                                      \
@@ -73,12 +73,12 @@ public:
      * @param attempt - what attempt is this, 1 based
      * @param operation - e.g. "update"
      */
-    static void logAndBackoff(int attempt, const StringData& operation, const StringData& ns);
+    static void logAndBackoff(int attempt, StringData operation, StringData ns);
 
     /**
      * If true, will call printStackTrace on every WriteConflictException created.
      * Can be set via setParameter named traceWriteConflictExceptions.
      */
-    static bool trace;
+    static std::atomic<bool> trace;  // NOLINT
 };
 }

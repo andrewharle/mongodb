@@ -1,25 +1,16 @@
-(function() {
+// This test requires persistence because it assumes standalone shards will still have their data
+// after restarting.
+// @tags: [requires_persistence]
 
+(function() {
 'use strict';
 
-var restartMongod = function(st, n) {
-    var mongod = st['d' + n];
-    MongoRunner.stopMongod(mongod);
-    mongod.restart = true;
-
-    var newConn = MongoRunner.runMongod(mongod);
-
-    st['d' + n] = newConn;
-};
-
 var st = new ShardingTest({name: "write_commands", mongos: 2, shards: 2 });
-st.stopBalancer();
 
 var dbTestName = 'WriteCommandsTestDB';
 
 assert.commandWorked(st.s0.adminCommand({ enablesharding: dbTestName }));
-var res = st.s0.adminCommand({ movePrimary: dbTestName, to: 'shard0000' });
-assert(res.ok || res.errmsg == 'it is already the primary', tojson(res));
+st.ensurePrimaryShard(dbTestName, 'shard0000');
 
 assert.commandWorked(st.s0.adminCommand({ shardCollection: dbTestName + '.TestColl',
                                           key: { Key: 1 },
@@ -62,8 +53,8 @@ printjson(st.d0.getDB(dbTestName).TestColl.find({}).toArray());
 printjson(st.d1.getDB(dbTestName).TestColl.find({}).toArray());
 
 // Now restart all mongod instances, so they don't know yet that they are sharded
-restartMongod(st, 0);
-restartMongod(st, 1);
+st.restartMongod(0);
+st.restartMongod(1);
 
 // Now that both mongod shards are restarted, they don't know yet that they are part of a sharded
 // cluster until they get a setShardVerion command. Mongos instance s1 has stale metadata and

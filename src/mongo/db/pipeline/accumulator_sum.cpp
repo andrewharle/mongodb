@@ -29,11 +29,19 @@
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/pipeline/accumulator.h"
+#include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/value.h"
 
 namespace mongo {
 
 using boost::intrusive_ptr;
+
+REGISTER_ACCUMULATOR(sum, AccumulatorSum::create);
+REGISTER_EXPRESSION(sum, ExpressionFromAccumulator<AccumulatorSum>::parse);
+
+const char* AccumulatorSum::getOpName() const {
+    return "$sum";
+}
 
 void AccumulatorSum::processInternal(const Value& input, bool merging) {
     // do nothing with non numeric types
@@ -81,9 +89,5 @@ void AccumulatorSum::reset() {
     totalType = NumberInt;
     longTotal = 0;
     doubleTotal = 0;
-}
-
-const char* AccumulatorSum::getOpName() const {
-    return "$sum";
 }
 }

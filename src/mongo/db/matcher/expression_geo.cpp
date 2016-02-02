@@ -45,7 +45,7 @@ using mongoutils::str::equals;
 // GeoExpression
 //
 
-// Put simple constructors here for scoped_ptr.
+// Put simple constructors here for unique_ptr.
 GeoExpression::GeoExpression() : field(""), predicate(INVALID) {}
 GeoExpression::GeoExpression(const std::string& f) : field(f), predicate(INVALID) {}
 
@@ -315,7 +315,7 @@ Status GeoNearExpression::parseFrom(const BSONObj& obj) {
 // Geo queries we don't need an index to answer: geoWithin and geoIntersects
 //
 
-Status GeoMatchExpression::init(const StringData& path,
+Status GeoMatchExpression::init(StringData path,
                                 const GeoExpression* query,
                                 const BSONObj& rawObj) {
     _query.reset(query);
@@ -328,7 +328,8 @@ bool GeoMatchExpression::matchesSingleElement(const BSONElement& e) const {
         return false;
 
     GeometryContainer geometry;
-    if (!geometry.parseFromStorage(e).isOK())
+
+    if (!geometry.parseFromStorage(e, _canSkipValidation).isOK())
         return false;
 
     // Never match big polygon
@@ -373,26 +374,25 @@ bool GeoMatchExpression::equivalent(const MatchExpression* other) const {
     if (path() != realOther->path())
         return false;
 
-    // TODO:
-    // return _query == realOther->_query;
-    return false;
+    return _rawObj == realOther->_rawObj;
 }
 
-LeafMatchExpression* GeoMatchExpression::shallowClone() const {
-    GeoMatchExpression* next = new GeoMatchExpression();
+std::unique_ptr<MatchExpression> GeoMatchExpression::shallowClone() const {
+    std::unique_ptr<GeoMatchExpression> next = stdx::make_unique<GeoMatchExpression>();
     next->init(path(), NULL, _rawObj);
     next->_query = _query;
+    next->_canSkipValidation = _canSkipValidation;
     if (getTag()) {
         next->setTag(getTag()->clone());
     }
-    return next;
+    return std::move(next);
 }
 
 //
 // Parse-only geo expressions: geoNear (formerly known as near).
 //
 
-Status GeoNearMatchExpression::init(const StringData& path,
+Status GeoNearMatchExpression::init(StringData path,
                                     const GeoNearExpression* query,
                                     const BSONObj& rawObj) {
     _query.reset(query);
@@ -431,18 +431,16 @@ bool GeoNearMatchExpression::equivalent(const MatchExpression* other) const {
     if (path() != realOther->path())
         return false;
 
-    // TODO:
-    // return _query == realOther->_query;
-    return false;
+    return _rawObj == realOther->_rawObj;
 }
 
-LeafMatchExpression* GeoNearMatchExpression::shallowClone() const {
-    GeoNearMatchExpression* next = new GeoNearMatchExpression();
+std::unique_ptr<MatchExpression> GeoNearMatchExpression::shallowClone() const {
+    std::unique_ptr<GeoNearMatchExpression> next = stdx::make_unique<GeoNearMatchExpression>();
     next->init(path(), NULL, _rawObj);
     next->_query = _query;
     if (getTag()) {
         next->setTag(getTag()->clone());
     }
-    return next;
+    return std::move(next);
 }
 }

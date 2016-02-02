@@ -1,4 +1,9 @@
-s = new ShardingTest( "shard_existing" , 2 /* numShards */, 1 /* verboseLevel */, 1 /* numMongos */, { chunksize : 1 } )
+(function() {
+
+var s = new ShardingTest({ name: "shard_existing",
+                           shards: 2,
+                           mongos: 1,
+                           other: { chunkSize: 1 } });
 
 db = s.getDB( "test" )
 
@@ -23,6 +28,7 @@ var dataSize = db.data.stats().size;
 assert.lte(totalSize, dataSize);
 
 s.adminCommand( { enablesharding : "test" } );
+s.ensurePrimaryShard('test', 'shard0001');
 res = s.adminCommand( { shardcollection : "test.data" , key : { _id : 1 } } );
 printjson(res);
 
@@ -32,3 +38,5 @@ var guess = Math.ceil(dataSize / (512*1024 + avgObjSize));
 assert( Math.abs( numChunks - guess ) < 2, "not right number of chunks" );
 
 s.stop();
+
+})();

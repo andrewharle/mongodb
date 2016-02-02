@@ -31,7 +31,7 @@
 #include <third_party/murmurhash3/MurmurHash3.h>
 
 #include <boost/intrusive_ptr.hpp>
-#include <boost/noncopyable.hpp>
+#include <bitset>
 
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/db/pipeline/value.h"
@@ -73,7 +73,9 @@ private:
 /** This is how values are stored in the DocumentStorage buffer
  *  Internal class. Consumers shouldn't care about this.
  */
-class ValueElement : boost::noncopyable {
+class ValueElement {
+    MONGO_DISALLOW_COPYING(ValueElement);
+
 public:
     Value val;
     Position nextCollision;  // Position of next field with same hashBucket
@@ -122,7 +124,8 @@ private:
 };
 // Real size is sizeof(ValueElement) + nameLen
 #pragma pack()
-BOOST_STATIC_ASSERT(sizeof(ValueElement) == (sizeof(Value) + sizeof(Position) + sizeof(int) + 1));
+static_assert(sizeof(ValueElement) == (sizeof(Value) + sizeof(Position) + sizeof(int) + 1),
+              "sizeof(ValueElement) == (sizeof(Value) + sizeof(Position) + sizeof(int) + 1)");
 
 // This is an internal class for Document. See FieldIterator for the public version.
 class DocumentStorageIterator {
@@ -186,9 +189,16 @@ public:
           _usedBytes(0),
           _numFields(0),
           _hashTabMask(0),
-          _hasTextScore(false),
+          _metaFields(),
           _textScore(0) {}
     ~DocumentStorage();
+
+    enum MetaType : char {
+        TEXT_SCORE,
+        RAND_VAL,
+
+        NUM_FIELDS
+    };
 
     static const DocumentStorage& emptyDoc() {
         static const char emptyBytes[sizeof(DocumentStorage)] = {0};
@@ -268,17 +278,31 @@ public:
         if (source.hasTextScore()) {
             setTextScore(source.getTextScore());
         }
+        if (source.hasRandMetaField()) {
+            setRandMetaField(source.getRandMetaField());
+        }
     }
 
     bool hasTextScore() const {
-        return _hasTextScore;
+        return _metaFields.test(MetaType::TEXT_SCORE);
     }
     double getTextScore() const {
         return _textScore;
     }
     void setTextScore(double score) {
-        _hasTextScore = true;
+        _metaFields.set(MetaType::TEXT_SCORE);
         _textScore = score;
+    }
+
+    bool hasRandMetaField() const {
+        return _metaFields.test(MetaType::RAND_VAL);
+    }
+    double getRandMetaField() const {
+        return _randVal;
+    }
+    void setRandMetaField(double val) {
+        _metaFields.set(MetaType::RAND_VAL);
+        _randVal = val;
     }
 
 private:
@@ -359,8 +383,9 @@ private:
     unsigned _numFields;    // this includes removed fields
     unsigned _hashTabMask;  // equal to hashTabBuckets()-1 but used more often
 
-    bool _hasTextScore;  // When adding more metadata fields, this should become a bitvector
+    std::bitset<MetaType::NUM_FIELDS> _metaFields;
     double _textScore;
+    double _randVal;
     // When adding a field, make sure to update clone() method
 };
 }

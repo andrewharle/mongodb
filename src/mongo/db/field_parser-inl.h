@@ -79,7 +79,7 @@ FieldParser::FieldState FieldParser::extract(BSONObj doc,
     BSONElement elem = doc[field.name()];
     if (elem.eoo()) {
         if (field.hasDefault()) {
-            std::auto_ptr<T> temp(new T);
+            std::unique_ptr<T> temp(new T);
             field.getDefault()->cloneTo(temp.get());
 
             *out = temp.release();
@@ -94,7 +94,7 @@ FieldParser::FieldState FieldParser::extract(BSONObj doc,
         return FIELD_INVALID;
     }
 
-    std::auto_ptr<T> temp(new T);
+    std::unique_ptr<T> temp(new T);
     if (!temp->parseBSON(elem.embeddedObject(), errMsg)) {
         return FIELD_INVALID;
     }
@@ -128,7 +128,7 @@ FieldParser::FieldState FieldParser::extract(BSONObj doc,
         return FIELD_INVALID;
     }
 
-    std::auto_ptr<T> temp(new T);
+    std::unique_ptr<T> temp(new T);
     if (!temp->parseBSON(elem.embeddedObject(), errMsg)) {
         return FIELD_INVALID;
     }
@@ -237,7 +237,7 @@ FieldParser::FieldState FieldParser::extract(BSONElement elem,
             return FIELD_INVALID;
         }
 
-        std::auto_ptr<T> toInsert(new T);
+        std::unique_ptr<T> toInsert(new T);
 
         if (!toInsert->parseBSON(next.embeddedObject(), errMsg) || !toInsert->isValid(errMsg)) {
             return FIELD_INVALID;
@@ -277,7 +277,7 @@ FieldParser::FieldState FieldParser::extract(BSONObj doc,
         return FIELD_INVALID;
     }
 
-    std::auto_ptr<std::vector<T*>> tempVector(new std::vector<T*>);
+    std::unique_ptr<std::vector<T*>> tempVector(new std::vector<T*>);
 
     BSONArray arr = BSONArray(elem.embeddedObject());
     BSONObjIterator objIt(arr);
@@ -293,7 +293,7 @@ FieldParser::FieldState FieldParser::extract(BSONObj doc,
             return FIELD_INVALID;
         }
 
-        std::auto_ptr<T> toInsert(new T);
+        std::unique_ptr<T> toInsert(new T);
         if (!toInsert->parseBSON(next.embeddedObject(), errMsg)) {
             clearOwnedVector(tempVector.get());
             return FIELD_INVALID;

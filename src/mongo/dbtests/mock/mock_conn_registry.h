@@ -28,7 +28,6 @@
 
 #pragma once
 
-#include <boost/scoped_ptr.hpp>
 
 #include "mongo/base/status.h"
 #include "mongo/client/dbclientinterface.h"
@@ -111,12 +110,12 @@ private:
 
     MockConnRegistry();
 
-    static boost::scoped_ptr<MockConnRegistry> _instance;
+    static std::unique_ptr<MockConnRegistry> _instance;
 
     MockConnHook _mockConnStrHook;
 
     // protects _registry
-    mongo::mutex _registryMutex;
+    stdx::mutex _registryMutex;
     unordered_map<std::string, MockRemoteDBServer*> _registry;
 };
 }

@@ -24,24 +24,20 @@ struct __wt_condvar {
 
 /*
  * !!!
- * Don't touch this structure without understanding the read/write
- * locking functions.
+ * Don't modify this structure without understanding the read/write locking
+ * functions.
  */
-typedef union {			/* Read/write lock */
-#ifdef WORDS_BIGENDIAN
-	WiredTiger read/write locks require modification for big-endian systems.
-#else
+typedef union {				/* Read/write lock */
 	uint64_t u;
 	struct {
-		uint32_t us;
+		uint32_t wr;		/* Writers and readers */
 	} i;
 	struct {
-		uint16_t writers;
-		uint16_t readers;
-		uint16_t users;
-		uint16_t pad;
+		uint16_t writers;	/* Now serving for writers */
+		uint16_t readers;	/* Now serving for readers */
+		uint16_t users;		/* Next available ticket number */
+		uint16_t __notused;	/* Padding */
 	} s;
-#endif
 } wt_rwlock_t;
 
 /*
@@ -56,6 +52,24 @@ struct __wt_rwlock {
 };
 
 /*
+ * A light weight lock that can be used to replace spinlocks if fairness is
+ * necessary. Implements a ticket-based back off spin lock.
+ * The fields are available as a union to allow for atomically setting
+ * the state of the entire lock.
+ */
+struct __wt_fair_lock {
+	union {
+		uint32_t lock;
+		struct {
+			uint16_t owner;		/* Ticket for current owner */
+			uint16_t waiter;	/* Last allocated ticket */
+		} s;
+	} u;
+#define	fair_lock_owner u.s.owner
+#define	fair_lock_waiter u.s.waiter
+};
+
+/*
  * Spin locks:
  *
  * WiredTiger uses spinlocks for fast mutual exclusion (where operations done
@@ -63,31 +77,27 @@ struct __wt_rwlock {
  * instructions).
  */
 #define	SPINLOCK_GCC			0
-#define	SPINLOCK_PTHREAD_MUTEX		1
-#define	SPINLOCK_PTHREAD_MUTEX_ADAPTIVE	2
-#define	SPINLOCK_PTHREAD_MUTEX_LOGGING	3
-#define	SPINLOCK_MSVC			4
+#define	SPINLOCK_MSVC			1
+#define	SPINLOCK_PTHREAD_MUTEX		2
+#define	SPINLOCK_PTHREAD_MUTEX_ADAPTIVE	3
 
 #if SPINLOCK_TYPE == SPINLOCK_GCC
 
-typedef volatile int WT_COMPILER_TYPE_ALIGN(WT_CACHE_LINE_ALIGNMENT)
-    WT_SPINLOCK;
+struct WT_COMPILER_TYPE_ALIGN(WT_CACHE_LINE_ALIGNMENT) __wt_spinlock {
+	volatile int lock;
+};
 
 #elif SPINLOCK_TYPE == SPINLOCK_PTHREAD_MUTEX ||\
 	SPINLOCK_TYPE == SPINLOCK_PTHREAD_MUTEX_ADAPTIVE ||\
-	SPINLOCK_TYPE == SPINLOCK_MSVC ||\
-	SPINLOCK_TYPE == SPINLOCK_PTHREAD_MUTEX_LOGGING
+	SPINLOCK_TYPE == SPINLOCK_MSVC
 
-typedef WT_COMPILER_TYPE_ALIGN(WT_CACHE_LINE_ALIGNMENT) struct {
+struct WT_COMPILER_TYPE_ALIGN(WT_CACHE_LINE_ALIGNMENT) __wt_spinlock {
 	wt_mutex_t lock;
 
-	uint64_t counter;		/* Statistics: counter */
-
 	const char *name;		/* Statistics: mutex name */
-	int8_t id;			/* Statistics: current holder ID */
 
 	int8_t initialized;		/* Lock initialized, for cleanup */
-} WT_SPINLOCK;
+};
 
 #else
 

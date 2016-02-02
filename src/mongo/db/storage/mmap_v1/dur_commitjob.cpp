@@ -44,7 +44,7 @@
 
 namespace mongo {
 
-using boost::shared_ptr;
+using std::shared_ptr;
 using std::endl;
 using std::max;
 using std::min;
@@ -62,13 +62,12 @@ void WriteIntent::absorb(const WriteIntent& other) {
 }
 
 
-CommitJob::CommitJob()
-    : groupCommitMutex("groupCommit"), _hasWritten(false), _lastNotedPos(0), _bytes(0) {}
+CommitJob::CommitJob() : _hasWritten(false), _lastNotedPos(0), _bytes(0) {}
 
 CommitJob::~CommitJob() {}
 
 void CommitJob::noteOp(shared_ptr<DurOp> p) {
-    SimpleMutex::scoped_lock lk(groupCommitMutex);
+    stdx::lock_guard<SimpleMutex> lk(groupCommitMutex);
     _hasWritten = true;
     _durOps.push_back(p);
 }
