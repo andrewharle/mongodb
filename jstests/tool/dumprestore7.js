@@ -8,23 +8,29 @@ function step(msg) {
 
 step();
 
-var replTest = new ReplSetTest( {name: name, nodes: 1} );
+var replTest = new ReplSetTest({name: name, nodes: 1});
 var nodes = replTest.startSet();
 replTest.initiate();
-var master = replTest.getMaster();
+var master = replTest.getPrimary();
 
 {
     step("first chunk of data");
     var foo = master.getDB("foo");
     for (i = 0; i < 20; i++) {
-        foo.bar.insert({ x: i, y: "abc" });
+        foo.bar.insert({x: i, y: "abc"});
     }
 }
 
 {
     step("wait");
     replTest.awaitReplication();
-    var time = replTest.getMaster().getDB("local").getCollection("oplog.rs").find().limit(1).sort({$natural:-1}).next();
+    var time = replTest.getPrimary()
+                   .getDB("local")
+                   .getCollection("oplog.rs")
+                   .find()
+                   .limit(1)
+                   .sort({$natural: -1})
+                   .next();
     step(time.ts.t);
 }
 
@@ -32,24 +38,29 @@ var master = replTest.getMaster();
     step("second chunk of data");
     var foo = master.getDB("foo");
     for (i = 30; i < 50; i++) {
-        foo.bar.insert({ x: i, y: "abc" });
+        foo.bar.insert({x: i, y: "abc"});
     }
 }
-{
-    var port = 30020;
-    var conn = startMongodTest(port, name + "-other");
-}
+{ var conn = MongoRunner.runMongod({}); }
 
 step("try mongodump with $timestamp");
 
 var data = MongoRunner.dataDir + "/dumprestore7-dump1/";
-var query = "{\"ts\":{\"$gt\":{\"$timestamp\" : {\"t\":"+ time.ts.t + ",\"i\":" + time.ts.i +" }}}}";
+var query = "{\"ts\":{\"$gt\":{\"$timestamp\":{\"t\":" + time.ts.t + ",\"i\":" + time.ts.i + "}}}}";
 
-runMongoProgram( "mongodump", "--host", "127.0.0.1:"+replTest.ports[0], "--db", "local", "--collection", "oplog.rs", "--query", query, "--out", data );
+MongoRunner.runMongoTool("mongodump",
+                         {
+                           "host": "127.0.0.1:" + replTest.ports[0],
+                           "db": "local",
+                           "collection": "oplog.rs",
+                           "query": query,
+                           "out": data
+                         });
 
 step("try mongorestore from $timestamp");
 
-runMongoProgram( "mongorestore", "--host", "127.0.0.1:"+port, "--dir", data );
+runMongoProgram(
+    "mongorestore", "--host", "127.0.0.1:" + conn.port, "--dir", data, "--writeConcern", 1);
 var x = 9;
 x = conn.getDB("local").getCollection("oplog.rs").count();
 
@@ -59,4 +70,3 @@ step("stopSet");
 replTest.stopSet();
 
 step("SUCCESS");
-
