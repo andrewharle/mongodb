@@ -28,16 +28,48 @@
 
 #pragma once
 
-#include <ostream>
+#include "mongo/logger/log_component.h"
+#include "mongo/logger/log_severity.h"
+#include "mongo/logger/logger.h"
+#include "mongo/logger/logstream_builder.h"
+#include "mongo/util/concurrency/thread_name.h"
 
 namespace mongo {
 
-    extern bool verboseQueryLogging;
+/**
+ * Verbose query logging is determined by the 'Query' log level in the global log domain.
+ * Set to verbosity 5 to enable.
+ *
+ * Command line:
+ *     ./mongod --setParameter=logComponentVerbosity="{query: {verbosity: 5}}"
+ *
+ * Config file:
+ *     systemLog:
+ *         component:
+ *             query:
+ *                 verbosity: 5
+ *
+ * Shell:
+ *     Enable:
+ *         db.adminCommand({setParameter: 1, logComponentVerbosity: {query: {verbosity: 5}}})
+ *     Disable:
+ *         db.adminCommand({setParameter: 1, logComponentVerbosity: {query: {verbosity: -1}}})
+ */
+const logger::LogComponent verboseQueryLogComponent = logger::LogComponent::kQuery;
+const logger::LogSeverity verboseQueryLogSeverity = logger::LogSeverity::Debug(5);
 
 // With a #define like this, we don't evaluate the costly toString()s that are QLOG'd
-#define QLOG() if (verboseQueryLogging) log() << "[QLOG] "
+#define QLOG()                                                                                   \
+    if (!(::mongo::logger::globalLogDomain())                                                    \
+             ->shouldLog(::mongo::verboseQueryLogComponent, ::mongo::verboseQueryLogSeverity)) { \
+    } else                                                                                       \
+    ::mongo::logger::LogstreamBuilder(::mongo::logger::globalLogDomain(),                        \
+                                      ::mongo::getThreadName(),                                  \
+                                      ::mongo::verboseQueryLogSeverity,                          \
+                                      ::mongo::verboseQueryLogComponent)                         \
+        << "[QLOG] "
 
-    bool qlogOff();
-    bool qlogOn();
+bool qlogOff();
+bool qlogOn();
 
 }  // namespace mongo

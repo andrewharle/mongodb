@@ -6,12 +6,12 @@
 import os
 from buildscripts import utils
 
-Import( "has_option env shellEnv testEnv" )
+Import( "has_option env" )
 
 def add_exe( v ):
     return "${PROGPREFIX}%s${PROGSUFFIX}" % v
 
-smokeEnv = testEnv.Clone()
+smokeEnv = env.Clone()
 smokeEnv['ENV']['PATH']=os.environ['PATH']
 
 # copy in any envrionment variables beginning with MONGO_; these
@@ -46,7 +46,7 @@ def addSmoketest( name, deps, extraSmokeArgs=[] ):
     target = name
     if name.startswith("smoke"):
         if name == "smoke":
-            target = File("test").path
+            target = File("dbtest").path
         else:
             target = name[5].lower() + name[6:]
 
@@ -66,15 +66,13 @@ def addSmokeSuite( name, suitefile, needMongod=False ):
         smoke_args.append('--dont-start-mongod')
     addTest(name, [suitefile], utils.run_smoke_command(*smoke_args))
 
-addSmoketest( "smoke", [ add_exe( "test" ), add_exe( "mongod" ), add_exe( "mongo" ) ] )
-addSmoketest( "smokePerf", [ add_exe("perftest") ]  )
+addSmoketest( "smoke", [ add_exe( "dbtest" ), add_exe( "mongod" ), add_exe( "mongo" ) ] )
 
 addSmoketest( "mongosTest", [ add_exe( 'mongos' ) ])
 addSmokeSuite( "smokeCppUnittests", "$UNITTEST_LIST" )
-addSmokeSuite( "smokeModuleTests", "$MODULETEST_LIST" )
 
 # These tests require the mongo shell
-if shellEnv is not None:
+if not has_option('noshell'):
     addSmoketest( "smokeJs", [add_exe("mongo"), add_exe("mongod")] )
     addSmoketest( "smokeJsCore", [add_exe("mongo"), add_exe("mongod")] )
     addSmoketest( "smokeClone", [ add_exe("mongo"), add_exe("mongod") ] )

@@ -28,110 +28,79 @@
 
 #pragma once
 
+#include <boost/scoped_ptr.hpp>
 #include <vector>
 
 #include "mongo/base/status.h"
-#include "mongo/db/diskloc.h"
-#include "mongo/db/jsobj.h"
-#include "mongo/db/index/btree_interface.h"
 #include "mongo/db/index/index_cursor.h"
 #include "mongo/db/index/index_descriptor.h"
+#include "mongo/db/jsobj.h"
+#include "mongo/db/record_id.h"
+#include "mongo/db/storage/sorted_data_interface.h"
 
 namespace mongo {
 
-    class BtreeIndexCursor : public IndexCursor {
-    public:
-        virtual ~BtreeIndexCursor();
+class BtreeIndexCursor : public IndexCursor {
+public:
+    bool isEOF() const;
 
-        bool isEOF() const;
+    virtual Status seek(const BSONObj& position);
 
-        /**
-         * Called from btree.cpp when we're about to delete a Btree bucket. The index descriptor
-         * is needed as just the DiskLoc of the bucket is not unique across databases, which might
-         * result in incorrect invalidation of cursors in other unlocked databases.
-         */
-        static void aboutToDeleteBucket(const IndexCatalogEntry* index,
-                                        const DiskLoc& bucket);
+    // Btree-specific seeking functions.
+    Status seek(const std::vector<const BSONElement*>& position,
+                const std::vector<bool>& inclusive);
 
-        virtual Status setOptions(const CursorOptions& options);
+    /**
+     * Seek to the key 'position'.  If 'afterKey' is true, seeks to the first
+     * key that is oriented after 'position'.
+     *
+     * Btree-specific.
+     */
+    void seek(const BSONObj& position, bool afterKey);
 
-        virtual Status seek(const BSONObj& position);
+    Status skip(const BSONObj& keyBegin,
+                int keyBeginLen,
+                bool afterKey,
+                const std::vector<const BSONElement*>& keyEnd,
+                const std::vector<bool>& keyEndInclusive);
 
-        // Btree-specific seeking functions.
-        Status seek(const vector<const BSONElement*>& position,
-                    const vector<bool>& inclusive);
+    virtual BSONObj getKey() const;
+    virtual RecordId getValue() const;
+    virtual void next();
 
-        /**
-         * Seek to the key 'position'.  If 'afterKey' is true, seeks to the first
-         * key that is oriented after 'position'.
-         *
-         * Btree-specific.
-         */
-        void seek(const BSONObj& position, bool afterKey);
+    /**
+     * BtreeIndexCursor-only.
+     * Returns true if 'this' points at the same exact key as 'other'.
+     * Returns false otherwise.
+     */
+    bool pointsAt(const BtreeIndexCursor& other);
 
-        Status skip(const BSONObj &keyBegin, int keyBeginLen, bool afterKey,
-                    const vector<const BSONElement*>& keyEnd,
-                    const vector<bool>& keyEndInclusive);
+    virtual Status savePosition();
 
-        virtual BSONObj getKey() const;
-        virtual DiskLoc getValue() const;
-        virtual void next();
+    virtual Status restorePosition(OperationContext* txn);
 
-        /**
-         * BtreeIndexCursor-only.
-         * Returns true if 'this' points at the same exact key as 'other'.
-         * Returns false otherwise.
-         */
-        bool pointsAt(const BtreeIndexCursor& other);
+    virtual std::string toString();
 
-        virtual Status savePosition();
+private:
+    // We keep the constructor private and only allow the AM to create us.
+    friend class BtreeBasedAccessMethod;
 
-        virtual Status restorePosition();
+    /**
+     * interface is an abstraction to hide the fact that we have two types of Btrees.
+     *
+     * Intentionally private, we're friends with the only class allowed to call it.
+     */
+    BtreeIndexCursor(SortedDataInterface::Cursor* cursor);
 
-        virtual string toString();
+    bool isSavedPositionValid();
 
-    private:
-        // We keep the constructor private and only allow the AM to create us.
-        friend class BtreeBasedAccessMethod;
+    /**
+     * Move to the next (or previous depending on the direction) key.  Used by normal getNext
+     * and also skipping unused keys.
+     */
+    void advance();
 
-        // For handling bucket deletion.
-        static unordered_set<BtreeIndexCursor*> _activeCursors;
-        static SimpleMutex _activeCursorsMutex;
-
-        /**
-         * btreeState is the ICE of the Btree that we're going to traverse.
-         * head is the head of the Btree.
-         * interface is an abstraction to hide the fact that we have two types of Btrees.
-         *
-         * Go forward by default.
-         *
-         * Intentionally private, we're friends with the only class allowed to call it.
-         */
-        BtreeIndexCursor(const IndexCatalogEntry* btreeState,
-                         const DiskLoc head,
-                         BtreeInterface *interface);
-
-        void skipUnusedKeys();
-
-        bool isSavedPositionValid();
-
-        // Move to the next/prev. key.  Used by normal getNext and also skipping unused keys.
-        void advance(const char* caller);
-
-        // For saving/restoring position.
-        BSONObj _savedKey;
-        DiskLoc _savedLoc;
-
-        BSONObj _emptyObj;
-
-        int _direction;
-        const IndexCatalogEntry* _btreeState; // not-owned
-        BtreeInterface* _interface;
-
-        // What are we looking at RIGHT NOW?  We look at a bucket.
-        DiskLoc _bucket;
-        // And we look at an offset in the bucket.
-        int _keyOffset;
-    };
+    boost::scoped_ptr<SortedDataInterface::Cursor> _cursor;
+};
 
 }  // namespace mongo

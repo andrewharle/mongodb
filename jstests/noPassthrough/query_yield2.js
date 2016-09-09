@@ -26,9 +26,11 @@ print( "Shell ==== Creating test.query_yield2 collection ..." );
 print( "Shell ==== Adding documents until a time-wasting query takes over 2 seconds to complete" );
 while ( true ){
     function fill() {
+        var bulk = t.initializeUnorderedBulkOp();
         for ( ; i < N; ++i ) {
-            t.insert( { _id : i , n : 1 } )
+            bulk.insert({ _id: i , n: 1 });
         }
+        assert.writeOK(bulk.execute());
     }
     function timeQuery() {
         return Date.timeFunc( 
@@ -61,7 +63,7 @@ print( tojson( currentOp ) );
 len = currentOp.inprog.length;
 if ( len ) {
     print( "Shell ==== This test is broken: db.currentOp().inprog.length is " + len );
-    throw "query_yield2.js test is broken";
+    throw Error("query_yield2.js test is broken");
 }
 print( "Shell ==== The test is working so far: db.currentOp().inprog.length is " + len );
 
@@ -100,7 +102,7 @@ while ( ( (new Date()).getTime() - start ) < ( time * 2 ) ) {
     if ( num == 0 ) {
         print( "Shell ==== Starting loop " + num + ", inserting 1 document" );
     }
-    insertTime = Date.timeFunc( function() { t.insert( { x : 1 } ); db.getLastError(); } );
+    insertTime = Date.timeFunc( function() { t.insert({ x: 1 } ); });
     currentOp = db.currentOp();
     len = currentOp.inprog.length;
     print( "Shell ==== Time to insert document " + num + " was " + insertTime + " ms, db.currentOp().inprog.length is " + len );
@@ -109,7 +111,7 @@ while ( ( (new Date()).getTime() - start ) < ( time * 2 ) ) {
             print( "Shell ==== TEST FAILED!  db.currentOp().inprog.length is " + len );
             print( "Shell ==== Dump of db.currentOp:" );
             print( tojson( currentOp ) );
-            throw "TEST FAILED!";
+            throw Error("TEST FAILED!");
         }
     }
     assert.gt( 200, insertTime, "Insert took too long (" + insertTime + " ms), should be less than 200 ms" );
@@ -128,7 +130,7 @@ if ( len != 0 ) {
     print( "Shell ==== Final sanity check FAILED!  db.currentOp().inprog.length is " + len );
     print( "Shell ==== Dump of db.currentOp:" );
     print( tojson( currentOp ) );
-    throw "TEST FAILED!";
+    throw Error("TEST FAILED!");
 }
 print( "Shell ==== Test completed successfully, shutting down server" );
 testServer.stop();

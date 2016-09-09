@@ -2,11 +2,8 @@
 /src/mongo/db/modules
 /.jsdbshell
 /.dbshell
-/.sconsign.dblite
-/.sconf_temp
 /perf.data
 /massif.out.*
-.scons
 /smoke-last.json
 
 *~
@@ -76,20 +73,10 @@ scratch
 /mongogrid
 /mongos
 
-/mongodump
-/mongorestore
-
-/mongofiles
-/mongoexport
-
-/mongoimport
 /mongosniff
 /mongobridge
-/mongostat
-/mongotop
-/mongooplog
 /mongoperf
-/bsondump
+/mongoshim
 /loadgen
 /docgen
 
@@ -115,7 +102,7 @@ scratch
 /tutorial
 
 #tests
-/test
+/dbtest
 /authTest
 /perftest
 /clientTest

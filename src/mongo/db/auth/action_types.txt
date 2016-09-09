@@ -17,7 +17,7 @@
 "changeOwnPassword",
 "changeOwnCustomData",
 "cleanupOrphaned",
-"closeAllDatabases",
+"closeAllDatabases",  # Deprecated, needs to stay around for backwards compatibility
 "collMod",
 "collStats",
 "compact",
@@ -65,7 +65,9 @@
 "invalidateUserCache",
 "killCursors",
 "killop",
+"listCollections",
 "listDatabases",
+"listIndexes",
 "listShards",
 "logRotate",
 "moveChunk",
@@ -80,6 +82,7 @@
 "renameCollectionSameDB",
 "repairDatabase",
 "replSetConfigure",
+"replSetGetConfig",
 "replSetGetStatus",
 "replSetHeartbeat",
 "replSetReconfig",  # Not used for permissions checks, but to id the event in logs.

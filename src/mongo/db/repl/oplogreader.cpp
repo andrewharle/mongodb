@@ -26,6 +26,10 @@
 *    it in the license file.
 */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kReplication
+
+#include "mongo/platform/basic.h"
+
 #include "mongo/db/repl/oplogreader.h"
 
 #include <boost/shared_ptr.hpp>
@@ -36,156 +40,171 @@
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authorization_manager_global.h"
 #include "mongo/db/auth/authorization_session.h"
-#include "mongo/db/commands/server_status.h"
-#include "mongo/db/auth/security_key.h"
+#include "mongo/db/auth/internal_user_auth.h"
+#include "mongo/db/commands/server_status_metric.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/db/repl/rs.h"  // theReplSet
+#include "mongo/db/repl/minvalid.h"
+#include "mongo/db/repl/oplog.h"
+#include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
 
-    //number of readers created;
-    //  this happens when the source source changes, a reconfig/network-error or the cursor dies
-    static Counter64 readersCreatedStats;
-    static ServerStatusMetricField<Counter64> displayReadersCreated(
-                                                    "repl.network.readersCreated",
-                                                    &readersCreatedStats );
+using boost::shared_ptr;
+using std::endl;
+using std::string;
+
+namespace repl {
+
+// number of readers created;
+//  this happens when the source source changes, a reconfig/network-error or the cursor dies
+static Counter64 readersCreatedStats;
+static ServerStatusMetricField<Counter64> displayReadersCreated("repl.network.readersCreated",
+                                                                &readersCreatedStats);
 
 
-    static const BSONObj userReplQuery = fromjson("{\"user\":\"repl\"}");
+static const BSONObj userReplQuery = fromjson("{\"user\":\"repl\"}");
 
-    bool replAuthenticate(DBClientBase *conn) {
-        if (!getGlobalAuthorizationManager()->isAuthEnabled())
-            return true;
-
-        if (!isInternalAuthSet())
-            return false;
-        return authenticateInternalUser(conn);
-    }
-
-    bool replHandshake(DBClientConnection *conn, const BSONObj& me) {
-        string myname = getHostName();
-
-        BSONObjBuilder cmd;
-        cmd.appendAs( me["_id"] , "handshake" );
-        if (theReplSet) {
-            cmd.append("member", theReplSet->selfId());
-            cmd.append("config", theReplSet->myConfig().asBson());
-        }
-
-        BSONObj res;
-        bool ok = conn->runCommand( "admin" , cmd.obj() , res );
-        // ignoring for now on purpose for older versions
-        LOG( ok ? 1 : 0 ) << "replHandshake res not: " << ok << " res: " << res << endl;
+bool replAuthenticate(DBClientBase* conn) {
+    if (!getGlobalAuthorizationManager()->isAuthEnabled())
         return true;
-    }
 
-    OplogReader::OplogReader() {
-        _tailingQueryOptions = QueryOption_SlaveOk;
-        _tailingQueryOptions |= QueryOption_CursorTailable | QueryOption_OplogReplay;
-        
-        /* TODO: slaveOk maybe shouldn't use? */
-        _tailingQueryOptions |= QueryOption_AwaitData;
-
-        readersCreatedStats.increment();
-    }
-
-    bool OplogReader::commonConnect(const string& hostName) {
-        if( conn() == 0 ) {
-            _conn = shared_ptr<DBClientConnection>(new DBClientConnection(false,
-                                                                          0,
-                                                                          tcp_timeout));
-            string errmsg;
-            if ( !_conn->connect(hostName.c_str(), errmsg) ||
-                 (getGlobalAuthorizationManager()->isAuthEnabled() &&
-                  !replAuthenticate(_conn.get())) ) {
-
-                resetConnection();
-                log() << "repl: " << errmsg << endl;
-                return false;
-            }
-        }
-        return true;
-    }
-
-    bool OplogReader::connect(const std::string& hostName) {
-        if (conn()) {
-            return true;
-        }
-
-        if (!commonConnect(hostName)) {
-            return false;
-        }
-
-        return true;
-    }
-
-    bool OplogReader::connect(const std::string& hostName, const BSONObj& me) {
-        if (conn()) {
-            return true;
-        }
-
-        if (!commonConnect(hostName)) {
-            return false;
-        }
-
-        if (!replHandshake(_conn.get(), me)) {
-            return false;
-        }
-
-        return true;
-    }
-
-    bool OplogReader::connect(const mongo::OID& rid, const int from, const string& to) {
-        if (conn() != 0) {
-            return true;
-        }
-        if (commonConnect(to)) {
-            log() << "handshake between " << from << " and " << to << endl;
-            return passthroughHandshake(rid, from);
-        }
+    if (!isInternalAuthSet())
         return false;
-    }
-
-    bool OplogReader::passthroughHandshake(const mongo::OID& rid, const int nextOnChainId) {
-        BSONObjBuilder cmd;
-        cmd.append("handshake", rid);
-        if (theReplSet) {
-            const Member* chainedMember = theReplSet->findById(nextOnChainId);
-            if (chainedMember != NULL) {
-                cmd.append("config", chainedMember->config().asBson());
-            }
-        }
-        cmd.append("member", nextOnChainId);
-
-        BSONObj res;
-        return conn()->runCommand("admin", cmd.obj(), res);
-    }
-
-    void OplogReader::query(const char *ns,
-                            Query query,
-                            int nToReturn,
-                            int nToSkip,
-                            const BSONObj* fields) {
-        cursor.reset(
-            _conn->query(ns, query, nToReturn, nToSkip, fields, QueryOption_SlaveOk).release()
-        );
-    }
-
-    void OplogReader::tailingQuery(const char *ns, const BSONObj& query, const BSONObj* fields ) {
-        verify( !haveCursor() );
-        LOG(2) << "repl: " << ns << ".find(" << query.toString() << ')' << endl;
-        cursor.reset( _conn->query( ns, query, 0, 0, fields, _tailingQueryOptions ).release() );
-    }
-
-    void OplogReader::tailingQueryGTE(const char *ns, OpTime optime, const BSONObj* fields ) {
-        BSONObjBuilder gte;
-        gte.appendTimestamp("$gte", optime.asDate());
-        BSONObjBuilder query;
-        query.append("ts", gte.done());
-        tailingQuery(ns, query.done(), fields);
-    }
-
+    return authenticateInternalUser(conn);
 }
+
+OplogReader::OplogReader() {
+    _tailingQueryOptions = QueryOption_SlaveOk;
+    _tailingQueryOptions |= QueryOption_CursorTailable | QueryOption_OplogReplay;
+
+    /* TODO: slaveOk maybe shouldn't use? */
+    _tailingQueryOptions |= QueryOption_AwaitData;
+
+    readersCreatedStats.increment();
+}
+
+bool OplogReader::connect(const HostAndPort& host) {
+    if (conn() == NULL || _host != host) {
+        resetConnection();
+        _conn = shared_ptr<DBClientConnection>(new DBClientConnection(false, tcp_timeout));
+        string errmsg;
+        if (!_conn->connect(host, errmsg) ||
+            (getGlobalAuthorizationManager()->isAuthEnabled() && !replAuthenticate(_conn.get()))) {
+            resetConnection();
+            log() << "repl: " << errmsg << endl;
+            return false;
+        }
+        _host = host;
+    }
+    return true;
+}
+
+void OplogReader::tailCheck() {
+    if (cursor.get() && cursor->isDead()) {
+        log() << "repl: old cursor isDead, will initiate a new one" << std::endl;
+        resetCursor();
+    }
+}
+
+void OplogReader::query(
+    const char* ns, Query query, int nToReturn, int nToSkip, const BSONObj* fields) {
+    cursor.reset(
+        _conn->query(ns, query, nToReturn, nToSkip, fields, QueryOption_SlaveOk).release());
+}
+
+void OplogReader::tailingQuery(const char* ns, const BSONObj& query, const BSONObj* fields) {
+    verify(!haveCursor());
+    LOG(2) << "repl: " << ns << ".find(" << query.toString() << ')' << endl;
+    cursor.reset(_conn->query(ns, query, 0, 0, fields, _tailingQueryOptions).release());
+}
+
+void OplogReader::tailingQueryGTE(const char* ns, OpTime optime, const BSONObj* fields) {
+    BSONObjBuilder gte;
+    gte.appendTimestamp("$gte", optime.asDate());
+    BSONObjBuilder query;
+    query.append("ts", gte.done());
+    tailingQuery(ns, query.done(), fields);
+}
+
+HostAndPort OplogReader::getHost() const {
+    return _host;
+}
+
+void OplogReader::connectToSyncSource(OperationContext* txn,
+                                      OpTime lastOpTimeFetched,
+                                      ReplicationCoordinator* replCoord) {
+    const OpTime sentinel(Milliseconds(curTimeMillis64()).total_seconds(), 0);
+    OpTime oldestOpTimeSeen = sentinel;
+
+    invariant(conn() == NULL);
+
+    while (true) {
+        HostAndPort candidate = replCoord->chooseNewSyncSource(lastOpTimeFetched);
+
+        if (candidate.empty()) {
+            if (oldestOpTimeSeen == sentinel) {
+                // If, in this invocation of connectToSyncSource(), we did not successfully
+                // connect to any node ahead of us,
+                // we apparently have no sync sources to connect to.
+                // This situation is common; e.g. if there are no writes to the primary at
+                // the moment.
+                return;
+            }
+
+            // Connected to at least one member, but in all cases we were too stale to use them
+            // as a sync source.
+            log() << "replSet error RS102 too stale to catch up";
+            log() << "replSet our last optime : " << lastOpTimeFetched.toStringLong();
+            log() << "replSet oldest available is " << oldestOpTimeSeen.toStringLong();
+            log() << "replSet "
+                     "See http://dochub.mongodb.org/core/resyncingaverystalereplicasetmember";
+            setMinValid(txn, oldestOpTimeSeen);
+            bool worked = replCoord->setFollowerMode(MemberState::RS_RECOVERING);
+            if (!worked) {
+                warning() << "Failed to transition into " << MemberState(MemberState::RS_RECOVERING)
+                          << ". Current state: " << replCoord->getMemberState();
+            }
+            return;
+        }
+
+        if (!connect(candidate)) {
+            LOG(2) << "replSet can't connect to " << candidate.toString() << " to read operations";
+            resetConnection();
+            replCoord->blacklistSyncSource(candidate, Date_t(curTimeMillis64() + 10 * 1000));
+            continue;
+        }
+        // Read the first (oldest) op and confirm that it's not newer than our last
+        // fetched op. Otherwise, we have fallen off the back of that source's oplog.
+        BSONObj remoteOldestOp(findOne(rsoplog, Query()));
+        BSONElement tsElem(remoteOldestOp["ts"]);
+        if (tsElem.type() != Timestamp) {
+            // This member's got a bad op in its oplog.
+            warning() << "oplog invalid format on node " << candidate.toString();
+            resetConnection();
+            replCoord->blacklistSyncSource(candidate, Date_t(curTimeMillis64() + 600 * 1000));
+            continue;
+        }
+        OpTime remoteOldOpTime = tsElem._opTime();
+
+        if (!lastOpTimeFetched.isNull() && lastOpTimeFetched < remoteOldOpTime) {
+            // We're too stale to use this sync source.
+            resetConnection();
+            replCoord->blacklistSyncSource(candidate, Date_t(curTimeMillis64() + 600 * 1000));
+            if (oldestOpTimeSeen > remoteOldOpTime) {
+                warning() << "we are too stale to use " << candidate.toString()
+                          << " as a sync source";
+                oldestOpTimeSeen = remoteOldOpTime;
+            }
+            continue;
+        }
+
+        // Got a valid sync source.
+        return;
+    }  // while (true)
+}
+
+}  // namespace repl
+}  // namespace mongo

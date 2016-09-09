@@ -76,7 +76,7 @@ unshardedCol.drop();
 
 // Enable sharding and pre-split the sharded collection.
 assert.commandWorked(db.adminCommand({enableSharding: db.getName()}));
-assert.commandWorked(db.adminCommand({movePrimary: db.getName(), to: "shard0000"}));
+db.adminCommand({movePrimary: db.getName(), to: "shard0000"});
 db.adminCommand({shardCollection: shardedCol.getFullName(), key: {_id: 1}});
 assert.commandWorked(db.adminCommand({split: shardedCol.getFullName(), middle: {_id: 0}}));
 assert.commandWorked(db.adminCommand({moveChunk: shardedCol.getFullName(),
@@ -87,18 +87,14 @@ assert.commandWorked(db.adminCommand({moveChunk: shardedCol.getFullName(),
 // Write 20 documents which all go to the primary shard in the unsharded collection.
 for (var i=1; i<=10; ++i) {
     // These go to shard 1.
-    shardedCol.insert({_id: i, x: i});
-    assert.eq(null, shardedCol.getDB().getLastError());
+    assert.writeOK(shardedCol.insert({_id: i, x: i}));
 
     // These go to shard 0.
-    shardedCol.insert({_id: -i, x: -i});
-    assert.eq(null, shardedCol.getDB().getLastError());
+    assert.writeOK(shardedCol.insert({_id: -i, x: -i}));
 
     // These go to shard 0 inside the non-sharded collection.
-    unshardedCol.insert({_id: i, x: i});
-    assert.eq(null, unshardedCol.getDB().getLastError());
-    unshardedCol.insert({_id: -i, x: -i});
-    assert.eq(null, unshardedCol.getDB().getLastError());
+    assert.writeOK(unshardedCol.insert({_id: i, x: i}));
+    assert.writeOK(unshardedCol.insert({_id: -i, x: -i}));
 }
 
 //

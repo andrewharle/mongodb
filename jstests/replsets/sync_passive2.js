@@ -4,8 +4,6 @@
 
 load("jstests/replsets/rslib.js");
 
-if (false) { // Test disabled until SERVER-10341 is resolved
-
 var name = "sync_passive2";
 var host = getHostName();
 
@@ -205,7 +203,7 @@ replTest.awaitReplication(60000);
 printjson(replTest.status());
 
 print("force 2 to sync from 3");
-// This briefly causes 2 to sync from 3, but members have a strong prefrence for not syncing from
+// This briefly causes 2 to sync from 3, but members have a strong preference for not syncing from
 // a slave delayed node so it may switch to another sync source quickly.
 result = replTest.nodes[2].getDB("admin")
     .runCommand({replSetSyncFrom: replTest.host+":"+replTest.ports[3]});
@@ -219,5 +217,3 @@ assert.soon(function() {
 }, 'failed to change sync target', 60000);
 
 replTest.stopSet();
-
-} // end test disabled

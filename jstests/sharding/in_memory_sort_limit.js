@@ -5,19 +5,10 @@
      "use strict";
 
      var st = new ShardingTest({ shards: 2, chunkSize: 1, other: {separateConfig: true}});
-     // Force write commands mode; this is a backport of a new test.
-     st.s0.forceWriteMode("commands");
-     st.shard0.forceWriteMode("commands");
-     st.shard1.forceWriteMode("commands");
-
      var db = st.s.getDB('test');
      var mongosCol = db.getCollection('skip');
      db.adminCommand({ enableSharding: 'test' });
      db.adminCommand({ shardCollection: 'test.skip', key: { _id: 1 }});
-     // Disable balancing of this collection
-     assert.writeOK(db.getSiblingDB('config').collections.update({_id: 'test.skip'},
-                                                                 {$set: {noBalance: true}}));
-
 
      var filler = new Array(10000).toString();
      var bulk = [];
@@ -26,11 +17,11 @@
          bulk.push({x:i, str:filler});
      }
      assert.writeOK(mongosCol.insert(bulk));
-     // Make sure that at least 1 doc is on another shard so that mongos doesn't treat this as a
-     // single-shard query (which doesn't exercise the bug)
-     assert.commandWorked(db.getSiblingDB('admin').runCommand({moveChunk: 'test.skip',
-                                                               find: {_id:1},
-                                                               to: 'shard0001'}));
+
+     // Make sure that at least 1 chunk is on another shard so that mongos doesn't treat this as a
+     // single-shard query (which doesn't exercise the bug).
+     st.startBalancer();
+     st.awaitBalance('skip', 'test');
 
      var docCount = mongosCol.count();
      var shardCol = st.shard0.getDB('test').getCollection('skip');

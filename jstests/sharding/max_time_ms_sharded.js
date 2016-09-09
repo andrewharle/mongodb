@@ -38,8 +38,8 @@ var configureMaxTimeNeverTimeOut = function(mode) {
 // Pre-split collection: shard 0 takes {_id: {$lt: 0}}, shard 1 takes {_id: {$gte: 0}}.
 //
 assert.commandWorked(admin.runCommand({enableSharding: coll.getDB().getName()}));
-assert.commandWorked(admin.runCommand({movePrimary: coll.getDB().getName(),
-                                       to: "shard0000"}));
+admin.runCommand({movePrimary: coll.getDB().getName(),
+                  to: "shard0000"});
 assert.commandWorked(admin.runCommand({shardCollection: coll.getFullName(),
                                        key: {_id: 1}}));
 assert.commandWorked(admin.runCommand({split: coll.getFullName(), middle: {_id: 0}}));
@@ -50,10 +50,11 @@ assert.commandWorked(admin.runCommand({moveChunk: coll.getFullName(),
 //
 // Insert 100 documents into sharded collection, such that each shard owns 50.
 //
+var bulk = coll.initializeUnorderedBulkOp();
 for (i=-50; i<50; i++) {
-    coll.insert({_id: i});
+    bulk.insert({ _id: i });
 }
-assert.eq(null, coll.getDB().getLastError());
+assert.writeOK(bulk.execute());
 assert.eq(50, shards[0].getCollection(coll.getFullName()).count());
 assert.eq(50, shards[1].getCollection(coll.getFullName()).count());
 

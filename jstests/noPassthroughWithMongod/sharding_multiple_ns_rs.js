@@ -6,12 +6,14 @@ s.adminCommand( { shardcollection : "test.foo" , key : { _id : 1 } } );
 
 db = s.getDB( "test" );
 
+var bulk = db.foo.initializeUnorderedBulkOp();
+var bulk2 = db.bar.initializeUnorderedBulkOp();
 for ( i=0; i<100; i++ )  {
-    db.foo.insert( { _id : i , x : i } )
-    db.bar.insert( { _id : i , x : i } )
+    bulk.insert({ _id: i, x: i });
+    bulk2.insert({ _id: i, x: i });
 }
-
-db.getLastError();
+assert.writeOK(bulk.execute());
+assert.writeOK(bulk2.execute());
 
 sh.splitAt( "test.foo" , { _id : 50 } )
 
@@ -27,7 +29,7 @@ assert.eq( 5 , dbother.bar.findOne( { _id : 5 } ).x );
 
 s._rs[0].test.awaitReplication();
 
-s._rs[0].test.stopMaster( 15 , true )
+s._rs[0].test.stopMaster(15);
 
 // Wait for the primary to come back online...
 var primary = s._rs[0].test.getPrimary();

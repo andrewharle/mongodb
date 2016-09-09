@@ -16,12 +16,13 @@ testGetCmdLineOptsMongod({ noscripting : "" }, expectedResult);
 
 
 
-// If the noscripting option is disabled in INI config, it should not show up in
-// getCmdLineOpts.parsed before SERVER-13439.
 jsTest.log("Testing explicitly disabled \"noscripting\" config file option");
 expectedResult = {
     "parsed" : {
         "config" : "jstests/libs/config_files/disable_noscripting.ini",
+        "security" : {
+            "javascriptEnabled" : true
+        }
     }
 };
 testGetCmdLineOptsMongod({ config : "jstests/libs/config_files/disable_noscripting.ini" },

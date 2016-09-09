@@ -2,6 +2,11 @@
 
 var st = new ShardingTest({ shards : 2, mongos : 1, verbose : 1 })
 
+// First, test that shell helpers require an argument
+assert.throws(sh.disableBalancing, [], "sh.disableBalancing requires a collection");
+assert.throws(sh.enableBalancing, [], "sh.enableBalancing requires a collection");
+
+
 // Initially stop balancing
 st.stopBalancer()
 
@@ -68,9 +73,11 @@ sh.waitForBalancer(true)
 // Make sure auto-migrates on insert don't move chunks
 var lastMigration = sh._lastMigration( collB )
 
+var bulk = collB.initializeUnorderedBulkOp();
 for( var i = 0; i < 1000000; i++ ){
-    collB.insert({ _id : i, hello : "world" })
+    bulk.insert({ _id: i, hello: "world" });
 }
+assert.writeOK(bulk.execute());
 
 printjson( lastMigration )
 printjson( sh._lastMigration( collB ) )

@@ -120,11 +120,16 @@ if ( typeof _threadInject != "undefined" ){
                                    "extent.js",
                                    "indexb.js",
 
+                                   // sets a failpoint that causes the server to ignore long keys,
+                                   // which makes index_bigkeys.js fail
+                                   "index_bigkeys_nofail.js",
+
                                    // tests turn on profiling
                                    "profile1.js",
                                    "profile3.js",
                                    "profile4.js",
                                    "profile5.js",
+                                   "geo_s2cursorlimitskip.js",
 
                                    "mr_drop.js",
                                    "mr3.js",
@@ -145,12 +150,13 @@ if ( typeof _threadInject != "undefined" ){
                                    "loglong.js",// log might overflow before 
                                                         // this has a chance to see the message
                                    "connections_opened.js", // counts connections, globally
-                                   "opcounters.js",
+                                   "opcounters_write_cmd.js",
                                    "currentop.js", // SERVER-8673, plus rwlock yielding issues
                                    "set_param1.js", // changes global state
                                    "geo_update_btree2.js", // SERVER-11132 test disables table scans
                                    "update_setOnInsert.js", // SERVER-9982
                                    "max_time_ms.js", // Sensitive to query execution time, by design
+                                   "collection_info_cache_race.js", // Requires collection exists
                                ] );
         
         var parallelFilesDir = "jstests/core";
@@ -257,4 +263,28 @@ if ( typeof _threadInject != "undefined" ){
         runners.forEach( function( x ) { if( !x.returnData() ) { ++nFailed; } } );        
         assert.eq( 0, nFailed, msg );
     }
+}
+
+if ( typeof CountDownLatch !== 'undefined' ) {
+    CountDownLatch = Object.extend(function(count) {
+        if (! (this instanceof CountDownLatch)) {
+            return new CountDownLatch(count);
+        }
+        this._descriptor = CountDownLatch._new.apply(null, arguments);
+
+        // NOTE: The following methods have to be defined on the instance itself,
+        //       and not on its prototype. This is because properties on the
+        //       prototype are lost during the serialization to BSON that occurs
+        //       when passing data to a child thread.
+
+        this.await = function() {
+            CountDownLatch._await(this._descriptor);
+        };
+        this.countDown = function() {
+            CountDownLatch._countDown(this._descriptor);
+        };
+        this.getCount = function() {
+            return CountDownLatch._getCount(this._descriptor);
+        };
+    }, CountDownLatch);
 }

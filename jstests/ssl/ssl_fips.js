@@ -1,5 +1,4 @@
 // Test mongod start with FIPS mode enabled
-if (0) { // SERVER-11005
 ports = allocatePorts(1);
 port1 = ports[0];
 var baseName = "jstests_ssl_ssl_fips";
@@ -10,7 +9,7 @@ var md = startMongod("--port", port1, "--dbpath",
                      "--sslPEMKeyFile", "jstests/libs/server.pem",
                      "--sslFIPSMode");
 
-var mongo = runMongoProgram("mongo", "--port", port1, "--ssl",
+var mongo = runMongoProgram("mongo", "--port", port1, "--ssl", "--sslAllowInvalidCertificates",
                             "--sslPEMKeyFile", "jstests/libs/client.pem",
                             "--sslFIPSMode",
                             "--eval", ";");
@@ -23,7 +22,10 @@ if (mongo != 0) {
         mongoOutput.match(/FIPS_mode_set:fips mode not supported/))
 }
 else {
+    // verify that auth works, SERVER-18051
+    md.getDB("admin").createUser({user: "root", pwd: "root", roles: ["root"]});
+    assert(md.getDB("admin").auth("root", "root"), "auth failed");
+
     // kill mongod
     stopMongod(port1);
-}
 }

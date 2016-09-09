@@ -31,6 +31,22 @@ assert.throws(function(){
 
 //
 //
+// Make sure we can't do geo search with invalid point coordinates.
+assert.throws(function(){
+   coll.findOne({ geo : { $within : { $center : [[NaN, 0], 1] } } });
+});
+assert.throws(function(){
+   coll.findOne({ geo : { $within : { $centerSphere : [[NaN, 0], 1] } } });
+});
+assert.throws(function(){
+   coll.findOne({ geo : { $within : { $center : [[Infinity, 0], 1] } } });
+});
+assert.throws(function(){
+   coll.findOne({ geo : { $within : { $centerSphere : [[-Infinity, 0], 1] } } });
+});
+
+//
+//
 // Make sure we can do a $within search with a zero-radius circular region
 assert.writeOK(coll.insert({ geo : [0, 0] }));
 assert.neq(null, coll.findOne({ geo : { $within : { $center : [[0, 0], 0] } } }));
@@ -66,6 +82,18 @@ assert.throws(function(){
 assert.commandFailed(db.runCommand({geoNear: coll.getName(),
                                     near: [0,0], spherical: true, num: -1}));
 assert.commandFailed(db.runCommand({geoNear: coll.getName(),
-                                    near: [0,0], spherical: true, num: NaN}));
-assert.commandFailed(db.runCommand({geoNear: coll.getName(),
                                     near: [0,0], spherical: true, num: -Infinity}));
+// NaN is interpreted as limit 0
+assert.commandWorked(db.runCommand({geoNear: coll.getName(),
+                                    near: [0,0], spherical: true, num: NaN}));
+
+
+//
+// SERVER-17241 Polygon has no loop
+assert.writeError(coll.insert({ geo : { type: 'Polygon', coordinates: [] } }));
+
+//
+// SERVER-17486 Loop has less then 3 vertices.
+assert.writeError(coll.insert({geo: {type: 'Polygon', coordinates: [[]]}}));
+assert.writeError(coll.insert({geo: {type: 'Polygon', coordinates: [[[0,0]]]}}));
+assert.writeError(coll.insert({geo: {type: 'Polygon', coordinates: [[[0,0], [0,0], [0,0], [0,0]]]}}));

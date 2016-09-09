@@ -34,121 +34,153 @@
 
 #include "mongo/base/owned_pointer_vector.h"
 #include "mongo/bson/ordering.h"
-#include "mongo/db/diskloc.h"
+#include "mongo/db/record_id.h"
 
 namespace mongo {
 
-    class Collection;
-    class IndexDescriptor;
-    class RecordStore;
-    class IndexAccessMethod;
+class CollectionCatalogEntry;
+class CollectionInfoCache;
+class HeadManager;
+class IndexAccessMethod;
+class IndexDescriptor;
+class OperationContext;
 
-    class IndexCatalogEntry {
-        MONGO_DISALLOW_COPYING( IndexCatalogEntry );
-    public:
-        IndexCatalogEntry( Collection* collection,
-                           IndexDescriptor* descriptor, // ownership passes to me
-                           RecordStore* recordStore ); // ownership passes to me
+class IndexCatalogEntry {
+    MONGO_DISALLOW_COPYING(IndexCatalogEntry);
 
-        ~IndexCatalogEntry();
+public:
+    IndexCatalogEntry(const StringData& ns,
+                      CollectionCatalogEntry* collection,  // not owned
+                      IndexDescriptor* descriptor,         // ownership passes to me
+                      CollectionInfoCache* infoCache);     // not owned, optional
 
-        void init( IndexAccessMethod* accessMethod );
+    ~IndexCatalogEntry();
 
-        const Collection* collection() const { return _collection; }
+    const std::string& ns() const {
+        return _ns;
+    }
 
-        IndexDescriptor* descriptor() { return _descriptor; }
-        const IndexDescriptor* descriptor() const { return _descriptor; }
+    void init(OperationContext* txn, IndexAccessMethod* accessMethod);
 
-        IndexAccessMethod* accessMethod() { return _accessMethod; }
-        const IndexAccessMethod* accessMethod() const { return _accessMethod; }
+    IndexDescriptor* descriptor() {
+        return _descriptor;
+    }
+    const IndexDescriptor* descriptor() const {
+        return _descriptor;
+    }
 
-        IndexAccessMethod* forcedBtreeIndex() { return _forcedBtreeIndex; }
-        // ownership passes
-        void setForcedBtreeIndex( IndexAccessMethod* iam ) { _forcedBtreeIndex = iam; }
+    IndexAccessMethod* accessMethod() {
+        return _accessMethod;
+    }
+    const IndexAccessMethod* accessMethod() const {
+        return _accessMethod;
+    }
 
-        RecordStore* recordStore() { return _recordStore; }
-        const RecordStore* recordStore() const { return _recordStore; }
+    const Ordering& ordering() const {
+        return _ordering;
+    }
 
-        const Ordering& ordering() const { return _ordering; }
+    /// ---------------------
 
-        /// ---------------------
+    const RecordId& head(OperationContext* txn) const;
 
-        const DiskLoc& head() const;
+    void setHead(OperationContext* txn, RecordId newHead);
 
-        void setHead( DiskLoc newHead );
+    void setIsReady(bool newIsReady);
 
-        void setIsReady( bool newIsReady );
+    HeadManager* headManager() const {
+        return _headManager;
+    }
 
-        // --
+    // --
 
-        bool isMultikey() const;
+    bool isMultikey() const;
 
-        void setMultikey();
+    void setMultikey(OperationContext* txn);
 
-        // if this ready is ready for queries
-        bool isReady() const;
+    // if this ready is ready for queries
+    bool isReady(OperationContext* txn) const;
 
-    private:
+private:
+    class SetMultikeyChange;
+    class SetHeadChange;
 
-        int _indexNo() const;
+    bool _catalogIsReady(OperationContext* txn) const;
+    RecordId _catalogHead(OperationContext* txn) const;
+    bool _catalogIsMultikey(OperationContext* txn) const;
 
-        bool _catalogIsReady() const;
-        DiskLoc _catalogHead() const;
-        bool _catalogIsMultikey() const;
+    // -----
 
-        // -----
+    std::string _ns;
 
-        Collection* _collection; // not owned here
+    CollectionCatalogEntry* _collection;  // not owned here
 
-        IndexDescriptor* _descriptor; // owned here
+    IndexDescriptor* _descriptor;  // owned here
 
-        RecordStore* _recordStore; // owned here
+    CollectionInfoCache* _infoCache;  // not owned here
 
-        IndexAccessMethod* _accessMethod; // owned here
-        IndexAccessMethod* _forcedBtreeIndex; // owned here
+    IndexAccessMethod* _accessMethod;  // owned here
 
-        // cached stuff
+    // Owned here.
+    HeadManager* _headManager;
 
-        Ordering _ordering; // TODO: this might be b-tree specific
-        bool _isReady; // cache of NamespaceDetails info
-        DiskLoc _head; // cache of IndexDetails
-        bool _isMultikey; // cache of NamespaceDetails info
-    };
+    // cached stuff
 
-    class IndexCatalogEntryContainer {
-    public:
+    Ordering _ordering;  // TODO: this might be b-tree specific
+    bool _isReady;       // cache of NamespaceDetails info
+    RecordId _head;      // cache of IndexDetails
+    bool _isMultikey;    // cache of NamespaceDetails info
+};
 
-        typedef std::vector<IndexCatalogEntry*>::const_iterator const_iterator;
-        typedef std::vector<IndexCatalogEntry*>::const_iterator iterator;
+class IndexCatalogEntryContainer {
+public:
+    typedef std::vector<IndexCatalogEntry*>::const_iterator const_iterator;
+    typedef std::vector<IndexCatalogEntry*>::const_iterator iterator;
 
-        const_iterator begin() const { return _entries.vector().begin(); }
-        const_iterator end() const { return _entries.vector().end(); }
+    const_iterator begin() const {
+        return _entries.vector().begin();
+    }
+    const_iterator end() const {
+        return _entries.vector().end();
+    }
 
-        iterator begin() { return _entries.vector().begin(); }
-        iterator end() { return _entries.vector().end(); }
+    iterator begin() {
+        return _entries.vector().begin();
+    }
+    iterator end() {
+        return _entries.vector().end();
+    }
 
-        // TODO: these have to be SUPER SUPER FAST
-        // maybe even some pointer trickery is in order
-        const IndexCatalogEntry* find( const IndexDescriptor* desc ) const;
-        IndexCatalogEntry* find( const IndexDescriptor* desc );
+    // TODO: these have to be SUPER SUPER FAST
+    // maybe even some pointer trickery is in order
+    const IndexCatalogEntry* find(const IndexDescriptor* desc) const;
+    IndexCatalogEntry* find(const IndexDescriptor* desc);
 
-        IndexCatalogEntry* find( const std::string& name );
+    IndexCatalogEntry* find(const std::string& name);
 
 
-        unsigned size() const { return _entries.size(); }
-        // -----------------
+    unsigned size() const {
+        return _entries.size();
+    }
+    // -----------------
 
-        bool remove( const IndexDescriptor* desc );
+    /**
+     * Removes from _entries and returns the matching entry or NULL if none matches.
+     */
+    IndexCatalogEntry* release(const IndexDescriptor* desc);
 
-        // pass ownership to EntryContainer
-        void add( IndexCatalogEntry* entry ) { _entries.mutableVector().push_back( entry ); }
+    bool remove(const IndexDescriptor* desc) {
+        IndexCatalogEntry* entry = release(desc);
+        delete entry;
+        return entry;
+    }
 
-        // TODO: should the findIndexBy* methods be done here
-        // and proxied in IndexCatatalog
-        //IndexCatalogEntry* findIndexByName();
+    // pass ownership to EntryContainer
+    void add(IndexCatalogEntry* entry) {
+        _entries.mutableVector().push_back(entry);
+    }
 
-    private:
-        OwnedPointerVector<IndexCatalogEntry> _entries;
-    };
-
+private:
+    OwnedPointerVector<IndexCatalogEntry> _entries;
+};
 }

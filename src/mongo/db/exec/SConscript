@@ -2,6 +2,7 @@
 
 Import("env")
 
+# WorkingSet target and associated test
 env.Library(
     target = "working_set",
     source = [
@@ -23,46 +24,72 @@ env.CppUnitTest(
 )
 
 env.Library(
-    target = "mock_stage",
+    target = "scoped_timer",
     source = [
-        "mock_stage.cpp",
+        "scoped_timer.cpp",
     ],
     LIBDEPS = [
-        "working_set",
     ],
 )
 
 env.Library(
     target = 'exec',
     source = [
-        "2d.cpp",
-        "2dcommon.cpp",
-        "2dnear.cpp",
         "and_hash.cpp",
         "and_sorted.cpp",
+        "cached_plan.cpp",
         "collection_scan.cpp",
         "count.cpp",
+        "count_scan.cpp",
+        "delete.cpp",
         "distinct_scan.cpp",
+        "eof.cpp",
         "fetch.cpp",
+        "geo_near.cpp",
+        "group.cpp",
+        "idhack.cpp",
         "index_scan.cpp",
         "keep_mutations.cpp",
         "limit.cpp",
         "merge_sort.cpp",
+        "multi_iterator.cpp",
+        "multi_plan.cpp",
+        "near.cpp",
         "oplogstart.cpp",
         "or.cpp",
+        "pipeline_proxy.cpp",
         "projection.cpp",
         "projection_exec.cpp",
-        "s2near.cpp",
+        "queued_data_stage.cpp",
         "shard_filter.cpp",
         "skip.cpp",
         "sort.cpp",
         "stagedebug_cmd.cpp",
+        "subplan.cpp",
         "text.cpp",
+        "update.cpp",
         "working_set_common.cpp",
     ],
     LIBDEPS = [
+        "scoped_timer",
         "$BUILD_DIR/mongo/bson",
     ],
+)
+
+env.CppUnitTest(
+    target = "queued_data_stage_test",
+    source = [
+        "queued_data_stage_test.cpp",
+    ],
+    LIBDEPS = [
+        "exec",
+        "$BUILD_DIR/mongo/serveronly",
+        "$BUILD_DIR/mongo/coreserver",
+        "$BUILD_DIR/mongo/coredb",
+        "$BUILD_DIR/mongo/mocklib",
+        "$BUILD_DIR/mongo/ntservice_mock",
+    ],
+    NO_CRUTCH = True,
 )
 
 env.CppUnitTest(
@@ -72,11 +99,11 @@ env.CppUnitTest(
     ],
     LIBDEPS = [
         "exec",
-        "mock_stage",
         "$BUILD_DIR/mongo/serveronly",
         "$BUILD_DIR/mongo/coreserver",
         "$BUILD_DIR/mongo/coredb",
         "$BUILD_DIR/mongo/mocklib",
+        "$BUILD_DIR/mongo/ntservice_mock",
     ],
     NO_CRUTCH = True,
 )
@@ -88,10 +115,10 @@ env.CppUnitTest(
     ],
     LIBDEPS = [
         "exec",
-        "mock_stage",
         "$BUILD_DIR/mongo/serveronly",
         "$BUILD_DIR/mongo/coreserver",
         "$BUILD_DIR/mongo/coredb",
+        "$BUILD_DIR/mongo/ntservice_mock",
     ],
     NO_CRUTCH = True,
 )

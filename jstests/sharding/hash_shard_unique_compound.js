@@ -2,6 +2,7 @@
 // Does 2 things and checks for consistent error:
 //  1.) shard collection on hashed "a", ensure unique index {a:1, b:1}
 //  2.) reverse order
+// @tags : [ hashed ]
 
 var s = new ShardingTest( { name : jsTestName() , shards : 1 , mongos : 1, verbose : 1 } );
 var dbName = "test";
@@ -22,8 +23,7 @@ assert.commandWorked(db.adminCommand( { shardcollection : ns , key : { a : "hash
 db.printShardingStatus();
 
 // Create unique index
-coll.ensureIndex({a:1, b:1}, {unique:true})
-assert.gleSuccess(db, "unique index failed");
+assert.commandWorked(coll.ensureIndex({ a: 1, b: 1 }, { unique: true }));
 
 jsTest.log("------ indexes -------")
 jsTest.log(tojson(coll.getIndexes()));
@@ -33,8 +33,7 @@ jsTest.log("------ dropping sharded collection to start part 2 -------")
 coll.drop();
 
 //Create unique index
-coll.ensureIndex({a:1, b:1}, {unique:true})
-assert.gleSuccess(db, "unique index failed 2");
+assert.commandWorked(coll.ensureIndex({ a: 1, b: 1 }, { unique: true }));
 
 // shard a fresh collection using a hashed shard key
 assert.commandWorked(db.adminCommand( { shardcollection : ns , key : { a : "hashed" } } ),

@@ -1,7 +1,7 @@
 // sharding_balance1.js
 
 
-s = new ShardingTest( "slow_sharding_balance1" , 2 , 1 , 1 , { chunksize : 1 } )
+s = new ShardingTest( "slow_sharding_balance1" , 2 , 1 , 1 , { chunksize : 1, enableBalancer : true } )
 
 s.adminCommand( { enablesharding : "test" } );
 
@@ -15,12 +15,13 @@ while ( bigString.length < 10000 )
 
 inserted = 0;
 num = 0;
+var bulk = db.foo.initializeUnorderedBulkOp();
 while ( inserted < ( 20 * 1024 * 1024 ) ){
-    db.foo.insert( { _id : num++ , s : bigString } );
+    bulk.insert({ _id: num++, s: bigString });
     inserted += bigString.length;
 }
+assert.writeOK(bulk.execute());
 
-db.getLastError();
 s.adminCommand( { shardcollection : "test.foo" , key : { _id : 1 } } );
 assert.lt( 20 , s.config.chunks.count()  , "setup2" );
 

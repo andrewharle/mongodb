@@ -26,37 +26,39 @@
  * it in the license file.
  */
 
-#include "mongo/pch.h"
+#include "mongo/platform/basic.h"
 
 #include "mongo/db/pipeline/accumulator.h"
 #include "mongo/db/pipeline/value.h"
 
 namespace mongo {
 
-    void AccumulatorLast::processInternal(const Value& input, bool merging) {
-        /* always remember the last value seen */
-        _last = input;
-        _memUsageBytes = sizeof(*this) + _last.getApproximateSize() - sizeof(Value);
-    }
+using boost::intrusive_ptr;
 
-    Value AccumulatorLast::getValue(bool toBeMerged) const {
-        return _last;
-    }
+void AccumulatorLast::processInternal(const Value& input, bool merging) {
+    /* always remember the last value seen */
+    _last = input;
+    _memUsageBytes = sizeof(*this) + _last.getApproximateSize() - sizeof(Value);
+}
 
-    AccumulatorLast::AccumulatorLast() {
-        _memUsageBytes = sizeof(*this);
-    }
+Value AccumulatorLast::getValue(bool toBeMerged) const {
+    return _last;
+}
 
-    void AccumulatorLast::reset() {
-        _memUsageBytes = sizeof(*this);
-        _last = Value();
-    }
+AccumulatorLast::AccumulatorLast() {
+    _memUsageBytes = sizeof(*this);
+}
 
-    intrusive_ptr<Accumulator> AccumulatorLast::create() {
-        return new AccumulatorLast();
-    }
+void AccumulatorLast::reset() {
+    _memUsageBytes = sizeof(*this);
+    _last = Value();
+}
 
-    const char *AccumulatorLast::getOpName() const {
-        return "$last";
-    }
+intrusive_ptr<Accumulator> AccumulatorLast::create() {
+    return new AccumulatorLast();
+}
+
+const char* AccumulatorLast::getOpName() const {
+    return "$last";
+}
 }

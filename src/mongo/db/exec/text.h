@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2013-2014 MongoDB Inc.
  *
  *    This program is free software: you can redistribute it and/or  modify
  *    it under the terms of the GNU Affero General Public License, version 3,
@@ -28,7 +28,6 @@
 
 #pragma once
 
-#include "mongo/db/diskloc.h"
 #include "mongo/db/exec/plan_stage.h"
 #include "mongo/db/fts/fts_index_format.h"
 #include "mongo/db/fts/fts_matcher.h"
@@ -38,6 +37,7 @@
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/matcher/expression.h"
+#include "mongo/db/record_id.h"
 #include "mongo/platform/unordered_map.h"
 
 #include <map>
@@ -46,126 +46,153 @@
 
 namespace mongo {
 
-    using fts::FTSIndexFormat;
-    using fts::FTSMatcher;
-    using fts::FTSQuery;
-    using fts::FTSSpec;
-    using fts::MAX_WEIGHT;
+using fts::FTSIndexFormat;
+using fts::FTSMatcher;
+using fts::FTSQuery;
+using fts::FTSSpec;
+using fts::MAX_WEIGHT;
 
-    struct TextStageParams {
-        TextStageParams(const FTSSpec& s) : spec(s) {}
+class OperationContext;
 
-        // Namespace.
-        string ns;
+struct TextStageParams {
+    TextStageParams(const FTSSpec& s) : spec(s) {}
 
-        // Text index descriptor.  IndexCatalog owns this.
-        IndexDescriptor* index;
+    // Text index descriptor.  IndexCatalog owns this.
+    IndexDescriptor* index;
 
-        // Index spec.
-        FTSSpec spec;
+    // Index spec.
+    FTSSpec spec;
 
-        // Index keys that precede the "text" index key.
-        BSONObj indexPrefix;
+    // Index keys that precede the "text" index key.
+    BSONObj indexPrefix;
 
-        // The text query.
-        FTSQuery query;
+    // The text query.
+    FTSQuery query;
+};
+
+/**
+ * Implements a blocking stage that returns text search results.
+ *
+ * Prerequisites: None; is a leaf node.
+ * Output type: LOC_AND_OBJ_UNOWNED.
+ *
+ * TODO: Should the TextStage ever generate NEED_FETCH requests? Right now this stage could
+ * reduce concurrency by failing to request a yield during fetch.
+ */
+class TextStage : public PlanStage {
+public:
+    /**
+     * The text stage has a few 'states' it transitions between.
+     */
+    enum State {
+        // 1. Initialize the index scans we use to retrieve term/score info.
+        INIT_SCANS,
+
+        // 2. Read the terms/scores from the text index.
+        READING_TERMS,
+
+        // 3. Return results to our parent.
+        RETURNING_RESULTS,
+
+        // 4. Done.
+        DONE,
     };
+
+    TextStage(OperationContext* txn,
+              const TextStageParams& params,
+              WorkingSet* ws,
+              const MatchExpression* filter);
+
+    virtual ~TextStage();
+
+    virtual StageState work(WorkingSetID* out);
+    virtual bool isEOF();
+
+    virtual void saveState();
+    virtual void restoreState(OperationContext* opCtx);
+    virtual void invalidate(OperationContext* txn, const RecordId& dl, InvalidationType type);
+
+    virtual std::vector<PlanStage*> getChildren() const;
+
+    virtual StageType stageType() const {
+        return STAGE_TEXT;
+    }
+
+    PlanStageStats* getStats();
+
+    virtual const CommonStats* getCommonStats();
+
+    virtual const SpecificStats* getSpecificStats();
+
+    static const char* kStageType;
+
+private:
+    /**
+     * Initializes sub-scanners.
+     */
+    StageState initScans(WorkingSetID* out);
 
     /**
-     * Implements a blocking stage that returns text search results.
-     *
-     * Prerequisites: None; is a leaf node.
-     * Output type: LOC_AND_OBJ_UNOWNED.
+     * Helper for buffering results array.  Returns NEED_TIME (if any results were produced),
+     * IS_EOF, or FAILURE.
      */
-    class TextStage : public PlanStage {
-    public:
-        /**
-         * The text stage has a few 'states' it transitions between.
-         */
-        enum State {
-            // 1. Initialize the index scans we use to retrieve term/score info.
-            INIT_SCANS,
+    StageState readFromSubScanners(WorkingSetID* out);
 
-            // 2. Read the terms/scores from the text index.
-            READING_TERMS,
+    /**
+     * Helper called from readFromSubScanners to update aggregate score with a new-found (term,
+     * score) pair for this document.  Also rejects documents that don't match this stage's
+     * filter.
+     */
+    void addTerm(const BSONObj key, WorkingSetID wsid);
 
-            // 3. Return results to our parent.
-            RETURNING_RESULTS,
+    /**
+     * Possibly return a result.  FYI, this may perform a fetch directly if it is needed to
+     * evaluate all filters.
+     */
+    StageState returnResults(WorkingSetID* out);
 
-            // 4. Done.
-            DONE,
-        };
+    // transactional context for read locks. Not owned by us
+    OperationContext* _txn;
 
-        TextStage(const TextStageParams& params, WorkingSet* ws, const MatchExpression* filter);
+    // Parameters of this text stage.
+    TextStageParams _params;
 
-        virtual ~TextStage();
+    // Text-specific phrase and negated term matcher.
+    FTSMatcher _ftsMatcher;
 
-        virtual StageState work(WorkingSetID* out);
-        virtual bool isEOF();
+    // Working set. Not owned by us.
+    WorkingSet* _ws;
 
-        virtual void prepareToYield();
-        virtual void recoverFromYield();
-        virtual void invalidate(const DiskLoc& dl, InvalidationType type);
+    // Filter. Not owned by us.
+    const MatchExpression* _filter;
 
-        PlanStageStats* getStats();
+    // Stats.
+    CommonStats _commonStats;
+    TextStats _specificStats;
 
-    private:
-        /**
-         * Initializes sub-scanners.
-         */
-        StageState initScans(WorkingSetID* out);
+    // What state are we in?  See the State enum above.
+    State _internalState;
 
-        /**
-         * Helper for buffering results array.  Returns NEED_TIME (if any results were produced),
-         * IS_EOF, or FAILURE.
-         */
-        StageState readFromSubScanners(WorkingSetID* out);
+    // Used in INIT_SCANS and READING_TERMS.  The index scans we're using to retrieve text
+    // terms.
+    OwnedPointerVector<PlanStage> _scanners;
 
-        /**
-         * Helper called from readFromSubScanners to update aggregate score with a new-found (term,
-         * score) pair for this document.  Also rejects documents that don't match this stage's
-         * filter.
-         */
-        void addTerm(const BSONObj& key, const DiskLoc& loc);
+    // Which _scanners are we currently reading from?
+    size_t _currentIndexScanner;
 
-        /**
-         * Possibly return a result.  FYI, this may perform a fetch directly if it is needed to
-         * evaluate all filters.
-         */
-        StageState returnResults(WorkingSetID* out);
-
-        // Parameters of this text stage.
-        TextStageParams _params;
-
-        // Text-specific phrase and negated term matcher.
-        FTSMatcher _ftsMatcher;
-
-        // Working set. Not owned by us.
-        WorkingSet* _ws;
-
-        // Filter. Not owned by us.
-        const MatchExpression* _filter;
-
-        // Stats.
-        CommonStats _commonStats;
-        TextStats _specificStats;
-
-        // What state are we in?  See the State enum above.
-        State _internalState;
-
-        // Used in INIT_SCANS and READING_TERMS.  The index scans we're using to retrieve text
-        // terms.
-        OwnedPointerVector<PlanStage> _scanners;
-
-        // Which _scanners are we currently reading from?
-        size_t _currentIndexScanner;
-
-        // Temporary score data filled out by sub-scans.  Used in READING_TERMS and
-        // RETURNING_RESULTS.
-        // Maps from diskloc -> aggregate score for doc.
-        typedef unordered_map<DiskLoc, double, DiskLoc::Hasher> ScoreMap;
-        ScoreMap _scores;
-        ScoreMap::const_iterator _scoreIterator;
+    // Map each buffered record id to this data.
+    struct TextRecordData {
+        TextRecordData() : wsid(WorkingSet::INVALID_ID), score(0.0) {}
+        WorkingSetID wsid;
+        double score;
     };
 
-} // namespace mongo
+    // Temporary score data filled out by sub-scans.  Used in READING_TERMS and
+    // RETURNING_RESULTS.
+    // Maps from diskloc -> (aggregate score for doc, wsid).
+    typedef unordered_map<RecordId, TextRecordData, RecordId::Hasher> ScoreMap;
+    ScoreMap _scores;
+    ScoreMap::const_iterator _scoreIterator;
+};
+
+}  // namespace mongo

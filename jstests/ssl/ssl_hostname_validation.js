@@ -5,6 +5,7 @@ var SERVER_CERT = "jstests/libs/server.pem";
 var CN_CERT = "jstests/libs/localhostnameCN.pem"; 
 var SAN_CERT = "jstests/libs/localhostnameSAN.pem"; 
 var CLIENT_CERT = "jstests/libs/client.pem"
+var BAD_SAN_CERT = "jstests/libs/badSAN.pem";
 
 // We want to be able to control all SSL parameters
 // but still need an SSL shell hence the test is placed
@@ -58,14 +59,20 @@ function testCombination(certPath, allowInvalidHost, allowInvalidCert, shouldSuc
 // and allowInvalidCertificates
 testCombination(CN_CERT, false, false, true);
 testCombination(SAN_CERT, false, false, true);
-testCombination(SERVER_CERT, false, false, false);
+
+// SERVER_CERT has SAN=localhost
+testCombination(SERVER_CERT, false, false, true);
 testCombination(SERVER_CERT, false, true, true);
 testCombination(SERVER_CERT, true, false, true);
 testCombination(SERVER_CERT, true, true, true);
 
+// BAD_SAN_CERT has SAN=BadSAN.
+testCombination(BAD_SAN_CERT, false, false, false);
+
 // 2. Initiate ReplSetTest with invalid certs
 ssl_options = {sslMode : "requireSSL",
-               sslPEMKeyFile : SERVER_CERT,
+               // SERVER_CERT has SAN=localhost. CLIENT_CERT is exact same except no SANS
+               sslPEMKeyFile : CLIENT_CERT,
                sslCAFile: CA_CERT};
 
 replTest = new ReplSetTest({nodes : {node0 : ssl_options, node1 : ssl_options}});
@@ -86,6 +93,7 @@ replTest.stopSet();
 
 // 4. Initiate ReplSetTest with invalid certs but set allowInvalidCertificates
 ssl_options = {sslMode : "requireSSL",
+               // SERVER_CERT has SAN=localhost. CLIENT_CERT is exact same except no SANS
                sslPEMKeyFile : SERVER_CERT,
                sslCAFile: CA_CERT,
                sslAllowInvalidCertificates: ""};

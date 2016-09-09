@@ -8,8 +8,6 @@ var st = new ShardingTest({shards : 1,
                            separateConfig : 1});
 
 var mongos = st.s0;
-// Backport from v2.7 - use write command mode
-mongos.forceWriteMode("commands");
 var coll = mongos.getCollection("foo.bar");
 
 //

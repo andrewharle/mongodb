@@ -92,11 +92,12 @@ assert.lte( before.query + 10 , after.query , "B3" )
 
 db.foo.ensureIndex( { x : 1 } )
 
+var bulk = db.foo.initializeUnorderedBulkOp();
 for ( i=0; i<100; i++ ){
     if ( i == 17 ) continue;
-    db.foo.insert( { x : i } )
+    bulk.insert({ x: i });
 }
-db.getLastError( 3 , 10000 );
+assert.writeOK(bulk.execute({ w: 3 }));
 
 // Counts pass the options of the connection - which is slaveOk'd, so we need to wait for 
 // replication for this and future tests to pass
@@ -129,6 +130,7 @@ assert.commandWorked(s.getDB('admin').runCommand({ moveChunk: "test.foo",
                                                    find: { x: 10 },
                                                    to: other._id,
                                                    _secondaryThrottle: true,
+                                                   writeConcern: { w: 2 },
                                                    _waitForDelete: true }));
 assert.eq( 100 , t.count() , "C3" )
 

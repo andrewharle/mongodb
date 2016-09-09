@@ -28,203 +28,223 @@
 
 #include "mongo/db/exec/fetch.h"
 
+#include "mongo/db/catalog/collection.h"
 #include "mongo/db/exec/filter.h"
+#include "mongo/db/exec/scoped_timer.h"
 #include "mongo/db/exec/working_set_common.h"
-#include "mongo/db/pdfile.h"
+#include "mongo/db/storage/record_fetcher.h"
 #include "mongo/util/fail_point_service.h"
+#include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
 
-    // Some fail points for testing.
-    MONGO_FP_DECLARE(fetchInMemoryFail);
-    MONGO_FP_DECLARE(fetchInMemorySucceed);
+using std::auto_ptr;
+using std::vector;
 
-    FetchStage::FetchStage(WorkingSet* ws, PlanStage* child, const MatchExpression* filter)
-        : _ws(ws), _child(child), _filter(filter), _idBeingPagedIn(WorkingSet::INVALID_ID) { }
+// static
+const char* FetchStage::kStageType = "FETCH";
 
-    FetchStage::~FetchStage() { }
+FetchStage::FetchStage(OperationContext* txn,
+                       WorkingSet* ws,
+                       PlanStage* child,
+                       const MatchExpression* filter,
+                       const Collection* collection)
+    : _txn(txn),
+      _collection(collection),
+      _ws(ws),
+      _child(child),
+      _filter(filter),
+      _idBeingPagedIn(WorkingSet::INVALID_ID),
+      _commonStats(kStageType) {}
 
-    bool FetchStage::isEOF() {
-        if (WorkingSet::INVALID_ID != _idBeingPagedIn) {
-            // We asked our parent for a page-in but he didn't get back to us.  We still need to
-            // return the result that _idBeingPagedIn refers to.
-            return false;
-        }
+FetchStage::~FetchStage() {}
 
-        return _child->isEOF();
+bool FetchStage::isEOF() {
+    if (WorkingSet::INVALID_ID != _idBeingPagedIn) {
+        // We asked the parent for a page-in, but still haven't had a chance to return the
+        // paged in document
+        return false;
     }
 
-    bool recordInMemory(const char* data) {
-        if (MONGO_FAIL_POINT(fetchInMemoryFail)) {
-            return false;
-        }
+    return _child->isEOF();
+}
 
-        if (MONGO_FAIL_POINT(fetchInMemorySucceed)) {
-            return true;
-        }
+PlanStage::StageState FetchStage::work(WorkingSetID* out) {
+    ++_commonStats.works;
 
-        return Record::likelyInPhysicalMemory(data);
+    // Adds the amount of time taken by work() to executionTimeMillis.
+    ScopedTimer timer(&_commonStats.executionTimeMillis);
+
+    if (isEOF()) {
+        return PlanStage::IS_EOF;
     }
 
-    PlanStage::StageState FetchStage::work(WorkingSetID* out) {
-        ++_commonStats.works;
+    // We might have a fetched result to return.
+    if (WorkingSet::INVALID_ID != _idBeingPagedIn) {
+        WorkingSetID id = _idBeingPagedIn;
+        _idBeingPagedIn = WorkingSet::INVALID_ID;
+        WorkingSetMember* member = _ws->get(id);
 
-        if (isEOF()) { return PlanStage::IS_EOF; }
+        WorkingSetCommon::completeFetch(_txn, member, _collection);
 
-        // If we asked our parent for a page-in last time work(...) was called, finish the fetch.
-        if (WorkingSet::INVALID_ID != _idBeingPagedIn) {
-            return fetchCompleted(out);
-        }
+        return returnIfMatches(member, id, out);
+    }
 
-        // If we're here, we're not waiting for a DiskLoc to be fetched.  Get another to-be-fetched
-        // result from our child.
-        WorkingSetID id = WorkingSet::INVALID_ID;
-        StageState status = _child->work(&id);
+    // If we're here, we're not waiting for a RecordId to be fetched.  Get another to-be-fetched
+    // result from our child.
+    WorkingSetID id = WorkingSet::INVALID_ID;
+    StageState status = _child->work(&id);
 
-        if (PlanStage::ADVANCED == status) {
-            WorkingSetMember* member = _ws->get(id);
+    if (PlanStage::ADVANCED == status) {
+        WorkingSetMember* member = _ws->get(id);
 
-            // If there's an obj there, there is no fetching to perform.
-            if (member->hasObj()) {
-                ++_specificStats.alreadyHasObj;
-                return returnIfMatches(member, id, out);
-            }
-
+        // If there's an obj there, there is no fetching to perform.
+        if (member->hasObj()) {
+            ++_specificStats.alreadyHasObj;
+        } else {
             // We need a valid loc to fetch from and this is the only state that has one.
             verify(WorkingSetMember::LOC_AND_IDX == member->state);
             verify(member->hasLoc());
 
-            Record* record = member->loc.rec();
-            const char* data = record->dataNoThrowing();
+            // We might need to retrieve 'nextLoc' from secondary storage, in which case we send
+            // a NEED_FETCH request up to the PlanExecutor.
+            if (!member->loc.isNull()) {
+                std::auto_ptr<RecordFetcher> fetcher(
+                    _collection->documentNeedsFetch(_txn, member->loc));
+                if (NULL != fetcher.get()) {
+                    // There's something to fetch. Hand the fetcher off to the WSM, and pass up
+                    // a fetch request.
+                    _idBeingPagedIn = id;
+                    member->setFetcher(fetcher.release());
+                    *out = id;
+                    _commonStats.needFetch++;
+                    return NEED_FETCH;
+                }
+            }
 
-            if (!recordInMemory(data)) {
-                // member->loc points to a record that's NOT in memory.  Pass a fetch request up.
-                verify(WorkingSet::INVALID_ID == _idBeingPagedIn);
-                _idBeingPagedIn = id;
-                *out = id;
-                ++_commonStats.needFetch;
-                return PlanStage::NEED_FETCH;
-            }
-            else {
-                // Don't need index data anymore as we have an obj.
-                member->keyData.clear();
-                member->obj = BSONObj(data);
-                member->state = WorkingSetMember::LOC_AND_UNOWNED_OBJ;
-                return returnIfMatches(member, id, out);
-            }
+            // The doc is already in memory, so go ahead and grab it. Now we have a RecordId
+            // as well as an unowned object
+            member->obj = _collection->docFor(_txn, member->loc);
+            member->keyData.clear();
+            member->state = WorkingSetMember::LOC_AND_OBJ;
         }
-        else if (PlanStage::FAILURE == status) {
-            *out = id;
-            // If a stage fails, it may create a status WSM to indicate why it
-            // failed, in which case 'id' is valid.  If ID is invalid, we
-            // create our own error message.
-            if (WorkingSet::INVALID_ID == id) {
-                mongoutils::str::stream ss;
-                ss << "fetch stage failed to read in results from child";
-                Status status(ErrorCodes::InternalError, ss);
-                *out = WorkingSetCommon::allocateStatusMember( _ws, status);
-            }
-            return status;
+
+        return returnIfMatches(member, id, out);
+    } else if (PlanStage::FAILURE == status) {
+        *out = id;
+        // If a stage fails, it may create a status WSM to indicate why it
+        // failed, in which case 'id' is valid.  If ID is invalid, we
+        // create our own error message.
+        if (WorkingSet::INVALID_ID == id) {
+            mongoutils::str::stream ss;
+            ss << "fetch stage failed to read in results from child";
+            Status status(ErrorCodes::InternalError, ss);
+            *out = WorkingSetCommon::allocateStatusMember(_ws, status);
         }
-        else {
-            if (PlanStage::NEED_FETCH == status) {
-                *out = id;
-                ++_commonStats.needFetch;
-            }
-            else if (PlanStage::NEED_TIME == status) {
-                ++_commonStats.needTime;
-            }
-            return status;
-        }
+        return status;
+    } else if (PlanStage::NEED_TIME == status) {
+        ++_commonStats.needTime;
+    } else if (PlanStage::NEED_FETCH == status) {
+        ++_commonStats.needFetch;
+        *out = id;
     }
 
-    void FetchStage::prepareToYield() {
-        ++_commonStats.yields;
-        _child->prepareToYield();
-    }
+    return status;
+}
 
-    void FetchStage::recoverFromYield() {
-        ++_commonStats.unyields;
-        _child->recoverFromYield();
-    }
+void FetchStage::saveState() {
+    _txn = NULL;
+    ++_commonStats.yields;
+    _child->saveState();
+}
 
-    void FetchStage::invalidate(const DiskLoc& dl, InvalidationType type) {
-        ++_commonStats.invalidates;
+void FetchStage::restoreState(OperationContext* opCtx) {
+    invariant(_txn == NULL);
+    _txn = opCtx;
+    ++_commonStats.unyields;
+    _child->restoreState(opCtx);
+}
 
-        _child->invalidate(dl, type);
+void FetchStage::invalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) {
+    ++_commonStats.invalidates;
 
-        // If we're holding on to an object that we're waiting for the runner to page in...
-        if (WorkingSet::INVALID_ID != _idBeingPagedIn) {
-            // And we haven't already invalidated it...
-            WorkingSetMember* member = _ws->get(_idBeingPagedIn);
-            if (member->hasLoc() && (member->loc == dl)) {
-                // Just fetch it now and kill the DiskLoc.
-                WorkingSetCommon::fetchAndInvalidateLoc(member);
-            }
-        }
-    }
+    _child->invalidate(txn, dl, type);
 
-    PlanStage::StageState FetchStage::fetchCompleted(WorkingSetID* out) {
+    // It's possible that the loc getting invalidated is the one we're about to
+    // fetch. In this case we do a "forced fetch" and put the WSM in owned object state.
+    if (WorkingSet::INVALID_ID != _idBeingPagedIn) {
         WorkingSetMember* member = _ws->get(_idBeingPagedIn);
-
-        // The DiskLoc we're waiting to page in was invalidated (forced fetch).  Test for
-        // matching and maybe pass it up.
-        if (member->state == WorkingSetMember::OWNED_OBJ) {
-            WorkingSetID memberID = _idBeingPagedIn;
-            _idBeingPagedIn = WorkingSet::INVALID_ID;
-            return returnIfMatches(member, memberID, out);
-        }
-
-        // Assume that the caller has fetched appropriately.
-        // TODO: Do we want to double-check the runner?  Not sure how reliable likelyInMemory is
-        // on all platforms.
-        verify(member->hasLoc());
-        verify(!member->hasObj());
-
-        // Make the (unowned) object.
-        Record* record = member->loc.rec();
-        const char* data = record->dataNoThrowing();
-        member->obj = BSONObj(data);
-
-        // Don't need index data anymore as we have an obj.
-        member->keyData.clear();
-        member->state = WorkingSetMember::LOC_AND_UNOWNED_OBJ;
-        verify(!member->obj.isOwned());
-
-        // Return the obj if it passes our filter.
-        WorkingSetID memberID = _idBeingPagedIn;
-        _idBeingPagedIn = WorkingSet::INVALID_ID;
-        return returnIfMatches(member, memberID, out);
-    }
-
-    PlanStage::StageState FetchStage::returnIfMatches(WorkingSetMember* member,
-                                                      WorkingSetID memberID,
-                                                      WorkingSetID* out) {
-        if (Filter::passes(member, _filter)) {
-            if (NULL != _filter) {
-                ++_specificStats.matchTested;
-            }
-
-            *out = memberID;
-
-            ++_commonStats.advanced;
-            return PlanStage::ADVANCED;
-        }
-        else {
-            _ws->free(memberID);
-
-            ++_commonStats.needTime;
-            return PlanStage::NEED_TIME;
+        if (member->hasLoc() && (member->loc == dl)) {
+            // Fetch it now and kill the diskloc.
+            WorkingSetCommon::fetchAndInvalidateLoc(txn, member, _collection);
         }
     }
+}
 
-    PlanStageStats* FetchStage::getStats() {
-        _commonStats.isEOF = isEOF();
+PlanStage::StageState FetchStage::returnIfMatches(WorkingSetMember* member,
+                                                  WorkingSetID memberID,
+                                                  WorkingSetID* out) {
+    // We consider "examining a document" to be every time that we pass a document through
+    // a filter by calling Filter::passes(...) below. Therefore, the 'docsExamined' metric
+    // is not always equal to the number of documents that were fetched from the collection.
+    // In particular, we can sometimes generate plans which have two fetch stages. The first
+    // one actually grabs the document from the collection, and the second passes the
+    // document through a second filter.
+    //
+    // One common example of this is geoNear. Suppose that a geoNear plan is searching an
+    // annulus to find 2dsphere-indexed documents near some point (x, y) on the globe.
+    // After fetching documents within geo hashes that intersect this annulus, the docs are
+    // fetched and filtered to make sure that they really do fall into this annulus. However,
+    // the user might also want to find only those documents for which accommodationType==
+    // "restaurant". The planner will add a second fetch stage to filter by this non-geo
+    // predicate.
+    ++_specificStats.docsExamined;
 
-        auto_ptr<PlanStageStats> ret(new PlanStageStats(_commonStats, STAGE_FETCH));
-        ret->specific.reset(new FetchStats(_specificStats));
-        ret->children.push_back(_child->getStats());
-        return ret.release();
+    if (Filter::passes(member, _filter)) {
+        if (NULL != _filter) {
+            ++_specificStats.matchTested;
+        }
+
+        *out = memberID;
+
+        ++_commonStats.advanced;
+        return PlanStage::ADVANCED;
+    } else {
+        _ws->free(memberID);
+
+        ++_commonStats.needTime;
+        return PlanStage::NEED_TIME;
     }
+}
+
+vector<PlanStage*> FetchStage::getChildren() const {
+    vector<PlanStage*> children;
+    children.push_back(_child.get());
+    return children;
+}
+
+PlanStageStats* FetchStage::getStats() {
+    _commonStats.isEOF = isEOF();
+
+    // Add a BSON representation of the filter to the stats tree, if there is one.
+    if (NULL != _filter) {
+        BSONObjBuilder bob;
+        _filter->toBSON(&bob);
+        _commonStats.filter = bob.obj();
+    }
+
+    auto_ptr<PlanStageStats> ret(new PlanStageStats(_commonStats, STAGE_FETCH));
+    ret->specific.reset(new FetchStats(_specificStats));
+    ret->children.push_back(_child->getStats());
+    return ret.release();
+}
+
+const CommonStats* FetchStage::getCommonStats() {
+    return &_commonStats;
+}
+
+const SpecificStats* FetchStage::getSpecificStats() {
+    return &_specificStats;
+}
 
 }  // namespace mongo

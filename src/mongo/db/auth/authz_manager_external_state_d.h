@@ -28,7 +28,6 @@
 
 #pragma once
 
-#include <boost/function.hpp>
 #include <boost/thread/mutex.hpp>
 #include <string>
 
@@ -37,55 +36,51 @@
 #include "mongo/db/auth/authz_manager_external_state_local.h"
 #include "mongo/db/auth/role_graph.h"
 #include "mongo/db/auth/user_name.h"
+#include "mongo/stdx/functional.h"
 
 namespace mongo {
 
-    /**
-     * The implementation of AuthzManagerExternalState functionality for mongod.
-     */
-    class AuthzManagerExternalStateMongod : public AuthzManagerExternalStateLocal {
-        MONGO_DISALLOW_COPYING(AuthzManagerExternalStateMongod);
+/**
+ * The implementation of AuthzManagerExternalState functionality for mongod.
+ */
+class AuthzManagerExternalStateMongod : public AuthzManagerExternalStateLocal {
+    MONGO_DISALLOW_COPYING(AuthzManagerExternalStateMongod);
 
-    public:
-        AuthzManagerExternalStateMongod();
-        virtual ~AuthzManagerExternalStateMongod();
+public:
+    AuthzManagerExternalStateMongod();
+    virtual ~AuthzManagerExternalStateMongod();
 
-        virtual Status getAllDatabaseNames(std::vector<std::string>* dbnames);
+    virtual Status findOne(OperationContext* txn,
+                           const NamespaceString& collectionName,
+                           const BSONObj& query,
+                           BSONObj* result);
+    virtual Status query(OperationContext* txn,
+                         const NamespaceString& collectionName,
+                         const BSONObj& query,
+                         const BSONObj& projection,
+                         const stdx::function<void(const BSONObj&)>& resultProcessor);
+    virtual Status insert(OperationContext* txn,
+                          const NamespaceString& collectionName,
+                          const BSONObj& document,
+                          const BSONObj& writeConcern);
+    virtual Status update(OperationContext* txn,
+                          const NamespaceString& collectionName,
+                          const BSONObj& query,
+                          const BSONObj& updatePattern,
+                          bool upsert,
+                          bool multi,
+                          const BSONObj& writeConcern,
+                          int* nMatched);
+    virtual Status remove(OperationContext* txn,
+                          const NamespaceString& collectionName,
+                          const BSONObj& query,
+                          const BSONObj& writeConcern,
+                          int* numRemoved);
+    virtual bool tryAcquireAuthzUpdateLock(const StringData& why);
+    virtual void releaseAuthzUpdateLock();
 
-        virtual Status findOne(const NamespaceString& collectionName,
-                               const BSONObj& query,
-                               BSONObj* result);
-        virtual Status query(const NamespaceString& collectionName,
-                             const BSONObj& query,
-                             const BSONObj& projection,
-                             const boost::function<void(const BSONObj&)>& resultProcessor);
-        virtual Status insert(const NamespaceString& collectionName,
-                              const BSONObj& document,
-                              const BSONObj& writeConcern);
-        virtual Status update(const NamespaceString& collectionName,
-                              const BSONObj& query,
-                              const BSONObj& updatePattern,
-                              bool upsert,
-                              bool multi,
-                              const BSONObj& writeConcern,
-                              int* nMatched);
-        virtual Status remove(const NamespaceString& collectionName,
-                              const BSONObj& query,
-                              const BSONObj& writeConcern,
-                              int* numRemoved);
-        virtual Status createIndex(const NamespaceString& collectionName,
-                                   const BSONObj& pattern,
-                                   bool unique,
-                                   const BSONObj& writeConcern);
-        virtual Status dropIndexes(const NamespaceString& collectionName,
-                                   const BSONObj& writeConcern);
-        virtual bool tryAcquireAuthzUpdateLock(const StringData& why);
-        virtual void releaseAuthzUpdateLock();
+private:
+    boost::timed_mutex _authzDataUpdateLock;
+};
 
-    private:
-        virtual Status _getUserDocument(const UserName& userName, BSONObj* userDoc);
-
-        boost::timed_mutex _authzDataUpdateLock;
-    };
-
-} // namespace mongo
+}  // namespace mongo

@@ -34,13 +34,13 @@ print()
 // need to wait for read to start
 print("wait have some ops");
 assert.soon( function(){
-    return ops( { "locks.^test": "r", "ns": "test.jstests_currentop" } ).length + 
-        ops({ "locks.^test": "R", "ns": "test.jstests_currentop" }).length >= 1;
+    return ops( { "locks.Collection": "r", "ns": "test.jstests_currentop" } ).length + 
+        ops({ "locks.Collection": "R", "ns": "test.jstests_currentop" }).length >= 1;
 }, "have_some_ops");
 print("ok");
     
 s2 = startParallelShell( "db.jstests_currentop.update({ '$where': function() { sleep(150); } }," +
-                         " { 'num': 1 }, false, true );" );
+                         " { '$inc': {num: 1} }, false, true );" );
 
 o = [];
 
@@ -49,9 +49,9 @@ function f() {
 
     printjson(o);
 
-    var writes = ops({ "locks.^test": "w", "ns": "test.jstests_currentop" }).length;
+    var writes = ops({ "locks.Collection": "w", "ns": "test.jstests_currentop" }).length;
 
-    var readops = ops({ "locks.^test": "r", "ns": "test.jstests_currentop" });
+    var readops = ops({ "locks.Collection": "r", "ns": "test.jstests_currentop" });
     print("readops:");
     printjson(readops);
     var reads = readops.length;

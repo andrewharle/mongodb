@@ -114,8 +114,8 @@ reconnect(slave1);
 wait(function() {
     var status = admin_s1.runCommand({replSetGetStatus:1});
     printjson(status);
-    return status.ok == 1 && status.members &&
-      status.members[1].state == 2 || status.members[1].state == 1;
+    return status.ok === 1 && status.members && status.members.length >= 2 &&
+      (status.members[1].state === 2 || status.members[1].state === 1);
   });
 
 
@@ -130,11 +130,5 @@ assert.writeOK(bulk.execute());
 print("11. Everyone happy eventually");
 replTest.awaitReplication(300000);
 
-
-print("13. Check hbmsg");
-master.getDB("admin").runCommand({replSetTest:1, sethbmsg:"foo bar baz"});
-var status = master.getDB("admin").runCommand({replSetGetStatus:1});
-printjson(status);
-assert.eq(status.members[0].infoMessage, "foo bar baz");
 stopMongod(ports[2]);
 replTest.stopSet();

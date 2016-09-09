@@ -1,5 +1,6 @@
 //
 // Tests cleanup of orphaned data in hashed sharded coll via the orphaned data cleanup command
+// @tags : [ hashed ]
 //
 
 var options = { separateConfig : true, shardOptions : { verbose : 2 } };
@@ -36,8 +37,9 @@ jsTest.log( "Inserting some docs on each shard, so 1/2 will be orphaned..." );
 
 for ( var s = 0; s < 2; s++ ) {
     var shardColl = ( s == 0 ? st.shard0 : st.shard1 ).getCollection( coll + "" );
-    for ( var i = 0; i < 100; i++ ) shardColl.insert({ _id : i });
-    assert.eq( null, shardColl.getDB().getLastError() );
+    var bulk = shardColl.initializeUnorderedBulkOp();
+    for ( var i = 0; i < 100; i++ ) bulk.insert({ _id : i });
+    assert.writeOK(bulk.execute());
 }
 
 assert.eq( 200, st.shard0.getCollection( coll + "" ).find().itcount() +

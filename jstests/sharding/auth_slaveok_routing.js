@@ -14,7 +14,9 @@
  */
 function doesRouteToSec( coll, query ) {
     var explain = coll.find( query ).explain();
-    var conn = new Mongo( explain.server );
+    assert.eq("SINGLE_SHARD", explain.queryPlanner.winningPlan.stage);
+    var serverInfo = explain.queryPlanner.winningPlan.shards[0].serverInfo;
+    var conn = new Mongo( serverInfo.host + ":" + serverInfo.port.toString());
     var cmdRes = conn.getDB( 'admin' ).runCommand({ isMaster: 1 });
 
     jsTest.log('isMaster: ' + tojson(cmdRes));
@@ -54,11 +56,11 @@ coll.setSlaveOk( true );
 ReplSetTest.awaitRSClientHosts( mongos, replTest.getSecondaries(),
    { ok : true, secondary : true });
 
+var bulk = coll.initializeUnorderedBulkOp();
 for ( var x = 0; x < 20; x++ ) {
-    coll.insert({ v: x, k: 10 });
+    bulk.insert({ v: x, k: 10 });
 }
-
-coll.runCommand({ getLastError: 1, w: nodeCount });
+assert.writeOK(bulk.execute({ w: nodeCount }));
 
 /* Although mongos never caches query results, try to do a different query
  * everytime just to be sure.

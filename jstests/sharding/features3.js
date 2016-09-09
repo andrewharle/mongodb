@@ -30,10 +30,11 @@ s.adminCommand({moveChunk: "test.foo", find: {_id: 3},
 s.setBalancer(true)
 
 // insert 10k small documents into the sharded collection
+var bulk = db.foo.initializeUnorderedBulkOp();
 for (i = 0; i < numDocs; i++)
-    db.foo.insert({_id: i});
+    bulk.insert({ _id: i });
+assert.writeOK(bulk.execute());
 
-db.getLastError();
 var x = db.foo.stats();
 
 // verify the colleciton has been sharded and documents are evenly distributed
@@ -43,7 +44,6 @@ assert.eq(numDocs, x.count, "total count");
 assert.eq(numDocs / 2, x.shards.shard0000.count, "count on shard0000");
 assert.eq(numDocs / 2, x.shards.shard0001.count, "count on shard0001");
 assert(x.totalIndexSize > 0);
-assert(x.numExtents > 0);
 
 // insert one doc into a non-sharded collection
 db.bar.insert({x: 1});
@@ -145,33 +145,13 @@ assert(x.code == 13,
 
 // test fsync on admin db
 x = db._adminCommand("fsync");
-assert(x.ok == 1 && x.numFiles > 0, "fsync failed: " + tojson(x));
+assert(x.ok == 1, "fsync failed: " + tojson(x));
+if ( x.all.shard0000 > 0 ) {
+    assert(x.numFiles > 0, "fsync failed: " + tojson(x));
+}
 
 // test fsync+lock on admin db
 x = db._adminCommand({"fsync" :1, lock:true});
 assert(!x.ok, "lock should fail: " + tojson(x));
-
-// write back stuff
-// SERVER-4194
-
-function countWritebacks(curop) {
-    print("---------------");
-    var num = 0;
-    for (var i = 0; i < curop.inprog.length; i++) {
-        var q = curop.inprog[i].query;
-        if (q && q.writebacklisten) {
-            printjson(curop.inprog[i]);
-            num++;
-        }
-    }
-    return num;
-}
-
-x = db.currentOp();
-assert.eq(0, countWritebacks(x), "without all");
-
-x = db.currentOp(true);
-y = countWritebacks(x);
-assert(y == 1 || y == 2, "with all: " + y);
 
 s.stop()

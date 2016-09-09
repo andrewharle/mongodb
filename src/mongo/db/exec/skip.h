@@ -28,41 +28,56 @@
 
 #pragma once
 
-#include "mongo/db/diskloc.h"
-#include "mongo/db/jsobj.h"
+#include <boost/scoped_ptr.hpp>
+
 #include "mongo/db/exec/plan_stage.h"
+#include "mongo/db/jsobj.h"
+#include "mongo/db/record_id.h"
 
 namespace mongo {
 
-    /**
-     * This stage implements skip functionality.  It drops the first 'toSkip' results from its child
-     * then returns the rest verbatim.
-     *
-     * Preconditions: None.
-     */
-    class SkipStage : public PlanStage {
-    public:
-        SkipStage(int toSkip, WorkingSet* ws, PlanStage* child);
-        virtual ~SkipStage();
+/**
+ * This stage implements skip functionality.  It drops the first 'toSkip' results from its child
+ * then returns the rest verbatim.
+ *
+ * Preconditions: None.
+ */
+class SkipStage : public PlanStage {
+public:
+    SkipStage(int toSkip, WorkingSet* ws, PlanStage* child);
+    virtual ~SkipStage();
 
-        virtual bool isEOF();
-        virtual StageState work(WorkingSetID* out);
+    virtual bool isEOF();
+    virtual StageState work(WorkingSetID* out);
 
-        virtual void prepareToYield();
-        virtual void recoverFromYield();
-        virtual void invalidate(const DiskLoc& dl, InvalidationType type);
+    virtual void saveState();
+    virtual void restoreState(OperationContext* opCtx);
+    virtual void invalidate(OperationContext* txn, const RecordId& dl, InvalidationType type);
 
-        virtual PlanStageStats* getStats();
+    virtual std::vector<PlanStage*> getChildren() const;
 
-    private:
-        WorkingSet* _ws;
-        scoped_ptr<PlanStage> _child;
+    virtual StageType stageType() const {
+        return STAGE_SKIP;
+    }
 
-        // We drop the first _toSkip results that we would have returned.
-        int _toSkip;
+    virtual PlanStageStats* getStats();
 
-        // Stats
-        CommonStats _commonStats;
-    };
+    virtual const CommonStats* getCommonStats();
+
+    virtual const SpecificStats* getSpecificStats();
+
+    static const char* kStageType;
+
+private:
+    WorkingSet* _ws;
+    boost::scoped_ptr<PlanStage> _child;
+
+    // We drop the first _toSkip results that we would have returned.
+    int _toSkip;
+
+    // Stats
+    CommonStats _commonStats;
+    SkipStats _specificStats;
+};
 
 }  // namespace mongo

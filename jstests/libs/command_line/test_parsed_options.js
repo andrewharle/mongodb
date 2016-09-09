@@ -7,7 +7,7 @@ function mergeOptions(obj1, obj2) {
         if (typeof obj1[attrname] === "object" &&
             typeof obj2[attrname] !== "undefined") {
             if (typeof obj2[attrname] !== "object") {
-                throw "Objects being merged must have the same structure";
+                throw Error("Objects being merged must have the same structure");
             }
             obj3[attrname] = mergeOptions(obj1[attrname], obj2[attrname]);
         }
@@ -19,7 +19,7 @@ function mergeOptions(obj1, obj2) {
         if (typeof obj2[attrname] === "object" &&
             typeof obj1[attrname] !== "undefined") {
             if (typeof obj1[attrname] !== "object") {
-                throw "Objects being merged must have the same structure";
+                throw Error("Objects being merged must have the same structure");
             }
             // Already handled above
         }
@@ -89,6 +89,17 @@ function testGetCmdLineOptsMongod(mongoRunnerConfig, expectedResult) {
     // Start mongod with options
     var mongod = MongoRunner.runMongod(mongoRunnerConfig);
 
+    // Create and authenticate high-privilege user in case mongod is running with authorization.
+    // Try/catch is necessary in case this is being run on an uninitiated replset, by a test
+    // such as repl_options.js for example.
+    var ex;
+    try {
+        mongod.getDB("admin").createUser({user: "root", pwd: "pass", roles: ["root"]});
+        mongod.getDB("admin").auth("root", "pass");
+    }
+    catch (ex) {
+    }
+
     // Get the parsed options
     var getCmdLineOptsResult = mongod.adminCommand("getCmdLineOpts");
 
@@ -109,6 +120,7 @@ function testGetCmdLineOptsMongod(mongoRunnerConfig, expectedResult) {
     assert.docEq(getCmdLineOptsResult.parsed, expectedResult.parsed);
 
     // Cleanup
+    mongod.getDB("admin").logout();
     MongoRunner.stopMongod(mongod.port);
 }
 

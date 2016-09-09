@@ -35,32 +35,38 @@
 
 namespace mongo {
 
-    class CmdShutdown : public Command {
-    public:
-        virtual bool requiresAuth() { return true; }
-        virtual bool adminOnly() const { return true; }
-        virtual bool localHostOnlyIfNoAuth(const BSONObj& cmdObj) { return true; }
-        virtual bool logTheOp() {
-            return false;
-        }
-        virtual bool slaveOk() const {
-            return true;
-        }
-        virtual void addRequiredPrivileges(const std::string& dbname,
-                                           const BSONObj& cmdObj,
-                                           std::vector<Privilege>* out);
-        virtual LockType locktype() const { return NONE; }
-        virtual void help( stringstream& help ) const;
-        CmdShutdown() : Command("shutdown") {}
-        bool run(const string& dbname,
-                 BSONObj& cmdObj,
-                 int options,
-                 string& errmsg,
-                 BSONObjBuilder& result,
-                 bool fromRepl);
-    private:
-        bool shutdownHelper();
-    };
+class CmdShutdown : public Command {
+public:
+    virtual bool requiresAuth() {
+        return true;
+    }
+    virtual bool adminOnly() const {
+        return true;
+    }
+    virtual bool localHostOnlyIfNoAuth(const BSONObj& cmdObj) {
+        return true;
+    }
+    virtual bool slaveOk() const {
+        return true;
+    }
+    virtual void addRequiredPrivileges(const std::string& dbname,
+                                       const BSONObj& cmdObj,
+                                       std::vector<Privilege>* out);
+    virtual bool isWriteCommandForConfigServer() const {
+        return false;
+    }
+    virtual void help(std::stringstream& help) const;
+    CmdShutdown() : Command("shutdown") {}
+    bool run(OperationContext* txn,
+             const std::string& dbname,
+             BSONObj& cmdObj,
+             int options,
+             std::string& errmsg,
+             BSONObjBuilder& result,
+             bool fromRepl);
+
+private:
+    static void shutdownHelper();
+};
 
 }  // namespace mongo
-

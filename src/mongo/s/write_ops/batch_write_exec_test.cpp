@@ -28,6 +28,8 @@
 
 #include "mongo/s/write_ops/batch_write_exec.h"
 
+#include <boost/scoped_ptr.hpp>
+
 #include "mongo/base/owned_pointer_vector.h"
 #include "mongo/s/mock_multi_write_command.h"
 #include "mongo/s/mock_ns_targeter.h"
@@ -38,273 +40,267 @@
 
 namespace {
 
-    using namespace mongo;
+using boost::scoped_ptr;
+using std::string;
+using std::vector;
 
-    /**
-     * Mimics a single shard backend for a particular collection which can be initialized with a
-     * set of write command results to return.
-     */
-    class MockSingleShardBackend {
-    public:
+using namespace mongo;
 
-        MockSingleShardBackend( const NamespaceString& nss ) {
+/**
+ * Mimics a single shard backend for a particular collection which can be initialized with a
+ * set of write command results to return.
+ */
+class MockSingleShardBackend {
+public:
+    MockSingleShardBackend(const NamespaceString& nss) {
+        // Initialize targeting to a mock shard
+        ShardEndpoint endpoint("shard", ChunkVersion::IGNORED());
+        vector<MockRange*> mockRanges;
+        mockRanges.push_back(
+            new MockRange(endpoint, nss, BSON("x" << MINKEY), BSON("x" << MAXKEY)));
+        targeter.init(mockRanges);
 
-            // Initialize targeting to a mock shard
-            ShardEndpoint endpoint( "shard", ChunkVersion::IGNORED() );
-            vector<MockRange*> mockRanges;
-            mockRanges.push_back( new MockRange( endpoint,
-                                                 nss,
-                                                 BSON( "x" << MINKEY ),
-                                                 BSON( "x" << MAXKEY ) ) );
-            targeter.init( mockRanges );
+        // Get the connection string for the mock shard
+        resolver.chooseWriteHost(mockRanges.front()->endpoint.shardName, &shardHost);
 
-            // Get the connection string for the mock shard
-            resolver.chooseWriteHost( mockRanges.front()->endpoint.shardName, &shardHost );
-
-            // Executor using the mock backend
-            exec.reset( new BatchWriteExec( &targeter, &resolver, &dispatcher ) );
-        }
-
-        void setMockResults( const vector<MockWriteResult*>& results ) {
-            dispatcher.init( results );
-        }
-
-        ConnectionString shardHost;
-
-        MockNSTargeter targeter;
-        MockShardResolver resolver;
-        MockMultiWriteCommand dispatcher;
-
-        scoped_ptr<BatchWriteExec> exec;
-    };
-
-    //
-    // Tests for the BatchWriteExec
-    //
-
-    TEST(BatchWriteExecTests, SingleOp) {
-
-        //
-        // Basic execution test
-        //
-
-        NamespaceString nss( "foo.bar" );
-
-        MockSingleShardBackend backend( nss );
-
-        BatchedCommandRequest request( BatchedCommandRequest::BatchType_Insert );
-        request.setNS( nss.ns() );
-        request.setOrdered( false );
-        request.setWriteConcern( BSONObj() );
-        // Do single-target, single doc batch write op
-        request.getInsertRequest()->addToDocuments( BSON( "x" << 1 ) );
-
-        BatchedCommandResponse response;
-        backend.exec->executeBatch( request, &response );
-        ASSERT( response.getOk() );
-
-        const BatchWriteExecStats& stats = backend.exec->getStats();
-        ASSERT_EQUALS( stats.numRounds, 1 );
+        // Executor using the mock backend
+        exec.reset(new BatchWriteExec(&targeter, &resolver, &dispatcher));
     }
 
-    TEST(BatchWriteExecTests, SingleOpError) {
-
-        //
-        // Basic error test
-        //
-
-        NamespaceString nss( "foo.bar" );
-
-        MockSingleShardBackend backend( nss );
-
-        vector<MockWriteResult*> mockResults;
-        BatchedCommandResponse errResponse;
-        errResponse.setOk( false );
-        errResponse.setErrCode( ErrorCodes::UnknownError );
-        errResponse.setErrMessage( "mock error" );
-        mockResults.push_back( new MockWriteResult( backend.shardHost, errResponse ) );
-
-        backend.setMockResults( mockResults );
-
-        BatchedCommandRequest request( BatchedCommandRequest::BatchType_Insert );
-        request.setNS( nss.ns() );
-        request.setOrdered( false );
-        request.setWriteConcern( BSONObj() );
-        // Do single-target, single doc batch write op
-        request.getInsertRequest()->addToDocuments( BSON( "x" << 1 ) );
-
-        BatchedCommandResponse response;
-        backend.exec->executeBatch( request, &response );
-        ASSERT( response.getOk() );
-        ASSERT_EQUALS( response.getN(), 0 );
-        ASSERT( response.isErrDetailsSet() );
-        ASSERT_EQUALS( response.getErrDetailsAt( 0 )->getErrCode(), errResponse.getErrCode() );
-        ASSERT( response.getErrDetailsAt( 0 )->getErrMessage().find( errResponse.getErrMessage() )
-                != string::npos );
-
-        const BatchWriteExecStats& stats = backend.exec->getStats();
-        ASSERT_EQUALS( stats.numRounds, 1 );
+    void setMockResults(const vector<MockWriteResult*>& results) {
+        dispatcher.init(results);
     }
 
+    ConnectionString shardHost;
+
+    MockNSTargeter targeter;
+    MockShardResolver resolver;
+    MockMultiWriteCommand dispatcher;
+
+    scoped_ptr<BatchWriteExec> exec;
+};
+
+//
+// Tests for the BatchWriteExec
+//
+
+TEST(BatchWriteExecTests, SingleOp) {
     //
-    // Test retryable errors
+    // Basic execution test
     //
 
-    TEST(BatchWriteExecTests, StaleOp) {
+    NamespaceString nss("foo.bar");
 
-        //
-        // Retry op in exec b/c of stale config
-        //
+    MockSingleShardBackend backend(nss);
 
-        NamespaceString nss( "foo.bar" );
+    BatchedCommandRequest request(BatchedCommandRequest::BatchType_Insert);
+    request.setNS(nss.ns());
+    request.setOrdered(false);
+    request.setWriteConcern(BSONObj());
+    // Do single-target, single doc batch write op
+    request.getInsertRequest()->addToDocuments(BSON("x" << 1));
 
-        // Insert request
-        BatchedCommandRequest request( BatchedCommandRequest::BatchType_Insert );
-        request.setNS( nss.ns() );
-        request.setOrdered( false );
-        request.setWriteConcern( BSONObj() );
-        // Do single-target, single doc batch write op
-        request.getInsertRequest()->addToDocuments( BSON( "x" << 1 ) );
+    BatchedCommandResponse response;
+    BatchWriteExecStats stats;
+    backend.exec->executeBatch(request, &response, &stats);
+    ASSERT(response.getOk());
 
-        MockSingleShardBackend backend( nss );
+    ASSERT_EQUALS(stats.numRounds, 1);
+}
 
-        vector<MockWriteResult*> mockResults;
-        WriteErrorDetail error;
-        error.setErrCode( ErrorCodes::StaleShardVersion );
-        error.setErrMessage( "mock stale error" );
-        mockResults.push_back( new MockWriteResult( backend.shardHost, error ) );
+TEST(BatchWriteExecTests, SingleOpError) {
+    //
+    // Basic error test
+    //
 
-        backend.setMockResults( mockResults );
+    NamespaceString nss("foo.bar");
 
-        // Execute request
-        BatchedCommandResponse response;
-        backend.exec->executeBatch( request, &response );
-        ASSERT( response.getOk() );
+    MockSingleShardBackend backend(nss);
 
-        const BatchWriteExecStats& stats = backend.exec->getStats();
-        ASSERT_EQUALS( stats.numStaleBatches, 1 );
+    vector<MockWriteResult*> mockResults;
+    BatchedCommandResponse errResponse;
+    errResponse.setOk(false);
+    errResponse.setErrCode(ErrorCodes::UnknownError);
+    errResponse.setErrMessage("mock error");
+    mockResults.push_back(new MockWriteResult(backend.shardHost, errResponse));
+
+    backend.setMockResults(mockResults);
+
+    BatchedCommandRequest request(BatchedCommandRequest::BatchType_Insert);
+    request.setNS(nss.ns());
+    request.setOrdered(false);
+    request.setWriteConcern(BSONObj());
+    // Do single-target, single doc batch write op
+    request.getInsertRequest()->addToDocuments(BSON("x" << 1));
+
+    BatchedCommandResponse response;
+    BatchWriteExecStats stats;
+    backend.exec->executeBatch(request, &response, &stats);
+    ASSERT(response.getOk());
+    ASSERT_EQUALS(response.getN(), 0);
+    ASSERT(response.isErrDetailsSet());
+    ASSERT_EQUALS(response.getErrDetailsAt(0)->getErrCode(), errResponse.getErrCode());
+    ASSERT(response.getErrDetailsAt(0)->getErrMessage().find(errResponse.getErrMessage()) !=
+           string::npos);
+
+    ASSERT_EQUALS(stats.numRounds, 1);
+}
+
+//
+// Test retryable errors
+//
+
+TEST(BatchWriteExecTests, StaleOp) {
+    //
+    // Retry op in exec b/c of stale config
+    //
+
+    NamespaceString nss("foo.bar");
+
+    // Insert request
+    BatchedCommandRequest request(BatchedCommandRequest::BatchType_Insert);
+    request.setNS(nss.ns());
+    request.setOrdered(false);
+    request.setWriteConcern(BSONObj());
+    // Do single-target, single doc batch write op
+    request.getInsertRequest()->addToDocuments(BSON("x" << 1));
+
+    MockSingleShardBackend backend(nss);
+
+    vector<MockWriteResult*> mockResults;
+    WriteErrorDetail error;
+    error.setErrCode(ErrorCodes::StaleShardVersion);
+    error.setErrMessage("mock stale error");
+    mockResults.push_back(new MockWriteResult(backend.shardHost, error));
+
+    backend.setMockResults(mockResults);
+
+    // Execute request
+    BatchedCommandResponse response;
+    BatchWriteExecStats stats;
+    backend.exec->executeBatch(request, &response, &stats);
+    ASSERT(response.getOk());
+
+    ASSERT_EQUALS(stats.numStaleBatches, 1);
+}
+
+TEST(BatchWriteExecTests, MultiStaleOp) {
+    //
+    // Retry op in exec multiple times b/c of stale config
+    //
+
+    NamespaceString nss("foo.bar");
+
+    // Insert request
+    BatchedCommandRequest request(BatchedCommandRequest::BatchType_Insert);
+    request.setNS(nss.ns());
+    request.setOrdered(false);
+    request.setWriteConcern(BSONObj());
+    // Do single-target, single doc batch write op
+    request.getInsertRequest()->addToDocuments(BSON("x" << 1));
+
+    MockSingleShardBackend backend(nss);
+
+    vector<MockWriteResult*> mockResults;
+    WriteErrorDetail error;
+    error.setErrCode(ErrorCodes::StaleShardVersion);
+    error.setErrMessage("mock stale error");
+    for (int i = 0; i < 3; i++) {
+        mockResults.push_back(new MockWriteResult(backend.shardHost, error));
     }
 
-    TEST(BatchWriteExecTests, MultiStaleOp) {
+    backend.setMockResults(mockResults);
 
-        //
-        // Retry op in exec multiple times b/c of stale config
-        //
+    // Execute request
+    BatchedCommandResponse response;
+    BatchWriteExecStats stats;
+    backend.exec->executeBatch(request, &response, &stats);
+    ASSERT(response.getOk());
 
-        NamespaceString nss( "foo.bar" );
+    ASSERT_EQUALS(stats.numStaleBatches, 3);
+}
 
-        // Insert request
-        BatchedCommandRequest request( BatchedCommandRequest::BatchType_Insert );
-        request.setNS( nss.ns() );
-        request.setOrdered( false );
-        request.setWriteConcern( BSONObj() );
-        // Do single-target, single doc batch write op
-        request.getInsertRequest()->addToDocuments( BSON( "x" << 1 ) );
+TEST(BatchWriteExecTests, TooManyStaleOp) {
+    //
+    // Retry op in exec too many times (without refresh) b/c of stale config
+    // (The mock targeter doesn't report progress on refresh)
+    // We should report a no progress error for everything in the batch
+    //
 
-        MockSingleShardBackend backend( nss );
+    NamespaceString nss("foo.bar");
 
-        vector<MockWriteResult*> mockResults;
-        WriteErrorDetail error;
-        error.setErrCode( ErrorCodes::StaleShardVersion );
-        error.setErrMessage( "mock stale error" );
-        for ( int i = 0; i < 3; i++ ) {
-            mockResults.push_back( new MockWriteResult( backend.shardHost, error ) );
-        }
+    // Insert request
+    BatchedCommandRequest request(BatchedCommandRequest::BatchType_Insert);
+    request.setNS(nss.ns());
+    request.setOrdered(false);
+    request.setWriteConcern(BSONObj());
+    // Do single-target, single doc batch write ops
+    request.getInsertRequest()->addToDocuments(BSON("x" << 1));
+    request.getInsertRequest()->addToDocuments(BSON("x" << 2));
 
-        backend.setMockResults( mockResults );
+    MockSingleShardBackend backend(nss);
 
-        // Execute request
-        BatchedCommandResponse response;
-        backend.exec->executeBatch( request, &response );
-        ASSERT( response.getOk() );
-
-        const BatchWriteExecStats& stats = backend.exec->getStats();
-        ASSERT_EQUALS( stats.numStaleBatches, 3 );
+    vector<MockWriteResult*> mockResults;
+    WriteErrorDetail error;
+    error.setErrCode(ErrorCodes::StaleShardVersion);
+    error.setErrMessage("mock stale error");
+    for (int i = 0; i < 10; i++) {
+        mockResults.push_back(
+            new MockWriteResult(backend.shardHost, error, request.sizeWriteOps()));
     }
 
-    TEST(BatchWriteExecTests, TooManyStaleOp) {
+    backend.setMockResults(mockResults);
 
-        //
-        // Retry op in exec too many times (without refresh) b/c of stale config
-        // (The mock targeter doesn't report progress on refresh)
-        // We should report a no progress error for everything in the batch
-        //
+    // Execute request
+    BatchedCommandResponse response;
+    BatchWriteExecStats stats;
+    backend.exec->executeBatch(request, &response, &stats);
+    ASSERT(response.getOk());
+    ASSERT_EQUALS(response.getN(), 0);
+    ASSERT(response.isErrDetailsSet());
+    ASSERT_EQUALS(response.getErrDetailsAt(0)->getErrCode(), ErrorCodes::NoProgressMade);
+    ASSERT_EQUALS(response.getErrDetailsAt(1)->getErrCode(), ErrorCodes::NoProgressMade);
+}
 
-        NamespaceString nss( "foo.bar" );
+TEST(BatchWriteExecTests, ManyStaleOpWithMigration) {
+    //
+    // Retry op in exec many times b/c of stale config, but simulate remote migrations occurring
+    //
 
-        // Insert request
-        BatchedCommandRequest request( BatchedCommandRequest::BatchType_Insert );
-        request.setNS( nss.ns() );
-        request.setOrdered( false );
-        request.setWriteConcern( BSONObj() );
-        // Do single-target, single doc batch write ops
-        request.getInsertRequest()->addToDocuments( BSON( "x" << 1 ) );
-        request.getInsertRequest()->addToDocuments( BSON( "x" << 2 ) );
+    NamespaceString nss("foo.bar");
 
-        MockSingleShardBackend backend( nss );
+    // Insert request
+    BatchedCommandRequest request(BatchedCommandRequest::BatchType_Insert);
+    request.setNS(nss.ns());
+    request.setOrdered(false);
+    request.setWriteConcern(BSONObj());
+    // Do single-target, single doc batch write op
+    request.getInsertRequest()->addToDocuments(BSON("x" << 1));
 
-        vector<MockWriteResult*> mockResults;
-        WriteErrorDetail error;
-        error.setErrCode( ErrorCodes::StaleShardVersion );
-        error.setErrMessage( "mock stale error" );
-        for ( int i = 0; i < 10; i++ ) {
-            mockResults.push_back( new MockWriteResult( backend.shardHost,
-                                                        error,
-                                                        request.sizeWriteOps() ) );
-        }
+    MockSingleShardBackend backend(nss);
 
-        backend.setMockResults( mockResults );
+    vector<MockWriteResult*> mockResults;
+    WriteErrorDetail error;
+    error.setErrCode(ErrorCodes::StaleShardVersion);
+    error.setErrMessage("mock stale error");
+    for (int i = 0; i < 10; i++) {
+        if (i % 2 == 0)
+            error.setErrInfo(BSONObj());
+        else
+            error.setErrInfo(BSON("inCriticalSection" << true));
 
-        // Execute request
-        BatchedCommandResponse response;
-        backend.exec->executeBatch( request, &response );
-        ASSERT( response.getOk() );
-        ASSERT_EQUALS( response.getN(), 0 );
-        ASSERT( response.isErrDetailsSet() );
-        ASSERT_EQUALS( response.getErrDetailsAt( 0 )->getErrCode(), ErrorCodes::NoProgressMade );
-        ASSERT_EQUALS( response.getErrDetailsAt( 1 )->getErrCode(), ErrorCodes::NoProgressMade );
+        mockResults.push_back(new MockWriteResult(backend.shardHost, error));
     }
 
-    TEST(BatchWriteExecTests, ManyStaleOpWithMigration) {
+    backend.setMockResults(mockResults);
 
-        //
-        // Retry op in exec many times b/c of stale config, but simulate remote migrations occurring
-        //
+    // Execute request
+    BatchedCommandResponse response;
+    BatchWriteExecStats stats;
+    backend.exec->executeBatch(request, &response, &stats);
+    ASSERT(response.getOk());
 
-        NamespaceString nss( "foo.bar" );
+    ASSERT_EQUALS(stats.numStaleBatches, 10);
+}
 
-        // Insert request
-        BatchedCommandRequest request( BatchedCommandRequest::BatchType_Insert );
-        request.setNS( nss.ns() );
-        request.setOrdered( false );
-        request.setWriteConcern( BSONObj() );
-        // Do single-target, single doc batch write op
-        request.getInsertRequest()->addToDocuments( BSON( "x" << 1 ) );
-
-        MockSingleShardBackend backend( nss );
-
-        vector<MockWriteResult*> mockResults;
-        WriteErrorDetail error;
-        error.setErrCode( ErrorCodes::StaleShardVersion );
-        error.setErrMessage( "mock stale error" );
-        for ( int i = 0; i < 10; i++ ) {
-            if ( i % 2 == 0 )
-                error.setErrInfo( BSONObj() );
-            else
-                error.setErrInfo( BSON( "inCriticalSection" << true ) );
-
-            mockResults.push_back( new MockWriteResult( backend.shardHost, error ) );
-        }
-
-        backend.setMockResults( mockResults );
-
-        // Execute request
-        BatchedCommandResponse response;
-        backend.exec->executeBatch( request, &response );
-        ASSERT( response.getOk() );
-
-        const BatchWriteExecStats& stats = backend.exec->getStats();
-        ASSERT_EQUALS( stats.numStaleBatches, 10 );
-    }
-
-} // unnamed namespace
+}  // unnamed namespace

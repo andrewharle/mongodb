@@ -30,60 +30,58 @@
 
 #pragma once
 
-#include "mongo/db/repl/connections.h"
+#include <boost/shared_ptr.hpp>
+#include <list>
+
+#include "mongo/db/jsobj.h"
 #include "mongo/util/background.h"
 
 namespace mongo {
+namespace repl {
 
-    struct Target {
-        Target(string hostport) : toHost(hostport), ok(false) { }
-        //Target() : ok(false) { }
-        const string toHost;
-        bool ok;
-        BSONObj result;
-    };
+struct Target {
+    Target(std::string hostport) : toHost(hostport), ok(false) {}
+    // Target() : ok(false) { }
+    const std::string toHost;
+    bool ok;
+    BSONObj result;
+};
 
-    /** send a command to several servers in parallel.  waits for all to complete before 
-        returning.  
-        
-        in: Target::toHost
-        out: Target::result and Target::ok
-    */
-    void multiCommand(BSONObj cmd, list<Target>& L);
+/** send a command to several servers in parallel.  waits for all to complete before
+    returning.
 
-    class _MultiCommandJob : public BackgroundJob {
-    public:
-        BSONObj& cmd;
-        Target& d;
-        _MultiCommandJob(BSONObj& _cmd, Target& _d) : cmd(_cmd), d(_d) { }
+    in: Target::toHost
+    out: Target::result and Target::ok
+*/
+void multiCommand(BSONObj cmd, std::list<Target>& L);
 
-    private:
-        string name() const { return "MultiCommandJob"; }
-        void run() {
-            try {
-                ScopedConn c(d.toHost);
-                LOG(1) << "multiCommand running on host " << d.toHost;
-                d.ok = c.runCommand("admin", cmd, d.result);
-                LOG(1) << "multiCommand response: " << d.result;
-            }
-            catch (const DBException& e) {
-                LOG(1) << "dev caught " << e.what() << " on multiCommand to " << d.toHost;
-            }
-        }
-    };
+class _MultiCommandJob : public BackgroundJob {
+public:
+    BSONObj& cmd;
+    Target& d;
+    _MultiCommandJob(BSONObj& _cmd, Target& _d) : cmd(_cmd), d(_d) {}
 
-    inline void multiCommand(BSONObj cmd, list<Target>& L) {
-        list< shared_ptr<BackgroundJob> > jobs;
+private:
+    std::string name() const {
+        return "MultiCommandJob";
+    }
+    void run();
+};
 
-        for( list<Target>::iterator i = L.begin(); i != L.end(); i++ ) {
-            Target& d = *i;
-            _MultiCommandJob *j = new _MultiCommandJob(cmd, d);
-            jobs.push_back( shared_ptr<BackgroundJob>(j) );
-            j->go();
-        }
+inline void multiCommand(BSONObj cmd, std::list<Target>& L) {
+    std::list<boost::shared_ptr<BackgroundJob>> jobs;
 
-        for( list< shared_ptr<BackgroundJob> >::iterator i = jobs.begin(); i != jobs.end(); i++ ) {
-            (*i)->wait();
-        }
+    for (std::list<Target>::iterator i = L.begin(); i != L.end(); i++) {
+        Target& d = *i;
+        _MultiCommandJob* j = new _MultiCommandJob(cmd, d);
+        jobs.push_back(boost::shared_ptr<BackgroundJob>(j));
+        j->go();
+    }
+
+    for (std::list<boost::shared_ptr<BackgroundJob>>::iterator i = jobs.begin(); i != jobs.end();
+         i++) {
+        (*i)->wait();
     }
 }
+}  // namespace repl
+}  // namespace mongo

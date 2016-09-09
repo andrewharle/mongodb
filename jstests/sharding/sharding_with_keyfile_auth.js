@@ -13,28 +13,29 @@ var st = new ShardingTest({ name : myTestName ,
 
 // Make sure all our instances got the key
 var configs = st._configServers
-var shards = st._connections
 var mongoses = st._mongos
 
+mongoses[0].getDB( "admin" ).createUser({ user: "root", pwd: "pass", roles: ["root"] });
+
 for( var i = 0; i < configs.length; i++ ){
-    printjson( new Mongo( "localhost:" + configs[i].port ).getDB("admin").runCommand({ getCmdLineOpts : 1 }) )
-    assert.eq( new Mongo( "localhost:" + configs[i].port ).getDB("admin").runCommand({ getCmdLineOpts : 1 }).parsed.security.keyFile, keyFile )
+    var confAdmin = configs[i].getDB( "admin" );
+    confAdmin.auth( "root", "pass" );
+    printjson( confAdmin.runCommand({ getCmdLineOpts : 1 }) )
+    assert.eq( confAdmin.runCommand({ getCmdLineOpts : 1 }).parsed.security.keyFile, keyFile )
 }
 
-for( var i = 0; i < shards.length; i++ ){
-    printjson( new Mongo( "localhost:" + shards[i].port ).getDB("admin").runCommand({ getCmdLineOpts : 1 }) )
-    assert.eq( new Mongo( "localhost:" + shards[i].port ).getDB("admin").runCommand({ getCmdLineOpts : 1 }).parsed.security.keyFile, keyFile )
-}
-    
 for( var i = 0; i < mongoses.length; i++ ){
-    printjson( new Mongo( "localhost:" + mongoses[i].port ).getDB("admin").runCommand({ getCmdLineOpts : 1 }) )
-    assert.eq( new Mongo( "localhost:" + mongoses[i].port ).getDB("admin").runCommand({ getCmdLineOpts : 1 }).parsed.security.keyFile, keyFile )
+    var monsAdmin = mongoses[i].getDB( "admin" );
+    monsAdmin.auth( "root", "pass" );
+    printjson( monsAdmin.runCommand({ getCmdLineOpts : 1 }) )
+    assert.eq( monsAdmin.runCommand({ getCmdLineOpts : 1 }).parsed.security.keyFile, keyFile )
 }
 
 var mongos = new Mongo( "localhost:" + st.s0.port )
-var coll = mongos.getCollection( "test.foo" )
+var coll = mongos.getDB( "test" ).foo;
 
-st.shardColl( coll, { _id : 1 }, false )
+mongos.getDB( "admin" ).auth( "root", "pass" );
+mongos.getDB( "admin" ).runCommand({shardCollection : coll, key : {_id : 1}});
 
 // Create an index so we can find by num later
 coll.ensureIndex({ insert : 1 })
@@ -45,33 +46,33 @@ coll.ensureIndex({ insert : 1 })
 print( "INSERT!" )
 
 // Insert a bunch of data
-var toInsert = 2000
+var toInsert = 2000;
+var bulk = coll.initializeUnorderedBulkOp();
 for( var i = 0; i < toInsert; i++ ){
-    coll.insert({ my : "test", data : "to", insert : i })
+    bulk.insert({ my : "test", data : "to", insert : i });
 }
-
-assert.eq( coll.getDB().getLastError(), null )
+assert.writeOK(bulk.execute());
 
 print( "UPDATE!" )
 
 // Update a bunch of data
-var toUpdate = toInsert
+var toUpdate = toInsert;
+bulk = coll.initializeUnorderedBulkOp();
 for( var i = 0; i < toUpdate; i++ ){
-    var id = coll.findOne({ insert : i })._id
-    coll.update({ insert : i, _id : id }, { $inc : { counter : 1 } })
+    var id = coll.findOne({ insert : i })._id;
+    bulk.find({ insert : i, _id : id }).updateOne({ $inc : { counter : 1 } });
 }
-
-assert.eq( coll.getDB().getLastError(), null )
+assert.writeOK(bulk.execute());
 
 print( "DELETE" )
 
 // Remove a bunch of data
-var toDelete = toInsert / 2
+var toDelete = toInsert / 2;
+bulk = coll.initializeUnorderedBulkOp();
 for( var i = 0; i < toDelete; i++ ){
-    coll.remove({ insert : i })
+    bulk.find({ insert : i }).remove();
 }
-
-assert.eq( coll.getDB().getLastError(), null )
+assert.writeOK(bulk.execute());
 
 // Make sure the right amount of data is there
 assert.eq( coll.find().count(), toInsert / 2 )

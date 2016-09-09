@@ -122,7 +122,7 @@ var checkErr = function(shouldPass, opFunc) {
  *
  * @param db {DB} the database object to use.
  * @param allowedActions {Object} the lists of operations that are allowed for the
- *     current user. The data structure is represented as a map with the presense of
+ *     current user. The data structure is represented as a map with the presence of
  *     a field name means that the operation is allowed and not allowed if it is
  *     not present. The list of field names are: insert, update, remove, query, killOp,
  *     currentOp, index_r, index_w, profile_r, profile_w, user_r, user_w, killCursor,
@@ -152,7 +152,7 @@ var testOps = function(db, allowedActions) {
         var res = db.killOp(1);
 
         if (res.err == 'unauthorized') {
-            throw 'unauthorized killOp';
+            throw Error("unauthorized killOp");
         }
     });
 
@@ -160,7 +160,7 @@ var testOps = function(db, allowedActions) {
         var res = db.currentOp();
 
         if (res.err == 'unauthorized') {
-            throw 'unauthorized currentOp';
+            throw Error("unauthorized currentOp");
         }
     });
 
@@ -171,7 +171,7 @@ var testOps = function(db, allowedActions) {
     checkErr(allowedActions.hasOwnProperty('index_w'), function() {
         var res = db.user.ensureIndex({ x: 1 });
         if (res.code == 13) { // Unauthorized
-            throw 'unauthorized currentOp';
+            throw Error("unauthorized currentOp");
         }
     });
 
@@ -239,7 +239,7 @@ var testOps = function(db, allowedActions) {
             var res = db.fsyncUnlock();
 
             if (res.err == 'unauthorized') {
-                throw 'unauthorized fsync unlock';
+                throw Error("unauthorized unauthorized fsyncUnlock");
             }
         });
     }
@@ -477,14 +477,14 @@ var runTests = function(conn) {
         var testDB = conn.getDB('test');
         var adminDB = conn.getDB('admin');
 
+        adminDB.createUser({ user: 'root', pwd: AUTH_INFO.admin.root.pwd,
+                             roles: AUTH_INFO.admin.root.roles });
+        adminDB.auth('root', AUTH_INFO.admin.root.pwd);
+
         for (var x = 0; x < 10; x++) {
             testDB.kill_cursor.insert({ x: x });
             adminDB.kill_cursor.insert({ x: x });
         }
-
-        adminDB.createUser({ user: 'root', pwd: AUTH_INFO.admin.root.pwd,
-                             roles: AUTH_INFO.admin.root.roles });
-        adminDB.auth('root', AUTH_INFO.admin.root.pwd);
 
         for (var dbName in AUTH_INFO) {
             var dbObj = AUTH_INFO[dbName];
@@ -526,10 +526,12 @@ var runTests = function(conn) {
         }
     });
 
+    teardown();
+
     if (failures.length > 0) {
         var list = '';
         failures.forEach(function(test) { list += (test + '\n'); });
-        throw 'Tests failed:\n' + list;
+        throw Error('Tests failed:\n' + list);
     }
 };
 
@@ -542,3 +544,4 @@ var st = new ShardingTest({ shards: 1, keyFile: 'jstests/libs/key1' });
 runTests(st.s);
 st.stop();
 
+print('SUCCESS! Completed basic_role_auth.js');

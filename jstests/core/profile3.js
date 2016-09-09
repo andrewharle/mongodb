@@ -26,11 +26,11 @@ try {
     
     db.setProfilingLevel(2);
     
-    db.createCollection(t.getName(), {usePowerOf2Sizes: false});
+    db.createCollection(t.getName());
     t.insert( { x : 1 } );
     t.findOne( { x : 1 } );
     t.find( { x : 1 } ).count();
-    t.update( { x : 1 }, {$inc:{a:1}} );
+    t.update( { x : 1 }, {$inc:{a:1}, $set: {big: Array(128).toString()}} );
     t.update( { x : 1 }, {$inc:{a:1}} );
     t.update( { x : 0 }, {$inc:{a:1}} );
     
@@ -42,7 +42,9 @@ try {
     assert.eq(profileCursor({nMatched: {$exists:1}}).count(), 3)
     assert.eq(profileCursor({nMatched: 1}).count(), 2)
     assert.eq(profileCursor({nMatched: 0}).count(), 1)
-    assert.eq(profileCursor({nmoved: 1}).count(), 1)
+    if ( db.serverStatus().storageEngine.name == "mmapv1" ) {
+        assert.eq(profileCursor({nmoved: 1}).count(), 1 );
+    }
 
     db.system.profile.drop();
 

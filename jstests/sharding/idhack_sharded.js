@@ -3,11 +3,6 @@
 var st = new ShardingTest({shards: 2});
 var coll = st.s0.getCollection("test.foo");
 
-// Force write commands mode; this is a backport of a new test.
-st.s0.forceWriteMode("commands");
-st.shard0.forceWriteMode("commands");
-st.shard1.forceWriteMode("commands");
-
 //
 // Pre-split collection: shard 0 takes {x: {$lt: 0}}, shard 1 takes {x: {$gte: 0}}.
 //

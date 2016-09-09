@@ -13,9 +13,8 @@ function profileCursor() {
 }
 
 function lastOp() {
-    var c = profileCursor().sort( { $natural:-1 } );
-    var p = c.next();
-    //printjson( p );
+    p = profileCursor().sort( { $natural:-1 } ).next();
+//    printjson( p );
     return p;
 }
 
@@ -49,37 +48,28 @@ try {
                   [ "keyUpdates", 0 ],
                   [ "nreturned", 0 ],
                   [ "responseLength", 20 ] ] );
-
-    db.eval( function(){ print( "-----xxx----" ); } );
-
-    x = t.save( {} );
-    x = t.save( {} );
-
+    
     // check write lock stats are set
+    t.save( {} );
     o = lastOp();
     assert.eq('insert', o.op);
-
-    assert.eq( 0, o.lockStats.timeLockedMicros.r );
-    assert.lt( 0, o.lockStats.timeLockedMicros.w );
-    assert.eq( 0, o.lockStats.timeAcquiringMicros.r );
-    //assert.lt( 0, o.lockStats.timeAcquiringMicros.w );    // Removed due to SERVER-8331
+    printjson(o.locks);
+    assert.lt( 0, Object.keys(o.locks).length );
 
     // check read lock stats are set
     t.find();
     o = lastOp();
     assert.eq('query', o.op);
-    assert.lt( 0, o.lockStats.timeLockedMicros.r );
-    assert.eq( 0, o.lockStats.timeLockedMicros.w );
-    //assert.lt( 0, o.lockStats.timeAcquiringMicros.r );    // Removed due to SERVER-8331
-    //assert.lt( 0, o.lockStats.timeAcquiringMicros.w );    // Removed due to SERVER-8331
+    printjson(o.locks);
+    assert.lt( 0, Object.keys(o.locks).length );
 
     t.save( {} );
     t.save( {} );
-    t.find().skip( 1 ).limit( 5 ).itcount();
-    checkLastOp( [ [ "ntoreturn", 5 ],
+    t.find().skip( 1 ).limit( 4 ).itcount();
+    checkLastOp( [ [ "ntoreturn", 4 ],
                   [ "ntoskip", 1 ],
-                  [ "nscanned", 4 ],
-                  [ "nreturned", 3 ] ] );
+                  [ "nscannedObjects", 3 ],
+                  [ "nreturned", 2 ] ] );
 
     t.find().batchSize( 2 ).next();
     o = lastOp();
@@ -97,8 +87,8 @@ try {
     t.ensureIndex( {a:1} );
     t.find( {a:1} ).itcount();
     o = lastOp();
-    assert.eq( "FETCH", o.execStats.type, tojson( o.execStats ) );
-    assert.eq( "IXSCAN", o.execStats.children[0].type, tojson( o.execStats ) );
+    assert.eq( "FETCH", o.execStats.stage, tojson( o.execStats ) );
+    assert.eq( "IXSCAN", o.execStats.inputStage.stage, tojson( o.execStats ) );
 
     // For queries with a lot of stats data, the execution stats in the profile
     // is replaced by the plan summary.
