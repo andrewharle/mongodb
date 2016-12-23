@@ -33,6 +33,8 @@
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/concurrency/d_concurrency.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/storage_engine.h"
 
@@ -57,7 +59,7 @@ public:
     virtual bool adminOnly() const {
         return true;
     }
-    virtual bool isWriteCommandForConfigServer() const {
+    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
     virtual void help(stringstream& help) const {
@@ -81,7 +83,11 @@ public:
              BSONObjBuilder& result) {
         vector<string> dbNames;
         StorageEngine* storageEngine = getGlobalServiceContext()->getGlobalStorageEngine();
-        storageEngine->listDatabases(&dbNames);
+        {
+            ScopedTransaction transaction(txn, MODE_IS);
+            Lock::GlobalLock lk(txn->lockState(), MODE_IS, UINT_MAX);
+            storageEngine->listDatabases(&dbNames);
+        }
 
         vector<BSONObj> dbInfos;
 

@@ -36,11 +36,10 @@
     // Test with mongodump/mongorestore
     print("dump the db");
     var data = MongoRunner.dataDir + "/tool_replset-dump1/";
-    var exitCode = MongoRunner.runMongoTool("mongodump",
-                                            {
-                                              host: replSetConnString,
-                                              out: data,
-                                            });
+    var exitCode = MongoRunner.runMongoTool("mongodump", {
+        host: replSetConnString,
+        out: data,
+    });
     assert.eq(0, exitCode, "mongodump failed to dump from the replica set");
 
     print("db successfully dumped, dropping now");
@@ -48,11 +47,10 @@
     replTest.awaitReplication();
 
     print("restore the db");
-    exitCode = MongoRunner.runMongoTool("mongorestore",
-                                        {
-                                          host: replSetConnString,
-                                          dir: data,
-                                        });
+    exitCode = MongoRunner.runMongoTool("mongorestore", {
+        host: replSetConnString,
+        dir: data,
+    });
     assert.eq(0, exitCode, "mongorestore failed to restore data to the replica set");
 
     print("db successfully restored, checking count");
@@ -64,13 +62,12 @@
     // Test with mongoexport/mongoimport
     print("export the collection");
     var extFile = MongoRunner.dataDir + "/tool_replset/export";
-    exitCode = MongoRunner.runMongoTool("mongoexport",
-                                        {
-                                          host: replSetConnString,
-                                          out: extFile,
-                                          db: "foo",
-                                          collection: "bar",
-                                        });
+    exitCode = MongoRunner.runMongoTool("mongoexport", {
+        host: replSetConnString,
+        out: extFile,
+        db: "foo",
+        collection: "bar",
+    });
     assert.eq(
         0, exitCode, "mongoexport failed to export collection 'foo.bar' from the replica set");
 
@@ -79,40 +76,29 @@
     replTest.awaitReplication();
 
     print("import the collection");
-    exitCode = MongoRunner.runMongoTool("mongoimport",
-                                        {
-                                          host: replSetConnString,
-                                          file: extFile,
-                                          db: "foo",
-                                          collection: "bar",
-                                        });
+    exitCode = MongoRunner.runMongoTool("mongoimport", {
+        host: replSetConnString,
+        file: extFile,
+        db: "foo",
+        collection: "bar",
+    });
     assert.eq(
         0, exitCode, "mongoimport failed to import collection 'foo.bar' into the replica set");
 
     var x = master.getDB("foo").getCollection("bar").count();
     assert.eq(x, 100, "mongoimport should have successfully imported the collection");
-    var doc = {
-        _id: 5,
-        x: 17
-    };
-    var oplogEntry = {
-        ts: new Timestamp(),
-        "op": "i",
-        "ns": "foo.bar",
-        "o": doc,
-        "v": NumberInt(2)
-    };
+    var doc = {_id: 5, x: 17};
+    var oplogEntry = {ts: new Timestamp(), "op": "i", "ns": "foo.bar", "o": doc, "v": NumberInt(2)};
     assert.writeOK(master.getDB("local").oplog.rs.insert(oplogEntry));
 
     assert.eq(100,
               master.getDB("foo").getCollection("bar").count(),
               "count before running " + "mongooplog was not 100 as expected");
 
-    exitCode = MongoRunner.runMongoTool("mongooplog",
-                                        {
-                                          from: "127.0.0.1:" + replTest.ports[0],
-                                          host: replSetConnString,
-                                        });
+    exitCode = MongoRunner.runMongoTool("mongooplog", {
+        from: "127.0.0.1:" + replTest.ports[0],
+        host: replSetConnString,
+    });
     assert.eq(0, exitCode, "mongooplog failed to replay the oplog");
 
     print("finished running mongooplog to replay the oplog");

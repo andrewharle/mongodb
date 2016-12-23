@@ -34,7 +34,26 @@ post:
     - command: attach.results
       params:
         file_location: work/report.json
-    - command: shell.cleanup
+    - command: shell.exec
+      params:
+        working_dir: work
+        script: |
+          source ./dsienv.sh
+          if [ -e $HOME/infrastructure_provisioning/terraform/provisioned.${cluster} ]; then
+            $DSI_PATH/bin/mark_idle.sh
+          fi
+
+    - command: shell.exec
+      params:
+        working_dir: src
+        script: |
+          # removes files from the (local) scons cache when it's over a
+          # threshold, to the $prune_ratio percentage. Ideally override
+          # these default values in the distro config in evergreen.
+
+          if [ -d "${scons_cache_path}" ]; then
+              ${python|python} buildscripts/scons_cache_prune.py --cache-dir ${scons_cache_path} --cache-size ${scons_cache_size|200} --prune-ratio ${scons_prune_ratio|0.8}
+          fi
 
 functions:
   "prepare environment":
@@ -45,7 +64,6 @@ functions:
           mkdir src
           mkdir work
           mkdir bin
-          mkdir keys
           pwd
           ls
     - command: manifest.load
@@ -61,13 +79,61 @@ functions:
         directory: src
     - command: shell.exec
       params:
-        silent: true
+        working_dir: work
         script: |
-          # generate aws private key file
-          echo "${terraform_secret}" > secret
-          chmod 400 secret
-          echo "${ec2_pem}" > keys/aws.pem
-          chmod 400 keys/aws.pem
+          cat > bootstrap.yml <<EOF
+          cluster_type: ${cluster}
+          platform: ${platform}
+          setup: ${setup}
+          storageEngine: ${storageEngine}
+          test: ${test}
+          production: true
+          EOF
+
+          cat > runtime.yml <<EOF
+          # evergreen default expansions
+          is_patch: ${is_patch}
+          task_id: ${task_id}
+          task_name: ${task_name}
+          execution: ${execution}
+          build_id: ${build_id}
+          build_variant: ${build_variant}
+          version_id: ${version_id}
+          workdir: ${workdir}
+          revision: ${revision}
+          project: ${project}
+          branch_name: ${branch_name}
+
+          # sys-perf expansions
+          # Shouldn't be needed: testList: ${testList}
+          ext: ${ext}
+          script_flags : ${script_flags}
+          dsi_rev: ${dsi_rev}
+          compare_task: ${compare_task}
+          workloads_rev: ${workloads_rev}
+          YCSB_rev: ${YCSB_rev}
+
+          # compositions of expansions
+          mongodb_binary_archive: "https://s3.amazonaws.com/mciuploads/${project}/${version_id}/${revision}/${platform}/mongod-${version_id}.tar.gz"
+          EOF
+    - command: shell.exec
+      params:
+        silent: true
+        working_dir: work
+        script: |
+          # AWS ssh secret key
+          echo "${ec2_pem}" > aws_ssh_key.pem
+          chmod 400 aws_ssh_key.pem
+
+          cat > runtime_secret.yml <<EOF
+          # Note that inside system_perf.yml we have ${aws_key} & ${aws_secret}, which are used for
+          # Evergreen resources. The below are used for dsi resources, and are NOT the same!
+          aws_access_key: "${terraform_key}"
+          aws_secret_key: "${terraform_secret}"
+          perf_jira_user: "${perf_jira_user}"
+          perf_jira_pw: "${perf_jira_pw}"
+          EOF
+          chmod 400 runtime_secret.yml
     - command: shell.exec
       params:
         working_dir: work
@@ -77,7 +143,7 @@ functions:
           virtualenv ./venv
           source ./venv/bin/activate
           pip install -r ../src/dsi/dsi/requirements.txt
-          python ../src/dsi/dsi/bin/setup_work_env.py --cluster-type ${cluster} --aws-key-name ${terraform_key} --ssh-keyfile-path ../keys/aws.pem --aws-secret-file ../secret --mongo-download-url https://s3.amazonaws.com/mciuploads/${project}/${version_id}/${revision}/${platform}/mongod-${version_id}.tar.gz --production
+          python ../src/dsi/dsi/bin/setup_work_env.py --production
           ls
           pwd
     - command: shell.exec
@@ -126,7 +192,7 @@ functions:
             echo "No existing resources found"
           fi
     - command: shell.exec
-      # call setup-cluster.sh, in most cases this only updates expire-on tag
+      # call setup-cluster.sh, in most cases this only updates tags
       params:
         working_dir: work
         script: |
@@ -174,7 +240,7 @@ functions:
           source ./dsienv.sh
           source ./venv/bin/activate
           cp mongodb_setup.${setup}.${storageEngine}.yml mongodb_setup.yml
-          $DSI_PATH/bin/mongodb_setup.py --mongodb-binary-archive https://s3.amazonaws.com/mciuploads/${project}/${version_id}/${revision}/${platform}/mongod-${version_id}.tar.gz --config && echo "${cluster} MongoDB Cluster STARTED."
+          $DSI_PATH/bin/mongodb_setup.py && echo "${cluster} MongoDB Cluster STARTED."
 
   "run test":
     - command: shell.exec
@@ -233,9 +299,8 @@ functions:
         silent: true
         script: |
           set -o errexit
-          TAGS="3.1.8-Baseline 3.2.0-Baseline 3.2.9-Baseline"
-          PROJECT="sys-perf-3.2"
-          OVERRIDEFILE="../src/dsi/dsi/analysis/v3.2/system_perf_override.json"
+          TAGS="3.3.10-Baseline 3.2.9-Baseline 3.2.3-Baseline 3.2.1-Baseline 3.1.8-Baseline 3.0.9-Baseline"
+          OVERRIDEFILE="../src/dsi/dsi/analysis/v3.4/system_perf_override.json"
           python -u ../src/dsi/dsi/analysis/dashboard_gen.py --rev ${revision} -f history.json -t tags.json --refTag $TAGS --overrideFile $OVERRIDEFILE --project_id sys-perf --variant ${build_variant} --task ${task_name} --jira-user ${perf_jira_user} --jira-password ${perf_jira_pw} || true
     - command: "json.send"
       params:
@@ -249,8 +314,8 @@ functions:
         script: |
           set -o errexit
           set -o verbose
-          TAG="3.0.6-Baseline"
-          OVERRIDEFILE="../src/dsi/dsi/analysis/v3.2/system_perf_override.json"
+          TAG="3.2.9-Baseline"
+          OVERRIDEFILE="../src/dsi/dsi/analysis/v3.4/system_perf_override.json"
           python -u ../src/dsi/dsi/analysis/post_run_check.py ${script_flags} --reports-analysis reports --perf-file reports/perf.json --rev ${revision} -f history.json -t tags.json --refTag $TAG --overrideFile $OVERRIDEFILE --project_id sys-perf --variant ${build_variant} --task ${task_name}
 
   "compare":
@@ -299,10 +364,8 @@ functions:
 tasks:
 - name: compile
   commands:
+    - command: manifest.load
     - command: git.get_project
-      params:
-        directory: src
-    - command: git.apply_patch
       params:
         directory: src
     - command: shell.exec
@@ -311,11 +374,39 @@ tasks:
         script: |
           set -o errexit
           set -o verbose
-          ${scons|scons} ${compile_flags|} mongo mongod mongos
+
+          # We get the raw version string (r1.2.3-45-gabcdef) from git
+          MONGO_VERSION=$(git describe)
+          # If this is a patch build, we add the patch version id to the version string so we know
+          # this build was a patch, and which evergreen task it came from
+          if [ "${is_patch|}" = "true" ]; then
+            MONGO_VERSION="$MONGO_VERSION-patch-${version_id}"
+          fi
+
+          # This script converts the generated version string into a sanitized version string for
+          # use by scons and uploading artifacts as well as information about for the scons cache.
+          echo $MONGO_VERSION | USE_SCONS_CACHE=${use_scons_cache|false} ${python|python} buildscripts/generate_compile_expansions.py | tee compile_expansions.yml
+    # Then we load the generated version data into the agent so we can use it in task definitions
+    - command: expansions.update
+      params:
+        file: src/compile_expansions.yml
+    - command: shell.exec
+      params:
+        working_dir: src
+        script: |
+          set -o errexit
+          set -o verbose
+          ${python|python} ./buildscripts/scons.py ${compile_flags|} ${scons_cache_args|} mongo${extension} mongod${extension} mongos${extension} MONGO_VERSION=${version}
           mkdir -p mongodb/bin
-          mv mongo mongodb/bin
-          mv mongod mongodb/bin
-          mv mongos mongodb/bin
+          mkdir -p mongodb/jstests/hooks
+          mv mongo${extension|} mongodb/bin
+          mv mongod${extension|} mongodb/bin
+          mv mongos${extension|} mongodb/bin
+          if [ -d jstests/hooks ]
+          then
+            echo "Fetching JS test DB correctness checks from directory jstests/hooks"
+            cp -a jstests/hooks/* mongodb/jstests/hooks
+          fi
           tar cvf mongodb.tar mongodb
           gzip mongodb.tar
     - command: s3.put
@@ -505,6 +596,44 @@ tasks:
     - func: "make test log artifact"
     - func: "analyze"
 
+- name: initialsync_WT_dr
+  depends_on:
+    - name: compile
+      variant: linux-standalone
+  commands:
+    - func: "prepare environment"
+    - func: "infrastructure provisioning"
+    - func: "configure mongodb cluster"
+      vars:
+        storageEngine: "wiredTiger"
+        setup: replica-2node.dr
+    - func: "run test"
+      vars:
+        storageEngine: "wiredTiger"
+        test: "initialSync"
+        testList: "default"
+    - func: "make test log artifact"
+    - func: "analyze"
+
+- name: initialsync_MMAPv1_dr
+  depends_on:
+    - name: compile
+      variant: linux-standalone
+  commands:
+    - func: "prepare environment"
+    - func: "infrastructure provisioning"
+    - func: "configure mongodb cluster"
+      vars:
+        storageEngine: "mmapv1"
+        setup: replica-2node.dr
+    - func: "run test"
+      vars:
+        storageEngine: "mmapv1"
+        test: "initialSync"
+        testList: "default"
+    - func: "make test log artifact"
+    - func: "analyze"
+
 
 #######################################
 #               Modules               #
@@ -542,11 +671,12 @@ buildvariants:
     - workloads
     - YCSB
   expansions:
-    compile_flags: -j$(grep -c ^processor /proc/cpuinfo) CC=/opt/mongodbtoolchain/bin/gcc CXX=/opt/mongodbtoolchain/bin/g++ --release
+    compile_flags: -j$(grep -c ^processor /proc/cpuinfo) CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
     setup: single-replica
     cluster: single
     platform: linux
-    project: &project dsi-v3.2
+    use_scons_cache: true
+    project: &project dsi-v3.4
   run_on:
       - "rhel70-perf-single"
   tasks:
@@ -560,10 +690,11 @@ buildvariants:
   batchtime: 1440 # 24 hours
   modules: *modules
   expansions:
-    compile_flags: -j$(grep -c ^processor /proc/cpuinfo) CC=/opt/mongodbtoolchain/bin/gcc CXX=/opt/mongodbtoolchain/bin/g++ --release
+    compile_flags: -j$(grep -c ^processor /proc/cpuinfo) CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
     setup: standalone
     cluster: single
     platform: linux
+    use_scons_cache: true
     project: *project
   run_on:
       - "rhel70-perf-single"
@@ -581,10 +712,11 @@ buildvariants:
   batchtime: 1440 # 24 hours
   modules: *modules
   expansions:
-    compile_flags: -j$(grep -c ^processor /proc/cpuinfo) CC=/opt/mongodbtoolchain/bin/gcc CXX=/opt/mongodbtoolchain/bin/g++ --release
+    compile_flags: -j$(grep -c ^processor /proc/cpuinfo) CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
     setup: shard
     cluster: shard
     platform: linux
+    use_scons_cache: true
     project: *project
   run_on:
       - "rhel70-perf-shard"
@@ -599,7 +731,7 @@ buildvariants:
   batchtime: 1440 # 24 hours
   modules: *modules
   expansions:
-    compile_flags: -j$(grep -c ^processor /proc/cpuinfo) CC=/opt/mongodbtoolchain/bin/gcc CXX=/opt/mongodbtoolchain/bin/g++ --release
+    compile_flags: -j$(grep -c ^processor /proc/cpuinfo) CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
     setup: replica
     cluster: replica
     platform: linux
@@ -617,22 +749,27 @@ buildvariants:
   batchtime: 1440 # 24 hours
   modules: *modules
   expansions:
-    compile_flags: -j$(grep -c ^processor /proc/cpuinfo) CC=/opt/mongodbtoolchain/bin/gcc CXX=/opt/mongodbtoolchain/bin/g++ --release
-    setup: replica-2node.dr
+    compile_flags: -j$(grep -c ^processor /proc/cpuinfo) CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
+    setup: replica-2node
     cluster: replica
     platform: linux
+    use_scons_cache: true
     project: *project
   run_on:
       - "rhel70-perf-replset"
   tasks:
     - name: initialsync_WT
     - name: initialsync_MMAPv1
+    - name: initialsync_WT_dr
+    - name: initialsync_MMAPv1_dr
 
 - name: linux-oplog-compare
   display_name: Linux Oplog Compare
   batchtime: 1440 # 24 hours
   modules: *modules
   expansions:
+    compile_flags: -j$(grep -c ^processor /proc/cpuinfo) CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
+    use_scons_cache: true
     project: *project
   run_on:
       - "rhel70-perf-single"

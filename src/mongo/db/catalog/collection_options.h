@@ -48,6 +48,11 @@ struct CollectionOptions {
     bool isValid() const;
 
     /**
+     * Returns true if the options indicate the namespace is a view.
+     */
+    bool isView() const;
+
+    /**
      * Confirms that collection options can be converted to BSON and back without errors.
      */
     Status validate() const;
@@ -106,9 +111,14 @@ struct CollectionOptions {
     std::string validationAction;
     std::string validationLevel;
 
-    // Collation information produced on a newer version, which supports the collation feature. We
-    // do the work to parse this information to ensure that we properly recognize when collation
-    // metadata is in the catalog, and downgrade must fail.
+    // The namespace's default collation.
     BSONObj collation;
+
+    // View-related options.
+    // The namespace of the view or collection that "backs" this view, or the empty string if this
+    // collection is not a view.
+    std::string viewOn;
+    // The aggregation pipeline that defines this view.
+    BSONObj pipeline;
 };
 }

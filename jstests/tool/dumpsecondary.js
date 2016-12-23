@@ -21,27 +21,25 @@ if (jsTest.options().keyFile) {
     commonOptions.password = jsTest.options().authPassword;
 }
 
-var exitCode = MongoRunner.runMongoTool(
-    "mongodump",
-    Object.extend(
-        {
-          host: slave.host,
-          out: MongoRunner.dataDir + "/jstests_tool_dumpsecondary_external/",
-        },
-        commonOptions));
+var exitCode =
+    MongoRunner.runMongoTool("mongodump",
+                             Object.extend({
+                                 host: slave.host,
+                                 out: MongoRunner.dataDir + "/jstests_tool_dumpsecondary_external/",
+                             },
+                                           commonOptions));
 assert.eq(0, exitCode, "mongodump failed to dump data from the secondary");
 
 db.foo.drop();
 assert.eq(0, db.foo.count(), "after drop");
 
-exitCode = MongoRunner.runMongoTool(
-    "mongorestore",
-    Object.extend(
-        {
-          host: master.host,
-          dir: MongoRunner.dataDir + "/jstests_tool_dumpsecondary_external/",
-        },
-        commonOptions));
+exitCode =
+    MongoRunner.runMongoTool("mongorestore",
+                             Object.extend({
+                                 host: master.host,
+                                 dir: MongoRunner.dataDir + "/jstests_tool_dumpsecondary_external/",
+                             },
+                                           commonOptions));
 assert.eq(0, exitCode, "mongorestore failed to restore data to the primary");
 
 assert.soon("db.foo.findOne()", "no data after sleep");

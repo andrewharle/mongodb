@@ -31,6 +31,7 @@
 
 #pragma once
 
+#include <memory>
 #include <queue>
 #include <string>
 
@@ -44,6 +45,7 @@
 
 namespace mongo {
 
+class ClockSource;
 class JournalListener;
 class WiredTigerSessionCache;
 class WiredTigerSizeStorer;
@@ -52,11 +54,14 @@ class WiredTigerKVEngine final : public KVEngine {
 public:
     WiredTigerKVEngine(const std::string& canonicalName,
                        const std::string& path,
+                       ClockSource* cs,
                        const std::string& extraOpenOptions,
                        size_t cacheSizeGB,
                        bool durable,
                        bool ephemeral,
-                       bool repair);
+                       bool repair,
+                       bool readOnly);
+
     virtual ~WiredTigerKVEngine();
 
     void setRecordStoreExtraOptions(const std::string& options);
@@ -70,7 +75,7 @@ public:
         return _durable;
     }
 
-    virtual bool isEphemeral() {
+    virtual bool isEphemeral() const {
         return _ephemeral;
     }
 
@@ -81,10 +86,10 @@ public:
                                      StringData ident,
                                      const CollectionOptions& options);
 
-    virtual RecordStore* getRecordStore(OperationContext* opCtx,
-                                        StringData ns,
-                                        StringData ident,
-                                        const CollectionOptions& options);
+    virtual std::unique_ptr<RecordStore> getRecordStore(OperationContext* opCtx,
+                                                        StringData ns,
+                                                        StringData ident,
+                                                        const CollectionOptions& options);
 
     virtual Status createSortedDataInterface(OperationContext* opCtx,
                                              StringData ident,
@@ -170,6 +175,7 @@ private:
 
     bool _durable;
     bool _ephemeral;
+    bool _readOnly;
     std::unique_ptr<WiredTigerJournalFlusher> _journalFlusher;  // Depends on _sizeStorer
 
     std::string _rsOptions;

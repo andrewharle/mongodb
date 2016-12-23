@@ -214,9 +214,7 @@ var runner = (function() {
                 myDB[collName].drop();
 
                 if (cluster.isSharded()) {
-                    var shardKey = context[workload].config.data.shardKey || {
-                        _id: 'hashed'
-                    };
+                    var shardKey = context[workload].config.data.shardKey || {_id: 'hashed'};
                     // TODO: allow workload config data to specify split
                     cluster.shardCollection(myDB[collName], shardKey, false);
                 }
@@ -328,11 +326,13 @@ var runner = (function() {
                 numUniqueTraces + ' of which were unique:\n\n';
 
             return summary +
-                uniqueTraces.map(function(obj) {
-                    var line = pluralize('thread', obj.freq) + ' with tids ' +
-                        JSON.stringify(obj.tids) + ' threw\n';
-                    return indent(line + obj.value, 8);
-                }).join('\n\n');
+                uniqueTraces
+                    .map(function(obj) {
+                        var line = pluralize('thread', obj.freq) + ' with tids ' +
+                            JSON.stringify(obj.tids) + ' threw\n';
+                        return indent(line + obj.value, 8);
+                    })
+                    .join('\n\n');
         }
 
         if (workerErrs.length > 0) {
@@ -351,6 +351,17 @@ var runner = (function() {
 
             throw err;
         }
+    }
+
+    function shouldSkipWorkload(workload, context, cluster) {
+        var config = context[workload].config;
+        var result = config.skip.call(config.data, cluster);
+        if (result.skip) {
+            var msg = result.msg || '';
+            jsTest.log('Skipping workload: ' + workload + ' ' + msg);
+            return true;
+        }
+        return false;
     }
 
     function setupWorkload(workload, context, cluster) {
@@ -393,22 +404,15 @@ var runner = (function() {
         // lock is already held by the balancer or by a workload operation. The increased wait
         // is shorter than the distributed-lock-takeover period because otherwise the node
         // would be assumed to be down and the lock would be overtaken.
-        if (cluster.isUsingLegacyConfigServers()) {
-            clusterOptions.setupFunctions.mongos.push(increaseDropDistLockTimeoutSCCC);
-            clusterOptions.teardownFunctions.mongos.push(resetDropDistLockTimeoutSCCC);
-        } else {
-            clusterOptions.setupFunctions.mongos.push(increaseDropDistLockTimeout);
-            clusterOptions.teardownFunctions.mongos.push(resetDropDistLockTimeout);
-        }
+        clusterOptions.setupFunctions.mongos.push(increaseDropDistLockTimeout);
+        clusterOptions.teardownFunctions.mongos.push(resetDropDistLockTimeout);
     }
 
     function loadWorkloadContext(workloads, context, executionOptions, applyMultipliers) {
         workloads.forEach(function(workload) {
             load(workload);  // for $config
             assert.neq('undefined', typeof $config, '$config was not defined by ' + workload);
-            context[workload] = {
-                config: parseConfig($config)
-            };
+            context[workload] = {config: parseConfig($config)};
             if (applyMultipliers) {
                 context[workload].config.iterations *= executionOptions.iterationMultiplier;
                 context[workload].config.threadCount *= executionOptions.threadMultiplier;
@@ -436,14 +440,23 @@ var runner = (function() {
         // Returns true if the workload's teardown succeeds and false if the workload's
         // teardown fails.
 
+        var phase = 'before workload ' + workload + ' teardown';
+
         try {
             // Ensure that all data has replicated correctly to the secondaries before calling the
             // workload's teardown method.
-            var phase = 'before workload ' + workload + ' teardown';
             cluster.checkReplicationConsistency(dbHashBlacklist, phase);
         } catch (e) {
             errors.push(new WorkloadFailure(
                 e.toString(), e.stack, 'main', header + ' checking consistency on secondaries'));
+            return false;
+        }
+
+        try {
+            cluster.validateAllCollections(phase);
+        } catch (e) {
+            errors.push(new WorkloadFailure(
+                e.toString(), e.stack, 'main', header + ' validating collections'));
             return false;
         }
 
@@ -528,7 +541,7 @@ var runner = (function() {
             } finally {
                 // Threads must be joined before destruction, so do this
                 // even in the presence of exceptions.
-                errors.push(... threadMgr.joinAll().map(
+                errors.push(...threadMgr.joinAll().map(
                     e => new WorkloadFailure(
                         e.err, e.stack, e.tid, 'Foreground ' + e.workloads.join(' '))));
             }
@@ -607,6 +620,11 @@ var runner = (function() {
         }
         cluster.setup();
 
+        // Filter out workloads that need to be skipped.
+        bgWorkloads =
+            bgWorkloads.filter(workload => !shouldSkipWorkload(workload, bgContext, cluster));
+        workloads = workloads.filter(workload => !shouldSkipWorkload(workload, context, cluster));
+
         // Clean up the state left behind by other tests in the concurrency suite
         // to avoid having too many open files.
 
@@ -617,8 +635,8 @@ var runner = (function() {
         var dbHashBlacklist = ['local'];
 
         if (cleanupOptions.dropDatabaseBlacklist) {
-            dbBlacklist.push(... cleanupOptions.dropDatabaseBlacklist);
-            dbHashBlacklist.push(... cleanupOptions.dropDatabaseBlacklist);
+            dbBlacklist.push(...cleanupOptions.dropDatabaseBlacklist);
+            dbHashBlacklist.push(...cleanupOptions.dropDatabaseBlacklist);
         }
         if (!cleanupOptions.keepExistingDatabases) {
             dropAllDatabases(cluster.getDB('test'), dbBlacklist);
@@ -690,7 +708,7 @@ var runner = (function() {
             } finally {
                 // Set a flag so background threads know to terminate.
                 bgThreadMgr.markAllForTermination();
-                errors.push(... bgThreadMgr.joinAll().map(
+                errors.push(...bgThreadMgr.joinAll().map(
                     e => new WorkloadFailure(
                         e.err, e.stack, e.tid, 'Background ' + e.workloads.join(' '))));
             }

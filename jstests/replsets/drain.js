@@ -20,7 +20,9 @@
             {"_id": 0, "host": nodes[0]},
             {"_id": 1, "host": nodes[1]},
             {"_id": 2, "host": nodes[2], "arbiterOnly": true}
-        ]
+        ],
+        // No primary catch-up so we focus on the drain mode.
+        "settings": {"catchUpTimeoutMillis": 0},
     });
 
     var primary = replSet.getPrimary();
@@ -75,12 +77,7 @@
               "find failed with unexpected error code: " + tojson(res));
     // Nor should it be readable with the slaveOk bit.
     secondary.slaveOk = true;
-    res = secondary.getDB("foo").runCommand({find: "foo"});
-    assert.commandFailed(res);
-    assert.eq(ErrorCodes.NotMasterOrSecondary,
-              res.code,
-              "find failed with unexpected error code: " + tojson(res));
-    secondary.slaveOk = false;
+    assert.commandWorked(secondary.getDB("foo").runCommand({find: "foo"}));
 
     assert.commandFailedWithCode(
         secondary.adminCommand({

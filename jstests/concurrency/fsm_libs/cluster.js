@@ -3,41 +3,73 @@
 /**
  * Represents a MongoDB cluster.
  */
-load('jstests/hooks/check_repl_dbhash.js');  // Loads the checkDBHashes function.
+load('jstests/hooks/validate_collections.js');  // Loads the validateCollections function.
 
 var Cluster = function(options) {
     if (!(this instanceof Cluster)) {
         return new Cluster(options);
     }
 
+    function getObjectKeys(obj) {
+        var values = [];
+        if (typeof obj !== "object") {
+            return values;
+        }
+        Object.keys(obj).forEach(key => {
+            if (key.indexOf('.') > -1) {
+                throw new Error('illegal key specified ' + key);
+            }
+            var subKeys = getObjectKeys(obj[key]);
+            if (subKeys.length === 0) {
+                values.push(key);
+            } else {
+                subKeys.forEach(subKey => {
+                    values.push(key + "." + subKey);
+                });
+            }
+        });
+        return values;
+    }
+
     function validateClusterOptions(options) {
         var allowedKeys = [
-            'enableBalancer',
             'masterSlave',
-            'replication',
+            'replication.enabled',
+            'replication.numNodes',
             'sameCollection',
             'sameDB',
             'setupFunctions',
-            'sharded',
-            'teardownFunctions',
-            'useLegacyConfigServers'
+            'sharded.enabled',
+            'sharded.enableAutoSplit',
+            'sharded.enableBalancer',
+            'sharded.numMongos',
+            'sharded.numShards',
+            'teardownFunctions'
         ];
 
-        Object.keys(options).forEach(function(option) {
+        getObjectKeys(options).forEach(function(option) {
             assert.contains(option,
                             allowedKeys,
                             'invalid option: ' + tojson(option) + '; valid options are: ' +
                                 tojson(allowedKeys));
         });
 
-        options.enableBalancer = options.enableBalancer || false;
-        assert.eq('boolean', typeof options.enableBalancer);
-
         options.masterSlave = options.masterSlave || false;
         assert.eq('boolean', typeof options.masterSlave);
 
-        options.replication = options.replication || false;
-        assert.eq('boolean', typeof options.replication);
+        options.replication = options.replication || {};
+        assert.eq('object', typeof options.replication);
+
+        options.replication.enabled = options.replication.enabled || false;
+        assert.eq('boolean', typeof options.replication.enabled);
+
+        if (typeof options.replication.numNodes !== 'undefined') {
+            assert(options.replication.enabled,
+                   "Must have replication.enabled be true if 'replication.numNodes' is specified");
+        }
+
+        options.replication.numNodes = options.replication.numNodes || 3;
+        assert.eq('number', typeof options.replication.numNodes);
 
         options.sameCollection = options.sameCollection || false;
         assert.eq('boolean', typeof options.sameCollection);
@@ -45,15 +77,43 @@ var Cluster = function(options) {
         options.sameDB = options.sameDB || false;
         assert.eq('boolean', typeof options.sameDB);
 
-        options.sharded = options.sharded || false;
-        assert.eq('boolean', typeof options.sharded);
+        options.sharded = options.sharded || {};
+        assert.eq('object', typeof options.sharded);
 
-        if (typeof options.useLegacyConfigServers !== 'undefined') {
-            assert(options.sharded, "Must be sharded if 'useLegacyConfigServers' is specified");
+        options.sharded.enabled = options.sharded.enabled || false;
+        assert.eq('boolean', typeof options.sharded.enabled);
+
+        if (typeof options.sharded.enableAutoSplit !== 'undefined') {
+            assert(options.sharded.enabled,
+                   "Must have sharded.enabled be true if 'sharded.enableAutoSplit' is specified");
         }
 
-        options.useLegacyConfigServers = options.useLegacyConfigServers || false;
-        assert.eq('boolean', typeof options.useLegacyConfigServers);
+        options.sharded.enableAutoSplit = options.sharded.enableAutoSplit || false;
+        assert.eq('boolean', typeof options.sharded.enableAutoSplit);
+
+        if (typeof options.sharded.enableBalancer !== 'undefined') {
+            assert(options.sharded.enabled,
+                   "Must have sharded.enabled be true if 'sharded.enableBalancer' is specified");
+        }
+
+        options.sharded.enableBalancer = options.sharded.enableBalancer || false;
+        assert.eq('boolean', typeof options.sharded.enableBalancer);
+
+        if (typeof options.sharded.numMongos !== 'undefined') {
+            assert(options.sharded.enabled,
+                   "Must have sharded.enabled be true if 'sharded.numMongos' is specified");
+        }
+
+        options.sharded.numMongos = options.sharded.numMongos || 2;
+        assert.eq('number', typeof options.sharded.numMongos);
+
+        if (typeof options.sharded.numShards !== 'undefined') {
+            assert(options.sharded.enabled,
+                   "Must have sharded.enabled be true if 'sharded.numShards' is specified");
+        }
+
+        options.sharded.numShards = options.sharded.numShards || 2;
+        assert.eq('number', typeof options.sharded.numShards);
 
         options.setupFunctions = options.setupFunctions || {};
         assert.eq('object', typeof options.setupFunctions);
@@ -65,7 +125,8 @@ var Cluster = function(options) {
                'Expected setupFunctions.mongod to be an array of functions');
 
         if (typeof options.setupFunctions.mongos !== 'undefined') {
-            assert(options.sharded, "Must be sharded if 'setupFunctions.mongos' is specified");
+            assert(options.sharded.enabled,
+                   "Must have sharded.enabled be true if 'setupFunctions.mongos' is specified");
         }
 
         options.setupFunctions.mongos = options.setupFunctions.mongos || [];
@@ -84,7 +145,8 @@ var Cluster = function(options) {
                'Expected teardownFunctions.mongod to be an array of functions');
 
         if (typeof options.teardownFunctions.mongos !== 'undefined') {
-            assert(options.sharded, "Must be sharded if 'teardownFunctions.mongos' is specified");
+            assert(options.sharded.enabled,
+                   "Must have sharded.enabled be true if 'teardownFunctions.mongos' is specified");
         }
 
         options.teardownFunctions.mongos = options.teardownFunctions.mongos || [];
@@ -93,10 +155,23 @@ var Cluster = function(options) {
         assert(options.teardownFunctions.mongos.every(f => (typeof f === 'function')),
                'Expected teardownFunctions.mongos to be an array of functions');
 
-        assert(!options.masterSlave || !options.replication,
-               "Both 'masterSlave' and " + "'replication' cannot be true");
-        assert(!options.masterSlave || !options.sharded,
-               "Both 'masterSlave' and 'sharded' cannot" + "be true");
+        assert(!options.masterSlave || !options.replication.enabled,
+               "Both 'masterSlave' and " + "'replication.enabled' cannot be true");
+        assert(!options.masterSlave || !options.sharded.enabled,
+               "Both 'masterSlave' and 'sharded.enabled' cannot" + "be true");
+    }
+
+    function makeReplSetTestConfig(numReplSetNodes) {
+        const REPL_SET_VOTING_LIMIT = 7;
+        // Workaround for SERVER-26893 to specify when numReplSetNodes > REPL_SET_VOTING_LIMIT.
+        var rstConfig = [];
+        for (var i = 0; i < numReplSetNodes; i++) {
+            rstConfig[i] = {};
+            if (i >= REPL_SET_VOTING_LIMIT) {
+                rstConfig[i].rsConfig = {priority: 0, votes: 0};
+            }
+        }
+        return rstConfig;
     }
 
     var conn;
@@ -106,15 +181,9 @@ var Cluster = function(options) {
     var initialized = false;
     var clusterStartTime;
 
-    var _conns = {
-        mongos: [],
-        mongod: []
-    };
+    var _conns = {mongos: [], mongod: []};
     var nextConn = 0;
     var replSets = [];
-
-    // TODO: Define size of replica set from options
-    var replSetNodes = 3;
 
     validateClusterOptions(options);
     Object.freeze(options);
@@ -127,21 +196,22 @@ var Cluster = function(options) {
             throw new Error('cluster has already been initialized');
         }
 
-        if (options.sharded) {
+        if (options.sharded.enabled) {
             // TODO: allow 'options' to specify the number of shards and mongos processes
             var shardConfig = {
-                shards: 2,
-                mongos: 2,
-                // Legacy config servers are pre-3.2 style, 3-node non-replica-set config servers
-                sync: options.useLegacyConfigServers,
+                shards: options.sharded.numShards,
+                mongos: options.sharded.numMongos,
                 verbose: verbosityLevel,
-                other: {enableBalancer: options.enableBalancer}
+                other: {
+                    enableAutoSplit: options.sharded.enableAutoSplit,
+                    enableBalancer: options.sharded.enableBalancer,
+                }
             };
 
             // TODO: allow 'options' to specify an 'rs' config
-            if (options.replication) {
+            if (options.replication.enabled) {
                 shardConfig.rs = {
-                    nodes: replSetNodes,
+                    nodes: makeReplSetTestConfig(options.replication.numNodes),
                     // Increase the oplog size (in MB) to prevent rollover
                     // during write-heavy workloads
                     oplogSize: 1024,
@@ -191,10 +261,9 @@ var Cluster = function(options) {
                 ++i;
                 mongod = st['d' + i];
             }
-        } else if (options.replication) {
-            // TODO: allow 'options' to specify the number of nodes
+        } else if (options.replication.enabled) {
             var replSetConfig = {
-                nodes: replSetNodes,
+                nodes: makeReplSetTestConfig(options.replication.numNodes),
                 // Increase the oplog size (in MB) to prevent rollover during write-heavy workloads
                 oplogSize: 1024,
                 nodeOptions: {verbose: verbosityLevel}
@@ -304,16 +373,11 @@ var Cluster = function(options) {
     };
 
     this.isSharded = function isSharded() {
-        return options.sharded;
+        return options.sharded.enabled;
     };
 
     this.isReplication = function isReplication() {
-        return options.replication;
-    };
-
-    this.isUsingLegacyConfigServers = function isUsingLegacyConfigServers() {
-        assert(this.isSharded(), 'cluster is not sharded');
-        return options.useLegacyConfigServers;
+        return options.replication.enabled;
     };
 
     this.shardCollection = function shardCollection() {
@@ -358,11 +422,7 @@ var Cluster = function(options) {
             return '';
         }
 
-        var cluster = {
-            mongos: [],
-            config: [],
-            shards: {}
-        };
+        var cluster = {mongos: [], config: [], shards: {}};
 
         var i = 0;
         var mongos = st.s0;
@@ -391,7 +451,7 @@ var Cluster = function(options) {
             } else {
                 // If the shard is a standalone mongod, the format of st.shard0.name in ShardingTest
                 // is "localhost:20006".
-                cluster.shards[i] = [shard.name];
+                cluster.shards[shard.shardName] = [shard.name];
             }
             ++i;
             shard = st['shard' + i];
@@ -412,65 +472,33 @@ var Cluster = function(options) {
     };
 
     this.isBalancerEnabled = function isBalancerEnabled() {
-        return this.isSharded() && options.enableBalancer;
+        return this.isSharded() && options.sharded.enableBalancer;
     };
 
-    this.checkDBHashes = function checkDBHashes(rst, dbBlacklist, phase) {
+    this.isAutoSplitEnabled = function isAutoSplitEnabled() {
+        return this.isSharded() && options.sharded.enableAutoSplit;
+    };
+
+    this.validateAllCollections = function validateAllCollections(phase) {
         assert(initialized, 'cluster must be initialized first');
-        assert(this.isReplication(), 'cluster is not a replica set');
 
-        // Use liveNodes.master instead of getPrimary() to avoid the detection of a new primary.
-        var primary = rst.liveNodes.master;
-
-        var res = primary.adminCommand({listDatabases: 1});
-        assert.commandWorked(res);
-
-        res.databases.forEach(dbInfo => {
-            var dbName = dbInfo.name;
-            if (Array.contains(dbBlacklist, dbName)) {
-                return;
-            }
-
-            var dbHashes = rst.getHashes(dbName);
-            var primaryDBHash = dbHashes.master;
-            assert.commandWorked(primaryDBHash);
-
-            dbHashes.slaves.forEach(secondaryDBHash => {
-                assert.commandWorked(secondaryDBHash);
-
-                var primaryNumCollections = Object.keys(primaryDBHash.collections).length;
-                var secondaryNumCollections = Object.keys(secondaryDBHash.collections).length;
-
-                assert.eq(primaryNumCollections,
-                          secondaryNumCollections,
-                          phase + ', the primary and secondary have a different number of' +
-                              ' collections: ' + tojson(dbHashes));
-
-                // Only compare the dbhashes of non-capped collections because capped collections
-                // are not necessarily truncated at the same points across replica set members.
-                var collNames =
-                    Object.keys(primaryDBHash.collections)
-                        .filter(collName => !primary.getDB(dbName)[collName].isCapped());
-
-                collNames.forEach(collName => {
-                    assert.eq(primaryDBHash.collections[collName],
-                              secondaryDBHash.collections[collName],
-                              phase + ', the primary and secondary have a different hash for the' +
-                                  ' collection ' + dbName + '.' + collName + ': ' +
-                                  tojson(dbHashes));
-                });
-
-                if (collNames.length === primaryNumCollections) {
-                    // If the primary and secondary have the same hashes for all the collections on
-                    // the database and there aren't any capped collections, then the hashes for the
-                    // whole database should match.
-                    assert.eq(primaryDBHash.md5,
-                              secondaryDBHash.md5,
-                              phase + ', the primary and secondary have a different hash for the ' +
-                                  dbName + ' database: ' + tojson(dbHashes));
+        var _validateCollections = function _validateCollections(db) {
+            // Validate all the collections on each node.
+            var res = db.adminCommand({listDatabases: 1});
+            assert.commandWorked(res);
+            res.databases.forEach(dbInfo => {
+                if (!validateCollections(db.getSiblingDB(dbInfo.name), {full: true})) {
+                    throw new Error(phase + ' collection validation failed');
                 }
             });
-        });
+        };
+
+        var startTime = Date.now();
+        jsTest.log('Starting to validate collections ' + phase);
+        this.executeOnMongodNodes(_validateCollections);
+        this.executeOnMongosNodes(_validateCollections);
+        var totalTime = Date.now() - startTime;
+        jsTest.log('Finished validating collections in ' + totalTime + ' ms, ' + phase);
     };
 
     this.checkReplicationConsistency = function checkReplicationConsistency(dbBlacklist, phase) {
@@ -494,7 +522,7 @@ var Cluster = function(options) {
                            ' assumed to still be primary, ' + phase);
 
                 // Compare the dbhashes of the primary and secondaries.
-                checkDBHashes(rst, dbBlacklist, phase);
+                rst.checkReplicatedDataHashes(phase, dbBlacklist);
                 var totalTime = Date.now() - startTime;
                 jsTest.log('Finished consistency checks of replica set with ' + primary.host +
                            ' as primary in ' + totalTime + ' ms, ' + phase);
@@ -515,12 +543,13 @@ var Cluster = function(options) {
                 // Wait for all previous workload operations to complete, with "getLastError".
                 res = primary.getDB('test').runCommand({
                     getLastError: 1,
-                    w: replSetNodes,
+                    w: options.replication.numNodes,
                     wtimeout: 5 * 60 * 1000,
                     wOpTime: primaryInfo.optime
                 });
                 assert.commandWorked(res, phase + ', error awaiting replication');
             }
+
         });
     };
 
@@ -559,5 +588,6 @@ var Cluster = function(options) {
  * and false otherwise.
  */
 Cluster.isStandalone = function isStandalone(clusterOptions) {
-    return !clusterOptions.sharded && !clusterOptions.replication && !clusterOptions.masterSlave;
+    return !clusterOptions.sharded.enabled && !clusterOptions.replication.enabled &&
+        !clusterOptions.masterSlave;
 };

@@ -16,15 +16,14 @@
 
     var i = 0;
     for (var j = 0; j < 30; j++) {
-        print("j:" + j + " : " +
-              Date.timeFunc(function() {
-                  var bulk = coll.initializeUnorderedBulkOp();
-                  for (var k = 0; k < 100; k++) {
-                      bulk.insert({num: i, s: bigString});
-                      i++;
-                  }
-                  assert.writeOK(bulk.execute());
-              }));
+        print("j:" + j + " : " + Date.timeFunc(function() {
+            var bulk = coll.initializeUnorderedBulkOp();
+            for (var k = 0; k < 100; k++) {
+                bulk.insert({num: i, s: bigString});
+                i++;
+            }
+            assert.writeOK(bulk.execute());
+        }));
     }
 
     s.startBalancer();
@@ -37,7 +36,7 @@
     print("done inserting data");
 
     print("datasize: " +
-          tojson(s.getServer("test").getDB("admin").runCommand({datasize: "test.foo"})));
+          tojson(s.getPrimaryShard("test").getDB("admin").runCommand({datasize: "test.foo"})));
     s.printChunks();
 
     function doCountsGlobal() {
@@ -92,15 +91,14 @@
     print("checkpoint C");
 
     assert(Array.unique(s.config.chunks.find().toArray().map(function(z) {
-        return z.shard;
-    })).length == 2,
+                    return z.shard;
+                })).length == 2,
            "should be using both servers");
 
     for (i = 0; i < 100; i++) {
         cursor = coll.find().batchSize(5);
         cursor.next();
-        cursor = null;
-        gc();
+        cursor.close();
     }
 
     print("checkpoint D");
@@ -111,14 +109,12 @@
     for (i = 0; i < 100; i++)
         t.save({_id: i});
     for (i = 0; i < 100; i++) {
-        t.find().batchSize(2).next();
+        var cursor = t.find().batchSize(2);
+        cursor.next();
         assert.lt(0, db.serverStatus().metrics.cursor.open.total, "cursor1");
-        gc();
+        cursor.close();
     }
 
-    for (i = 0; i < 100; i++) {
-        gc();
-    }
     assert.eq(0, db.serverStatus().metrics.cursor.open.total, "cursor2");
 
     // Stop the balancer, otherwise it may grab some connections from the pool for itself
@@ -133,8 +129,7 @@
         temp2 = conn.getDB("test2").foobar;
         assert.eq(conn._fullNameSpace, t._fullNameSpace, "check close 1");
         assert(temp2.findOne(), "check close 2");
-        conn = null;
-        gc();
+        conn.close();
     }
 
     print("checkpoint F");

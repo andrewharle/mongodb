@@ -29,4 +29,5 @@ load('jstests/aggregation/extras/utils.js');
     print(after.uptimeEstimate);
     assert.gte(
         after.uptimeEstimate, before.uptimeEstimate, "uptime estimate should be non-decreasing");
+
 })();

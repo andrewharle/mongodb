@@ -31,6 +31,7 @@
 #include "mongo/platform/basic.h"
 
 #include "mongo/base/init.h"
+#include "mongo/base/static_assert.h"
 #include "mongo/config.h"
 #include "mongo/db/commands/server_status.h"
 #include "mongo/db/server_parameters.h"
@@ -279,8 +280,8 @@ private:
     // >1: sample ever sampleIntervalBytes bytes allocated - less accurate but fast and small
     std::atomic_size_t sampleIntervalBytes;  // NOLINT
 
-    stdx::mutex hashtable_mutex;  // guards updates to both object and stack hash tables  NOLINT
-    stdx::mutex stackinfo_mutex;  // guards against races updating StackInfo  NOLINT
+    stdx::mutex hashtable_mutex;  // guards updates to both object and stack hash tables
+    stdx::mutex stackinfo_mutex;  // guards against races updating the StackInfo bson representation
 
     // cumulative bytes allocated - determines when samples are taken
     std::atomic_size_t bytesAllocated{0};  // NOLINT
@@ -311,8 +312,8 @@ private:
 
         Hash hash() {
             Hash hash;
-            static_assert(sizeof(frames) == sizeof(FrameInfo) * kMaxFramesPerStack,
-                          "frames array is not dense");
+            MONGO_STATIC_ASSERT_MSG(sizeof(frames) == sizeof(FrameInfo) * kMaxFramesPerStack,
+                                    "frames array is not dense");
             MurmurHash3_x86_32(frames.data(), numFrames * sizeof(FrameInfo), 0, &hash);
             return hash;
         }
@@ -564,8 +565,9 @@ private:
 
         // Sort the stacks and find enough stacks to account for at least 99% of the active bytes
         // deem any stack that has ever met this criterion as "important".
-        auto sortByActiveBytes =
-            [](StackInfo* a, StackInfo* b) -> bool { return a->activeBytes > b->activeBytes; };
+        auto sortByActiveBytes = [](StackInfo* a, StackInfo* b) -> bool {
+            return a->activeBytes > b->activeBytes;
+        };
         std::stable_sort(stackInfos.begin(), stackInfos.end(), sortByActiveBytes);
         size_t threshold = totalActiveBytes * 0.99;
         size_t cumulative = 0;
@@ -671,9 +673,8 @@ ExportedServerParameter<long long, ServerParameterType::kStartupOnly>
                                      "heapProfilingSampleIntervalBytes",
                                      &HeapProfiler::sampleIntervalBytesParameter);
 
-MONGO_INITIALIZER_GENERAL(StartHeapProfiling,
-                          ("EndStartupOptionHandling"),
-                          ("default"))(InitializerContext* context) {
+MONGO_INITIALIZER_GENERAL(StartHeapProfiling, ("EndStartupOptionHandling"), ("default"))
+(InitializerContext* context) {
     if (HeapProfiler::enabledParameter)
         HeapProfiler::heapProfiler = new HeapProfiler();
     return Status::OK();

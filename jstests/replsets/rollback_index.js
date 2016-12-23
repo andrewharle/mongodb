@@ -38,16 +38,13 @@ var b_conn = conns[1];
 var AID = replTest.getNodeId(a_conn);
 var BID = replTest.getNodeId(b_conn);
 
-replTest.waitForState(replTest.nodes[0], ReplSetTest.State.PRIMARY, 60 * 1000);
+replTest.waitForState(replTest.nodes[0], ReplSetTest.State.PRIMARY);
 
 // get master and do an initial write
 var master = replTest.getPrimary();
 assert(master === conns[0], "conns[0] assumed to be master");
 assert(a_conn.host === master.host, "a_conn assumed to be master");
-var options = {
-    writeConcern: {w: 2, wtimeout: 60000},
-    upsert: true
-};
+var options = {writeConcern: {w: 2, wtimeout: 60000}, upsert: true};
 assert.writeOK(a_conn.getDB(name).foo.insert({x: 1}, options));
 
 // shut down master
@@ -97,9 +94,9 @@ assert.writeOK(a_conn.getDB(name).foo.insert({x: 1}, options));
 assert.eq(3,
           b_conn.getDB(name).foo.find().itcount(),
           'Collection on B does not have the same number of documents as A');
-assert.eq(a_conn.getDB(name).foo.getIndexes().length,
-          b_conn.getDB(name).foo.getIndexes().length,
-          'Unique index not dropped during rollback: ' +
-              tojson(b_conn.getDB(name).foo.getIndexes()));
+assert.eq(
+    a_conn.getDB(name).foo.getIndexes().length,
+    b_conn.getDB(name).foo.getIndexes().length,
+    'Unique index not dropped during rollback: ' + tojson(b_conn.getDB(name).foo.getIndexes()));
 
 replTest.stopSet();

@@ -33,6 +33,7 @@
 #include <stack>
 
 #include "mongo/client/dbclientinterface.h"
+#include "mongo/client/mongo_uri.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/background.h"
 #include "mongo/util/concurrency/mutex.h"
@@ -62,9 +63,17 @@ public:
           _minValidCreationTimeMicroSec(0),
           _type(ConnectionString::INVALID),
           _maxPoolSize(kPoolSizeUnlimited),
-          _checkedOut(0) {}
+          _checkedOut(0),
+          _badConns(0) {}
 
     ~PoolForHost();
+
+    /**
+     * Returns the number of connections in this pool that went bad.
+     */
+    int getNumBadConns() const {
+        return _badConns;
+    }
 
     /**
      * Returns the maximum number of connections stored in the pool
@@ -133,7 +142,7 @@ private:
     struct StoredConnection {
         StoredConnection(DBClientBase* c);
 
-        bool ok(time_t now);
+        bool ok();
 
         DBClientBase* conn;
         time_t when;
@@ -151,6 +160,9 @@ private:
 
     // The number of currently active connections from this pool
     int _checkedOut;
+
+    // The number of connections that we did not reuse because they went bad.
+    int _badConns;
 };
 
 class DBConnectionHook {
@@ -216,6 +228,13 @@ public:
 
     DBClientBase* get(const std::string& host, double socketTimeout = 0);
     DBClientBase* get(const ConnectionString& host, double socketTimeout = 0);
+    DBClientBase* get(const MongoURI& uri, double socketTimeout = 0);
+
+    /**
+     * Gets the number of connections available in the pool.
+     */
+    int getNumAvailableConns(const std::string& host, double socketTimeout = 0) const;
+    int getNumBadConns(const std::string& host, double socketTimeout = 0) const;
 
     void release(const std::string& host, DBClientBase* c);
 
@@ -327,6 +346,7 @@ public:
         */
     explicit ScopedDbConnection(const std::string& host, double socketTimeout = 0);
     explicit ScopedDbConnection(const ConnectionString& host, double socketTimeout = 0);
+    explicit ScopedDbConnection(const MongoURI& host, double socketTimeout = 0);
 
     ScopedDbConnection() : _host(""), _conn(0), _socketTimeout(0) {}
 

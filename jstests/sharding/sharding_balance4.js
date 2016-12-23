@@ -25,7 +25,7 @@
 
     num = 0;
 
-    counts = {};
+    var counts = {};
 
     //
     // TODO: Rewrite to make much clearer.
@@ -39,13 +39,10 @@
     //
 
     function doUpdate(bulk, includeString, optionalId) {
-        var up = {
-            $inc: {x: 1}
-        };
-        if (includeString)
-            up["$set"] = {
-                s: bigString
-            };
+        var up = {$inc: {x: 1}};
+        if (includeString) {
+            up["$set"] = {s: bigString};
+        }
         var myid = optionalId == undefined ? Random.randInt(N) : optionalId;
         bulk.find({_id: myid}).upsert().update(up);
 
@@ -53,6 +50,7 @@
         return myid;
     }
 
+    Random.setRandomSeed();
     // Initially update all documents from 1 to N, otherwise later checks can fail because no
     // document
     // previously existed
