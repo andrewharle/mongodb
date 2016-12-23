@@ -1,3 +1,24 @@
+mongodb (1:3.4.1-1) experimental; urgency=medium
+
+  * New upstream stable series
+    + d/watch: look for 3.4 stable releases
+    + Update upstream's signing key for 3.4
+    + Drop fix-boost-1.60-build.patch; applied upstream
+    + Refresh remaining patches
+    + B-D on libboost-iostreams-dev
+  * Upload to experimental
+  * New patches:
+    + Use std::regex instead of boost::regex in mongo shell (fixes FTBFS with
+      Debian's boost and C++11)
+  * Also build for s390x (Closes: #848298)
+  * Drop i386 builds; i386 has long been deprecated upstream and support has
+    been essentially removed in 3.4.
+  * Use tcmalloc on ppc64el and arm64 as well
+  * Do not ship mongosniff, as it is no longer built by the mongodb source
+  * d/changelog: restore the 2.6.12-3 entry (Closes: #848305)
+
+ -- Apollon Oikonomopoulos <apoikos@debian.org>  Fri, 23 Dec 2016 14:57:21 +0200
+
 mongodb (1:3.2.11-2) unstable; urgency=medium
 
   * Drop armhf builds; currently FTBFS and is unsupported upstream
