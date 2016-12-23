@@ -66,14 +66,6 @@ repos:
 #
 ####################
 
-  - name: rhel55
-    type: rpm
-    edition: org
-    bucket: repo.mongodb.org
-    repos:
-      - yum/redhat/5/mongodb-org
-      - yum/redhat/5Server/mongodb-org
-
   - name: rhel62
     type: rpm
     edition: org
@@ -163,6 +155,7 @@ repos:
     component: multiverse
     architectures:
       - amd64
+      - arm64
     repos:
       - apt/ubuntu/dists/xenial/mongodb-org
 
@@ -171,14 +164,6 @@ repos:
 # Enterprise Repos:
 #
 ####################
-
-  - name: rhel57
-    type: rpm
-    edition: enterprise
-    bucket: repo.mongodb.com
-    repos:
-      - yum/redhat/5/mongodb-enterprise
-      - yum/redhat/5Server/mongodb-enterprise
 
   - name: rhel62
     type: rpm
@@ -295,5 +280,6 @@ repos:
       - amd64
       - ppc64el
       - s390x
+      - arm64
     repos:
       - apt/ubuntu/dists/xenial/mongodb-enterprise

@@ -53,7 +53,8 @@ public:
 
 MONGO_INITIALIZER_GENERAL(AuthzSchemaParameter,
                           MONGO_NO_PREREQUISITES,
-                          ("BeginStartupOptionParsing"))(InitializerContext*) {
+                          ("BeginStartupOptionParsing"))
+(InitializerContext*) {
     new AuthzVersionParameter(ServerParameterSet::getGlobal(), authSchemaVersionServerParameter);
     return Status::OK();
 }

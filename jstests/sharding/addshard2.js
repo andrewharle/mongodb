@@ -47,10 +47,22 @@
         }, "removeShard never completed for shard " + shardName);
     };
 
-    var st = new ShardingTest({shards: 0, mongos: 1});
+    // Enable the failpoint that prevents the config server from upserting a shardIdentity on new
+    // shards so that the same shard host can be re-used for multiple addShard calls without being
+    // restarted in between each addShard (the shardIdentity cannot be deleted while the shard host
+    // is running with --shardsvr).
+    var st = new ShardingTest({
+        shards: 0,
+        mongos: 1,
+        other: {
+            configOptions: {
+                setParameter: "failpoint.dontUpsertShardIdentityOnNewShards={'mode':'alwaysOn'}"
+            }
+        }
+    });
 
     // Add one shard since the last shard cannot be removed.
-    var normalShard = MongoRunner.runMongod();
+    var normalShard = MongoRunner.runMongod({shardsvr: ''});
     st.s.adminCommand({addShard: normalShard.name, name: 'normalShard'});
 
     // Allocate a port that can be used to test adding invalid hosts.
@@ -60,7 +72,7 @@
 
     // 1.a. with or without specifying the shardName.
 
-    var standalone = MongoRunner.runMongod();
+    var standalone = MongoRunner.runMongod({shardsvr: ''});
 
     jsTest.log("Adding a standalone *without* a specified shardName should succeed.");
     addShardRes = st.s.adminCommand({addshard: standalone.name});
@@ -85,7 +97,7 @@
     // 2.a. with or without specifying the shardName.
 
     rst = new ReplSetTest({nodes: 1});
-    rst.startSet();
+    rst.startSet({shardsvr: ''});
     rst.initiate();
 
     jsTest.log("Adding a replica set without a specified shardName should succeed.");
@@ -130,7 +142,7 @@
     // shardName.
 
     rst = new ReplSetTest({name: "config", nodes: 1});
-    rst.startSet();
+    rst.startSet({shardsvr: ''});
     rst.initiate();
 
     jsTest.log(
@@ -154,7 +166,7 @@
     // 4. Test that a replica set whose *set name* is "admin" can be written to (SERVER-17232).
 
     rst = new ReplSetTest({name: "admin", nodes: 1});
-    rst.startSet();
+    rst.startSet({shardsvr: ''});
     rst.initiate();
 
     jsTest.log("A replica set whose set name is 'admin' should be able to be written to.");

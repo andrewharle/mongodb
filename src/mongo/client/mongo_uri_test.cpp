@@ -30,6 +30,7 @@
 
 #include "mongo/client/mongo_uri.h"
 
+#include "mongo/base/string_data.h"
 #include "mongo/unittest/unittest.h"
 
 namespace {
@@ -60,6 +61,8 @@ const URITestCase validCases[] = {
     {"mongodb://user@127.0.0.1", "user", "", kMaster, "", 1, 0, ""},
 
     {"mongodb://127.0.0.1/dbName?foo=a&c=b", "", "", kMaster, "", 1, 2, "dbName"},
+
+    {"mongodb://localhost/?foo=bar", "", "", kMaster, "", 1, 1, ""},
 
     {"mongodb://user:pwd@127.0.0.1:1234", "user", "pwd", kMaster, "", 1, 0, ""},
 
@@ -269,9 +272,20 @@ const URITestCase validCases[] = {
 
 const InvalidURITestCase invalidCases[] = {
 
+    // No host.
     {"mongodb://"},
 
+    // Needs a "/" after the hosts and before the options.
     {"mongodb://localhost:27017,localhost:27018?replicaSet=missingSlash"},
+
+    // Host list must actually be comma separated.
+    {"mongodb://localhost:27017localhost:27018"},
+
+    // Domain sockets have to end in ".sock".
+    {"mongodb:///notareal/domainsock"},
+
+    // Options can't have multiple question marks. Only one.
+    {"mongodb://localhost:27017/?foo=a?c=b&d=e?asdf=foo"},
 };
 
 TEST(MongoURI, GoodTrickyURIs) {
@@ -292,10 +306,7 @@ TEST(MongoURI, GoodTrickyURIs) {
         ASSERT_EQ(testCase.type, result.type());
         ASSERT_EQ(testCase.setname, result.getSetName());
         ASSERT_EQ(testCase.numservers, result.getServers().size());
-        auto options = result.getOptions();
-        std::set<std::string> fieldNames;
-        options.getFieldNames(fieldNames);
-        ASSERT_EQ(testCase.numOptions, fieldNames.size());
+        ASSERT_EQ(testCase.numOptions, result.getOptions().size());
         ASSERT_EQ(testCase.database, result.getDatabase());
     }
 }
@@ -320,8 +331,30 @@ TEST(MongoURI, ValidButBadURIsFailToConnect) {
     ASSERT_TRUE(uri.isValid());
 
     std::string errmsg;
-    auto dbclient = uri.connect(errmsg);
+    auto dbclient = uri.connect(mongo::StringData(), errmsg);
     ASSERT_EQ(dbclient, static_cast<decltype(dbclient)>(nullptr));
+}
+
+TEST(MongoURI, CloneURIForServer) {
+    auto sw_uri = MongoURI::parse(
+        "mongodb://localhost:27017,localhost:27018,localhost:27019/admin?replicaSet=rs1&ssl=true");
+    ASSERT_OK(sw_uri.getStatus());
+
+    auto uri = sw_uri.getValue();
+    ASSERT_EQ(uri.type(), kSet);
+    ASSERT_EQ(uri.getSetName(), "rs1");
+    ASSERT_EQ(uri.getServers().size(), static_cast<std::size_t>(3));
+
+    auto& uriOptions = uri.getOptions();
+    ASSERT_EQ(uriOptions.at("ssl"), "true");
+
+    auto clonedURI = uri.cloneURIForServer(mongo::HostAndPort{"localhost:27020"});
+
+    ASSERT_EQ(clonedURI.type(), kMaster);
+    ASSERT_TRUE(clonedURI.getSetName().empty());
+    ASSERT_EQ(clonedURI.getServers().size(), static_cast<std::size_t>(1));
+    auto& clonedURIOptions = clonedURI.getOptions();
+    ASSERT_EQ(clonedURIOptions.at("ssl"), "true");
 }
 
 }  // namespace

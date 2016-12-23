@@ -59,39 +59,6 @@ class MongoDFixture(interface.Fixture):
 
         self.mongod = None
 
-    def reconfigure(self, mongod_executable, mongod_options):
-        self.original_mongod_executable = self.mongod_executable
-        self.original_mongod_options = self.mongod_options
-        self.original_preserve_dbpath = self.preserve_dbpath
-
-        teardown_success = self.teardown()
-
-        self.mongod_executable = mongod_executable
-        self.mongod_options = mongod_options
-        self.preserve_dbpath = True 
-
-        self.setup()
-        self.await_ready()
-        
-        if not teardown_success:
-            raise errors.TestFailure("%s did not exit cleanly" % (self))
-
-    def reset_configuration(self):
-        teardown_success = self.teardown()
-
-        self.mongod_executable = self.original_mongod_executable
-        self.mongod_options = self.original_mongod_options
-
-        self.setup()
-        self.await_ready()
-
-        # Reset preserve_dbpath after calling setup(), since setup() should always preserve the
-        # dbpath.
-        self.preserve_dbpath = self.original_preserve_dbpath
-        
-        if not teardown_success:
-            raise errors.TestFailure("%s did not exit cleanly" % (self))
-
     def setup(self):
         if not self.preserve_dbpath:
             shutil.rmtree(self._dbpath, ignore_errors=True)
@@ -127,9 +94,10 @@ class MongoDFixture(interface.Fixture):
         # be established.
         while True:
             # Check whether the mongod exited for some reason.
-            if self.mongod.poll() is not None:
+            exit_code = self.mongod.poll()
+            if exit_code is not None:
                 raise errors.ServerFailure("Could not connect to mongod on port %d, process ended"
-                                           " unexpectedly." % (self.port))
+                                           " unexpectedly with code %d." % (self.port, exit_code))
 
             try:
                 # Use a shorter connection timeout to more closely satisfy the requested deadline.

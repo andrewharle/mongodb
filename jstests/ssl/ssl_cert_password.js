@@ -27,6 +27,8 @@ var exit_code = runMongoProgram("mongo",
                                 md.port,
                                 "--ssl",
                                 "--sslAllowInvalidCertificates",
+                                "--sslCAFile",
+                                "jstests/libs/ca.pem",
                                 "--sslPEMKeyFile",
                                 "jstests/libs/password_protected.pem",
                                 "--sslPEMKeyPassword",
@@ -41,28 +43,28 @@ assert.eq(0, c.count(), "dumprestore_ssl.foo collection is not initially empty")
 c.save({a: 22});
 assert.eq(1, c.count(), "failed to insert document into dumprestore_ssl.foo collection");
 
-exit_code = MongoRunner.runMongoTool("mongodump",
-                                     {
-                                       out: external_scratch_dir,
-                                       port: md.port,
-                                       ssl: "",
-                                       sslPEMKeyFile: "jstests/libs/password_protected.pem",
-                                       sslPEMKeyPassword: "qwerty",
-                                     });
+exit_code = MongoRunner.runMongoTool("mongodump", {
+    out: external_scratch_dir,
+    port: md.port,
+    ssl: "",
+    sslPEMKeyFile: "jstests/libs/password_protected.pem",
+    sslCAFile: "jstests/libs/ca.pem",
+    sslPEMKeyPassword: "qwerty",
+});
 
 assert.eq(exit_code, 0, "Failed to start mongodump with ssl");
 
 c.drop();
 assert.eq(0, c.count(), "dumprestore_ssl.foo collection is not empty after drop");
 
-exit_code = MongoRunner.runMongoTool("mongorestore",
-                                     {
-                                       dir: external_scratch_dir,
-                                       port: md.port,
-                                       ssl: "",
-                                       sslPEMKeyFile: "jstests/libs/password_protected.pem",
-                                       sslPEMKeyPassword: "qwerty",
-                                     });
+exit_code = MongoRunner.runMongoTool("mongorestore", {
+    dir: external_scratch_dir,
+    port: md.port,
+    ssl: "",
+    sslCAFile: "jstests/libs/ca.pem",
+    sslPEMKeyFile: "jstests/libs/password_protected.pem",
+    sslPEMKeyPassword: "qwerty",
+});
 
 assert.eq(exit_code, 0, "Failed to start mongorestore with ssl");
 
@@ -81,32 +83,32 @@ assert.eq(1, c.count(), "failed to insert document into exportimport_ssl.foo col
 
 var exportimport_file = "data.json";
 
-exit_code = MongoRunner.runMongoTool("mongoexport",
-                                     {
-                                       out: external_scratch_dir + exportimport_file,
-                                       db: exportimport_ssl_dbname,
-                                       collection: "foo",
-                                       port: md.port,
-                                       ssl: "",
-                                       sslPEMKeyFile: "jstests/libs/password_protected.pem",
-                                       sslPEMKeyPassword: "qwerty",
-                                     });
+exit_code = MongoRunner.runMongoTool("mongoexport", {
+    out: external_scratch_dir + exportimport_file,
+    db: exportimport_ssl_dbname,
+    collection: "foo",
+    port: md.port,
+    ssl: "",
+    sslCAFile: "jstests/libs/ca.pem",
+    sslPEMKeyFile: "jstests/libs/password_protected.pem",
+    sslPEMKeyPassword: "qwerty",
+});
 
 assert.eq(exit_code, 0, "Failed to start mongoexport with ssl");
 
 c.drop();
 assert.eq(0, c.count(), "afterdrop", "-d", exportimport_ssl_dbname, "-c", "foo");
 
-exit_code = MongoRunner.runMongoTool("mongoimport",
-                                     {
-                                       file: external_scratch_dir + exportimport_file,
-                                       db: exportimport_ssl_dbname,
-                                       collection: "foo",
-                                       port: md.port,
-                                       ssl: "",
-                                       sslPEMKeyFile: "jstests/libs/password_protected.pem",
-                                       sslPEMKeyPassword: "qwerty",
-                                     });
+exit_code = MongoRunner.runMongoTool("mongoimport", {
+    file: external_scratch_dir + exportimport_file,
+    db: exportimport_ssl_dbname,
+    collection: "foo",
+    port: md.port,
+    ssl: "",
+    sslCAFile: "jstests/libs/ca.pem",
+    sslPEMKeyFile: "jstests/libs/password_protected.pem",
+    sslPEMKeyPassword: "qwerty",
+});
 
 assert.eq(exit_code, 0, "Failed to start mongoimport with ssl");
 
@@ -128,6 +130,7 @@ exit_code = MongoRunner.runMongoTool("mongofiles",
                                        db: mongofiles_ssl_dbname,
                                        port: md.port,
                                        ssl: "",
+                                       sslCAFile: "jstests/libs/ca.pem",
                                        sslPEMKeyFile: "jstests/libs/password_protected.pem",
                                        sslPEMKeyPassword: "qwerty",
                                      },
@@ -151,6 +154,7 @@ exit_code = MongoRunner.runMongoTool("mongofiles",
                                        local: external_scratch_dir + filename,
                                        port: md.port,
                                        ssl: "",
+                                       sslCAFile: "jstests/libs/ca.pem",
                                        sslPEMKeyFile: "jstests/libs/password_protected.pem",
                                        sslPEMKeyPassword: "qwerty",
                                      },

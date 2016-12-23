@@ -204,6 +204,7 @@ class ShardedClusterFixture(interface.Fixture):
         mongod_logger = logging.loggers.new_logger(logger_name, parent=self.logger)
 
         mongod_options = copy.deepcopy(self.mongod_options)
+        mongod_options["shardsvr"] = ""
         mongod_options["dbpath"] = os.path.join(self._dbpath_prefix, "shard%d" % (index))
 
         return standalone.MongoDFixture(mongod_logger,
@@ -273,9 +274,6 @@ class _MongoSFixture(interface.Fixture):
         self.mongos = None
 
     def setup(self):
-        if "chunkSize" not in self.mongos_options:
-            self.mongos_options["chunkSize"] = 50
-
         if "port" not in self.mongos_options:
             self.mongos_options["port"] = core.network.PortAllocator.next_fixture_port(self.job_num)
         self.port = self.mongos_options["port"]
@@ -301,9 +299,10 @@ class _MongoSFixture(interface.Fixture):
         # be established.
         while True:
             # Check whether the mongos exited for some reason.
-            if self.mongos.poll() is not None:
+            exit_code = self.mongos.poll()
+            if exit_code is not None:
                 raise errors.ServerFailure("Could not connect to mongos on port %d, process ended"
-                                           " unexpectedly." % (self.port))
+                                           " unexpectedly with code %d." % (self.port, exit_code))
 
             try:
                 # Use a shorter connection timeout to more closely satisfy the requested deadline.

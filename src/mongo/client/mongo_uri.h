@@ -28,6 +28,7 @@
 
 #pragma once
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -67,9 +68,13 @@ namespace mongo {
  */
 class MongoURI {
 public:
+    using OptionsMap = std::map<std::string, std::string>;
+
     static StatusWith<MongoURI> parse(const std::string& url);
 
-    DBClientBase* connect(std::string& errmsg, double socketTimeout = 0) const;
+    DBClientBase* connect(StringData applicationName,
+                          std::string& errmsg,
+                          boost::optional<double> socketTimeoutSecs = boost::none) const;
 
     const std::string& getUser() const {
         return _user;
@@ -79,7 +84,7 @@ public:
         return _password;
     }
 
-    const BSONObj& getOptions() const {
+    const OptionsMap& getOptions() const {
         return _options;
     }
 
@@ -103,24 +108,34 @@ public:
         return _connectString.getServers();
     }
 
+    // If you are trying to clone a URI (including its options/auth information) for a single
+    // server (say a member of a replica-set), you can pass in its HostAndPort information to
+    // get a new URI with the same info, except type() will be MASTER and getServers() will
+    // be the single host you pass in.
+    MongoURI cloneURIForServer(const HostAndPort& hostAndPort) const {
+        return MongoURI(ConnectionString(hostAndPort), _user, _password, _database, _options);
+    }
+
     ConnectionString::ConnectionType type() const {
         return _connectString.type();
     }
 
-private:
-    explicit MongoURI(const ConnectionString cs)
-        : _connectString(std::move(cs)), _user(), _password(), _database(), _options(){};
+    explicit MongoURI(const ConnectionString connectString)
+        : _connectString(std::move(connectString)){};
 
-    MongoURI(ConnectionString _connectString,
+    MongoURI() = default;
+
+private:
+    MongoURI(ConnectionString connectString,
              const std::string& user,
              const std::string& password,
              const std::string& database,
-             const BSONObj& options)
-        : _connectString(std::move(_connectString)),
+             OptionsMap options)
+        : _connectString(std::move(connectString)),
           _user(user),
           _password(password),
           _database(database),
-          _options(options){};
+          _options(std::move(options)){};
 
     BSONObj _makeAuthObjFromOptions(int maxWireVersion) const;
 
@@ -128,6 +143,7 @@ private:
     std::string _user;
     std::string _password;
     std::string _database;
-    BSONObj _options;
+    OptionsMap _options;
 };
+
 }  // namespace mongo

@@ -2,7 +2,6 @@ command_type: system
 stepback: false
 
 pre:
-    - command: shell.track
     - command: shell.exec
       params:
         silent: true
@@ -20,7 +19,25 @@ post:
         script: |
           ${killall_mci|pkill -9 mongod; pkill -9 mongos; pkill -9 mongo; pkill -9 bsondump; pkill -9 mongoimport; pkill -9 mongoexport; pkill -9 mongodump; pkill -9 mongorestore; pkill -9 mongostat; pkill -9 mongofiles; pkill -9 mongooplog; pkill -9 mongotop; pkill -9 mongobridge; pkill -9 mongod-2.6; pkill -9 mongos-2.6; pkill -9 mongo-2.6; pkill -9 bsondump-2.6; pkill -9 mongoimport-2.6; pkill -9 mongoexport-2.6; pkill -9 mongodump-2.6; pkill -9 mongorestore-2.6; pkill -9 mongostat-2.6; pkill -9 mongofiles-2.6; pkill -9 mongooplog-2.6; pkill -9 mongotop-2.6; pkill -9 mongobridge-2.6; pkill -9 mongod-2.4; pkill -9 mongos-2.4; pkill -9 mongo-2.4; pkill -9 bsondump-2.4; pkill -9 mongoimport-2.4; pkill -9 mongoexport-2.4; pkill -9 mongodump-2.4; pkill -9 mongorestore-2.4; pkill -9 mongostat-2.4; pkill -9 mongofiles-2.4; pkill -9 mongooplog-2.4; pkill -9 mongotop-2.4; pkill -9 resmoke.py; pkill -9 python; pkill -9 lldb; pkill -9 _test} >/dev/null 2>&1
           exit 0
-    - command: shell.cleanup
+    - command: shell.exec
+      params:
+        working_dir: src
+        script: |
+          # removes files from the (local) scons cache when it's over a
+          # threshold, to the $prune_ratio percentage. Ideally override
+          # these default values in the distro config in evergreen.
+
+          if [ -d "${scons_cache_path}" ]; then
+              ${python|python} buildscripts/scons_cache_prune.py --cache-dir ${scons_cache_path} --cache-size ${scons_cache_size|200} --prune-ratio ${scons_prune_ratio|0.8}
+          fi
+
+
+modules:
+- name: enterprise
+  repo: git@github.com:10gen/mongo-enterprise-modules.git
+  prefix: src/mongo/db/modules
+  branch: v3.4
+
 
 functions:
   "download analysis scripts":
@@ -61,7 +78,7 @@ functions:
           chmod +x mongo
           git clone https://github.com/mongodb/mongo-perf perf
           cd perf
-          git checkout r20160805
+          git checkout r20161010
     - command: shell.exec
       params:
         background: true
@@ -131,6 +148,25 @@ functions:
         file: "src/tags.json"
         name: "perf"
     - command: shell.exec
+      # generate dashboard data
+      type : test
+      params:
+        working_dir: src
+        silent: true
+        script: |
+          set -o errexit
+          source ./venv/bin/activate
+          REFTAGS="3.2.10-Baseline 3.0.14-Baseline" # These are project specific
+          # Project Opts are  project specific, but don't match expansion from elsewhere.
+          # We could change dsi/analysis/v3.4 to dsi/analysis/perf-3.4 in DSI to get dsi/analysis/${project}/perf_override.json
+          # Note project_id performance doesn't match string perf used elsewhere for ${project}
+          PROJECT_OPTS="--overrideFile ../dsi/analysis/v3.4/perf_override.json --project_id performance"
+          python -u ../dsi/analysis/dashboard_gen.py --rev ${revision} -f history.json -t tags.json --refTag $REFTAGS $PROJECT_OPTS --variant ${build_variant} --task ${task_name} --jira-user ${perf_jira_user} --jira-password ${perf_jira_pw} || true
+    - command: "json.send"
+      params:
+         name: "dashboard"
+         file: "src/dashboard.json"
+    - command: shell.exec
       type : test
       params:
         working_dir: src
@@ -138,13 +174,14 @@ functions:
           set -o errexit
           set -o verbose
           source ./venv/bin/activate
+
           # Any tasks that want the analysis scripts to analyze mongod.log files should pass in
           # `reports_analysis: true` as a var to this function. The following line will select the
           # appropriate flags if it's `true`.
           reports_analysis_flags="--reports-analysis . --perf-file perf/perf.json"
           cmd_flags=$([ "${reports_analysis}" = "true" ] && echo "$reports_analysis_flags" || echo "")
-          REFTAG="3.0.12-Baseline"
-          OVERRIDE="../dsi/analysis/v3.2/perf_override.json" # Note use of v3.2 here cannot use ${project} perf
+          REFTAG="3.2.10-Baseline"
+          OVERRIDE="../dsi/analysis/v3.4/perf_override.json" # Note use of v3.4 here cannot use ${project}
           python ../dsi/analysis/perf_regression_check.py $cmd_flags -f history.json --rev ${revision} -t tags.json --refTag $REFTAG --overrideFile $OVERRIDE --variant ${build_variant} --task ${task_name} --threshold 0.10 --threadThreshold 0.15
   "run perf tests":
     - command: shell.exec
@@ -167,6 +204,16 @@ functions:
           #  give mongod a few seconds to start up so that we can connect.
           sleep 5
           ${perf_exec_wrapper} python benchrun.py --shell ../mongo -t ${threads} --trialCount 5 -f testcases/*.js --includeFilter ${includeFilter1}  --includeFilter ${includeFilter2} --excludeFilter ${excludeFilter} --out perf.json --exclude-testbed
+    - command: s3.put
+      params:
+        aws_key: ${aws_key}
+        aws_secret: ${aws_secret}
+        local_file: src/mongod.log
+        remote_file: ${project}/${version_id}/${revision}/mongod-${task_id}.log
+        bucket: mciuploads
+        permissions: public-read
+        content_type: ${content_type|text/html}
+        display_name: mongod.log
     - command: "json.send"
       params:
         name: "perf"
@@ -178,17 +225,36 @@ tasks:
     - command: git.get_project
       params:
         directory: src
-    - command: git.apply_patch
-      params:
-        directory: src
     - command: shell.exec
       params:
         working_dir: src
         script: |
           set -o errexit
           set -o verbose
-          ${scons|scons} ${compile_flags|} mongo
-          ${scons|scons} ${compile_flags|} mongod
+
+          # We get the raw version string (r1.2.3-45-gabcdef) from git
+          MONGO_VERSION=$(git describe)
+          # If this is a patch build, we add the patch version id to the version string so we know
+          # this build was a patch, and which evergreen task it came from
+          if [ "${is_patch|}" = "true" ]; then
+            MONGO_VERSION="$MONGO_VERSION-patch-${version_id}"
+          fi
+
+          # This script converts the generated version string into a sanitized version string for
+          # use by scons and uploading artifacts as well as information about for the scons cache.
+          echo $MONGO_VERSION | USE_SCONS_CACHE=${use_scons_cache|false} ${python|python} buildscripts/generate_compile_expansions.py | tee compile_expansions.yml
+    # Then we load the generated version data into the agent so we can use it in task definitions
+    - command: expansions.update
+      params:
+        file: src/compile_expansions.yml
+    - command: shell.exec
+      params:
+        working_dir: src
+        script: |
+          set -o errexit
+          set -o verbose
+
+          ${python|python} ./buildscripts/scons.py ${compile_flags|} ${scons_cache_args|} mongo mongod
     - command: s3.put
       params:
         aws_key: ${aws_key}
@@ -203,7 +269,7 @@ tasks:
       params:
         aws_key: ${aws_key}
         aws_secret: ${aws_secret}
-        local_file: src/mongo
+        local_file: src/build/cached/mongo/mongo
         remote_file: ${project}/${version_id}/${revision}/mongo-${version_id}
         bucket: mciuploads
         permissions: public-read
@@ -484,14 +550,17 @@ tasks:
 
 buildvariants:
 - name: linux-wt-standalone
-  display_name: Standalone Linux WT
+  display_name: Standalone Linux inMemory
   batchtime: 90 # 1.5 hours
+  modules:
+    - enterprise
   expansions:
-    compile_flags: &compile_flags -j$(grep -c ^processor /proc/cpuinfo) CC=/opt/mongodbtoolchain/bin/gcc CXX=/opt/mongodbtoolchain/bin/g++ --release
+    compile_flags: -j$(grep -c ^processor /proc/cpuinfo) CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy --ssl
     mongod_exec_wrapper: &exec_wrapper "numactl --physcpubind=4,5,6,7 -i 1"
     perf_exec_wrapper: &perf_wrapper "numactl --physcpubind=1,2,3 -i 0"
-    mongod_flags: "--storageEngine=wiredTiger --logpath ./mongod.log --fork --syncdelay 0 --nojournal --setParameter ttlMonitorEnabled=false --setParameter diagnosticDataCollectionEnabled=false  --wiredTigerCacheSizeGB 16"
-    project: &project perf-3.2
+    mongod_flags: "--storageEngine=inMemory --logpath ./mongod.log --fork --syncdelay 0 --setParameter ttlMonitorEnabled=false --setParameter diagnosticDataCollectionEnabled=false  --inMemorySizeGB 16"
+    use_scons_cache: true
+    project: &project perf-3.4
   run_on:
   - "centos6-perf"
   tasks:
@@ -511,7 +580,6 @@ buildvariants:
   display_name: Standalone Linux MMAPv1
   batchtime: 90 # 1.5 hours
   expansions:
-    compile_flags: *compile_flags
     mongod_exec_wrapper: *exec_wrapper
     perf_exec_wrapper: *perf_wrapper
     mongod_flags: "--storageEngine=mmapv1 --logpath ./mongod.log --fork --syncdelay 0 --nojournal --setParameter ttlMonitorEnabled=false --setParameter diagnosticDataCollectionEnabled=false"
@@ -529,13 +597,12 @@ buildvariants:
   - name: singleThreaded
 
 - name: linux-wt-repl
-  display_name: 1-Node ReplSet Linux WT
+  display_name: 1-Node ReplSet Linux inMemory
   batchtime: 360 # 6 hours
   expansions:
-    compile_flags: *compile_flags
     mongod_exec_wrapper: *exec_wrapper
     perf_exec_wrapper: *perf_wrapper
-    mongod_flags: "--replSet=test --storageEngine=wiredTiger --logpath ./mongod.log --fork --syncdelay 0 --nojournal --setParameter ttlMonitorEnabled=false --wiredTigerCacheSizeGB 16 --oplogSize 100000 --setParameter diagnosticDataCollectionEnabled=false "
+    mongod_flags: "--replSet=test --storageEngine=inMemory  --logpath ./mongod.log --fork --syncdelay 0 --setParameter ttlMonitorEnabled=false --inMemorySizeGB 16 --oplogSize 10000 --setParameter diagnosticDataCollectionEnabled=false "
     project: *project
   run_on:
   - "centos6-perf"
@@ -549,7 +616,6 @@ buildvariants:
   display_name: 1-Node ReplSet Linux MMAPv1
   batchtime: 360 # 6 hours
   expansions:
-    compile_flags: *compile_flags
     mongod_exec_wrapper: *exec_wrapper
     perf_exec_wrapper: *perf_wrapper
     mongod_flags: "--replSet=test --storageEngine=mmapv1 --logpath ./mongod.log --fork --syncdelay 0 --nojournal --setParameter ttlMonitorEnabled=false --oplogSize 100000 --setParameter diagnosticDataCollectionEnabled=false"
@@ -563,7 +629,7 @@ buildvariants:
   - name: singleThreaded
 
 - name: linux-wt-repl-compare
-  display_name: 1-Node ReplSet Linux WT Comparison Standalone
+  display_name: 1-Node ReplSet Linux inMemory Comparison Standalone
   batchtime: 360 # 6 hours
   expansions:
     project: *project

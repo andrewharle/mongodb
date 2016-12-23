@@ -22,8 +22,6 @@ __ckpt_server_config(WT_SESSION_IMPL *session, const char **cfg, bool *startp)
 
 	*startp = false;
 
-	*startp = false;
-
 	conn = S2C(session);
 
 	WT_RET(__wt_config_gets(session, cfg, "checkpoint.wait", &cval));

@@ -41,7 +41,6 @@
 #include "mongo/platform/atomic_word.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
-#include "mongo/util/concurrency/synchronization.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/util/fail_point_service.h"
 
@@ -62,7 +61,7 @@ class WiredTigerSizeStorer;
 extern const std::string kWiredTigerEngineName;
 typedef std::list<RecordId> SortedRecordIds;
 
-class WiredTigerRecordStore : public RecordStore {
+class WiredTigerRecordStore final : public RecordStore {
 public:
     /**
      * Parses collections options for wired tiger configuration string for table creation.
@@ -130,16 +129,17 @@ public:
                                               int len,
                                               bool enforceQuota);
 
-    virtual StatusWith<RecordId> insertRecord(OperationContext* txn,
-                                              const DocWriter* doc,
-                                              bool enforceQuota);
+    virtual Status insertRecordsWithDocWriter(OperationContext* txn,
+                                              const DocWriter* const* docs,
+                                              size_t nDocs,
+                                              RecordId* idsOut);
 
-    virtual StatusWith<RecordId> updateRecord(OperationContext* txn,
-                                              const RecordId& oldLocation,
-                                              const char* data,
-                                              int len,
-                                              bool enforceQuota,
-                                              UpdateNotifier* notifier);
+    virtual Status updateRecord(OperationContext* txn,
+                                const RecordId& oldLocation,
+                                const char* data,
+                                int len,
+                                bool enforceQuota,
+                                UpdateNotifier* notifier);
 
     virtual bool updateWithDamagesSupported() const;
 
@@ -173,8 +173,7 @@ public:
                            CompactStats* stats);
 
     virtual Status validate(OperationContext* txn,
-                            bool full,
-                            bool scanData,
+                            ValidateCmdLevel level,
                             ValidateAdaptor* adaptor,
                             ValidateResults* results,
                             BSONObjBuilder* output);
@@ -265,6 +264,8 @@ private:
 
     void _dealtWithCappedId(SortedRecordIds::iterator it, bool didCommit);
     void _addUncommitedRecordId_inlock(OperationContext* txn, const RecordId& id);
+
+    Status _insertRecords(OperationContext* txn, Record* records, size_t nRecords);
 
     RecordId _nextId();
     void _setId(RecordId id);

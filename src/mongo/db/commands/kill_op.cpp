@@ -50,7 +50,8 @@ class KillOpCommand : public Command {
 public:
     KillOpCommand() : Command("killOp") {}
 
-    bool isWriteCommandForConfigServer() const final {
+
+    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
 
@@ -81,7 +82,7 @@ public:
     }
 
     static StatusWith<std::tuple<stdx::unique_lock<Client>, OperationContext*>> _findOp(
-        ClientBasic* client, unsigned int opId) {
+        Client* client, unsigned int opId) {
         AuthorizationSession* authzSession = AuthorizationSession::get(client);
 
         for (ServiceContext::LockedClientsCursor cursor(client->getServiceContext());
@@ -102,7 +103,7 @@ public:
         return Status(ErrorCodes::NoSuchKey, str::stream() << "Could not access opID: " << opId);
     }
 
-    Status checkAuthForCommand(ClientBasic* client,
+    Status checkAuthForCommand(Client* client,
                                const std::string& dbname,
                                const BSONObj& cmdObj) final {
         AuthorizationSession* authzSession = AuthorizationSession::get(client);

@@ -67,13 +67,15 @@ public:
 
     BSONObj getIndexSpec(OperationContext* txn, StringData idxName) const final;
 
-    bool isIndexMultikey(OperationContext* txn, StringData indexName) const final;
+    bool isIndexMultikey(OperationContext* txn,
+                         StringData indexName,
+                         MultikeyPaths* multikeyPaths) const final;
     bool isIndexMultikey(int idxNo) const;
 
     bool setIndexIsMultikey(OperationContext* txn, int idxNo, bool multikey = true);
     bool setIndexIsMultikey(OperationContext* txn,
                             StringData indexName,
-                            bool multikey = true) final;
+                            const MultikeyPaths& multikeyPaths) final;
 
     RecordId getIndexHead(OperationContext* txn, StringData indexName) const final;
 
@@ -112,14 +114,6 @@ public:
      * 'txn' is only allowed to be null when called from the constructor.
      */
     void setNamespacesRecordId(OperationContext* txn, RecordId newId);
-
-    /**
-     * Examines metadata for each collection and each index, and returns true if any
-     * collation-related metadata is found.
-     *
-     * This function is used to support downgrading from 3.4.
-     */
-    bool hasCollationMetadata(OperationContext* txn, const std::string& ns) const;
 
 private:
     NamespaceDetails* _details;

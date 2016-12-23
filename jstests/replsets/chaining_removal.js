@@ -19,7 +19,7 @@
             {_id: 4, host: nodes[4].host, priority: 0},
         ],
     });
-    replTest.waitForState(nodes[0], ReplSetTest.State.PRIMARY, 60 * 1000);
+    replTest.waitForState(nodes[0], ReplSetTest.State.PRIMARY);
     replTest.awaitNodesAgreeOnPrimary();
     var primary = replTest.getPrimary();
     replTest.awaitReplication();
@@ -49,9 +49,7 @@
 
     // write that should reach all nodes
     var timeout = 60 * 1000;
-    var options = {
-        writeConcern: {w: numNodes, wtimeout: timeout}
-    };
+    var options = {writeConcern: {w: numNodes, wtimeout: timeout}};
     assert.writeOK(primary.getDB(name).foo.insert({x: 1}, options));
 
     var config = primary.getDB("local").system.replset.findOne();

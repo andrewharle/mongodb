@@ -69,7 +69,7 @@ public:
         invariant(false);
     }
 
-    virtual bool unlockAll() {
+    virtual bool unlockGlobal() {
         invariant(false);
     }
 
@@ -162,18 +162,6 @@ public:
 
     virtual bool hasLockPending() const {
         invariant(false);
-    }
-
-    virtual void setIsBatchWriter(bool newValue) {
-        invariant(false);
-    }
-
-    virtual bool isBatchWriter() const {
-        invariant(false);
-    }
-
-    virtual bool hasStrongLocks() const {
-        return false;
     }
 };
 

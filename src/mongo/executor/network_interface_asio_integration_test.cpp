@@ -32,7 +32,6 @@
 
 #include <algorithm>
 #include <exception>
-#include <vector>
 
 #include "mongo/client/connection_string.h"
 #include "mongo/executor/async_stream_factory.h"
@@ -56,14 +55,20 @@ namespace mongo {
 namespace executor {
 namespace {
 
-using StartCommandCB = stdx::function<void(const StatusWith<RemoteCommandResponse>&)>;
+using StartCommandCB = stdx::function<void(const RemoteCommandResponse&)>;
 
 class NetworkInterfaceASIOIntegrationTest : public mongo::unittest::Test {
 public:
     void startNet(NetworkInterfaceASIO::Options options = NetworkInterfaceASIO::Options()) {
         options.streamFactory = stdx::make_unique<AsyncStreamFactory>();
         options.timerFactory = stdx::make_unique<AsyncTimerFactoryASIO>();
+#ifdef _WIN32
+        // Connections won't queue on widnows, so attempting to open too many connections
+        // concurrently will result in refused connections and test failure.
+        options.connectionPoolOptions.maxConnections = 16u;
+#else
         options.connectionPoolOptions.maxConnections = 256u;
+#endif
         _net = stdx::make_unique<NetworkInterfaceASIO>(std::move(options));
         _net->startup();
     }
@@ -96,24 +101,22 @@ public:
         net().startCommand(cbHandle, request, onFinish);
     }
 
-    Deferred<StatusWith<RemoteCommandResponse>> runCommand(
-        const TaskExecutor::CallbackHandle& cbHandle, const RemoteCommandRequest& request) {
-        Deferred<StatusWith<RemoteCommandResponse>> deferred;
-        net().startCommand(cbHandle,
-                           request,
-                           [deferred](StatusWith<RemoteCommandResponse> resp) mutable {
-                               deferred.emplace(std::move(resp));
-                           });
+    Deferred<RemoteCommandResponse> runCommand(const TaskExecutor::CallbackHandle& cbHandle,
+                                               RemoteCommandRequest& request) {
+        Deferred<RemoteCommandResponse> deferred;
+        net().startCommand(cbHandle, request, [deferred](RemoteCommandResponse resp) mutable {
+            deferred.emplace(std::move(resp));
+        });
         return deferred;
     }
 
-    StatusWith<RemoteCommandResponse> runCommandSync(const RemoteCommandRequest& request) {
+    RemoteCommandResponse runCommandSync(RemoteCommandRequest& request) {
         auto deferred = runCommand(makeCallbackHandle(), request);
         auto& res = deferred.get();
         if (res.isOK()) {
-            log() << "got command result: " << res.getValue().toString();
+            log() << "got command result: " << res.toString();
         } else {
-            log() << "command failed: " << res.getStatus();
+            log() << "command failed: " << res.status;
         }
         return res;
     }
@@ -121,8 +124,10 @@ public:
     void assertCommandOK(StringData db,
                          const BSONObj& cmd,
                          Milliseconds timeoutMillis = Milliseconds(-1)) {
-        auto res = unittest::assertGet(runCommandSync(
-            {fixture().getServers()[0], db.toString(), cmd, BSONObj(), timeoutMillis}));
+        RemoteCommandRequest request{
+            fixture().getServers()[0], db.toString(), cmd, BSONObj(), nullptr, timeoutMillis};
+        auto res = runCommandSync(request);
+        ASSERT_OK(res.status);
         ASSERT_OK(getStatusFromCommandResult(res.data));
     }
 
@@ -130,19 +135,22 @@ public:
                                     const BSONObj& cmd,
                                     Milliseconds timeoutMillis,
                                     ErrorCodes::Error reason) {
-        auto clientStatus = runCommandSync(
-            {fixture().getServers()[0], db.toString(), cmd, BSONObj(), timeoutMillis});
-        ASSERT_TRUE(clientStatus == reason);
+        RemoteCommandRequest request{
+            fixture().getServers()[0], db.toString(), cmd, BSONObj(), nullptr, timeoutMillis};
+        auto res = runCommandSync(request);
+        ASSERT_EQ(reason, res.status.code());
     }
 
     void assertCommandFailsOnServer(StringData db,
                                     const BSONObj& cmd,
                                     Milliseconds timeoutMillis,
                                     ErrorCodes::Error reason) {
-        auto res = unittest::assertGet(runCommandSync(
-            {fixture().getServers()[0], db.toString(), cmd, BSONObj(), timeoutMillis}));
+        RemoteCommandRequest request{
+            fixture().getServers()[0], db.toString(), cmd, BSONObj(), nullptr, timeoutMillis};
+        auto res = runCommandSync(request);
+        ASSERT_OK(res.status);
         auto serverStatus = getStatusFromCommandResult(res.data);
-        ASSERT_TRUE(serverStatus == reason);
+        ASSERT_EQ(reason, serverStatus);
     }
 
 private:
@@ -162,7 +170,8 @@ TEST_F(NetworkInterfaceASIOIntegrationTest, Timeouts) {
     assertCommandFailsOnClient("admin",
                                BSON("sleep" << 1 << "lock"
                                             << "none"
-                                            << "secs" << 10),
+                                            << "secs"
+                                            << 10),
                                Milliseconds(100),
                                ErrorCodes::ExceededTimeLimit);
 
@@ -170,7 +179,8 @@ TEST_F(NetworkInterfaceASIOIntegrationTest, Timeouts) {
     assertCommandOK("admin",
                     BSON("sleep" << 1 << "lock"
                                  << "none"
-                                 << "secs" << 1),
+                                 << "secs"
+                                 << 1),
                     Milliseconds(10000000));
 }
 
@@ -184,8 +194,11 @@ public:
              Milliseconds timeout = RemoteCommandRequest::kNoTimeout) {
         auto cb = makeCallbackHandle();
 
-        RemoteCommandRequest request{
-            unittest::getFixtureConnectionString().getServers()[0], "admin", _command, timeout};
+        RemoteCommandRequest request{unittest::getFixtureConnectionString().getServers()[0],
+                                     "admin",
+                                     _command,
+                                     nullptr,
+                                     timeout};
 
         fixture->startCommand(cb, request, onFinish);
 
@@ -199,29 +212,37 @@ public:
     static void runTimeoutOp(Fixture* fixture, StartCommandCB onFinish) {
         return StressTestOp(BSON("sleep" << 1 << "lock"
                                          << "none"
-                                         << "secs" << 1),
-                            false).run(fixture, onFinish, Milliseconds(100));
+                                         << "secs"
+                                         << 1),
+                            false)
+            .run(fixture, onFinish, Milliseconds(100));
     }
 
     static void runCompleteOp(Fixture* fixture, StartCommandCB onFinish) {
         return StressTestOp(BSON("sleep" << 1 << "lock"
                                          << "none"
-                                         << "millis" << 100),
-                            false).run(fixture, onFinish);
+                                         << "millis"
+                                         << 100),
+                            false)
+            .run(fixture, onFinish);
     }
 
     static void runCancelOp(Fixture* fixture, StartCommandCB onFinish) {
         return StressTestOp(BSON("sleep" << 1 << "lock"
                                          << "none"
-                                         << "secs" << 10),
-                            true).run(fixture, onFinish);
+                                         << "secs"
+                                         << 10),
+                            true)
+            .run(fixture, onFinish);
     }
 
     static void runLongOp(Fixture* fixture, StartCommandCB onFinish) {
         return StressTestOp(BSON("sleep" << 1 << "lock"
                                          << "none"
-                                         << "secs" << 30),
-                            false).run(fixture, onFinish);
+                                         << "secs"
+                                         << 30),
+                            false)
+            .run(fixture, onFinish);
     }
 
 private:
@@ -232,8 +253,8 @@ private:
 };
 
 TEST_F(NetworkInterfaceASIOIntegrationTest, StressTest) {
-    const std::size_t numOps = 1000;
-    std::vector<Status> testResults(numOps, {ErrorCodes::InternalError, "uninitialized"});
+    constexpr std::size_t numOps = 1000;
+    RemoteCommandResponse testResults[numOps];
     ErrorCodes::Error expectedResults[numOps];
     CountdownLatch cl(numOps);
 
@@ -253,9 +274,8 @@ TEST_F(NetworkInterfaceASIOIntegrationTest, StressTest) {
 
         auto r = rng.nextCanonicalDouble();
 
-        auto cb = [&testResults, &cl, i](const StatusWith<RemoteCommandResponse>& resp) {
-            testResults[i] =
-                resp.isOK() ? getStatusFromCommandResult(resp.getValue().data) : resp.getStatus();
+        auto cb = [&testResults, &cl, i](const RemoteCommandResponse& resp) {
+            testResults[i] = resp;
             cl.countDown();
         };
 
@@ -278,7 +298,9 @@ TEST_F(NetworkInterfaceASIOIntegrationTest, StressTest) {
     cl.await();
 
     for (std::size_t i = 0; i < numOps; ++i) {
-        ASSERT_EQ(testResults[i], expectedResults[i]);
+        const auto& resp = testResults[i];
+        auto ec = resp.isOK() ? getStatusFromCommandResult(resp.data) : resp.status;
+        ASSERT_EQ(ec, expectedResults[i]);
     }
 }
 
@@ -294,8 +316,10 @@ class HangingHook : public executor::NetworkConnectionHook {
                                                           "admin",
                                                           BSON("sleep" << 1 << "lock"
                                                                        << "none"
-                                                                       << "secs" << 100000000),
-                                                          BSONObj()))};
+                                                                       << "secs"
+                                                                       << 100000000),
+                                                          BSONObj(),
+                                                          nullptr))};
     }
 
     Status handleReply(const HostAndPort& remoteHost, RemoteCommandResponse&& response) final {
