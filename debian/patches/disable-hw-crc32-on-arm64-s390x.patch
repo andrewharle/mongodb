@@ -1,0 +1,13 @@
+--- a/src/third_party/wiredtiger/SConscript
++++ b/src/third_party/wiredtiger/SConscript
+@@ -169,7 +169,9 @@
+ # If not available at runtime, we fall back to software in some cases.
+ #
+ # On zSeries we may disable because SLES 11 kernel doe not support the instructions.
+-if not (env['TARGET_ARCH'] == 's390x' and get_option("use-s390x-crc32") == "off"):
++# Debian: disable hardware-assisted crc32 on s390x and arm64, as at least the
++# buildd's do not support the instructions.
++if env['TARGET_ARCH'] not in ('s390x', 'arm64', 'aarch64'):
+     env.Append(CPPDEFINES=["HAVE_CRC32_HARDWARE"])
+ 
+ wtlib = env.Library(
