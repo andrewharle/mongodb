@@ -1,0 +1,32 @@
+Author: Apollon Oikonomopoulos <apoikos@debian.org>
+Description: Use std::regex instead of boost::regex
+ Fixes FTBFS due to C++ ABI mismatch between system boost and mongodb.
+ std::regex is part of C++11.
+Forwarded: no (further investigation needed)
+Last-Update: 2016-12-23
+--- a/src/mongo/client/mongo_uri.cpp
++++ b/src/mongo/client/mongo_uri.cpp
+@@ -43,7 +43,8 @@
+ #include <boost/algorithm/string/classification.hpp>
+ #include <boost/algorithm/string/predicate.hpp>
+ #include <boost/algorithm/string/split.hpp>
+-#include <boost/regex.hpp>
++
++#include <regex>
+ 
+ namespace mongo {
+ 
+@@ -85,10 +86,10 @@
+         return MongoURI(cs_status.getValue());
+     }
+ 
+-    const boost::regex mongoUrlRe(kMongoDBURL);
++    const std::regex mongoUrlRe(kMongoDBURL);
+ 
+-    boost::smatch matches;
+-    if (!boost::regex_match(url, matches, mongoUrlRe)) {
++    std::smatch matches;
++    if (!std::regex_match(url, matches, mongoUrlRe)) {
+         return Status(ErrorCodes::FailedToParse,
+                       str::stream() << "Failed to parse mongodb:// URL: " << url);
+     }
