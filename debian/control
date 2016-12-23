@@ -15,7 +15,7 @@ Build-Depends:
  libboost-program-options-dev,
  libboost-thread-dev,
  libboost-regex-dev,
- libgoogle-perftools-dev [linux-amd64 linux-i386],
+ libgoogle-perftools-dev [linux-amd64 linux-arm64 linux-ppc64el],
  libyaml-cpp-dev,
  libpcap-dev,
  libpcre3-dev,
