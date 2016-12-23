@@ -6,24 +6,24 @@ Last-Update: 2016-12-15
 Forwarded: no
 --- a/src/mongo/db/storage/storage_options.h
 +++ b/src/mongo/db/storage/storage_options.h
-@@ -51,7 +51,11 @@
-     static const char* kDefaultConfigDbPath;
+@@ -52,7 +52,11 @@
  
-     StorageGlobalParams()
+     // --storageEngine
+     // storage engine for this instance of mongod.
 +#if defined(__i386__)
-+        : engine("mmapv1"),
++    std::string engine = "mmapv1";
 +#else
-         : engine("wiredTiger"),
+     std::string engine = "wiredTiger";
 +#endif
-           engineSetByUser(false),
-           dbpath(kDefaultDbPath),
-           upgrade(false),
+ 
+     // True if --storageEngine was passed on the command line, and false otherwise.
+     bool engineSetByUser = false;
 --- a/src/mongo/dbtests/framework_options.cpp
 +++ b/src/mongo/dbtests/framework_options.cpp
-@@ -92,7 +92,11 @@
- 
-     options->addOptionChaining(
-                  "storage.engine", "storageEngine", moe::String, "what storage engine to use")
+@@ -104,7 +104,11 @@
+     options
+         ->addOptionChaining(
+             "storage.engine", "storageEngine", moe::String, "what storage engine to use")
 +#if defined(__i386__)
 +        .setDefault(moe::Value(std::string("mmapv1")));
 +#else
