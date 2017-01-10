@@ -1,0 +1,41 @@
+From 1d44ca172befd6ad6d3a6cb410ddf7a0e31b6f81 Mon Sep 17 00:00:00 2001
+From: Apollon Oikonomopoulos <apoikos@debian.org>
+Date: Tue, 10 Jan 2017 17:39:57 +0200
+Bug-Debian: #833087
+Subject: [PATCH] Redact key and nonce from auth attempt logs
+---
+ src/mongo/db/commands/authentication_commands.cpp | 17 ++++++++++++++++-
+ 1 file changed, 16 insertions(+), 1 deletion(-)
+
+diff --git a/src/mongo/db/commands/authentication_commands.cpp b/src/mongo/db/commands/authentication_commands.cpp
+index bcc5a2f..538e9a0 100644
+--- a/src/mongo/db/commands/authentication_commands.cpp
++++ b/src/mongo/db/commands/authentication_commands.cpp
+@@ -93,8 +93,23 @@ namespace mongo {
+     } cmdGetNonce;
+ 
+     bool CmdAuthenticate::run(const string& dbname , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
++        // Debian #833087: redact key and nonce from authentication attempts
++        BSONObjBuilder cmdToLog;
++        BSONObjIterator it = cmdObj.begin();
++        const StringData kKey = "key";
++        const StringData kNonce = "nonce";
++
++        while (it.more()) {
++            BSONElement e = it.next();
++            const char *fname = e.fieldName();
++            if (fname == kKey || fname == kNonce) {
++                cmdToLog.append(fname, "xxx");
++            } else {
++                cmdToLog.append(e);
++            }
++        }
+ 
+-        log() << " authenticate db: " << dbname << " " << cmdObj << endl;
++        log() << " authenticate db: " << dbname << " " << cmdToLog.obj() << endl;
+ 
+         string user = cmdObj.getStringField("user");
+ 
+-- 
+2.10.2
+
