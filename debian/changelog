@@ -1,3 +1,10 @@
+mongodb (1:2.4.10-5+deb8u1) jessie; urgency=medium
+
+  * Redact key and nonce from auth attempt logs (Closes: #833087)
+  * Backport patch for CVE-2016-6494 from 2.6 (Closes: #832908)
+
+ -- Apollon Oikonomopoulos <apoikos@debian.org>  Wed, 11 Jan 2017 11:17:56 +0200
+
 mongodb (1:2.4.10-5) unstable; urgency=high
 
   * Use upstream backported fix for CVE-2015-1609 (closes: #780129).
