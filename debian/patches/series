@@ -19,3 +19,4 @@ cefb0ef38f050b73b2bf8211add55f3749753e0a.patch
 656f78711632a5dc37221422c99e3c4619bcc58f.patch
 3a7e85ea1f672f702660e5472566234b1d19038e.patch
 Redact-key-and-nonce-from-auth-attempt-logs.patch
+CVE-2016-6494.patch
