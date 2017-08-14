@@ -203,10 +203,15 @@
     rst = new ReplSetTest({nodes: [{binVersion: latest}, {binVersion: downgrade}]});
     rst.startSet();
 
-    // Rig the election so that the node running latest version becomes the primary.
+    // Rig the election so that the node running latest version becomes the primary. Give the 3.2
+    // node no votes, so that the primary doesn't step down when it crashes.
     replSetConfig = rst.getReplSetConfig();
     replSetConfig.members[1].priority = 0;
-    rst.initiate(replSetConfig);
+    replSetConfig.members[1].votes = 0;
+
+    // TODO(SERVER-14017): remove this in favor of using initiate() everywhere.
+    rst.initiateWithAnyNodeAsPrimary(replSetConfig);
+    rst.awaitSecondaryNodes();
 
     primaryAdminDB = rst.getPrimary().getDB("admin");
     res = assert.commandWorked(
@@ -337,7 +342,16 @@
     st.rs0.getPrimary().discardMessagesFrom(st.configRS.getPrimary(), 0.0);
 
     // featureCompatibilityVersion can be set to 3.2 on mongos.
-    assert.commandWorked(mongosAdminDB.runCommand({setFeatureCompatibilityVersion: "3.2"}));
+    // This is run through assert.soon() because we've just caused a network interruption
+    // by discarding messages in the bridge.
+    assert.soon(function() {
+        var res = mongosAdminDB.runCommand({setFeatureCompatibilityVersion: "3.2"});
+        if (res.ok == 0) {
+            print("Failed to set feature compatibility version: " + tojson(res));
+            return false;
+        }
+        return true;
+    });
 
     // featureCompatibilityVersion propagates to config and shard.
     res = configPrimaryAdminDB.runCommand({getParameter: 1, featureCompatibilityVersion: 1});

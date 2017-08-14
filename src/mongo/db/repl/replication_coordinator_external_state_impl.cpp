@@ -87,7 +87,6 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/exit.h"
-#include "mongo/util/fail_point_service.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
 #include "mongo/util/net/hostandport.h"
@@ -96,8 +95,6 @@
 
 namespace mongo {
 namespace repl {
-
-MONGO_FP_DECLARE(transitionToPrimaryHangBeforeInitializingConfigDatabase);
 
 namespace {
 using UniqueLock = stdx::unique_lock<stdx::mutex>;
@@ -261,13 +258,11 @@ void ReplicationCoordinatorExternalStateImpl::_stopDataReplication_inlock(Operat
     auto oldSSF = std::move(_syncSourceFeedbackThread);
     auto oldBgSync = std::move(_bgSync);
     auto oldApplier = std::move(_applierThread);
-    if (oldSSF) {
-        log() << "Stopping replication reporter thread";
-        _syncSourceFeedback.shutdown();
-    }
     lock->unlock();
 
     if (oldSSF) {
+        log() << "Stopping replication reporter thread";
+        _syncSourceFeedback.shutdown();
         oldSSF->join();
     }
 
@@ -324,32 +319,37 @@ void ReplicationCoordinatorExternalStateImpl::startMasterSlave(OperationContext*
     repl::startMasterSlave(txn);
 }
 
-void ReplicationCoordinatorExternalStateImpl::shutdown(OperationContext* txn) {
+void ReplicationCoordinatorExternalStateImpl::shutdown(OperationContext* opCtx) {
     UniqueLock lk(_threadMutex);
-    if (_startedThreads) {
-        _stopDataReplication_inlock(txn, &lk);
+    if (!_startedThreads) {
+        return;
+    }
 
-        if (_snapshotThread) {
-            log() << "Stopping replication snapshot thread";
-            _snapshotThread->shutdown();
-        }
+    _stopDataReplication_inlock(opCtx, &lk);
 
-        if (_storageInterface->getOplogDeleteFromPoint(txn).isNull() &&
-            loadLastOpTime(txn) == _storageInterface->getAppliedThrough(txn)) {
-            // Clear the appliedThrough marker to indicate we are consistent with the top of the
-            // oplog.
-            _storageInterface->setAppliedThrough(txn, {});
-        }
+    if (_snapshotThread) {
+        log() << "Stopping replication snapshot thread";
+        _snapshotThread->shutdown();
+    }
 
-        if (_noopWriter) {
-            LOG(1) << "Stopping noop writer";
-            _noopWriter->stopWritingPeriodicNoops();
-        }
+    if (_noopWriter) {
+        LOG(1) << "Stopping noop writer";
+        _noopWriter->stopWritingPeriodicNoops();
+    }
 
-        log() << "Stopping replication storage threads";
-        _taskExecutor->shutdown();
-        _taskExecutor->join();
-        _storageInterface->shutdown();
+    log() << "Stopping replication storage threads";
+    _taskExecutor->shutdown();
+    _taskExecutor->join();
+    _storageInterface->shutdown();
+    lk.unlock();
+
+    // Perform additional shutdown steps below that must be done outside _threadMutex.
+
+    if (_storageInterface->getOplogDeleteFromPoint(opCtx).isNull() &&
+        loadLastOpTime(opCtx) == _storageInterface->getAppliedThrough(opCtx)) {
+        // Clear the appliedThrough marker to indicate we are consistent with the top of the
+        // oplog.
+        _storageInterface->setAppliedThrough(opCtx, {});
     }
 }
 
@@ -534,9 +534,7 @@ StatusWith<LastVote> ReplicationCoordinatorExternalStateImpl::loadLocalLastVoteD
                                                 << "Did not find replica set lastVote document in "
                                                 << lastVoteCollectionName);
             }
-            LastVote lastVote;
-            lastVote.initialize(lastVoteObj);
-            return StatusWith<LastVote>(lastVote);
+            return LastVote::readFromLastVote(lastVoteObj);
         }
         MONGO_WRITE_CONFLICT_RETRY_LOOP_END(
             txn, "load replica set lastVote", lastVoteCollectionName);
@@ -552,12 +550,29 @@ Status ReplicationCoordinatorExternalStateImpl::storeLocalLastVoteDocument(
         MONGO_WRITE_CONFLICT_RETRY_LOOP_BEGIN {
             ScopedTransaction transaction(txn, MODE_IX);
             Lock::DBLock dbWriteLock(txn->lockState(), lastVoteDatabaseName, MODE_X);
-            Helpers::putSingleton(txn, lastVoteCollectionName, lastVoteObj);
-            return Status::OK();
+
+            // If there is no last vote document, we want to store one. Otherwise, we only want to
+            // replace it if the new last vote document would have a higher term. We both check
+            // the term of the current last vote document and insert the new document under the
+            // DBLock to synchronize the two operations.
+            BSONObj result;
+            bool exists = Helpers::getSingleton(txn, lastVoteCollectionName, result);
+            if (!exists) {
+                Helpers::putSingleton(txn, lastVoteCollectionName, lastVoteObj);
+            } else {
+                StatusWith<LastVote> oldLastVoteDoc = LastVote::readFromLastVote(result);
+                if (!oldLastVoteDoc.isOK()) {
+                    return oldLastVoteDoc.getStatus();
+                }
+                if (lastVote.getTerm() > oldLastVoteDoc.getValue().getTerm()) {
+                    Helpers::putSingleton(txn, lastVoteCollectionName, lastVoteObj);
+                }
+            }
         }
         MONGO_WRITE_CONFLICT_RETRY_LOOP_END(
             txn, "save replica set lastVote", lastVoteCollectionName);
-        MONGO_UNREACHABLE;
+        txn->recoveryUnit()->waitUntilDurable();
+        return Status::OK();
     } catch (const DBException& ex) {
         return ex.toStatus();
     }
@@ -729,18 +744,6 @@ void ReplicationCoordinatorExternalStateImpl::_shardingOnTransitionToPrimaryHook
     fassertStatusOK(40107, status);
 
     if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
-        if (MONGO_FAIL_POINT(transitionToPrimaryHangBeforeInitializingConfigDatabase)) {
-            log() << "transition to primary - "
-                     "transitionToPrimaryHangBeforeInitializingConfigDatabase fail point enabled. "
-                     "Blocking until fail point is disabled.";
-            while (MONGO_FAIL_POINT(transitionToPrimaryHangBeforeInitializingConfigDatabase)) {
-                mongo::sleepsecs(1);
-                if (inShutdown()) {
-                    break;
-                }
-            }
-        }
-
         status = Grid::get(txn)->catalogManager()->initializeConfigDatabaseIfNeeded(txn);
         if (!status.isOK() && status != ErrorCodes::AlreadyInitialized) {
             if (ErrorCodes::isShutdownError(status.code())) {
@@ -814,12 +817,18 @@ void ReplicationCoordinatorExternalStateImpl::signalApplierToChooseNewSyncSource
     }
 }
 
-void ReplicationCoordinatorExternalStateImpl::signalApplierToCancelFetcher() {
+void ReplicationCoordinatorExternalStateImpl::stopProducer() {
     LockGuard lk(_threadMutex);
-    if (!_bgSync) {
-        return;
+    if (_bgSync) {
+        _bgSync->stop(false);
     }
-    _bgSync->cancelFetcher();
+}
+
+void ReplicationCoordinatorExternalStateImpl::startProducerIfStopped() {
+    LockGuard lk(_threadMutex);
+    if (_bgSync) {
+        _bgSync->startProducerIfStopped();
+    }
 }
 
 void ReplicationCoordinatorExternalStateImpl::_dropAllTempCollections(OperationContext* txn) {
@@ -851,6 +860,13 @@ void ReplicationCoordinatorExternalStateImpl::updateCommittedSnapshot(SnapshotNa
     auto manager = getGlobalServiceContext()->getGlobalStorageEngine()->getSnapshotManager();
     invariant(manager);  // This should never be called if there is no SnapshotManager.
     manager->setCommittedSnapshot(newCommitPoint);
+}
+
+void ReplicationCoordinatorExternalStateImpl::createSnapshot(OperationContext* txn,
+                                                             SnapshotName name) {
+    auto manager = getGlobalServiceContext()->getGlobalStorageEngine()->getSnapshotManager();
+    invariant(manager);  // This should never be called if there is no SnapshotManager.
+    manager->createSnapshot(txn, name);
 }
 
 void ReplicationCoordinatorExternalStateImpl::forceSnapshotCreation() {

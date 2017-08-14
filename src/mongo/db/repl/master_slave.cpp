@@ -486,6 +486,11 @@ void ReplSource::resyncDrop(OperationContext* txn, const string& dbName) {
     invariant(txn->lockState()->isW());
 
     Database* const db = dbHolder().get(txn, dbName);
+    if (!db) {
+        log() << "resync: dropping database " << dbName
+              << " - database does not exist. nothing to do.";
+        return;
+    }
     Database::dropDatabase(txn, db);
 }
 
@@ -561,7 +566,7 @@ bool ReplSource::handleDuplicateDbName(OperationContext* txn,
         // missing from master after optime "ts".
         return false;
     }
-    if (Database::duplicateUncasedName(db).empty()) {
+    if (dbHolder().getNamesWithConflictingCasing(db).empty()) {
         // No duplicate database names are present.
         return true;
     }
@@ -571,7 +576,7 @@ bool ReplSource::handleDuplicateDbName(OperationContext* txn,
     {
         // This is always a GlobalWrite lock (so no ns/db used from the context)
         invariant(txn->lockState()->isW());
-        Lock::TempRelease(txn->lockState());
+        Lock::TempRelease tempRelease(txn->lockState());
 
         // We always log an operation after executing it (never before), so
         // a database list will always be valid as of an oplog entry generated
@@ -618,8 +623,7 @@ bool ReplSource::handleDuplicateDbName(OperationContext* txn,
     }
 
     // Check for duplicates again, since we released the lock above.
-    set<string> duplicates;
-    Database::duplicateUncasedName(db, &duplicates);
+    auto duplicates = dbHolder().getNamesWithConflictingCasing(db);
 
     // The database is present on the master and no conflicting databases
     // are present on the master.  Drop any local conflicts.
@@ -634,22 +638,14 @@ bool ReplSource::handleDuplicateDbName(OperationContext* txn,
 
     massert(14034,
             "Duplicate database names present after attempting to delete duplicates",
-            Database::duplicateUncasedName(db).empty());
+            dbHolder().getNamesWithConflictingCasing(db).empty());
     return true;
 }
 
 void ReplSource::applyCommand(OperationContext* txn, const BSONObj& op) {
     try {
         Status status = applyCommand_inlock(txn, op, true);
-        if (!status.isOK()) {
-            SyncTail sync(nullptr, SyncTail::MultiSyncApplyFunc());
-            sync.setHostname(hostName);
-            if (sync.shouldRetry(txn, op)) {
-                uassert(28639,
-                        "Failure retrying initial sync update",
-                        applyCommand_inlock(txn, op, true).isOK());
-            }
-        }
+        uassert(28639, "Failure applying initial sync command", status.isOK());
     } catch (UserException& e) {
         log() << "sync: caught user assertion " << redact(e) << " while applying op: " << redact(op)
               << endl;
@@ -665,13 +661,17 @@ void ReplSource::applyOperation(OperationContext* txn, Database* db, const BSONO
     try {
         Status status = applyOperation_inlock(txn, db, op);
         if (!status.isOK()) {
+            uassert(15914,
+                    "Failure applying initial sync operation",
+                    status == ErrorCodes::UpdateOperationFailed);
+
+            // In initial sync, update operations can cause documents to be missed during
+            // collection cloning. As a result, it is possible that a document that we need to
+            // update is not present locally. In that case we fetch the document from the
+            // sync source.
             SyncTail sync(nullptr, SyncTail::MultiSyncApplyFunc());
             sync.setHostname(hostName);
-            if (sync.shouldRetry(txn, op)) {
-                uassert(15914,
-                        "Failure retrying initial sync update",
-                        applyOperation_inlock(txn, db, op).isOK());
-            }
+            sync.fetchAndInsertMissingDocument(txn, op);
         }
     } catch (UserException& e) {
         log() << "sync: caught user assertion " << redact(e) << " while applying op: " << redact(op)

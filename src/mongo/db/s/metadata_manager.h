@@ -59,7 +59,7 @@ public:
      * contains the currently active metadata.  When the usageCounter goes to zero, the RAII
      * object going out of scope will call _removeMetadata.
      */
-    ScopedCollectionMetadata getActiveMetadata();
+    ScopedCollectionMetadata getActiveMetadata(std::shared_ptr<MetadataManager> self);
 
     /**
      * Uses the contents of the specified metadata as a way to purge any pending chunks.
@@ -204,7 +204,7 @@ private:
     const NamespaceString _nss;
 
     // ServiceContext from which to obtain instances of global support objects.
-    ServiceContext* _serviceContext;
+    ServiceContext* const _serviceContext;
 
     // Mutex to protect the state below
     stdx::mutex _managerLock;
@@ -243,8 +243,8 @@ public:
     /**
      * Dereferencing the ScopedCollectionMetadata will dereference the internal CollectionMetadata.
      */
-    CollectionMetadata* operator->();
-    CollectionMetadata* getMetadata();
+    CollectionMetadata* operator->() const;
+    CollectionMetadata* getMetadata() const;
 
     /**
      * True if the ScopedCollectionMetadata stores a metadata (is not empty)
@@ -252,12 +252,13 @@ public:
     operator bool() const;
 
 private:
-    friend ScopedCollectionMetadata MetadataManager::getActiveMetadata();
+    friend ScopedCollectionMetadata MetadataManager::getActiveMetadata(
+        std::shared_ptr<MetadataManager>);
 
     /**
      * Increments the counter in the CollectionMetadataTracker.
      */
-    ScopedCollectionMetadata(MetadataManager* manager,
+    ScopedCollectionMetadata(std::shared_ptr<MetadataManager> manager,
                              MetadataManager::CollectionMetadataTracker* tracker);
 
     /**
@@ -266,7 +267,7 @@ private:
      */
     void _decrementUsageCounter();
 
-    MetadataManager* _manager{nullptr};
+    std::shared_ptr<MetadataManager> _manager{nullptr};
     MetadataManager::CollectionMetadataTracker* _tracker{nullptr};
 };
 

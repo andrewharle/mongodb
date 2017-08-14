@@ -36,18 +36,14 @@
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/catalog/index_create.h"
 #include "mongo/db/client.h"
-#include "mongo/db/commands/feature_compatibility_version.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
-#include "mongo/db/dbhelpers.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_context_d.h"
 #include "mongo/dbtests/dbtests.h"
 
 namespace IndexUpdateTests {
-
-using std::unique_ptr;
 
 namespace {
 const auto kIndexVersion = IndexDescriptor::IndexVersion::kV2;
@@ -417,28 +413,6 @@ public:
     }
 };
 
-/** Helpers::ensureIndex() is not interrupted. */
-class HelpersEnsureIndexInterruptDisallowed : public IndexBuildBase {
-public:
-    void run() {
-        // Insert some documents.
-        int32_t nDocs = 1000;
-        for (int32_t i = 0; i < nDocs; ++i) {
-            _client.insert(_ns, BSON("a" << i));
-        }
-        // Start with just _id
-        ASSERT_EQUALS(1U, _client.getIndexSpecs(_ns).size());
-        // Request an interrupt.
-        getGlobalServiceContext()->setKillAllOperations();
-        // The call is not interrupted.
-        Helpers::ensureIndex(&_txn, collection(), BSON("a" << 1), kIndexVersion, false, "a_1");
-        // only want to interrupt the index build
-        getGlobalServiceContext()->unsetKillAllOperations();
-        // The new index is listed in getIndexSpecs because the index build completed.
-        ASSERT_EQUALS(2U, _client.getIndexSpecs(_ns).size());
-    }
-};
-
 Status IndexBuildBase::createIndex(const std::string& dbname, const BSONObj& indexSpec) {
     MultiIndexBlock indexer(&_txn, collection());
     Status status = indexer.init(indexSpec).getStatus();
@@ -719,7 +693,6 @@ class InsertSymbolIntoIndexWithCollationFails {
 public:
     void run() {
         auto opCtx = cc().makeOperationContext();
-        FeatureCompatibilityVersion::set(opCtx.get(), "3.4");
         DBDirectClient client(opCtx.get());
         client.dropCollection(_ns);
         IndexSpec indexSpec;
@@ -737,7 +710,6 @@ class InsertSymbolIntoIndexWithoutCollationSucceeds {
 public:
     void run() {
         auto opCtx = cc().makeOperationContext();
-        FeatureCompatibilityVersion::set(opCtx.get(), "3.4");
         DBDirectClient client(opCtx.get());
         client.dropCollection(_ns);
         IndexSpec indexSpec;
@@ -753,7 +725,6 @@ class InsertSymbolInsideNestedObjectIntoIndexWithCollationFails {
 public:
     void run() {
         auto opCtx = cc().makeOperationContext();
-        FeatureCompatibilityVersion::set(opCtx.get(), "3.4");
         DBDirectClient client(opCtx.get());
         client.dropCollection(_ns);
         IndexSpec indexSpec;
@@ -771,7 +742,6 @@ class InsertSymbolInsideNestedArrayIntoIndexWithCollationFails {
 public:
     void run() {
         auto opCtx = cc().makeOperationContext();
-        FeatureCompatibilityVersion::set(opCtx.get(), "3.4");
         DBDirectClient client(opCtx.get());
         client.dropCollection(_ns);
         IndexSpec indexSpec;
@@ -789,7 +759,6 @@ class BuildingIndexWithCollationWhenSymbolDataExistsShouldFail {
 public:
     void run() {
         auto opCtx = cc().makeOperationContext();
-        FeatureCompatibilityVersion::set(opCtx.get(), "3.4");
         DBDirectClient client(opCtx.get());
         client.dropCollection(_ns);
         client.insert(_ns, BSON("a" << BSON_ARRAY(99 << BSONSymbol("mySymbol"))));
@@ -806,7 +775,6 @@ class IndexingSymbolWithInheritedCollationShouldFail {
 public:
     void run() {
         auto opCtx = cc().makeOperationContext();
-        FeatureCompatibilityVersion::set(opCtx.get(), "3.4");
         DBDirectClient client(opCtx.get());
         client.dropCollection(_ns);
         BSONObj cmdResult;
@@ -841,7 +809,6 @@ public:
         add<InsertBuildIndexInterruptDisallowed>();
         add<InsertBuildIdIndexInterrupt>();
         add<InsertBuildIdIndexInterruptDisallowed>();
-        add<HelpersEnsureIndexInterruptDisallowed>();
         add<SameSpecDifferentOption>();
         add<SameSpecSameOptions>();
         add<DifferentSpecSameName>();

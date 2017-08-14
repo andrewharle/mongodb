@@ -46,7 +46,6 @@
 #include "mongo/db/repl/replication_coordinator_global.h"
 #include "mongo/db/s/collection_metadata.h"
 #include "mongo/db/s/collection_sharding_state.h"
-#include "mongo/db/s/metadata_loader.h"
 #include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/sharded_connection_info.h"
 #include "mongo/db/s/sharding_initialization_mongod.h"
@@ -58,10 +57,10 @@
 #include "mongo/rpc/metadata/metadata_hook.h"
 #include "mongo/s/catalog/sharding_catalog_client.h"
 #include "mongo/s/catalog/type_chunk.h"
+#include "mongo/s/catalog_cache.h"
 #include "mongo/s/chunk_version.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/client/sharding_network_connection_hook.h"
-#include "mongo/s/config.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/sharding_initialization.h"
 #include "mongo/util/log.h"
@@ -83,12 +82,6 @@ using CallbackArgs = executor::TaskExecutor::CallbackArgs;
 namespace {
 
 const auto getShardingState = ServiceContext::declareDecoration<ShardingState>();
-
-// Max number of concurrent config server refresh threads
-const int kMaxConfigServerRefreshThreads = 3;
-
-// Maximum number of times to try to refresh the collection metadata if conflicts are occurring
-const int kMaxNumMetadataRefreshAttempts = 3;
 
 /**
  * Updates the config server field of the shardIdentity document with the given connection string
@@ -124,7 +117,6 @@ const std::set<std::string> ShardingState::_commandsThatInitializeShardingAwaren
 ShardingState::ShardingState()
     : _initializationState(static_cast<uint32_t>(InitializationState::kNew)),
       _initializationStatus(Status(ErrorCodes::InternalError, "Uninitialized value")),
-      _configServerTickets(kMaxConfigServerRefreshThreads),
       _globalInit(&initializeGlobalShardingStateForMongod),
       _scheduleWorkFn([](NamespaceString nss) {}) {}
 
@@ -273,47 +265,24 @@ Status ShardingState::onStaleShardVersion(OperationContext* txn,
         }
     }
 
-    // At the first attempt try to use the currently loaded metadata and on subsequent attempts use
-    // the complete metadata
-    int numRefreshAttempts = 0;
-
-    while (true) {
-        numRefreshAttempts++;
-
-        auto refreshStatusAndVersion =
-            _refreshMetadata(txn, nss, (currentMetadata ? currentMetadata.getMetadata() : nullptr));
-        if (refreshStatusAndVersion.isOK()) {
-            LOG(1) << "Successfully refreshed metadata for " << nss.ns() << " to "
-                   << refreshStatusAndVersion.getValue();
-            return Status::OK();
-        }
-
-        if (refreshStatusAndVersion == ErrorCodes::RemoteChangeDetected &&
-            numRefreshAttempts < kMaxNumMetadataRefreshAttempts) {
-            currentMetadata = ScopedCollectionMetadata();
-
-            log() << "Refresh failed and will be retried as full reload "
-                  << refreshStatusAndVersion.getStatus();
-            continue;
-        }
-
-        return refreshStatusAndVersion.getStatus();
+    try {
+        _refreshMetadata(txn, nss);
+        return Status::OK();
+    } catch (const DBException& ex) {
+        log() << "Failed to refresh metadata for collection" << nss << causedBy(redact(ex));
+        return ex.toStatus();
     }
-
-
-    MONGO_UNREACHABLE;
 }
 
 Status ShardingState::refreshMetadataNow(OperationContext* txn,
                                          const NamespaceString& nss,
                                          ChunkVersion* latestShardVersion) {
-    auto refreshLatestShardVersionStatus = _refreshMetadata(txn, nss, nullptr);
-    if (!refreshLatestShardVersionStatus.isOK()) {
-        return refreshLatestShardVersionStatus.getStatus();
+    try {
+        *latestShardVersion = _refreshMetadata(txn, nss);
+        return Status::OK();
+    } catch (const DBException& ex) {
+        return ex.toStatus();
     }
-
-    *latestShardVersion = refreshLatestShardVersionStatus.getValue();
-    return Status::OK();
 }
 
 void ShardingState::initializeFromConfigConnString(OperationContext* txn,
@@ -436,7 +405,7 @@ Status ShardingState::initializeFromShardIdentity(OperationContext* txn,
             if (status.isOK()) {
                 _setInitializationState_inlock(InitializationState::kInitialized);
                 ReplicaSetMonitor::setSynchronousConfigChangeHook(
-                    &ConfigServer::replicaSetChangeShardRegistryUpdateHook);
+                    &ShardRegistry::replicaSetChangeShardRegistryUpdateHook);
                 ReplicaSetMonitor::setAsynchronousConfigChangeHook(
                     &updateShardIdentityConfigStringCB);
             } else {
@@ -474,7 +443,7 @@ void ShardingState::_initializeImpl(ConnectionString configSvr, string shardName
 
         if (status.isOK()) {
             ReplicaSetMonitor::setSynchronousConfigChangeHook(
-                &ConfigServer::replicaSetChangeShardRegistryUpdateHook);
+                &ShardRegistry::replicaSetChangeShardRegistryUpdateHook);
             ReplicaSetMonitor::setAsynchronousConfigChangeHook(&updateShardIdentityConfigStringCB);
 
             _initializeRangeDeleterTaskExecutor();
@@ -646,78 +615,59 @@ StatusWith<bool> ShardingState::initializeShardingAwarenessIfNeeded(OperationCon
     }
 }
 
-StatusWith<ChunkVersion> ShardingState::_refreshMetadata(
-    OperationContext* txn, const NamespaceString& nss, const CollectionMetadata* metadataForDiff) {
+ChunkVersion ShardingState::_refreshMetadata(OperationContext* txn, const NamespaceString& nss) {
     invariant(!txn->lockState()->isLocked());
+    invariant(enabled());
 
-    {
-        Status status = _waitForInitialization(txn->getDeadline());
-        if (!status.isOK())
-            return status;
-    }
+    const ShardId shardId = getShardName();
 
-    // We can't reload if a shard name has not yet been set
-    {
-        stdx::lock_guard<stdx::mutex> lk(_mutex);
+    uassert(ErrorCodes::NotYetInitialized,
+            str::stream() << "Cannot refresh metadata for " << nss.ns()
+                          << " before shard name has been set",
+            shardId.isValid());
 
-        if (_shardName.empty()) {
-            string errMsg = str::stream() << "cannot refresh metadata for " << nss.ns()
-                                          << " before shard name has been set";
-            warning() << errMsg;
-            return {ErrorCodes::NotYetInitialized, errMsg};
+    auto newCollectionMetadata = [&]() -> std::unique_ptr<CollectionMetadata> {
+        auto const catalogCache = Grid::get(txn)->catalogCache();
+        catalogCache->invalidateShardedCollection(nss);
+
+        const auto routingInfo = uassertStatusOK(catalogCache->getCollectionRoutingInfo(txn, nss));
+        const auto cm = routingInfo.cm();
+        if (!cm) {
+            return nullptr;
         }
-    }
 
-    // The _configServerTickets serializes this process such that only a small number of threads can
-    // try to refresh at the same time in order to avoid overloading the config server
-    _configServerTickets.waitForTicket();
-    TicketHolderReleaser needTicketFrom(&_configServerTickets);
+        RangeMap shardChunksMap =
+            SimpleBSONObjComparator::kInstance.makeBSONObjIndexedMap<CachedChunkInfo>();
 
-    Timer t;
+        for (const auto& chunkMapEntry : cm->chunkMap()) {
+            const auto& chunk = chunkMapEntry.second;
 
-    log() << "MetadataLoader loading chunks for " << nss.ns() << " based on: "
-          << (metadataForDiff ? metadataForDiff->getCollVersion().toString() : "(empty)");
+            if (chunk->getShardId() != shardId)
+                continue;
 
-    std::unique_ptr<CollectionMetadata> remoteMetadata(stdx::make_unique<CollectionMetadata>());
+            shardChunksMap.emplace_hint(shardChunksMap.end(),
+                                        chunk->getMin(),
+                                        CachedChunkInfo(chunk->getMax(), chunk->getLastmod()));
+        }
 
-    Status status = MetadataLoader::makeCollectionMetadata(txn,
-                                                           grid.catalogClient(txn),
-                                                           nss.ns(),
-                                                           getShardName(),
-                                                           metadataForDiff,
-                                                           remoteMetadata.get());
-
-    if (!status.isOK() && status != ErrorCodes::NamespaceNotFound) {
-        warning() << "MetadataLoader failed after " << t.millis() << " ms"
-                  << causedBy(redact(status));
-
-        return status;
-    }
+        return stdx::make_unique<CollectionMetadata>(cm->getShardKeyPattern().toBSON(),
+                                                     cm->getVersion(),
+                                                     cm->getVersion(shardId),
+                                                     std::move(shardChunksMap));
+    }();
 
     // Exclusive collection lock needed since we're now changing the metadata
     ScopedTransaction transaction(txn, MODE_IX);
     AutoGetCollection autoColl(txn, nss, MODE_IX, MODE_X);
 
     auto css = CollectionShardingState::get(txn, nss);
+    css->refreshMetadata(txn, std::move(newCollectionMetadata));
 
-    if (status.isOK()) {
-        css->refreshMetadata(txn, std::move(remoteMetadata));
-
-        auto metadata = css->getMetadata();
-
-        log() << "MetadataLoader took " << t.millis() << " ms and found version "
-              << metadata->getCollVersion();
-
-        return metadata->getShardVersion();
+    if (!css->getMetadata()) {
+        return ChunkVersion::UNSHARDED();
     }
 
-    invariant(status == ErrorCodes::NamespaceNotFound);
-
-    css->refreshMetadata(txn, nullptr);
-
-    log() << "MetadataLoader took " << t.millis() << " ms and did not find the namespace";
-
-    return ChunkVersion::UNSHARDED();
+    return css->getMetadata()->getShardVersion();
 }
 
 StatusWith<ScopedRegisterDonateChunk> ShardingState::registerDonateChunk(

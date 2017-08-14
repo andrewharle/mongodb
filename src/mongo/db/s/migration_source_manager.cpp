@@ -145,15 +145,9 @@ MigrationSourceManager::MigrationSourceManager(OperationContext* txn,
     // With nonzero shard version, we must have a coll version >= our shard version
     invariant(collectionVersion >= shardVersion);
 
-    // With nonzero shard version, we must have a shard key
-    invariant(!_collectionMetadata->getKeyPattern().isEmpty());
-
     ChunkType chunkToMove;
     chunkToMove.setMin(_args.getMinKey());
     chunkToMove.setMax(_args.getMaxKey());
-    if (_args.hasChunkVersion()) {
-        chunkToMove.setVersion(_args.getChunkVersion());
-    }
 
     Status chunkValidateStatus = _collectionMetadata->checkChunkIsValid(chunkToMove);
     if (!chunkValidateStatus.isOK()) {
