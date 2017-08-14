@@ -13,7 +13,7 @@
  wtlib = env.Library(
 --- a/src/third_party/wiredtiger/dist/filelist
 +++ b/src/third_party/wiredtiger/dist/filelist
-@@ -53,7 +53,6 @@
+@@ -54,7 +54,6 @@
  src/checksum/software/checksum.c
  src/checksum/x86/crc32-x86.c		X86_HOST
  src/checksum/zseries/crc32-s390x.c	ZSERIES_HOST
@@ -21,28 +21,3 @@
  src/config/config.c
  src/config/config_api.c
  src/config/config_check.c
---- a/src/third_party/wiredtiger/src/checksum/zseries/crc32-s390x.c
-+++ b/src/third_party/wiredtiger/src/checksum/zseries/crc32-s390x.c
-@@ -66,11 +66,14 @@
- 		return crc;                                                 \
- 	}
- 
-+#if defined(HAVE_CRC32_HARDWARE)
- /* Main CRC-32 functions */
- DEFINE_CRC32_VX(__wt_crc32c_le_vx, __wt_crc32c_le_vgfm_16, __wt_crc32c_le)
-+#endif
- 
- #include "wt_internal.h"
- 
-+#if defined(HAVE_CRC32_HARDWARE)
- /*
-  * __wt_checksum_hw --
-  *      WiredTiger: return a checksum for a chunk of memory.
-@@ -80,6 +83,7 @@
- {
- 	return (~__wt_crc32c_le_vx(0xffffffff, chunk, len));
- }
-+#endif
- 
- /*
-  * __wt_checksum_init --
