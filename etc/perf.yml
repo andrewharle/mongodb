@@ -13,6 +13,16 @@ post:
     - command: attach.results
       params:
         file_location: src/report.json
+    - command: s3.put
+      params:
+            aws_key: ${aws_key}
+            aws_secret: ${aws_secret}
+            local_file: src/mongod.log
+            remote_file: ${project}/${build_variant}/${revision}/${task_id}/${version_id}/logs/mongod-${build_id}.log
+            bucket: mciuploads
+            permissions: public-read
+            content_type: ${content_type|text/plain}
+            display_name: mongod.log
     - command: shell.exec
       params:
         silent: true
@@ -78,7 +88,7 @@ functions:
           chmod +x mongo
           git clone https://github.com/mongodb/mongo-perf perf
           cd perf
-          git checkout r20161010
+          git describe --tags
     - command: shell.exec
       params:
         background: true
@@ -95,37 +105,29 @@ functions:
           set -e
           set -o verbose
           sleep 5
+
           # if we started a replset, initiate it and wait for it to become primary
-          ./mongo --eval "if(db.isMaster().isreplicaset){rs.initiate(); assert.soon(function(){return db.isMaster().ismaster}, 'no primary')}"
+          #
+          # Note: This process is always currently started with --nojournal (not a recommended production configuration, see
+          #       https://docs.mongodb.com/manual/tutorial/manage-journaling/#disable-journaling).
+          #       As a result, writeConcernMajorityJournalDefault can be set to false. If this becomes configurable later
+          #       then the correct value should be passed to rs.initiate or getCmdLineOpts needs to interrogated (but
+          #       only after db.createUser).
+          ./mongo --eval "if(db.isMaster().isreplicaset){\
+                             rs.initiate({_id: 'test', version: 1, members: [ { _id: 0, host : 'localhost:27017' }], writeConcernMajorityJournalDefault:false});\
+                             assert.soon(function(){return db.isMaster().ismaster}, 'no primary');\
+                          }"
+
+          # benchRun() authenticates against the admin db, with a user that must has admin access.
+          # Note: This is possibly a legacy requirement from times when it would call serverStatus.
+          # Btw, when mongod is started without --auth, these should be harmless no-ops
+          ./mongo --eval "db.createUser({user: 'admin', pwd: 'password', roles:\
+                         [ { role: 'root', db: 'admin' } ] })"\
+                           admin
+
+          # print the replset config unless this is a standalone
+          ./mongo --eval "if( db.isMaster().hosts ) { printjson(rs.config()); }" --username admin --password password admin
           echo "MONGOD STARTED."
-  "compare":
-    - command: json.get
-      params:
-        task: ${compare_task}
-        variant : ${variant1}
-        file: "src/stand.json"
-        name: "perf"
-    - command: json.get
-      params:
-        task: ${compare_task}
-        variant : ${variant2}
-        file: "src/node.json"
-        name: "perf"
-    - command: shell.exec
-      type : test
-      params:
-        working_dir: src
-        script: |
-          set -o errexit
-          set -o verbose
-          virtualenv ./venv
-          source ./venv/bin/activate
-          pip install -r ../dsi/requirements/analysis.txt
-          python -u ../dsi/analysis/compare.py -b stand.json -c node.json
-    - command: "json.send"
-      params:
-        name: "perf"
-        file: "src/perf.json"
   "analyze":
     - command: shell.exec
       params:
@@ -156,7 +158,7 @@ functions:
         script: |
           set -o errexit
           source ./venv/bin/activate
-          REFTAGS="3.2.10-Baseline 3.0.14-Baseline" # These are project specific
+          REFTAGS="3.4.2-Baseline 3.2.12-Baseline 3.0.14-Baseline" # These are project specific
           # Project Opts are  project specific, but don't match expansion from elsewhere.
           # We could change dsi/analysis/v3.4 to dsi/analysis/perf-3.4 in DSI to get dsi/analysis/${project}/perf_override.json
           # Note project_id performance doesn't match string perf used elsewhere for ${project}
@@ -180,7 +182,7 @@ functions:
           # appropriate flags if it's `true`.
           reports_analysis_flags="--reports-analysis . --perf-file perf/perf.json"
           cmd_flags=$([ "${reports_analysis}" = "true" ] && echo "$reports_analysis_flags" || echo "")
-          REFTAG="3.2.10-Baseline"
+          REFTAG="3.2.12-Baseline"
           OVERRIDE="../dsi/analysis/v3.4/perf_override.json" # Note use of v3.4 here cannot use ${project}
           python ../dsi/analysis/perf_regression_check.py $cmd_flags -f history.json --rev ${revision} -t tags.json --refTag $REFTAG --overrideFile $OVERRIDE --variant ${build_variant} --task ${task_name} --threshold 0.10 --threadThreshold 0.15
   "run perf tests":
@@ -203,17 +205,9 @@ functions:
           cd perf
           #  give mongod a few seconds to start up so that we can connect.
           sleep 5
-          ${perf_exec_wrapper} python benchrun.py --shell ../mongo -t ${threads} --trialCount 5 -f testcases/*.js --includeFilter ${includeFilter1}  --includeFilter ${includeFilter2} --excludeFilter ${excludeFilter} --out perf.json --exclude-testbed
-    - command: s3.put
-      params:
-        aws_key: ${aws_key}
-        aws_secret: ${aws_secret}
-        local_file: src/mongod.log
-        remote_file: ${project}/${version_id}/${revision}/mongod-${task_id}.log
-        bucket: mciuploads
-        permissions: public-read
-        content_type: ${content_type|text/html}
-        display_name: mongod.log
+          ${perf_exec_wrapper} python benchrun.py --shell ../mongo -t ${threads} --trialCount 5 -f testcases/*.js --readCmd ${readCmd} --includeFilter ${includeFilter1}  --includeFilter ${includeFilter2} --excludeFilter ${excludeFilter} --out perf.json --exclude-testbed --username admin --password password
+          echo "Oplog size at end of tests..."
+          ../mongo --username admin --password password --eval "db.getSiblingDB('local').oplog.rs.totalSize()/1024/1024" admin
     - command: "json.send"
       params:
         name: "perf"
@@ -225,6 +219,7 @@ tasks:
     - command: git.get_project
       params:
         directory: src
+    - command: manifest.load
     - command: shell.exec
       params:
         working_dir: src
@@ -287,10 +282,45 @@ tasks:
         includeFilter2 : "core regression"
         excludeFilter : "single_threaded"
         threads : "1 2 4 8"
+        readCmd: false
     - func: "download analysis scripts"
     - func: "analyze"
       vars:
         reports_analysis: true
+- name: views-query
+  depends_on:
+  - variant: linux-wt-standalone
+    name: compile
+  commands:
+    - func: "start server"
+    - func: "run perf tests"
+      vars:
+        includeFilter1: "query_identityview"
+        includeFilter2 : "core regression"
+        excludeFilter : "single_threaded"
+        threads : "1 2 4 8"
+        readCmd: true
+    - func: "download analysis scripts"
+    - func: "analyze"
+      vars:
+        reports_analysis: true
+- name: views-aggregation
+  depends_on:
+  - variant: linux-wt-standalone
+    name: compile
+  commands:
+    - func: "start server"
+    - func: "run perf tests"
+      vars:
+        includeFilter1: "aggregation_identityview"
+        includeFilter2 : "regression"
+        excludeFilter: "none"
+        threads : "1"
+        readCmd: true
+    - func: "download analysis scripts"
+    - func: "analyze"
+      vars:
+        report_analysis: true
 - name: where
   depends_on:
   - variant: linux-wt-standalone
@@ -303,6 +333,7 @@ tasks:
         includeFilter2 : "core regression"
         excludeFilter : "single_threaded"
         threads : "1 2 4 8"
+        readCmd: false
     - func: "download analysis scripts"
     - func: "analyze"
       vars:
@@ -319,6 +350,7 @@ tasks:
         includeFilter2 : "core regression"
         excludeFilter : "single_threaded"
         threads : "1 2 4 8"
+        readCmd: false
     - func: "download analysis scripts"
     - func: "analyze"
       vars:
@@ -335,6 +367,7 @@ tasks:
         includeFilter2 : "core regression"
         excludeFilter : "single_threaded"
         threads : "1 2 4 8"
+        readCmd: false
     - func: "download analysis scripts"
     - func: "analyze"
       vars:
@@ -351,6 +384,7 @@ tasks:
         includeFilter2 : "core regression"
         excludeFilter : "single_threaded"
         threads : "1 2 4 8"
+        readCmd: false
     - func: "download analysis scripts"
     - func: "analyze"
       vars:
@@ -367,6 +401,7 @@ tasks:
         includeFilter2 : "core regression"
         excludeFilter : "single_threaded"
         threads : "1 2 4 8"
+        readCmd: false
     - func: "download analysis scripts"
     - func: "analyze"
       vars:
@@ -383,154 +418,11 @@ tasks:
         includeFilter2 : "core regression"
         excludeFilter : "none"
         threads : "1"
+        readCmd: false
     - func: "download analysis scripts"
     - func: "analyze"
       vars:
         reports_analysis: true
-- name: singleThreaded-wt-repl-comp
-  depends_on:
-    - name : compile
-      variant : linux-wt-standalone
-    - name : singleThreaded
-      variant : linux-wt-standalone
-      status : "*"
-    - name : singleThreaded
-      variant :  linux-wt-repl
-      status : "*"
-  commands:
-    - func: "download analysis scripts"
-    - func: "compare"
-      vars:
-        compare_task : "singleThreaded"
-        variant1 : "linux-wt-standalone"
-        variant2 : "linux-wt-repl"
-    - func: "analyze"
-- name: insert-wt-repl-comp
-  depends_on:
-    - name : compile
-      variant : linux-wt-standalone
-    - name : insert
-      variant : linux-wt-standalone
-      status : "*"
-    - name : insert
-      variant :  linux-wt-repl
-      status : "*"
-  commands:
-    - func: "download analysis scripts"
-    - func: "compare"
-      vars:
-        compare_task : "insert"
-        variant1 : "linux-wt-standalone"
-        variant2 : "linux-wt-repl"
-    - func: "analyze"
-- name: update-wt-repl-comp
-  depends_on:
-    - name : compile
-      variant : linux-wt-standalone
-    - name : update
-      variant : linux-wt-standalone
-      status : "*"
-    - name : update
-      variant :  linux-wt-repl
-      status : "*"
-  commands:
-    - func: "download analysis scripts"
-    - func: "compare"
-      vars:
-        compare_task : "update"
-        variant1 : "linux-wt-standalone"
-        variant2 : "linux-wt-repl"
-    - func: "analyze"
-- name: misc-wt-repl-comp
-  depends_on:
-    - name : compile
-      variant : linux-wt-standalone
-    - name : misc
-      variant : linux-wt-standalone
-      status : "*"
-    - name : misc
-      variant :  linux-wt-repl
-      status : "*"
-  commands:
-    - func: "download analysis scripts"
-    - func: "compare"
-      vars:
-        compare_task : "misc"
-        variant1 : "linux-wt-standalone"
-        variant2 : "linux-wt-repl"
-    - func: "analyze"
-- name: singleThreaded-mmap-repl-comp
-  depends_on:
-    - name : compile
-      variant : linux-wt-standalone
-    - name : singleThreaded
-      variant : linux-mmap-standalone
-      status : "*"
-    - name : singleThreaded
-      variant :  linux-mmap-repl
-      status : "*"
-  commands:
-    - func: "download analysis scripts"
-    - func: "compare"
-      vars:
-        compare_task : "singleThreaded"
-        variant1 : "linux-mmap-standalone"
-        variant2 : "linux-mmap-repl"
-    - func: "analyze"
-- name: insert-mmap-repl-comp
-  depends_on:
-    - name : compile
-      variant : linux-wt-standalone
-    - name : insert
-      variant : linux-mmap-standalone
-      status : "*"
-    - name : insert
-      variant :  linux-mmap-repl
-      status : "*"
-  commands:
-    - func: "download analysis scripts"
-    - func: "compare"
-      vars:
-        compare_task : "insert"
-        variant1 : "linux-mmap-standalone"
-        variant2 : "linux-mmap-repl"
-    - func: "analyze"
-- name: update-mmap-repl-comp
-  depends_on:
-    - name : compile
-      variant : linux-wt-standalone
-    - name : update
-      variant : linux-mmap-standalone
-      status : "*"
-    - name : update
-      variant :  linux-mmap-repl
-      status : "*"
-  commands:
-    - func: "download analysis scripts"
-    - func: "compare"
-      vars:
-        compare_task : "update"
-        variant1 : "linux-mmap-standalone"
-        variant2 : "linux-mmap-repl"
-    - func: "analyze"
-- name: misc-mmap-repl-comp
-  depends_on:
-    - name : compile
-      variant : linux-wt-standalone
-    - name : misc
-      variant : linux-mmap-standalone
-      status : "*"
-    - name : misc
-      variant :  linux-mmap-repl
-      status : "*"
-  commands:
-    - func: "download analysis scripts"
-    - func: "compare"
-      vars:
-        compare_task : "misc"
-        variant1 : "linux-mmap-standalone"
-        variant2 : "linux-mmap-repl"
-    - func: "analyze"
 - name: aggregation
   depends_on:
   - variant: linux-wt-standalone
@@ -543,10 +435,11 @@ tasks:
         includeFilter2: "regression"
         excludeFilter: "none"
         threads : "1"
+        readCmd: false
     - func: "download analysis scripts"
     - func: "analyze"
       vars:
-        log_analysis: true
+        report_analysis: true
 
 buildvariants:
 - name: linux-wt-standalone
@@ -558,7 +451,7 @@ buildvariants:
     compile_flags: -j$(grep -c ^processor /proc/cpuinfo) CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy --ssl
     mongod_exec_wrapper: &exec_wrapper "numactl --physcpubind=4,5,6,7 -i 1"
     perf_exec_wrapper: &perf_wrapper "numactl --physcpubind=1,2,3 -i 0"
-    mongod_flags: "--storageEngine=inMemory --logpath ./mongod.log --fork --syncdelay 0 --setParameter ttlMonitorEnabled=false --setParameter diagnosticDataCollectionEnabled=false  --inMemorySizeGB 16"
+    mongod_flags: "--storageEngine=inMemory --logpath ./mongod.log --fork --syncdelay 0 --setParameter ttlMonitorEnabled=false --setParameter diagnosticDataCollectionEnabled=false --inMemoryEngineConfigString 'eviction=(threads_min=1),' --inMemorySizeGB 60 --auth"
     use_scons_cache: true
     project: &project perf-3.4
   run_on:
@@ -569,6 +462,8 @@ buildvariants:
     - rhel62-large
   - name: aggregation
   - name: query
+  - name: views-aggregation
+  - name: views-query
   - name: where
   - name: update
   - name: insert
@@ -582,13 +477,15 @@ buildvariants:
   expansions:
     mongod_exec_wrapper: *exec_wrapper
     perf_exec_wrapper: *perf_wrapper
-    mongod_flags: "--storageEngine=mmapv1 --logpath ./mongod.log --fork --syncdelay 0 --nojournal --setParameter ttlMonitorEnabled=false --setParameter diagnosticDataCollectionEnabled=false"
+    mongod_flags: "--storageEngine=mmapv1 --logpath ./mongod.log --fork --syncdelay 0 --nojournal --setParameter ttlMonitorEnabled=false --setParameter diagnosticDataCollectionEnabled=false --auth"
     project: *project
   run_on:
   - "centos6-perf"
   tasks:
   - name: aggregation
   - name: query
+  - name: views-aggregation
+  - name: views-query
   - name: where
   - name: update
   - name: insert
@@ -602,7 +499,7 @@ buildvariants:
   expansions:
     mongod_exec_wrapper: *exec_wrapper
     perf_exec_wrapper: *perf_wrapper
-    mongod_flags: "--replSet=test --storageEngine=inMemory  --logpath ./mongod.log --fork --syncdelay 0 --setParameter ttlMonitorEnabled=false --inMemorySizeGB 16 --oplogSize 10000 --setParameter diagnosticDataCollectionEnabled=false "
+    mongod_flags: "--replSet=test --storageEngine=inMemory  --logpath ./mongod.log --fork --syncdelay 0 --setParameter ttlMonitorEnabled=false --setParameter diagnosticDataCollectionEnabled=false --inMemoryEngineConfigString 'eviction=(threads_min=1),' --inMemorySizeGB 60 --auth --oplogSize 30000"
     project: *project
   run_on:
   - "centos6-perf"
@@ -618,7 +515,7 @@ buildvariants:
   expansions:
     mongod_exec_wrapper: *exec_wrapper
     perf_exec_wrapper: *perf_wrapper
-    mongod_flags: "--replSet=test --storageEngine=mmapv1 --logpath ./mongod.log --fork --syncdelay 0 --nojournal --setParameter ttlMonitorEnabled=false --oplogSize 100000 --setParameter diagnosticDataCollectionEnabled=false"
+    mongod_flags: "--replSet=test --storageEngine=mmapv1 --logpath ./mongod.log --fork --syncdelay 0 --nojournal --setParameter ttlMonitorEnabled=false --setParameter diagnosticDataCollectionEnabled=false --auth --oplogSize 100000"
     project: *project
   run_on:
   - "centos6-perf"
@@ -627,31 +524,3 @@ buildvariants:
   - name: insert
   - name: misc
   - name: singleThreaded
-
-- name: linux-wt-repl-compare
-  display_name: 1-Node ReplSet Linux inMemory Comparison Standalone
-  batchtime: 360 # 6 hours
-  expansions:
-    project: *project
-  run_on:
-  - "centos6-perf"
-#    - "ubuntu1404-docker"
-  tasks:
-  - name: singleThreaded-wt-repl-comp
-  - name: insert-wt-repl-comp
-  - name: update-wt-repl-comp
-  - name: misc-wt-repl-comp
-
-- name: linux-mmap-repl-compare
-  display_name: 1-Node ReplSet Linux MMAPv1 Comparison Standalone
-  batchtime: 360 # 6 hours
-  expansions:
-    project: *project
-  run_on:
-  - "centos6-perf"
-#    - "ubuntu1404-docker"
-  tasks:
-  - name: singleThreaded-mmap-repl-comp
-  - name: insert-mmap-repl-comp
-  - name: update-mmap-repl-comp
-  - name: misc-mmap-repl-comp

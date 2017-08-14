@@ -123,7 +123,7 @@ class ShardedClusterFixture(interface.Fixture):
             self.logger.info("Enabling sharding for '%s' database...", db_name)
             client.admin.command({"enablesharding": db_name})
 
-    def teardown(self):
+    def _do_teardown(self):
         """
         Shuts down the sharded cluster.
         """
@@ -131,8 +131,8 @@ class ShardedClusterFixture(interface.Fixture):
         success = True  # Still a success even if nothing is running.
 
         if not running_at_start:
-            self.logger.info("Sharded cluster was expected to be running in teardown(), but"
-                             " wasn't.")
+            self.logger.info(
+                "Sharded cluster was expected to be running in _do_teardown(), but wasn't.")
 
         if self.configsvr is not None:
             if running_at_start:
@@ -169,6 +169,12 @@ class ShardedClusterFixture(interface.Fixture):
         return (self.configsvr is not None and self.configsvr.is_running() and
                 all(shard.is_running() for shard in self.shards) and
                 self.mongos is not None and self.mongos.is_running())
+
+    def get_connection_string(self):
+        if self.mongos is None:
+            raise ValueError("Must call setup() before calling get_connection_string()")
+
+        return "%s:%d" % (socket.gethostname(), self.mongos.port)
 
     def _new_configsvr(self):
         """
@@ -321,13 +327,14 @@ class _MongoSFixture(interface.Fixture):
 
         self.logger.info("Successfully contacted the mongos on port %d.", self.port)
 
-    def teardown(self):
+    def _do_teardown(self):
         running_at_start = self.is_running()
         success = True  # Still a success even if nothing is running.
 
         if not running_at_start and self.port is not None:
-            self.logger.info("mongos on port %d was expected to be running in teardown(), but"
-                             " wasn't." % (self.port))
+            self.logger.info(
+                "mongos on port %d was expected to be running in _do_teardown(), but wasn't.",
+                self.port)
 
         if self.mongos is not None:
             if running_at_start:

@@ -73,7 +73,7 @@ const WriteConcernOptions kMajorityWriteConcern(WriteConcernOptions::kMajority,
 CollectionRangeDeleter::CollectionRangeDeleter(NamespaceString nss) : _nss(std::move(nss)) {}
 
 void CollectionRangeDeleter::run() {
-    Client::initThread(getThreadName().c_str());
+    Client::initThread(getThreadName());
     ON_BLOCK_EXIT([&] { Client::destroy(); });
     auto txn = cc().makeOperationContext().get();
     bool hasNextRangeToClean = cleanupNextRange(txn);
@@ -98,7 +98,7 @@ bool CollectionRangeDeleter::cleanupNextRange(OperationContext* txn) {
         }
 
         CollectionShardingState* shardingState = CollectionShardingState::get(txn, _nss);
-        MetadataManager& metadataManager = shardingState->_metadataManager;
+        MetadataManager& metadataManager = *shardingState->_metadataManager;
 
         if (!_rangeInProgress && !metadataManager.hasRangesToClean()) {
             // Nothing left to do

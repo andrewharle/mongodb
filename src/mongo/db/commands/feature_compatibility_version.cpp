@@ -57,6 +57,7 @@ using repl::UnreplicatedWritesBlock;
 constexpr StringData FeatureCompatibilityVersion::k32IncompatibleIndexName;
 constexpr StringData FeatureCompatibilityVersion::kCollection;
 constexpr StringData FeatureCompatibilityVersion::kCommandName;
+constexpr StringData FeatureCompatibilityVersion::kDatabase;
 constexpr StringData FeatureCompatibilityVersion::kParameterName;
 constexpr StringData FeatureCompatibilityVersion::kVersionField;
 
@@ -220,6 +221,12 @@ void FeatureCompatibilityVersion::set(OperationContext* txn, StringData version)
                     repl::ReplicationCoordinator::get(txn->getServiceContext())
                         ->canAcceptWritesFor(nss));
 
+            // If the "admin.system.version" collection has not been created yet, explicitly create
+            // it to hold the v=2 index.
+            if (!autoDB.getDb()->getCollection(nss)) {
+                uassertStatusOK(repl::StorageInterface::get(txn)->createCollection(txn, nss, {}));
+            }
+
             IndexBuilder builder(k32IncompatibleIndexSpec, false);
             auto status = builder.buildInForeground(txn, autoDB.getDb());
             uassertStatusOK(status);
@@ -227,7 +234,7 @@ void FeatureCompatibilityVersion::set(OperationContext* txn, StringData version)
             MONGO_WRITE_CONFLICT_RETRY_LOOP_BEGIN {
                 WriteUnitOfWork wuow(txn);
                 getGlobalServiceContext()->getOpObserver()->onCreateIndex(
-                    txn, autoDB.getDb()->getSystemIndexesName(), k32IncompatibleIndexSpec);
+                    txn, autoDB.getDb()->getSystemIndexesName(), k32IncompatibleIndexSpec, false);
                 wuow.commit();
             }
             MONGO_WRITE_CONFLICT_RETRY_LOOP_END(txn, "FeatureCompatibilityVersion::set", nss.ns());
@@ -304,6 +311,12 @@ void FeatureCompatibilityVersion::setIfCleanStartup(OperationContext* txn,
             ScopedTransaction transaction(txn, MODE_IX);
             AutoGetOrCreateDb autoDB(txn, nss.db(), MODE_X);
 
+            // We reached this point because the only database that exists on the server is "local"
+            // and we have just created an empty "admin" database.
+            // Therefore, it is safe to create the "admin.system.version" collection.
+            invariant(autoDB.justCreated());
+            uassertStatusOK(storageInterface->createCollection(txn, nss, {}));
+
             IndexBuilder builder(k32IncompatibleIndexSpec, false);
             auto status = builder.buildInForeground(txn, autoDB.getDb());
             uassertStatusOK(status);
@@ -346,6 +359,13 @@ void FeatureCompatibilityVersion::onDelete(const BSONObj& doc) {
         idElement.String() != FeatureCompatibilityVersion::kParameterName) {
         return;
     }
+    log() << "setting featureCompatibilityVersion to "
+          << FeatureCompatibilityVersionCommandParser::kVersion32;
+    serverGlobalParams.featureCompatibility.version.store(
+        ServerGlobalParams::FeatureCompatibility::Version::k32);
+}
+
+void FeatureCompatibilityVersion::onDropCollection() {
     log() << "setting featureCompatibilityVersion to "
           << FeatureCompatibilityVersionCommandParser::kVersion32;
     serverGlobalParams.featureCompatibility.version.store(

@@ -48,7 +48,6 @@
 #include "mongo/executor/task_executor.h"
 #include "mongo/executor/task_executor_pool.h"
 #include "mongo/rpc/get_status_from_command_result.h"
-#include "mongo/s/chunk.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/grid.h"
 #include "mongo/util/elapsed_tracker.h"
@@ -63,6 +62,8 @@ namespace {
 const char kRecvChunkStatus[] = "_recvChunkStatus";
 const char kRecvChunkCommit[] = "_recvChunkCommit";
 const char kRecvChunkAbort[] = "_recvChunkAbort";
+
+const int kMaxObjectPerChunk{250000};
 
 bool isInRange(const BSONObj& obj,
                const BSONObj& min,
@@ -575,11 +576,11 @@ Status MigrationChunkClonerSourceLegacy::_storeCurrentLocs(OperationContext* txn
     if (totalRecs > 0) {
         avgRecSize = collection->dataSize(txn) / totalRecs;
         maxRecsWhenFull = _args.getMaxChunkSizeBytes() / avgRecSize;
-        maxRecsWhenFull = std::min((unsigned long long)(Chunk::MaxObjectPerChunk + 1),
+        maxRecsWhenFull = std::min((unsigned long long)(kMaxObjectPerChunk + 1),
                                    130 * maxRecsWhenFull / 100 /* slack */);
     } else {
         avgRecSize = 0;
-        maxRecsWhenFull = Chunk::MaxObjectPerChunk + 1;
+        maxRecsWhenFull = kMaxObjectPerChunk + 1;
     }
 
     // Do a full traversal of the chunk and don't stop even if we think it is a large chunk we want
@@ -591,6 +592,11 @@ Status MigrationChunkClonerSourceLegacy::_storeCurrentLocs(OperationContext* txn
     RecordId recordId;
     PlanExecutor::ExecState state;
     while (PlanExecutor::ADVANCED == (state = exec->getNext(&obj, &recordId))) {
+        Status interruptStatus = txn->checkForInterruptNoAssert();
+        if (!interruptStatus.isOK()) {
+            return interruptStatus;
+        }
+
         if (!isLargeChunk) {
             stdx::lock_guard<stdx::mutex> lk(_mutex);
             _cloneLocs.insert(recordId);

@@ -200,6 +200,8 @@ error_code("ReplicaSetMonitorRemoved", 199)
 error_code("ChunkRangeCleanupPending", 200)
 error_code("CannotBuildIndexKeys", 201)
 error_code("NetworkInterfaceExceededTimeLimit", 202)
+error_code("TooManyLocks", 208)
+error_code("UpdateOperationFailed", 218)
 
 # Non-sequential error codes (for compatibility only)
 error_code("SocketException", 9001)

@@ -37,6 +37,7 @@
 
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/index_create.h"
+#include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/db.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/exec/working_set_common.h"
@@ -81,34 +82,6 @@ using std::string;
 using std::stringstream;
 
 using logger::LogComponent;
-
-void Helpers::ensureIndex(OperationContext* txn,
-                          Collection* collection,
-                          BSONObj keyPattern,
-                          IndexDescriptor::IndexVersion indexVersion,
-                          bool unique,
-                          const char* name) {
-    BSONObjBuilder b;
-    b.append("name", name);
-    b.append("ns", collection->ns().ns());
-    b.append("key", keyPattern);
-    b.append("v", static_cast<int>(indexVersion));
-    b.appendBool("unique", unique);
-    BSONObj o = b.done();
-
-    MultiIndexBlock indexer(txn, collection);
-
-    Status status = indexer.init(o).getStatus();
-    if (status.code() == ErrorCodes::IndexAlreadyExists)
-        return;
-    uassertStatusOK(status);
-
-    uassertStatusOK(indexer.insertAllDocumentsInCollection());
-
-    WriteUnitOfWork wunit(txn);
-    indexer.commit();
-    wunit.commit();
-}
 
 /* fetch a single object from collection ns that matches query
    set your db SavedContext first
@@ -403,8 +376,6 @@ long long Helpers::removeRange(OperationContext* txn,
 
             verify(PlanExecutor::ADVANCED == state);
 
-            WriteUnitOfWork wuow(txn);
-
             if (onlyRemoveOrphanedDocs) {
                 // Do a final check in the write lock to make absolutely sure that our
                 // collection hasn't been modified in a way that invalidates our migration
@@ -436,20 +407,25 @@ long long Helpers::removeRange(OperationContext* txn,
                 }
             }
 
-            NamespaceString nss(ns);
-            if (!repl::getGlobalReplicationCoordinator()->canAcceptWritesFor(nss)) {
-                warning() << "stepped down from primary while deleting chunk; "
-                          << "orphaning data in " << ns << " in range [" << redact(min) << ", "
-                          << redact(max) << ")";
-                return numDeleted;
+            MONGO_WRITE_CONFLICT_RETRY_LOOP_BEGIN {
+                WriteUnitOfWork wuow(txn);
+                NamespaceString nss(ns);
+                if (!repl::getGlobalReplicationCoordinator()->canAcceptWritesFor(nss)) {
+                    warning() << "stepped down from primary while deleting chunk; "
+                              << "orphaning data in " << ns << " in range [" << redact(min) << ", "
+                              << redact(max) << ")";
+                    return numDeleted;
+                }
+
+                if (callback)
+                    callback->goingToDelete(obj);
+
+                OpDebug* const nullOpDebug = nullptr;
+                collection->deleteDocument(txn, rloc, nullOpDebug, fromMigrate);
+                wuow.commit();
             }
+            MONGO_WRITE_CONFLICT_RETRY_LOOP_END(txn, "delete range", ns);
 
-            if (callback)
-                callback->goingToDelete(obj);
-
-            OpDebug* const nullOpDebug = nullptr;
-            collection->deleteDocument(txn, rloc, nullOpDebug, fromMigrate);
-            wuow.commit();
             numDeleted++;
         }
 

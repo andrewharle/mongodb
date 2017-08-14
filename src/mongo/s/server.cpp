@@ -70,8 +70,6 @@
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/client/shard_remote.h"
 #include "mongo/s/client/sharding_connection_hook_for_mongos.h"
-#include "mongo/s/commands/request.h"
-#include "mongo/s/config.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/mongos_options.h"
 #include "mongo/s/query/cluster_cursor_cleanup_job.h"
@@ -86,6 +84,7 @@
 #include "mongo/transport/transport_layer_legacy.h"
 #include "mongo/util/admin_access.h"
 #include "mongo/util/cmdline_utils/censor_cmdline.h"
+#include "mongo/util/concurrency/idle_thread_block.h"
 #include "mongo/util/concurrency/thread_name.h"
 #include "mongo/util/exception_filter_win32.h"
 #include "mongo/util/exit.h"
@@ -254,9 +253,9 @@ static ExitCode runMongosServer() {
     shardConnectionPool.addHook(new ShardingConnectionHookForMongos(true));
 
     ReplicaSetMonitor::setAsynchronousConfigChangeHook(
-        &ConfigServer::replicaSetChangeConfigServerUpdateHook);
+        &ShardRegistry::replicaSetChangeConfigServerUpdateHook);
     ReplicaSetMonitor::setSynchronousConfigChangeHook(
-        &ConfigServer::replicaSetChangeShardRegistryUpdateHook);
+        &ShardRegistry::replicaSetChangeShardRegistryUpdateHook);
 
     // Mongos connection pools already takes care of authenticating new connections so the
     // replica set connection shouldn't need to.
@@ -330,6 +329,7 @@ static ExitCode runMongosServer() {
 #endif
 
     // Block until shutdown.
+    MONGO_IDLE_THREAD_BLOCK;
     return waitForShutdown();
 }
 
@@ -369,6 +369,8 @@ static int _main() {
 
     getGlobalServiceContext()->setFastClockSource(FastClockSourceFactory::create(Milliseconds{10}));
 
+    auto shardingContext = Grid::get(getGlobalServiceContext());
+
     // we either have a setting where all processes are in localhost or none are
     std::vector<HostAndPort> configServers = mongosGlobalParams.configdbs.getServers();
     for (std::vector<HostAndPort>::const_iterator it = configServers.begin();
@@ -377,10 +379,10 @@ static int _main() {
         const HostAndPort& configAddr = *it;
 
         if (it == configServers.begin()) {
-            grid.setAllowLocalHost(configAddr.isLocalHost());
+            shardingContext->setAllowLocalHost(configAddr.isLocalHost());
         }
 
-        if (configAddr.isLocalHost() != grid.allowLocalHost()) {
+        if (configAddr.isLocalHost() != shardingContext->allowLocalHost()) {
             mongo::log(LogComponent::kDefault)
                 << "cannot mix localhost and ip addresses in configdbs";
             return 10;
