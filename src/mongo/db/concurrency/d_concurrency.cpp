@@ -34,6 +34,7 @@
 
 #include <string>
 
+#include "mongo/db/concurrency/global_lock_acquisition_tracker.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/server_parameters.h"
 #include "mongo/db/service_context.h"
@@ -90,6 +91,13 @@ void Lock::GlobalLock::waitForLock(unsigned timeoutMs) {
 
     if (_result != LOCK_OK && _locker->shouldConflictWithSecondaryBatchApplication()) {
         _pbwm.unlock();
+    }
+
+    if (_locker->isWriteLocked() && haveClient()) {
+        auto opCtx = cc().getOperationContext();
+        if (opCtx) {
+            GlobalLockAcquisitionTracker::get(opCtx).setGlobalExclusiveLockTaken();
+        }
     }
 }
 

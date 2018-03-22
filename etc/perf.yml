@@ -86,7 +86,7 @@ functions:
           set -v
           chmod +x mongod
           chmod +x mongo
-          git clone https://github.com/mongodb/mongo-perf perf
+          git clone git@github.com:mongodb/mongo-perf.git perf
           cd perf
           git describe --tags
     - command: shell.exec
@@ -158,11 +158,9 @@ functions:
         script: |
           set -o errexit
           source ./venv/bin/activate
-          REFTAGS="3.4.2-Baseline 3.2.12-Baseline 3.0.14-Baseline" # These are project specific
+          REFTAGS="3.4.9-Baseline 3.2.17-Baseline 3.0.15-Baseline" # These are project specific
           # Project Opts are  project specific, but don't match expansion from elsewhere.
-          # We could change dsi/analysis/v3.4 to dsi/analysis/perf-3.4 in DSI to get dsi/analysis/${project}/perf_override.json
-          # Note project_id performance doesn't match string perf used elsewhere for ${project}
-          PROJECT_OPTS="--overrideFile ../dsi/analysis/v3.4/perf_override.json --project_id performance"
+          PROJECT_OPTS="--overrideFile ../dsi/analysis/${branch_name}/perf_override.json --project_id performance"
           python -u ../dsi/analysis/dashboard_gen.py --rev ${revision} -f history.json -t tags.json --refTag $REFTAGS $PROJECT_OPTS --variant ${build_variant} --task ${task_name} --jira-user ${perf_jira_user} --jira-password ${perf_jira_pw} || true
     - command: "json.send"
       params:
@@ -182,8 +180,8 @@ functions:
           # appropriate flags if it's `true`.
           reports_analysis_flags="--reports-analysis . --perf-file perf/perf.json"
           cmd_flags=$([ "${reports_analysis}" = "true" ] && echo "$reports_analysis_flags" || echo "")
-          REFTAG="3.2.12-Baseline"
-          OVERRIDE="../dsi/analysis/v3.4/perf_override.json" # Note use of v3.4 here cannot use ${project}
+          REFTAG="3.2.17-Baseline"
+          OVERRIDE="../dsi/analysis/${branch_name}/perf_override.json"
           python ../dsi/analysis/perf_regression_check.py $cmd_flags -f history.json --rev ${revision} -t tags.json --refTag $REFTAG --overrideFile $OVERRIDE --variant ${build_variant} --task ${task_name} --threshold 0.10 --threadThreshold 0.15
   "run perf tests":
     - command: shell.exec
@@ -196,6 +194,7 @@ functions:
           source ./venv/bin/activate
           pip install argparse
     - command: shell.exec
+      type : test
       params:
         working_dir: src
         script: |
@@ -495,7 +494,7 @@ buildvariants:
 
 - name: linux-wt-repl
   display_name: 1-Node ReplSet Linux inMemory
-  batchtime: 360 # 6 hours
+  batchtime: 90 # 1.5 hours
   expansions:
     mongod_exec_wrapper: *exec_wrapper
     perf_exec_wrapper: *perf_wrapper
@@ -511,7 +510,7 @@ buildvariants:
 
 - name: linux-mmap-repl
   display_name: 1-Node ReplSet Linux MMAPv1
-  batchtime: 360 # 6 hours
+  batchtime: 90 # 1.5 hours
   expansions:
     mongod_exec_wrapper: *exec_wrapper
     perf_exec_wrapper: *perf_wrapper

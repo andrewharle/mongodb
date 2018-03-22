@@ -448,7 +448,6 @@ void applyOps(std::vector<MultiApplier::OperationPtrs>& writerVectors,
               const MultiApplier::ApplyOperationFn& func,
               std::vector<Status>* statusVector) {
     invariant(writerVectors.size() == statusVector->size());
-    TimerHolder timer(&applyBatchStats);
     for (size_t i = 0; i < writerVectors.size(); i++) {
         if (!writerVectors[i].empty()) {
             writerPool->schedule([&func, &writerVectors, statusVector, i] {
@@ -695,32 +694,53 @@ public:
     }
 
 private:
+    /**
+     * Calculates batch limit size (in bytes) using the maximum capped collection size of the oplog
+     * size.
+     * Batches are limited to 10% of the oplog.
+     */
+    std::size_t _calculateBatchLimitBytes() {
+        auto opCtx = cc().makeOperationContext();
+        auto storageInterface = StorageInterface::get(opCtx.get());
+        auto oplogMaxSizeResult =
+            storageInterface->getOplogMaxSize(opCtx.get(), NamespaceString(rsOplogName));
+        auto oplogMaxSize = fassertStatusOK(40301, oplogMaxSizeResult);
+        return std::min(oplogMaxSize / 10, std::size_t(replBatchLimitBytes));
+    }
+
+    /**
+     * If slaveDelay is enabled, this function calculates the most recent timestamp of any oplog
+     * entries that can be be returned in a batch.
+     */
+    boost::optional<Date_t> _calculateSlaveDelayLatestTimestamp() {
+        auto service = cc().getServiceContext();
+        auto replCoord = ReplicationCoordinator::get(service);
+        auto slaveDelay = replCoord->getSlaveDelaySecs();
+        if (slaveDelay <= Seconds(0)) {
+            return {};
+        }
+        auto fastClockSource = service->getFastClockSource();
+        return fastClockSource->now() - slaveDelay;
+    }
+
     void run() {
         Client::initThread("ReplBatcher");
-        const ServiceContext::UniqueOperationContext txnPtr = cc().makeOperationContext();
-        OperationContext& txn = *txnPtr;
-        const auto replCoord = ReplicationCoordinator::get(&txn);
-        const auto fastClockSource = txn.getServiceContext()->getFastClockSource();
-        const auto oplogMaxSize = fassertStatusOK(
-            40301,
-            StorageInterface::get(&txn)->getOplogMaxSize(&txn, NamespaceString(rsOplogName)));
 
-        // Batches are limited to 10% of the oplog.
         BatchLimits batchLimits;
-        batchLimits.bytes = std::min(oplogMaxSize / 10, size_t(replBatchLimitBytes));
+        batchLimits.bytes = _calculateBatchLimitBytes();
 
         while (true) {
-            const auto slaveDelay = replCoord->getSlaveDelaySecs();
-            batchLimits.slaveDelayLatestTimestamp = (slaveDelay > Seconds(0))
-                ? (fastClockSource->now() - slaveDelay)
-                : boost::optional<Date_t>();
+            batchLimits.slaveDelayLatestTimestamp = _calculateSlaveDelayLatestTimestamp();
 
             // Check this once per batch since users can change it at runtime.
             batchLimits.ops = replBatchLimitOperations.load();
 
             OpQueue ops;
             // tryPopAndWaitForMore adds to ops and returns true when we need to end a batch early.
-            while (!_syncTail->tryPopAndWaitForMore(&txn, &ops, batchLimits)) {
+            {
+                auto opCtx = cc().makeOperationContext();
+                while (!_syncTail->tryPopAndWaitForMore(opCtx.get(), &ops, batchLimits)) {
+                }
             }
 
             if (ops.empty() && !ops.mustShutdown()) {
@@ -755,14 +775,15 @@ private:
 void SyncTail::oplogApplication(ReplicationCoordinator* replCoord) {
     OpQueueBatcher batcher(this);
 
-    const ServiceContext::UniqueOperationContext txnPtr = cc().makeOperationContext();
-    OperationContext& txn = *txnPtr;
     std::unique_ptr<ApplyBatchFinalizer> finalizer{
         getGlobalServiceContext()->getGlobalStorageEngine()->isDurable()
             ? new ApplyBatchFinalizerForJournal(replCoord)
             : new ApplyBatchFinalizer(replCoord)};
 
     while (true) {  // Exits on message from OpQueueBatcher.
+        const ServiceContext::UniqueOperationContext txnPtr = cc().makeOperationContext();
+        OperationContext& txn = *txnPtr;
+
         // For pausing replication in tests.
         while (MONGO_FAIL_POINT(rsSyncApplyStop)) {
             // Tests should not trigger clean shutdown while that failpoint is active. If we
@@ -1301,6 +1322,9 @@ StatusWith<OpTime> multiApply(OperationContext* txn,
 
     std::vector<Status> statusVector(workerPool->getNumThreads(), Status::OK());
     {
+        // Each node records cumulative batch application stats for itself using this timer.
+        TimerHolder timer(&applyBatchStats);
+
         // We must wait for the all work we've dispatched to complete before leaving this block
         // because the spawned threads refer to objects on our stack, including writerVectors.
         std::vector<MultiApplier::OperationPtrs> writerVectors(workerPool->getNumThreads());

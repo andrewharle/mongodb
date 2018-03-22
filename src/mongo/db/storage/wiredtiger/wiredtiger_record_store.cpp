@@ -909,7 +909,7 @@ int64_t WiredTigerRecordStore::storageSize(OperationContext* txn,
     if (_isEphemeral) {
         return dataSize(txn);
     }
-    WiredTigerSession* session = WiredTigerRecoveryUnit::get(txn)->getSession(txn);
+    WiredTigerSession* session = WiredTigerRecoveryUnit::get(txn)->getSessionNoTxn(txn);
     StatusWith<int64_t> result =
         WiredTigerUtil::getStatisticsValueAs<int64_t>(session->getSession(),
                                                       "statistics:" + getURI(),
@@ -1194,7 +1194,9 @@ bool WiredTigerRecordStore::yieldAndAwaitOplogDeletionRequest(OperationContext* 
 
     // The top-level locks were freed, so also release any potential low-level (storage engine)
     // locks that might be held.
-    txn->recoveryUnit()->abandonSnapshot();
+    WiredTigerRecoveryUnit* recoveryUnit = (WiredTigerRecoveryUnit*)txn->recoveryUnit();
+    recoveryUnit->abandonSnapshot();
+    recoveryUnit->beginIdle();
 
     // Wait for an oplog deletion request, or for this record store to have been destroyed.
     oplogStones->awaitHasExcessStonesOrDead();
@@ -1219,15 +1221,22 @@ void WiredTigerRecordStore::reclaimOplog(OperationContext* txn) {
         try {
             WriteUnitOfWork wuow(txn);
 
-            WiredTigerCursor startwrap(_uri, _tableId, true, txn);
-            WT_CURSOR* start = startwrap.get();
-            start->set_key(start, _makeKey(_oplogStones->firstRecord));
+            WiredTigerCursor cwrap(_uri, _tableId, true, txn);
+            WT_CURSOR* cursor = cwrap.get();
 
-            WiredTigerCursor endwrap(_uri, _tableId, true, txn);
-            WT_CURSOR* end = endwrap.get();
-            end->set_key(end, _makeKey(stone->lastRecord));
+            // The first record in the oplog should be within the truncate range.
+            int ret = WT_READ_CHECK(cursor->next(cursor));
+            invariantWTOK(ret);
+            int64_t key;
+            invariantWTOK(cursor->get_key(cursor, &key));
+            RecordId firstRecord = _fromKey(key);
+            if (firstRecord < _oplogStones->firstRecord || firstRecord > stone->lastRecord) {
+                warning() << "First oplog record " << firstRecord << " is not in truncation range ("
+                          << _oplogStones->firstRecord << ", " << stone->lastRecord << ")";
+            }
 
-            invariantWTOK(session->truncate(session, nullptr, start, end, nullptr));
+            cursor->set_key(cursor, _makeKey(stone->lastRecord));
+            invariantWTOK(session->truncate(session, nullptr, nullptr, cursor, nullptr));
             _changeNumRecords(txn, -stone->records);
             _increaseDataSize(txn, -stone->bytes);
 
@@ -1619,7 +1628,7 @@ void WiredTigerRecordStore::appendCustomStats(OperationContext* txn,
         result->appendIntOrLL("sleepCount", _cappedSleep.load());
         result->appendIntOrLL("sleepMS", _cappedSleepMS.load());
     }
-    WiredTigerSession* session = WiredTigerRecoveryUnit::get(txn)->getSession(txn);
+    WiredTigerSession* session = WiredTigerRecoveryUnit::get(txn)->getSessionNoTxn(txn);
     WT_SESSION* s = session->getSession();
     BSONObjBuilder bob(result->subobjStart(_engineName));
     {

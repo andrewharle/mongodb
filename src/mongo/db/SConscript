@@ -445,6 +445,7 @@ env.Library(
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/serveronly',
         '$BUILD_DIR/mongo/util/options_parser/options_parser_init',
+        'repl/replica_set_messages',
         'server_options',
     ],
 )
@@ -766,9 +767,12 @@ env.Library(
         'log_process_details.cpp',
     ],
     LIBDEPS=[
+        'repl/repl_coordinator_global',
+        'repl/repl_coordinator_interface',
+        'repl/replica_set_messages',
+        'server_options',
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/util/net/network',
-        'server_options',
     ],
 )
 
@@ -818,3 +822,4 @@ asioEnv.CppIntegrationTest(
         '$BUILD_DIR/mongo/executor/network_interface_asio_fixture',
     ],
 )
+

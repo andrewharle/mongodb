@@ -117,8 +117,7 @@ const std::set<std::string> ShardingState::_commandsThatInitializeShardingAwaren
 ShardingState::ShardingState()
     : _initializationState(static_cast<uint32_t>(InitializationState::kNew)),
       _initializationStatus(Status(ErrorCodes::InternalError, "Uninitialized value")),
-      _globalInit(&initializeGlobalShardingStateForMongod),
-      _scheduleWorkFn([](NamespaceString nss) {}) {}
+      _globalInit(&initializeGlobalShardingStateForMongod) {}
 
 ShardingState::~ShardingState() = default;
 
@@ -220,14 +219,6 @@ void ShardingState::markCollectionsNotShardedAtStepdown() {
 
 void ShardingState::setGlobalInitMethodForTest(GlobalInitFunc func) {
     _globalInit = func;
-}
-
-void ShardingState::setScheduleCleanupFunctionForTest(RangeDeleterCleanupNotificationFunc fn) {
-    _scheduleWorkFn = fn;
-}
-
-void ShardingState::scheduleCleanup(const NamespaceString& nss) {
-    _scheduleWorkFn(nss);
 }
 
 Status ShardingState::onStaleShardVersion(OperationContext* txn,
@@ -416,8 +407,6 @@ Status ShardingState::initializeFromShardIdentity(OperationContext* txn,
             _shardName = shardIdentity.getShardName();
             _clusterId = shardIdentity.getClusterId();
 
-            _initializeRangeDeleterTaskExecutor();
-
             return status;
         } catch (const DBException& ex) {
             auto errorStatus = ex.toStatus();
@@ -445,8 +434,6 @@ void ShardingState::_initializeImpl(ConnectionString configSvr, string shardName
             ReplicaSetMonitor::setSynchronousConfigChangeHook(
                 &ShardRegistry::replicaSetChangeShardRegistryUpdateHook);
             ReplicaSetMonitor::setAsynchronousConfigChangeHook(&updateShardIdentityConfigStringCB);
-
-            _initializeRangeDeleterTaskExecutor();
 
             _shardName = shardName;
         }
@@ -626,46 +613,75 @@ ChunkVersion ShardingState::_refreshMetadata(OperationContext* txn, const Namesp
                           << " before shard name has been set",
             shardId.isValid());
 
-    auto newCollectionMetadata = [&]() -> std::unique_ptr<CollectionMetadata> {
-        auto const catalogCache = Grid::get(txn)->catalogCache();
-        catalogCache->invalidateShardedCollection(nss);
+    auto const catalogCache = Grid::get(txn)->catalogCache();
+    catalogCache->invalidateShardedCollection(nss);
 
-        const auto routingInfo = uassertStatusOK(catalogCache->getCollectionRoutingInfo(txn, nss));
-        const auto cm = routingInfo.cm();
-        if (!cm) {
-            return nullptr;
+    auto routingInfo = uassertStatusOK(catalogCache->getCollectionRoutingInfo(txn, nss));
+    const auto cm = routingInfo.cm();
+
+    if (!cm) {
+        // No chunk manager, so unsharded.
+
+        // Exclusive collection lock needed since we're now changing the metadata
+        ScopedTransaction transaction(txn, MODE_IX);
+        AutoGetCollection autoColl(txn, nss, MODE_IX, MODE_X);
+
+        auto css = CollectionShardingState::get(txn, nss);
+        css->refreshMetadata(txn, nullptr);
+
+        return ChunkVersion::UNSHARDED();
+    }
+
+    {
+        AutoGetCollection autoColl(txn, nss, MODE_IS);
+        auto css = CollectionShardingState::get(txn, nss);
+
+        // We already have newer version
+        if (css->getMetadata() &&
+            css->getMetadata()->getCollVersion().epoch() == cm->getVersion().epoch() &&
+            css->getMetadata()->getCollVersion() >= cm->getVersion()) {
+            LOG(1) << "Skipping refresh of metadata for " << nss << " "
+                   << css->getMetadata()->getCollVersion() << " with an older " << cm->getVersion();
+            return css->getMetadata()->getShardVersion();
         }
-
-        RangeMap shardChunksMap =
-            SimpleBSONObjComparator::kInstance.makeBSONObjIndexedMap<CachedChunkInfo>();
-
-        for (const auto& chunkMapEntry : cm->chunkMap()) {
-            const auto& chunk = chunkMapEntry.second;
-
-            if (chunk->getShardId() != shardId)
-                continue;
-
-            shardChunksMap.emplace_hint(shardChunksMap.end(),
-                                        chunk->getMin(),
-                                        CachedChunkInfo(chunk->getMax(), chunk->getLastmod()));
-        }
-
-        return stdx::make_unique<CollectionMetadata>(cm->getShardKeyPattern().toBSON(),
-                                                     cm->getVersion(),
-                                                     cm->getVersion(shardId),
-                                                     std::move(shardChunksMap));
-    }();
+    }
 
     // Exclusive collection lock needed since we're now changing the metadata
     ScopedTransaction transaction(txn, MODE_IX);
     AutoGetCollection autoColl(txn, nss, MODE_IX, MODE_X);
 
     auto css = CollectionShardingState::get(txn, nss);
-    css->refreshMetadata(txn, std::move(newCollectionMetadata));
 
-    if (!css->getMetadata()) {
-        return ChunkVersion::UNSHARDED();
+    // We already have newer version
+    if (css->getMetadata() &&
+        css->getMetadata()->getCollVersion().epoch() == cm->getVersion().epoch() &&
+        css->getMetadata()->getCollVersion() >= cm->getVersion()) {
+        LOG(1) << "Skipping refresh of metadata for " << nss << " "
+               << css->getMetadata()->getCollVersion() << " with an older " << cm->getVersion();
+        return css->getMetadata()->getShardVersion();
     }
+
+    RangeMap shardChunksMap =
+        SimpleBSONObjComparator::kInstance.makeBSONObjIndexedMap<CachedChunkInfo>();
+
+    for (const auto& chunkMapEntry : cm->chunkMap()) {
+        const auto& chunk = chunkMapEntry.second;
+
+        if (chunk->getShardId() != shardId)
+            continue;
+
+        shardChunksMap.emplace_hint(shardChunksMap.end(),
+                                    chunk->getMin(),
+                                    CachedChunkInfo(chunk->getMax(), chunk->getLastmod()));
+    }
+
+    std::unique_ptr<CollectionMetadata> newCollectionMetadata =
+        stdx::make_unique<CollectionMetadata>(cm->getShardKeyPattern().toBSON(),
+                                              cm->getVersion(),
+                                              cm->getVersion(shardId),
+                                              std::move(shardChunksMap));
+
+    css->refreshMetadata(txn, std::move(newCollectionMetadata));
 
     return css->getMetadata()->getShardVersion();
 }
@@ -754,19 +770,6 @@ Status ShardingState::updateShardIdentityConfigString(OperationContext* txn,
     }
 
     return Status::OK();
-}
-
-void ShardingState::_initializeRangeDeleterTaskExecutor() {
-    invariant(!_rangeDeleterTaskExecutor);
-    auto net =
-        executor::makeNetworkInterface("NetworkInterfaceCollectionRangeDeleter-TaskExecutor");
-    auto netPtr = net.get();
-    _rangeDeleterTaskExecutor = stdx::make_unique<executor::ThreadPoolTaskExecutor>(
-        stdx::make_unique<executor::NetworkInterfaceThreadPool>(netPtr), std::move(net));
-}
-
-executor::ThreadPoolTaskExecutor* ShardingState::getRangeDeleterTaskExecutor() {
-    return _rangeDeleterTaskExecutor.get();
 }
 
 /**
