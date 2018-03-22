@@ -58,16 +58,15 @@ Description: object/document-oriented database (metapackage)
  the server, the clients and the development files (headers and library).
 
 Package: mongodb-server
-Architecture: amd64 arm64 ppc64el s390x
+Architecture: all
 Depends:
  mongodb-clients,
+ mongodb-server-core (>= ${source:Version}),
+ mongodb-server-core (<< ${source:Version}.1~),
  adduser, 
  lsb-base (>= 3.0-6),
  ${misc:Depends},
- ${shlibs:Depends}
-Replaces:
- mongodb (<= 1:1.4.2-2)
-Description: object/document-oriented database (server package)
+Description: object/document-oriented database (managed server package)
  MongoDB is a high-performance, open source, schema-free
  document-oriented data store that's easy to deploy, manage
  and use. It's network accessible, written in C++ and offers
@@ -83,8 +82,33 @@ Description: object/document-oriented database (server package)
  High performance, scalability, and reasonable depth of
  functionality are the goals for the project.
  .
- This package contains the server itself  (mongod) and the sharding
- server/load-balancer (mongos).
+ This package installs MongoDB as a system service.
+
+Package: mongodb-server-core
+Architecture: amd64 arm64 ppc64el s390x
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Breaks:
+ mongodb (<< 1:3.4.14-1~)
+Replaces:
+ mongodb (<< 1:3.4.14-1~)
+Description: object/document-oriented database (server binaries package)
+ MongoDB is a high-performance, open source, schema-free
+ document-oriented data store that's easy to deploy, manage
+ and use. It's network accessible, written in C++ and offers
+ the following features:
+ .
+    * Collection oriented storage - easy storage of object-style data
+    * Full index support, including on inner objects
+    * Query profiling
+    * Replication and fail-over support
+    * Efficient storage of binary data including large objects (e.g. videos)
+    * Auto-sharding for cloud-level scalability
+ .
+ High performance, scalability, and reasonable depth of
+ functionality are the goals for the project.
+ .
+ This package contains the database server (mongod) and sharding
+ server/load-balancer (mongos) binaries.
 
 Package: mongodb-clients
 Architecture: amd64 arm64 ppc64el s390x
