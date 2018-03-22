@@ -9,18 +9,18 @@ Description: Fix FTBFS with GCC 7
  Additionally turn format truncation errors back to warnings again for the time
  being.
 Bug-Debian: https://bugs.debian.org/853556
-Last-Update: 2017-08-10
+Last-Update: 2018-03-22
 Forwarded: no
 --- a/SConstruct
 +++ b/SConstruct
-@@ -1568,6 +1568,10 @@
+@@ -1567,6 +1567,10 @@
+                          "-Wall",
                           "-Wsign-compare",
                           "-Wno-unknown-pragmas",
- 			 "-Wno-nonnull-compare",
 +			 "-Wno-error=c++1z-compat",
 +			 "-Wno-error=noexcept-type",
 +			 "-Wno-error=format-truncation",
 +			 "-Wno-error=int-in-bool-context",
- 			 "-Wno-overflow",
                           "-Winvalid-pch"] )
      # env.Append( " -Wconversion" ) TODO: this doesn't really work yet
+     if env.TargetOSIs('linux', 'osx', 'solaris'):
