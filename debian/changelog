@@ -1,3 +1,36 @@
+mongodb (1:3.4.14-1) unstable; urgency=medium
+
+  * New upstream stable release (Closes: #882643)
+  * Drop/Refresh patches
+    + Drop patches for architectures no longer built
+      - 0001-Create-kfreebsd-like-linux-in-most-respects.patch
+      - 0002-kfreebsd-has-dev-urandom.patch
+      - 0012-support-gnu.patch
+      - use-mmapv1-on-i386
+    + Drop obsolete/merged patches
+      - fix-boost-1.62-build.patch
+      - fix-gcc-6-ftbfs.patch
+      - use-std::regex.patch
+      - fix-build-with-openssl-1.1.patch
+      - fix-mozjs-38-segfaults.patch
+      - arm64-48bit-va-compat.patch
+      - scons-3.0-compat.patch
+    + Refresh fix-ftbfs-with-gcc-7.patch
+  * Ship the mongod and mongos binaries in mongodb-server-core. This allows
+    the use of special-purpose Mongo instances without the need for a
+    system-wide setup (Closes: #893621). Thanks to Robie Basak!
+  * Upload to unstable, merging all experimental development history
+  * Switch Vcs-* URLs to salsa.d.o
+  * Bump Standards-Version to 4.1.3; no changes needed
+  * Bump dh compat to 11
+    + Use dh_missing instead of dh_install --list-missing
+    + Use dh_installsystemd instead of dh_systemd_enable
+  * d/rules: do not pass --parallel to dh, this is now done by default
+  * d/watch: switch URL to https://
+  * d/mongodb.conf: rename oplog to diaglog (Closes: #892955)
+
+ -- Apollon Oikonomopoulos <apoikos@debian.org>  Thu, 22 Mar 2018 14:18:12 +0200
+
 mongodb (1:3.4.7-1) experimental; urgency=medium
 
   * New upstream bugfix release; see
