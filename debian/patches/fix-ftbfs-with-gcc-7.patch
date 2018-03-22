@@ -13,7 +13,7 @@ Last-Update: 2017-08-10
 Forwarded: no
 --- a/SConstruct
 +++ b/SConstruct
-@@ -1462,6 +1462,10 @@
+@@ -1568,6 +1568,10 @@
                           "-Wsign-compare",
                           "-Wno-unknown-pragmas",
  			 "-Wno-nonnull-compare",
