@@ -311,7 +311,7 @@ LockResult LockerImpl<IsForMMAPV1>::_lockGlobalBegin(LockMode mode, Milliseconds
     dassert(isLocked() == (_modeForTicket != MODE_NONE));
     if (_modeForTicket == MODE_NONE) {
         const bool reader = isSharedLockMode(mode);
-        auto holder = ticketHolders[mode];
+        auto holder = shouldAcquireTicket() ? ticketHolders[mode] : nullptr;
         if (holder) {
             _clientState.store(reader ? kQueuedReader : kQueuedWriter);
             if (timeout == Milliseconds::max()) {
@@ -787,7 +787,10 @@ LockResult LockerImpl<IsForMMAPV1>::lockComplete(ResourceId resId,
         }
     }
 
-    // Cleanup the state, since this is an unused lock now
+    // Cleanup the state, since this is an unused lock now.
+    // Note: in case of the _notify object returning LOCK_TIMEOUT, it is possible to find that the
+    // lock was still granted after all, but we don't try to take advantage of that and will return
+    // a timeout.
     if (result != LOCK_OK) {
         LockRequestsMap::Iterator it = _requests.find(resId);
         _unlockImpl(&it);
@@ -807,7 +810,7 @@ bool LockerImpl<IsForMMAPV1>::_unlockImpl(LockRequestsMap::Iterator* it) {
     if (globalLockManager.unlock(it->objAddr())) {
         if (it->key() == resourceIdGlobal) {
             invariant(_modeForTicket != MODE_NONE);
-            auto holder = ticketHolders[_modeForTicket];
+            auto holder = shouldAcquireTicket() ? ticketHolders[_modeForTicket] : nullptr;
             _modeForTicket = MODE_NONE;
             if (holder) {
                 holder->release();

@@ -32,7 +32,6 @@ flags = {
         'READ_PREV',
         'READ_RESTART_OK',
         'READ_SKIP_INTL',
-        'READ_SKIP_LEAF',
         'READ_TRUNCATE',
         'READ_WONT_NEED',
     ],
@@ -111,6 +110,7 @@ flags = {
         'CONN_SERVER_LSM',
         'CONN_SERVER_STATISTICS',
         'CONN_SERVER_SWEEP',
+        'CONN_TABLE_CACHE',
         'CONN_WAS_BACKUP',
     ],
     'session' : [

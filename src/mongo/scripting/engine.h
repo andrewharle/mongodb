@@ -44,7 +44,7 @@ class OperationContext;
 
 struct JSFile {
     const char* name;
-    const StringData& source;
+    const StringData source;
 };
 
 class Scope {
@@ -102,6 +102,8 @@ public:
     virtual void gc() = 0;
 
     virtual void advanceGeneration() = 0;
+
+    virtual void requireOwnedObjects() = 0;
 
     virtual ScriptingFunction createFunction(const char* code);
 

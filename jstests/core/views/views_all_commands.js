@@ -48,6 +48,8 @@
  *
  *  skipStandalone
  *      If true, do not run this command on a standalone mongod.
+ *
+ * @tags: [requires_collmod_command]
  */
 
 (function() {

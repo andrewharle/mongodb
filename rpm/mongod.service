@@ -13,6 +13,7 @@ ExecStartPre=/usr/bin/chown mongod:mongod /var/run/mongodb
 ExecStartPre=/usr/bin/chmod 0755 /var/run/mongodb
 PermissionsStartOnly=true
 PIDFile=/var/run/mongodb/mongod.pid
+Type=forking
 # file size
 LimitFSIZE=infinity
 # cpu time
@@ -23,6 +24,8 @@ LimitAS=infinity
 LimitNOFILE=64000
 # processes/threads
 LimitNPROC=64000
+# locked memory
+LimitMEMLOCK=infinity
 # total threads (user+kernel)
 TasksMax=infinity
 TasksAccounting=false

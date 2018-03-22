@@ -51,6 +51,7 @@
 #include "mongo/db/auth/user_cache_invalidator_job.h"
 #include "mongo/db/client.h"
 #include "mongo/db/dbwebserver.h"
+#include "mongo/db/ftdc/ftdc_mongos.h"
 #include "mongo/db/initialize_server_global_state.h"
 #include "mongo/db/instance.h"
 #include "mongo/db/lasterror.h"
@@ -152,6 +153,9 @@ static void cleanupTask() {
         if (auto catalog = Grid::get(txn)->catalogClient(txn)) {
             catalog->shutDown(txn);
         }
+
+        // Shutdown Full-Time Data Capture
+        stopMongoSFTDC();
     }
 
     audit::logShutdown(Client::getCurrent());
@@ -292,6 +296,8 @@ static ExitCode runMongosServer() {
         stdx::thread web(stdx::bind(&webServerListenThread, dbWebServer));
         web.detach();
     }
+
+    startMongoSFTDC();
 
     Status status = getGlobalAuthorizationManager()->initialize(NULL);
     if (!status.isOK()) {

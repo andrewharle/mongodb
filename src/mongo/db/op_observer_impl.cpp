@@ -42,8 +42,11 @@
 #include "mongo/db/server_options.h"
 #include "mongo/db/views/durable_view_catalog.h"
 #include "mongo/scripting/engine.h"
+#include "mongo/util/fail_point_service.h"
 
 namespace mongo {
+
+MONGO_FP_DECLARE(failCollectionUpdates);
 
 void OpObserverImpl::onCreateIndex(OperationContext* txn,
                                    const std::string& ns,
@@ -80,7 +83,7 @@ void OpObserverImpl::onInserts(OperationContext* txn,
 
     if (nss.ns() == FeatureCompatibilityVersion::kCollection) {
         for (auto it = begin; it != end; it++) {
-            FeatureCompatibilityVersion::onInsertOrUpdate(*it);
+            FeatureCompatibilityVersion::onInsertOrUpdate(txn, *it);
         }
     }
 
@@ -94,6 +97,20 @@ void OpObserverImpl::onInserts(OperationContext* txn,
 }
 
 void OpObserverImpl::onUpdate(OperationContext* txn, const OplogUpdateEntryArgs& args) {
+    MONGO_FAIL_POINT_BLOCK(failCollectionUpdates, extraData) {
+        auto collElem = extraData.getData()["collectionNS"];
+        // If the failpoint specifies no collection or matches the existing one, fail.
+        if (!collElem || args.ns == collElem.String()) {
+            uasserted(40654,
+                      str::stream() << "failCollectionUpdates failpoint enabled, namespace: "
+                                    << args.ns
+                                    << ", update: "
+                                    << args.update
+                                    << " on document with "
+                                    << args.criteria);
+        }
+    }
+
     // Do not log a no-op operation; see SERVER-21738
     if (args.update.isEmpty()) {
         return;
@@ -119,7 +136,7 @@ void OpObserverImpl::onUpdate(OperationContext* txn, const OplogUpdateEntryArgs&
     }
 
     if (args.ns == FeatureCompatibilityVersion::kCollection) {
-        FeatureCompatibilityVersion::onInsertOrUpdate(args.updatedDoc);
+        FeatureCompatibilityVersion::onInsertOrUpdate(txn, args.updatedDoc);
     }
 }
 
@@ -162,7 +179,7 @@ void OpObserverImpl::onDelete(OperationContext* txn,
         DurableViewCatalog::onExternalChange(txn, ns);
     }
     if (ns.ns() == FeatureCompatibilityVersion::kCollection) {
-        FeatureCompatibilityVersion::onDelete(deleteState.idDoc);
+        FeatureCompatibilityVersion::onDelete(txn, deleteState.idDoc);
     }
 }
 
@@ -221,7 +238,7 @@ void OpObserverImpl::onDropDatabase(OperationContext* txn, const std::string& db
     repl::logOp(txn, "c", dbName.c_str(), cmdObj, nullptr, false);
 
     if (NamespaceString(dbName).db() == FeatureCompatibilityVersion::kDatabase) {
-        FeatureCompatibilityVersion::onDropCollection();
+        FeatureCompatibilityVersion::onDropCollection(txn);
     }
 
     getGlobalAuthorizationManager()->logOp(txn, "c", dbName.c_str(), cmdObj, nullptr);
@@ -243,7 +260,7 @@ void OpObserverImpl::onDropCollection(OperationContext* txn,
     }
 
     if (collectionName.ns() == FeatureCompatibilityVersion::kCollection) {
-        FeatureCompatibilityVersion::onDropCollection();
+        FeatureCompatibilityVersion::onDropCollection(txn);
     }
 
     getGlobalAuthorizationManager()->logOp(txn, "c", dbName.c_str(), cmdObj, nullptr);
@@ -276,11 +293,10 @@ void OpObserverImpl::onRenameCollection(OperationContext* txn,
                                 << dropTarget);
 
     repl::logOp(txn, "c", dbName.c_str(), cmdObj, nullptr, false);
-    if (fromCollection.coll() == DurableViewCatalog::viewsCollectionName() ||
-        toCollection.coll() == DurableViewCatalog::viewsCollectionName()) {
-        DurableViewCatalog::onExternalChange(
-            txn, NamespaceString(DurableViewCatalog::viewsCollectionName()));
-    }
+    if (fromCollection.isSystemDotViews())
+        DurableViewCatalog::onExternalChange(txn, fromCollection);
+    if (toCollection.isSystemDotViews())
+        DurableViewCatalog::onExternalChange(txn, toCollection);
 
     getGlobalAuthorizationManager()->logOp(txn, "c", dbName.c_str(), cmdObj, nullptr);
     logOpForDbHash(txn, dbName.c_str());

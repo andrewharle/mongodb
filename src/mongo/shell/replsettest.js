@@ -427,8 +427,10 @@ var ReplSetTest = function(opts) {
             var member = {};
             member._id = i;
 
-            var port = this.ports[i];
-            member.host = this.host + ":" + port;
+            member.host = this.host;
+            if (!member.host.contains('/')) {
+                member.host += ":" + this.ports[i];
+            }
 
             var nodeOpts = this.nodeOptions["n" + i];
             if (nodeOpts) {
@@ -470,7 +472,7 @@ var ReplSetTest = function(opts) {
      *
      * @param options - The options passed to {@link MongoRunner.runMongod}
      */
-    this.startSet = function(options) {
+    this.startSet = function(options, restart) {
         print("ReplSetTest starting set");
 
         if (options && options.keyFile) {
@@ -482,7 +484,7 @@ var ReplSetTest = function(opts) {
 
         var nodes = [];
         for (var n = 0; n < this.ports.length; n++) {
-            nodes.push(this.start(n, options));
+            nodes.push(this.start(n, options, restart));
         }
 
         this.nodes = nodes;
@@ -1883,7 +1885,11 @@ var ReplSetTest = function(opts) {
      * Constructor, which instantiates the ReplSetTest object from an existing set.
      */
     function _constructFromExistingSeedNode(seedNode) {
-        var conf = _replSetGetConfig(new Mongo(seedNode));
+        const conn = new Mongo(seedNode);
+        if (jsTest.options().keyFile) {
+            self.keyFile = jsTest.options().keyFile;
+        }
+        var conf = asCluster(conn, () => _replSetGetConfig(conn));
         print('Recreating replica set from config ' + tojson(conf));
 
         var existingNodes = conf.members.map(member => member.host);

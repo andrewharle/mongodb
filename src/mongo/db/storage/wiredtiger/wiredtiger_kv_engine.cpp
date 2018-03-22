@@ -228,6 +228,7 @@ WiredTigerKVEngine::WiredTigerKVEngine(const std::string& canonicalName,
         ss << "checkpoint=(wait=" << wiredTigerGlobalOptions.checkpointDelaySecs;
         ss << ",log_size=2GB),";
         ss << "statistics_log=(wait=" << wiredTigerGlobalOptions.statisticsLogDelaySecs << "),";
+        ss << "verbose=(recovery_progress),";
     }
     ss << WiredTigerCustomizationHooks::get(getGlobalServiceContext())
               ->getTableCreateConfig("system");
@@ -253,6 +254,13 @@ WiredTigerKVEngine::WiredTigerKVEngine(const std::string& canonicalName,
                 msgassertedNoTrace(28718, s.reason());
             }
             invariantWTOK(_conn->close(_conn, NULL));
+            // After successful recovery, remove the journal directory.
+            try {
+                boost::filesystem::remove_all(journalPath);
+            } catch (std::exception& e) {
+                error() << "error removing journal dir " << journalPath.string() << ' ' << e.what();
+                throw;
+            }
         }
         // This setting overrides the earlier setting because it is later in the config string.
         ss << ",log=(enabled=false),";
