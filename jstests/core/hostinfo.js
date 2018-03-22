@@ -34,7 +34,7 @@ if (hostinfo.os.type != "") {
 
 var buildInfo = assert.commandWorked(db.runCommand({buildInfo: 1}));
 if (buildInfo.buildEnvironment && buildInfo.buildEnvironment.target_arch) {
-    var targetArch = buildInfo.buildEnvironment.target_arch;
+    let targetArch = buildInfo.buildEnvironment.target_arch;
     if (targetArch == "i386")
         assert.eq(hostinfo.system.cpuAddrSize, 32);
     else

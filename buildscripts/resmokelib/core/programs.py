@@ -115,7 +115,8 @@ def mongos_program(logger, executable=None, process_kwargs=None, **kwargs):
     return _process.Process(logger, args, **process_kwargs)
 
 
-def mongo_shell_program(logger, executable=None, filename=None, process_kwargs=None, **kwargs):
+def mongo_shell_program(logger, executable=None, connection_string=None, filename=None,
+                        process_kwargs=None, isMainTest=True, **kwargs):
     """
     Returns a Process instance that starts a mongo shell with arguments
     constructed from 'kwargs'.
@@ -146,6 +147,8 @@ def mongo_shell_program(logger, executable=None, filename=None, process_kwargs=N
         elif opt_name not in test_data:
             # Only use 'opt_default' if the property wasn't set in the YAML configuration.
             test_data[opt_name] = opt_default
+
+    test_data["isMainTest"] = isMainTest
     global_vars["TestData"] = test_data
 
     # Pass setParameters for mongos and mongod through TestData. The setParameter parsing in
@@ -181,8 +184,21 @@ def mongo_shell_program(logger, executable=None, filename=None, process_kwargs=N
     if config.SHELL_WRITE_MODE is not None:
         kwargs["writeMode"] = config.SHELL_WRITE_MODE
 
+    if connection_string is not None:
+        # The --host and --port options are ignored by the mongo shell when an explicit connection
+        # string is specified. We remove these options to avoid any ambiguity with what server the
+        # logged mongo shell invocation will connect to.
+        if "port" in kwargs:
+            kwargs.pop("port")
+
+        if "host" in kwargs:
+            kwargs.pop("host")
+
     # Apply the rest of the command line arguments.
     _apply_kwargs(args, kwargs)
+
+    if connection_string is not None:
+        args.append(connection_string)
 
     # Have the mongos shell run the specified file.
     args.append(filename)

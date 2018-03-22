@@ -25,7 +25,7 @@
 
     // Migrate the middle chunk to another shard
     assert.commandWorked(s.s0.adminCommand(
-        {movechunk: "test.data", find: {_id: 50}, to: s.getOther(s.getServer("test")).name}));
+        {movechunk: "test.data", find: {_id: 50}, to: s.getOther(s.getPrimaryShard("test")).name}));
 
     // Check that the results are in order.
     var result = d.data.aggregate({$sort: {_id: 1}}).toArray();

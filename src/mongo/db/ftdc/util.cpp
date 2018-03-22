@@ -63,7 +63,7 @@ const char kFTDCDocsField[] = "docs";
 const char kFTDCCollectStartField[] = "start";
 const char kFTDCCollectEndField[] = "end";
 
-const std::uint64_t FTDCConfig::kPeriodMillisDefault = 1000;
+const std::int64_t FTDCConfig::kPeriodMillisDefault = 1000;
 
 const std::size_t kMaxRecursion = 10;
 
@@ -101,6 +101,19 @@ Date_t roundTime(Date_t now, Milliseconds period) {
     long long next_time = now_next_period - excess_time;
 
     return Date_t::fromMillisSinceEpoch(next_time);
+}
+
+boost::filesystem::path getMongoSPath(const boost::filesystem::path& logFile) {
+    auto base = logFile;
+
+    // Keep stripping file extensions until we are only left with the file name
+    while (base.has_extension()) {
+        auto full_path = base.generic_string();
+        base = full_path.substr(0, full_path.size() - base.extension().size());
+    }
+
+    base += "." + kFTDCDefaultDirectory.toString();
+    return base;
 }
 
 }  // namespace FTDCUtil
@@ -152,7 +165,8 @@ StatusWith<bool> extractMetricsFromDocument(const BSONObj& referenceDoc,
                 !(referenceElement.isNumber() == true &&
                   currentElement.isNumber() == referenceElement.isNumber())) {
                 LOG(4) << "full-time diagnostic data capture  schema change: field type change for "
-                          "field '" << referenceElement.fieldNameStringData() << "' from '"
+                          "field '"
+                       << referenceElement.fieldNameStringData() << "' from '"
                        << static_cast<int>(referenceElement.type()) << "' to '"
                        << static_cast<int>(currentElement.type()) << "'";
                 matches = false;
@@ -371,7 +385,9 @@ StatusWith<FTDCType> getBSONDocumentType(const BSONObj& obj) {
         static_cast<FTDCType>(value) != FTDCType::kMetadata) {
         return {ErrorCodes::BadValue,
                 str::stream() << "Field '" << std::string(kFTDCTypeField)
-                              << "' is not an expected value, found '" << value << "'"};
+                              << "' is not an expected value, found '"
+                              << value
+                              << "'"};
     }
 
     return {static_cast<FTDCType>(value)};

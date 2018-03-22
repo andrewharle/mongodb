@@ -1,5 +1,7 @@
 // Test the bypassDocumentValidation flag with some database commands. The test uses relevant shell
 // helpers when they're available for the respective server commands.
+//
+// @tags: [requires_collmod_command]
 
 (function() {
     'use strict';
@@ -19,9 +21,9 @@
     // Test applyOps with a simple insert if not on mongos.
     if (!db.runCommand({isdbgrid: 1}).isdbgrid) {
         var op = [{ts: Timestamp(0, 0), h: 1, v: 2, op: 'i', ns: coll.getFullName(), o: {_id: 9}}];
-        // SERVER-21345: applyOps is returning UnknownError instead of DocumentValidationFailure
         assert.commandFailedWithCode(
-            myDb.runCommand({applyOps: op, bypassDocumentValidation: false}), 8);
+            myDb.runCommand({applyOps: op, bypassDocumentValidation: false}),
+            ErrorCodes.DocumentValidationFailure);
         assert.eq(0, coll.count({_id: 9}));
         assert.commandWorked(myDb.runCommand({applyOps: op, bypassDocumentValidation: true}));
         assert.eq(1, coll.count({_id: 9}));

@@ -40,8 +40,7 @@
 #include "mongo/stdx/memory.h"
 
 namespace mongo {
-const StringData AuthorizationSessionForTest::kTestDBName =
-    StringData("authorizationSessionForTestDB");
+constexpr StringData AuthorizationSessionForTest::kTestDBName;
 
 AuthorizationSessionForTest::~AuthorizationSessionForTest() {
     revokeAllPrivileges();

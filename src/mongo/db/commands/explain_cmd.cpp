@@ -56,7 +56,8 @@ class CmdExplain : public Command {
 public:
     CmdExplain() : Command("explain") {}
 
-    virtual bool isWriteCommandForConfigServer() const {
+
+    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
 

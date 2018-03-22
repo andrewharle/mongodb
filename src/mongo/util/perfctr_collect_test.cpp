@@ -53,10 +53,12 @@ StringMap toNestedStringMap(BSONObj& obj) {
     StringMap map;
 
     for (const auto& parent : obj) {
+
         if (parent.isABSONObj()) {
             std::string parentNamePrefix = std::string(parent.fieldName()) + ".";
 
             for (const auto& child : parent.Obj()) {
+
                 if (child.isABSONObj()) {
                     std::string childNamePrefix = parentNamePrefix + child.fieldName() + ".";
 
@@ -128,6 +130,7 @@ size_t kDefaultCollectionCount = 2;
 
 // Simple verification test
 TEST(FTDCPerfCollector, TestSingleCounter) {
+
     PerfCounterCollection collection;
     // PERF_100NSEC_TIMER
     ASSERT_OK(collection.addCountersGroup("cpu", {"\\Processor(0)\\% Idle Time"}));
@@ -147,6 +150,7 @@ TEST(FTDCPerfCollector, TestSingleCounter) {
 
 // Simple verification test
 TEST(FTDCPerfCollector, TestSingleRawCounter) {
+
     PerfCounterCollection collection;
     // PERF_COUNTER_RAWCOUNT
     ASSERT_OK(collection.addCountersGroup("cpu", {"\\System\\Processes"}));
@@ -165,6 +169,7 @@ TEST(FTDCPerfCollector, TestSingleRawCounter) {
 
 // Test negative cases for collection
 TEST(FTDCPerfCollector, TestBadCollectionInput) {
+
     PerfCounterCollection collection;
     ASSERT_OK(collection.addCountersGroup("cpu", {"\\Processor(0)\\% Idle Time"}));
 
@@ -172,11 +177,11 @@ TEST(FTDCPerfCollector, TestBadCollectionInput) {
     ASSERT_NOT_OK(collection.addCountersGroup("cpu", {"\\Processor(0)\\% Idle Time"}));
 
     // Duplicate counter
-    ASSERT_NOT_OK(
-        collection.addCountersGroup("cpu2",
-                                    {
-                                     "\\Processor(0)\\% Idle Time", "\\Processor(0)\\% Idle Time",
-                                    }));
+    ASSERT_NOT_OK(collection.addCountersGroup(
+        "cpu2",
+        {
+            "\\Processor(0)\\% Idle Time", "\\Processor(0)\\% Idle Time",
+        }));
 
     // Duplicate group
     ASSERT_NOT_OK(
@@ -186,7 +191,7 @@ TEST(FTDCPerfCollector, TestBadCollectionInput) {
     ASSERT_NOT_OK(collection.addCountersGroupedByInstanceName(
         "cpu2",
         {
-         "\\Processor(0)\\% Idle Time", "\\Processor(0)\\% Idle Time",
+            "\\Processor(0)\\% Idle Time", "\\Processor(0)\\% Idle Time",
         }));
 }
 
@@ -231,21 +236,22 @@ TEST(FTDCPerfCollector, TestBadCollectorInput) {
 
 // Test all the different counter types we use in the MongoDB code
 TEST(FTDCPerfCollector, TestCounterTypes) {
+
     PerfCounterCollection collection;
     ASSERT_OK(collection.addCountersGroup(
         "misc",
         {
-         "\\Processor(0)\\% Idle Time",                          // PERF_100NSEC_TIMER
-         "\\Processor(0)\\% Processor Time",                     // PERF_100NSEC_TIMER_INV
-         "\\System\\Processes",                                  // PERF_COUNTER_RAWCOUNT
-         "\\System\\System Up Time",                             // PERF_ELAPSED_TIME
-         "\\Memory\\Available Bytes",                            // PERF_COUNTER_LARGE_RAWCOUNT
-         "\\PhysicalDisk(_Total)\\% Disk Write Time",            // PERF_PRECISION_100NS_TIMER
-         "\\PhysicalDisk(_Total)\\Avg. Disk Bytes/Write",        // PERF_AVERAGE_BULK
-         "\\PhysicalDisk(_Total)\\Avg. Disk Read Queue Length",  // PERF_COUNTER_LARGE_QUEUELEN_TYPE
-         "\\PhysicalDisk(_Total)\\Avg. Disk sec/Write",          // PERF_AVERAGE_TIMER
-         "\\PhysicalDisk(_Total)\\Disk Write Bytes/sec",         // PERF_COUNTER_BULK_COUNT
-         "\\PhysicalDisk(_Total)\\Disk Writes/sec",              // PERF_COUNTER_COUNTER
+            "\\Processor(0)\\% Idle Time",                          // PERF_100NSEC_TIMER
+            "\\Processor(0)\\% Processor Time",                     // PERF_100NSEC_TIMER_INV
+            "\\System\\Processes",                                  // PERF_COUNTER_RAWCOUNT
+            "\\System\\System Up Time",                             // PERF_ELAPSED_TIME
+            "\\Memory\\Available Bytes",                            // PERF_COUNTER_LARGE_RAWCOUNT
+            "\\PhysicalDisk(_Total)\\% Disk Write Time",            // PERF_PRECISION_100NS_TIMER
+            "\\PhysicalDisk(_Total)\\Avg. Disk Bytes/Write",        // PERF_AVERAGE_BULK
+            "\\PhysicalDisk(_Total)\\Avg. Disk Read Queue Length",  // PERF_COUNTER_LARGE_QUEUELEN_TYPE
+            "\\PhysicalDisk(_Total)\\Avg. Disk sec/Write",          // PERF_AVERAGE_TIMER
+            "\\PhysicalDisk(_Total)\\Disk Write Bytes/sec",         // PERF_COUNTER_BULK_COUNT
+            "\\PhysicalDisk(_Total)\\Disk Writes/sec",              // PERF_COUNTER_COUNTER
         }));
 
     auto swCollector = PerfCounterCollector::create(std::move(collection));
@@ -272,6 +278,7 @@ TEST(FTDCPerfCollector, TestCounterTypes) {
 
 // Test multiple counter groups
 TEST(FTDCPerfCollector, TestMultipleCounterGroups) {
+
     PerfCounterCollection collection;
     ASSERT_OK(collection.addCountersGroup(
         "cpu", {"\\Processor(0)\\% Idle Time", "\\Processor(0)\\% Processor Time"}));
@@ -296,6 +303,7 @@ TEST(FTDCPerfCollector, TestMultipleCounterGroups) {
 
 // Test multiple nested counter groups
 TEST(FTDCPerfCollector, TestMultipleNestedCounterGroups) {
+
     PerfCounterCollection collection;
     ASSERT_OK(collection.addCountersGroupedByInstanceName(
         "cpu", {"\\Processor(*)\\% Idle Time", "\\Processor(*)\\% Processor Time"}));
@@ -310,8 +318,12 @@ TEST(FTDCPerfCollector, TestMultipleNestedCounterGroups) {
         COLLECT_COUNTERS;
         ASSERT_TIMEBASE
 
+        // We boldly assume that machines we test on have at least two processors
         ASSERT_NESTED_GROUP_AND_RAW_COUNTER("cpu", "0", "\\Processor\\% Idle Time");
         ASSERT_NESTED_GROUP_AND_RAW_COUNTER("cpu", "0", "\\Processor\\% Processor Time");
+
+        ASSERT_NESTED_GROUP_AND_RAW_COUNTER("cpu", "1", "\\Processor\\% Idle Time");
+        ASSERT_NESTED_GROUP_AND_RAW_COUNTER("cpu", "1", "\\Processor\\% Processor Time");
 
         ASSERT_NO_NESTED_GROUP_AND_RAW_COUNTER("cpu", "_Total", "\\Processor\\% Idle Time");
         ASSERT_NO_NESTED_GROUP_AND_RAW_COUNTER("cpu", "_Total", "\\Processor\\% Processor Time");
@@ -323,57 +335,58 @@ TEST(FTDCPerfCollector, TestMultipleNestedCounterGroups) {
 
 // Test Counters we use in MongoDB
 TEST(FTDCPerfCollector, TestLocalCounters) {
+
     PerfCounterCollection collection;
     ASSERT_OK(collection.addCountersGroup("cpu",
                                           {
-                                           "\\Processor(_Total)\\% Idle Time",
-                                           "\\Processor(_Total)\\% Interrupt Time",
-                                           "\\Processor(_Total)\\% Privileged Time",
-                                           "\\Processor(_Total)\\% Processor Time",
-                                           "\\Processor(_Total)\\% User Time",
-                                           "\\Processor(_Total)\\Interrupts/sec",
-                                           "\\System\\Context Switches/sec",
-                                           "\\System\\Processes",
-                                           "\\System\\Processor Queue Length",
-                                           "\\System\\System Up Time",
-                                           "\\System\\Threads",
+                                              "\\Processor(_Total)\\% Idle Time",
+                                              "\\Processor(_Total)\\% Interrupt Time",
+                                              "\\Processor(_Total)\\% Privileged Time",
+                                              "\\Processor(_Total)\\% Processor Time",
+                                              "\\Processor(_Total)\\% User Time",
+                                              "\\Processor(_Total)\\Interrupts/sec",
+                                              "\\System\\Context Switches/sec",
+                                              "\\System\\Processes",
+                                              "\\System\\Processor Queue Length",
+                                              "\\System\\System Up Time",
+                                              "\\System\\Threads",
                                           }));
 
     // TODO: Should we capture the Heap Counters for the current process?
     ASSERT_OK(collection.addCountersGroup("memory",
                                           {
-                                           "\\Memory\\Available Bytes",
-                                           "\\Memory\\Cache Bytes",
-                                           "\\Memory\\Cache Faults/sec",
-                                           "\\Memory\\Committed Bytes",
-                                           "\\Memory\\Commit Limit",
-                                           "\\Memory\\Page Reads/sec",
-                                           "\\Memory\\Page Writes/sec",
-                                           "\\Memory\\Pages Input/sec",
-                                           "\\Memory\\Pages Output/sec",
-                                           "\\Memory\\Pool Nonpaged Bytes",
-                                           "\\Memory\\Pool Paged Bytes",
-                                           "\\Memory\\Pool Paged Resident Bytes",
-                                           "\\Memory\\System Cache Resident Bytes",
-                                           "\\Memory\\System Code Total Bytes",
+                                              "\\Memory\\Available Bytes",
+                                              "\\Memory\\Cache Bytes",
+                                              "\\Memory\\Cache Faults/sec",
+                                              "\\Memory\\Committed Bytes",
+                                              "\\Memory\\Commit Limit",
+                                              "\\Memory\\Page Reads/sec",
+                                              "\\Memory\\Page Writes/sec",
+                                              "\\Memory\\Pages Input/sec",
+                                              "\\Memory\\Pages Output/sec",
+                                              "\\Memory\\Pool Nonpaged Bytes",
+                                              "\\Memory\\Pool Paged Bytes",
+                                              "\\Memory\\Pool Paged Resident Bytes",
+                                              "\\Memory\\System Cache Resident Bytes",
+                                              "\\Memory\\System Code Total Bytes",
                                           }));
 
     ASSERT_OK(collection.addCountersGroupedByInstanceName(
         "disks",
         {
-         "\\PhysicalDisk(*)\\% Disk Read Time",
-         "\\PhysicalDisk(*)\\% Disk Write Time",
-         "\\PhysicalDisk(*)\\Avg. Disk Bytes/Read",
-         "\\PhysicalDisk(*)\\Avg. Disk Bytes/Write",
-         "\\PhysicalDisk(*)\\Avg. Disk Read Queue Length",
-         "\\PhysicalDisk(*)\\Avg. Disk Write Queue Length",
-         "\\PhysicalDisk(*)\\Avg. Disk sec/Read",
-         "\\PhysicalDisk(*)\\Avg. Disk sec/Write",
-         "\\PhysicalDisk(*)\\Disk Read Bytes/sec",
-         "\\PhysicalDisk(*)\\Disk Write Bytes/sec",
-         "\\PhysicalDisk(*)\\Disk Reads/sec",
-         "\\PhysicalDisk(*)\\Disk Writes/sec",
-         "\\PhysicalDisk(*)\\Current Disk Queue Length",
+            "\\PhysicalDisk(*)\\% Disk Read Time",
+            "\\PhysicalDisk(*)\\% Disk Write Time",
+            "\\PhysicalDisk(*)\\Avg. Disk Bytes/Read",
+            "\\PhysicalDisk(*)\\Avg. Disk Bytes/Write",
+            "\\PhysicalDisk(*)\\Avg. Disk Read Queue Length",
+            "\\PhysicalDisk(*)\\Avg. Disk Write Queue Length",
+            "\\PhysicalDisk(*)\\Avg. Disk sec/Read",
+            "\\PhysicalDisk(*)\\Avg. Disk sec/Write",
+            "\\PhysicalDisk(*)\\Disk Read Bytes/sec",
+            "\\PhysicalDisk(*)\\Disk Write Bytes/sec",
+            "\\PhysicalDisk(*)\\Disk Reads/sec",
+            "\\PhysicalDisk(*)\\Disk Writes/sec",
+            "\\PhysicalDisk(*)\\Current Disk Queue Length",
         }));
 
     auto swCollector = PerfCounterCollector::create(std::move(collection));

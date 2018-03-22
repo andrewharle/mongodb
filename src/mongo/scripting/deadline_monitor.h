@@ -33,7 +33,9 @@
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/unordered_map.h"
 #include "mongo/stdx/condition_variable.h"
+#include "mongo/stdx/mutex.h"
 #include "mongo/stdx/thread.h"
+#include "mongo/util/concurrency/idle_thread_block.h"
 #include "mongo/util/concurrency/mutex.h"
 #include "mongo/util/time_support.h"
 
@@ -131,6 +133,7 @@ private:
      * _Task::kill() is invoked.
      */
     void deadlineMonitorThread() {
+        setThreadName("DeadlineMonitor");
         stdx::unique_lock<stdx::mutex> lk(_deadlineMutex);
         Date_t lastInterruptCycle = Date_t::now();
         while (!_inShutdown) {
@@ -138,20 +141,21 @@ private:
             const Date_t now = Date_t::now();
             const auto interruptInterval = Milliseconds{getScriptingEngineInterruptInterval()};
 
-            if ((interruptInterval.count() > 0) && (now - lastInterruptCycle > interruptInterval)) {
+            if (now - lastInterruptCycle > interruptInterval) {
                 for (const auto& task : _tasks) {
-                    if (task.second > now)
-                        task.first->interrupt();
+                    if (task.first->isKillPending())
+                        task.first->kill();
                 }
                 lastInterruptCycle = now;
             }
 
             // wait for a task to be added or a deadline to expire
             if (_nearestDeadlineWallclock > now) {
+                MONGO_IDLE_THREAD_BLOCK;
                 if (_nearestDeadlineWallclock == Date_t::max()) {
                     if ((interruptInterval.count() > 0) &&
                         (_nearestDeadlineWallclock - now > interruptInterval)) {
-                        _newDeadlineAvailable.wait_for(lk, interruptInterval);
+                        _newDeadlineAvailable.wait_for(lk, interruptInterval.toSystemDuration());
                     } else {
                         _newDeadlineAvailable.wait(lk);
                     }
@@ -181,7 +185,7 @@ private:
         }
     }
 
-    using TaskDeadlineMap = std::unordered_map<_Task*, Date_t>;
+    using TaskDeadlineMap = stdx::unordered_map<_Task*, Date_t>;
     TaskDeadlineMap _tasks;      // map of running tasks with deadlines
     stdx::mutex _deadlineMutex;  // protects all non-const members, except _monitorThread
     stdx::condition_variable _newDeadlineAvailable;    // Signaled for timeout, start and stop

@@ -44,9 +44,7 @@
 namespace mongo {
 namespace mozjs {
 
-#ifndef _MSC_EXTENSIONS
 const int ObjectWrapper::kMaxWriteFieldDepth;
-#endif  // _MSC_EXTENSIONS
 
 void ObjectWrapper::Key::get(JSContext* cx, JS::HandleObject o, JS::MutableHandleValue value) {
     switch (_type) {
@@ -363,6 +361,13 @@ void ObjectWrapper::setBSON(Key key, const BSONObj& obj, bool readOnly) {
     setValue(key, value);
 }
 
+void ObjectWrapper::setBSONArray(Key key, const BSONObj& obj, bool readOnly) {
+    JS::RootedValue value(_context);
+    ValueReader(_context, &value).fromBSONArray(obj, nullptr, readOnly);
+
+    setValue(key, value);
+}
+
 void ObjectWrapper::setValue(Key key, JS::HandleValue val) {
     key.set(_context, _object, val);
 }
@@ -527,8 +532,11 @@ BSONObj ObjectWrapper::toBSON() {
     const int sizeWithEOO = b.len() + 1 /*EOO*/ - 4 /*BSONObj::Holder ref count*/;
     uassert(17260,
             str::stream() << "Converting from JavaScript to BSON failed: "
-                          << "Object size " << sizeWithEOO << " exceeds limit of "
-                          << BSONObjMaxInternalSize << " bytes.",
+                          << "Object size "
+                          << sizeWithEOO
+                          << " exceeds limit of "
+                          << BSONObjMaxInternalSize
+                          << " bytes.",
             sizeWithEOO <= BSONObjMaxInternalSize);
 
     return b.obj();
@@ -538,10 +546,13 @@ ObjectWrapper::WriteFieldRecursionFrame::WriteFieldRecursionFrame(JSContext* cx,
                                                                   JSObject* obj,
                                                                   BSONObjBuilder* parent,
                                                                   StringData sd)
-    : thisv(cx, obj), ids(cx) {
+    : thisv(cx, obj), ids(cx, JS::IdVector(cx)) {
     bool isArray = false;
     if (parent) {
-        isArray = JS_IsArrayObject(cx, thisv);
+        if (!JS_IsArrayObject(cx, thisv, &isArray)) {
+            throwCurrentJSException(
+                cx, ErrorCodes::JSInterpreterFailure, "Failure to check object is an array");
+        }
 
         subbob.emplace(isArray ? parent->subarrayStart(sd) : parent->subobjStart(sd));
     }
@@ -564,20 +575,9 @@ ObjectWrapper::WriteFieldRecursionFrame::WriteFieldRecursionFrame(JSContext* cx,
             ids.infallibleAppend(rid);
         }
     } else {
-        auto ridArrayPtr = JS_Enumerate(cx, thisv);
-        if (!ridArrayPtr) {
+        if (!JS_Enumerate(cx, thisv, &ids)) {
             throwCurrentJSException(
                 cx, ErrorCodes::JSInterpreterFailure, "Failure to enumerate object");
-        }
-        JS::AutoIdArray rids(cx, ridArrayPtr);
-
-        if (!ids.reserve(rids.length())) {
-            throwCurrentJSException(
-                cx, ErrorCodes::JSInterpreterFailure, "Failure to reserve array");
-        }
-
-        for (uint32_t i = 0; i < rids.length(); i++) {
-            ids.infallibleAppend(rids[i]);
         }
     }
 

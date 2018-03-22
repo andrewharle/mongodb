@@ -57,10 +57,16 @@ TEST(FTDCFileTest, TestFileBasicMetadata) {
 
     BSONObj doc1 = BSON("name"
                         << "joe"
-                        << "key1" << 34 << "key2" << 45);
+                        << "key1"
+                        << 34
+                        << "key2"
+                        << 45);
     BSONObj doc2 = BSON("name"
                         << "joe"
-                        << "key3" << 34 << "key5" << 45);
+                        << "key3"
+                        << 34
+                        << "key5"
+                        << 45);
 
     FTDCConfig config;
     FTDCFileWriter writer(&config);
@@ -79,13 +85,13 @@ TEST(FTDCFileTest, TestFileBasicMetadata) {
 
     BSONObj doc1a = std::get<1>(reader.next());
 
-    ASSERT_TRUE(doc1 == doc1a);
+    ASSERT_BSONOBJ_EQ(doc1, doc1a);
 
     ASSERT_OK(reader.hasNext());
 
     BSONObj doc2a = std::get<1>(reader.next());
 
-    ASSERT_TRUE(doc2 == doc2a);
+    ASSERT_BSONOBJ_EQ(doc2, doc2a);
 
     auto sw = reader.hasNext();
     ASSERT_OK(sw);
@@ -102,10 +108,16 @@ TEST(FTDCFileTest, TestFileBasicCompress) {
 
     BSONObj doc1 = BSON("name"
                         << "joe"
-                        << "key1" << 34 << "key2" << 45);
+                        << "key1"
+                        << 34
+                        << "key2"
+                        << 45);
     BSONObj doc2 = BSON("name"
                         << "joe"
-                        << "key3" << 34 << "key5" << 45);
+                        << "key3"
+                        << 34
+                        << "key5"
+                        << 45);
 
     FTDCConfig config;
     FTDCFileWriter writer(&config);
@@ -124,13 +136,13 @@ TEST(FTDCFileTest, TestFileBasicCompress) {
 
     BSONObj doc1a = std::get<1>(reader.next());
 
-    ASSERT_TRUE(doc1 == doc1a);
+    ASSERT_BSONOBJ_EQ(doc1, doc1a);
 
     ASSERT_OK(reader.hasNext());
 
     BSONObj doc2a = std::get<1>(reader.next());
 
-    ASSERT_TRUE(doc2 == doc2a);
+    ASSERT_BSONOBJ_EQ(doc2, doc2a);
 
     auto sw = reader.hasNext();
     ASSERT_OK(sw);
@@ -201,41 +213,69 @@ TEST(FTDCFileTest, TestSchemaChanges) {
 
     c.addSample(BSON("name"
                      << "joe"
-                     << "key1" << 33 << "key2" << 42));
+                     << "key1"
+                     << 33
+                     << "key2"
+                     << 42));
     c.addSample(BSON("name"
                      << "joe"
-                     << "key1" << 34 << "key2" << 45));
+                     << "key1"
+                     << 34
+                     << "key2"
+                     << 45));
     c.addSample(BSON("name"
                      << "joe"
-                     << "key1" << 34 << "key2" << 45));
+                     << "key1"
+                     << 34
+                     << "key2"
+                     << 45));
 
     // Add Value
     c.addSample(BSON("name"
                      << "joe"
-                     << "key1" << 34 << "key2" << 45 << "key3" << 47));
+                     << "key1"
+                     << 34
+                     << "key2"
+                     << 45
+                     << "key3"
+                     << 47));
 
     c.addSample(BSON("name"
                      << "joe"
-                     << "key1" << 34 << "key2" << 45 << "key3" << 47));
+                     << "key1"
+                     << 34
+                     << "key2"
+                     << 45
+                     << "key3"
+                     << 47));
 
     // Rename field
     c.addSample(BSON("name"
                      << "joe"
-                     << "key1" << 34 << "key5" << 45 << "key3" << 47));
+                     << "key1"
+                     << 34
+                     << "key5"
+                     << 45
+                     << "key3"
+                     << 47));
 
     // Change type
     c.addSample(BSON("name"
                      << "joe"
-                     << "key1" << 34 << "key5"
+                     << "key1"
+                     << 34
+                     << "key5"
                      << "45"
-                     << "key3" << 47));
+                     << "key3"
+                     << 47));
 
     // RemoveField
     c.addSample(BSON("name"
                      << "joe"
                      << "key5"
                      << "45"
-                     << "key3" << 47));
+                     << "key3"
+                     << 47));
 }
 
 // Test a full buffer
@@ -246,22 +286,34 @@ TEST(FTDCFileTest, TestFull) {
 
         c.addSample(BSON("name"
                          << "joe"
-                         << "key1" << 33 << "key2" << 42));
+                         << "key1"
+                         << 33
+                         << "key2"
+                         << 42));
 
         for (size_t i = 0; i <= FTDCConfig::kMaxSamplesPerArchiveMetricChunkDefault - 2; i++) {
             c.addSample(BSON("name"
                              << "joe"
-                             << "key1" << static_cast<long long int>(i * j) << "key2" << 45));
+                             << "key1"
+                             << static_cast<long long int>(i * j)
+                             << "key2"
+                             << 45));
         }
 
         c.addSample(BSON("name"
                          << "joe"
-                         << "key1" << 34 << "key2" << 45));
+                         << "key1"
+                         << 34
+                         << "key2"
+                         << 45));
 
         // Add Value
         c.addSample(BSON("name"
                          << "joe"
-                         << "key1" << 34 << "key2" << 45));
+                         << "key1"
+                         << 34
+                         << "key2"
+                         << 45));
     }
 }
 

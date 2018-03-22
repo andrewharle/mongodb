@@ -30,9 +30,9 @@
 #include "mongo/executor/connection_pool_test_fixture.h"
 
 #include "mongo/executor/connection_pool.h"
-#include "mongo/unittest/unittest.h"
-#include "mongo/stdx/memory.h"
 #include "mongo/stdx/future.h"
+#include "mongo/stdx/memory.h"
+#include "mongo/unittest/unittest.h"
 
 namespace mongo {
 namespace executor {
@@ -56,7 +56,7 @@ private:
 };
 
 #define CONN2ID(swConn)                                                     \
-    [](StatusWith<ConnectionPool::ConnectionHandle> & swConn) {             \
+    [](StatusWith<ConnectionPool::ConnectionHandle>& swConn) {              \
         ASSERT(swConn.isOK());                                              \
         return static_cast<ConnectionImpl*>(swConn.getValue().get())->id(); \
     }(swConn)
@@ -1041,10 +1041,9 @@ TEST_F(ConnectionPoolTest, SetupTimeoutsDontTimeoutUnrelatedRequests) {
     PoolImpl::setNow(now);
 
     boost::optional<StatusWith<ConnectionPool::ConnectionHandle>> conn1;
-    pool.get(
-        HostAndPort(),
-        Seconds(10),
-        [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) { conn1 = std::move(swConn); });
+    pool.get(HostAndPort(), Seconds(10), [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
+        conn1 = std::move(swConn);
+    });
 
     // initially we haven't called our callback
     ASSERT(!conn1);
@@ -1056,16 +1055,15 @@ TEST_F(ConnectionPoolTest, SetupTimeoutsDontTimeoutUnrelatedRequests) {
 
     // Get conn2 (which should have an extra second before the timeout)
     boost::optional<StatusWith<ConnectionPool::ConnectionHandle>> conn2;
-    pool.get(
-        HostAndPort(),
-        Seconds(10),
-        [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) { conn2 = std::move(swConn); });
+    pool.get(HostAndPort(), Seconds(10), [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
+        conn2 = std::move(swConn);
+    });
 
     PoolImpl::setNow(now + Seconds(2));
 
     ASSERT(conn1);
     ASSERT(!conn1->isOK());
-    ASSERT(conn1->getStatus().code() == ErrorCodes::ExceededTimeLimit);
+    ASSERT(conn1->getStatus().code() == ErrorCodes::NetworkInterfaceExceededTimeLimit);
 
     ASSERT(!conn2);
 }
@@ -1087,22 +1085,19 @@ TEST_F(ConnectionPoolTest, RefreshTimeoutsDontTimeoutRequests) {
     // Successfully get a new connection
     size_t conn1Id = 0;
     ConnectionImpl::pushSetup(Status::OK());
-    pool.get(HostAndPort(),
-             Seconds(1),
-             [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
-                 conn1Id = CONN2ID(swConn);
-                 doneWith(swConn.getValue());
-             });
+    pool.get(HostAndPort(), Seconds(1), [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
+        conn1Id = CONN2ID(swConn);
+        doneWith(swConn.getValue());
+    });
     ASSERT(conn1Id);
 
     // Force it into refresh
     PoolImpl::setNow(now + Seconds(3));
 
     boost::optional<StatusWith<ConnectionPool::ConnectionHandle>> conn1;
-    pool.get(
-        HostAndPort(),
-        Seconds(10),
-        [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) { conn1 = std::move(swConn); });
+    pool.get(HostAndPort(), Seconds(10), [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
+        conn1 = std::move(swConn);
+    });
 
     // initially we haven't called our callback
     ASSERT(!conn1);
@@ -1113,16 +1108,15 @@ TEST_F(ConnectionPoolTest, RefreshTimeoutsDontTimeoutRequests) {
 
     // Get conn2 (which should have an extra second before the timeout)
     boost::optional<StatusWith<ConnectionPool::ConnectionHandle>> conn2;
-    pool.get(
-        HostAndPort(),
-        Seconds(10),
-        [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) { conn2 = std::move(swConn); });
+    pool.get(HostAndPort(), Seconds(10), [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
+        conn2 = std::move(swConn);
+    });
 
     PoolImpl::setNow(now + Seconds(5));
 
     ASSERT(conn1);
     ASSERT(!conn1->isOK());
-    ASSERT(conn1->getStatus().code() == ErrorCodes::ExceededTimeLimit);
+    ASSERT(conn1->getStatus().code() == ErrorCodes::NetworkInterfaceExceededTimeLimit);
 
     ASSERT(!conn2);
 }

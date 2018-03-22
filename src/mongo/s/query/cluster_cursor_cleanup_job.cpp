@@ -34,6 +34,7 @@
 #include "mongo/db/server_parameters.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/query/cluster_cursor_manager.h"
+#include "mongo/util/concurrency/idle_thread_block.h"
 #include "mongo/util/exit.h"
 #include "mongo/util/time_support.h"
 
@@ -44,12 +45,15 @@ namespace {
 // Period of time after which mortal cursors are killed for inactivity. Configurable with server
 // parameter "cursorTimeoutMillis".
 std::atomic<long long> cursorTimeoutMillis(  // NOLINT
-    durationCount<stdx::chrono::milliseconds>(stdx::chrono::minutes(10)));
+    durationCount<Milliseconds>(Minutes(10)));
 
 ExportedServerParameter<long long, ServerParameterType::kStartupAndRuntime>
     cursorTimeoutMillisConfig(ServerParameterSet::getGlobal(),
                               "cursorTimeoutMillis",
                               &cursorTimeoutMillis);
+
+// Frequency with which ClusterCursorCleanupJob is run.
+MONGO_EXPORT_SERVER_PARAMETER(clientCursorMonitorFrequencySecs, long long, 4);
 
 }  // namespace
 
@@ -66,9 +70,11 @@ void ClusterCursorCleanupJob::run() {
 
     while (!inShutdown()) {
         manager->killMortalCursorsInactiveSince(Date_t::now() -
-                                                stdx::chrono::milliseconds(cursorTimeoutMillis));
-        manager->reapZombieCursors();
-        sleepFor(stdx::chrono::seconds(4));
+                                                Milliseconds(cursorTimeoutMillis.load()));
+        manager->incrementCursorsTimedOut(manager->reapZombieCursors());
+
+        MONGO_IDLE_THREAD_BLOCK;
+        sleepsecs(clientCursorMonitorFrequencySecs);
     }
 }
 

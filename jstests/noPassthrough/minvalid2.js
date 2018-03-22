@@ -37,6 +37,11 @@ var master = replTest.getPrimary();
 var masterId = replTest.getNodeId(master);
 var slave = slaves[0];
 var slaveId = replTest.getNodeId(slave);
+
+// Wait for primary to detect that the arbiter is up so that it won't step down when we later take
+// the secondary offline.
+replTest.waitForState(replTest.nodes[2], ReplSetTest.State.ARBITER);
+
 var mdb = master.getDB("foo");
 
 mdb.foo.save({a: 1000});
@@ -55,9 +60,8 @@ printjson(lastOp);
 
 // Overwrite minvalid document to simulate an inconsistent state (as might result from a server
 // crash.
-local.replset.minvalid.update({},
-                              {ts: new Timestamp(lastOp.ts.t, lastOp.ts.i + 1)},
-                              {upsert: true});
+local.replset.minvalid.update(
+    {}, {ts: new Timestamp(lastOp.ts.t, lastOp.ts.i + 1)}, {upsert: true});
 printjson(local.replset.minvalid.findOne());
 
 print("5: shut down master");
@@ -86,4 +90,4 @@ assert.soon(function() {
         'it does not contain the necessary operations for us to reach a consistent state');
 });
 
-replTest.stopSet(15);
+replTest.stopSet(undefined, undefined, {allowedExitCodes: [MongoRunner.EXIT_ABRUPT]});

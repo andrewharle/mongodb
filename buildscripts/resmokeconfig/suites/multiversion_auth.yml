@@ -8,20 +8,18 @@ selector:
     roots:
     - jstests/multiVersion/*.js
     exclude_files:
-      # Needs extra work to support MONGODB-CR
-      - jstests/multiVersion/upgrade_cluster_v5_to_v6.js
-      # Uses threads which don't propagate jsTest() information
-      - jstests/multiVersion/mixed_storage_version_replication.js
-      # Uses ToolTest, which doesn't start servers with keyFile
-      - jstests/multiVersion/transitioning_to_and_from_WT.js
-      # TODO: SERVER-21578
-      - jstests/multiVersion/balancer_multiVersion_detect.js
+    # Multi storageEngine tests
+    - jstests/multiVersion/mixed_storage_version_replication.js
+    - jstests/multiVersion/transitioning_to_and_from_WT.js
+    # TODO: SERVER-21578
+    - jstests/multiVersion/balancer_multiVersion_detect.js
 
 # Multiversion tests start their own mongod's.
 executor:
   js_test:
     config:
       shell_options:
+        eval: "load('jstests/libs/override_methods/multiversion_override_balancer_control.js');"
         global_vars:
           TestData:
             auth: true
@@ -33,5 +31,3 @@ executor:
         password: *keyFileData
         username: __system
         nodb: ''
-        readMode: legacy
-        writeMode: legacy

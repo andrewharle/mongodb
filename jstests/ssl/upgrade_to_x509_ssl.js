@@ -30,7 +30,10 @@ opts = {
 var NUM_NODES = 3;
 var rst = new ReplSetTest({name: 'sslSet', nodes: NUM_NODES, nodeOptions: opts});
 rst.startSet();
-rst.initiate();
+
+// ReplSetTest.initiate() requires all nodes to be to be authorized to run replSetGetStatus.
+// TODO(SERVER-14017): Remove this in favor of using initiate() everywhere.
+rst.initiateWithAnyNodeAsPrimary();
 
 // Connect to master and do some basic operations
 var rstConn1 = rst.getPrimary();
@@ -44,17 +47,16 @@ assert.eq(2, rstConn1.getDB("test").a.count(), "Error interacting with replSet")
 print("===== UPGRADE allowSSL,sendKeyfile -> preferSSL,sendX509 =====");
 authAllNodes();
 rst.awaitReplication();
-rst.upgradeSet(
-    {
-      sslMode: "preferSSL",
-      sslPEMKeyFile: SERVER_CERT,
-      sslAllowInvalidCertificates: "",
-      clusterAuthMode: "sendX509",
-      keyFile: KEYFILE,
-      sslCAFile: CA_CERT
-    },
-    "root",
-    "pwd");
+rst.upgradeSet({
+    sslMode: "preferSSL",
+    sslPEMKeyFile: SERVER_CERT,
+    sslAllowInvalidCertificates: "",
+    clusterAuthMode: "sendX509",
+    keyFile: KEYFILE,
+    sslCAFile: CA_CERT
+},
+               "root",
+               "pwd");
 // The upgradeSet call restarts the nodes so we need to reauthenticate.
 authAllNodes();
 var rstConn3 = rst.getPrimary();
@@ -66,17 +68,16 @@ var canConnectNoSSL = runMongoProgram("mongo", "--port", rst.ports[0], "--eval",
 assert.eq(0, canConnectNoSSL, "SSL Connection attempt failed when it should succeed");
 
 print("===== UPGRADE preferSSL,sendX509 -> requireSSL,x509 =====");
-rst.upgradeSet(
-    {
-      sslMode: "requireSSL",
-      sslPEMKeyFile: SERVER_CERT,
-      sslAllowInvalidCertificates: "",
-      clusterAuthMode: "x509",
-      keyFile: KEYFILE,
-      sslCAFile: CA_CERT
-    },
-    "root",
-    "pwd");
+rst.upgradeSet({
+    sslMode: "requireSSL",
+    sslPEMKeyFile: SERVER_CERT,
+    sslAllowInvalidCertificates: "",
+    clusterAuthMode: "x509",
+    keyFile: KEYFILE,
+    sslCAFile: CA_CERT
+},
+               "root",
+               "pwd");
 authAllNodes();
 var rstConn4 = rst.getPrimary();
 rstConn4.getDB("test").a.insert({a: 4, str: "TESTTESTTEST"});

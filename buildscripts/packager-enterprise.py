@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 
 # This program makes Debian and RPM repositories for MongoDB, by
 # downloading our tarballs of statically linked executables and
@@ -37,7 +37,7 @@ import tempfile
 import time
 
 # The MongoDB names for the architectures we support.
-ARCH_CHOICES=["x86_64", "ppc64le"]
+ARCH_CHOICES=["x86_64", "ppc64le", "s390x", "arm64"]
 
 # Made up names for the flavors of distribution we package for.
 DISTROS=["suse", "debian","redhat","ubuntu","amazon"]
@@ -101,14 +101,28 @@ class EnterpriseDistro(packager.Distro):
             raise Exception("BUG: unsupported platform?")
 
     def build_os(self, arch):
-        """Return the build os label in the binary package to download ("rhel57", "rhel62" and "rhel70"
+        """Return the build os label in the binary package to download ("rhel57", "rhel62", "rhel67" and "rhel70"
         for redhat, the others are delegated to the super class
         """
         if arch == "ppc64le":
             if self.n == 'ubuntu':
-                return [ "ubuntu1504" ]
+                return [ "ubuntu1604" ]
             if self.n == 'redhat':
                 return [ "rhel71" ]
+            else:
+                return []
+        if arch == "s390x":
+            if self.n == 'redhat':
+                return [ "rhel67", "rhel72" ]
+            if self.n == 'suse':
+                return [ "suse11", "suse12" ]
+            if self.n == 'ubuntu':
+                return [ "ubuntu1604" ]
+            else:
+                return []
+        if arch == "arm64":
+            if self.n == 'ubuntu':
+                return [ "ubuntu1604" ]
             else:
                 return []
 
@@ -215,11 +229,10 @@ def make_package(distro, build_os, arch, spec, srcdir):
     # packaging infrastructure will move the files to wherever they
     # need to go.
     unpack_binaries_into(build_os, arch, spec, sdir)
-    # Remove the mongosniff binary due to libpcap dynamic
-    # linkage.  FIXME: this removal should go away
-    # eventually.
-    if os.path.exists(sdir + "bin/mongosniff"):
-      os.unlink(sdir + "bin/mongosniff")
+    # Remove the mongoreplay binary due to libpcap dynamic
+    # linkage.
+    if os.path.exists(sdir + "bin/mongoreplay"):
+      os.unlink(sdir + "bin/mongoreplay")
     return distro.make_pkg(build_os, arch, spec, srcdir)
 
 def make_repo(repodir, distro, build_os, spec):
@@ -253,7 +266,7 @@ def make_deb_repo(repo, distro, build_os, spec):
 Label: mongodb
 Suite: %s
 Codename: %s/mongodb-enterprise
-Architectures: amd64 ppc64el
+Architectures: amd64 ppc64el s390x arm64
 Components: %s
 Description: MongoDB packages
 """ % (distro.repo_os_version(build_os), distro.repo_os_version(build_os), distro.repo_component())

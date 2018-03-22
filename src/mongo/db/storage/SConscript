@@ -1,3 +1,4 @@
+# -*- mode: python -*-
 Import("env")
 
 env.SConscript(
@@ -9,7 +10,6 @@ env.SConscript(
         'wiredtiger',
     ],
 )
-
 
 env.Library(
     target='journal_listener',
@@ -40,7 +40,6 @@ env.Library(
         ],
     )
 
-
 env.Library(
     target='bson_collection_catalog_entry',
     source=[
@@ -48,6 +47,7 @@ env.Library(
         ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/catalog/collection_options',
+        '$BUILD_DIR/mongo/db/common',
         '$BUILD_DIR/mongo/db/service_context',
         ],
     )
@@ -71,6 +71,19 @@ env.Library(
         '$BUILD_DIR/mongo/base',
     ],
 )
+
+env.Library(
+    target='encryption_hooks',
+    source= [
+        'encryption_hooks.cpp',
+        ],
+    LIBDEPS= ['$BUILD_DIR/mongo/base',
+              '$BUILD_DIR/mongo/db/service_context'],
+    PROGDEPS_DEPENDENTS=[
+        '$BUILD_DIR/mongo/mongod',
+        '$BUILD_DIR/mongo/mongos',
+        ],
+    )
 
 env.Library(
     target='storage_options',
@@ -104,6 +117,7 @@ env.Library(
         'sorted_data_interface_test_unindex.cpp',
     ],
     LIBDEPS=[
+        '$BUILD_DIR/mongo/db/storage/storage_options',
         '$BUILD_DIR/mongo/db/service_context',
         '$BUILD_DIR/mongo/unittest/unittest',
         'index_entry_comparison',
@@ -137,8 +151,9 @@ env.Library(
         'record_store_test_validate.cpp',
         ],
     LIBDEPS=[
-        '$BUILD_DIR/mongo/unittest/unittest',
         '$BUILD_DIR/mongo/db/service_context',
+        '$BUILD_DIR/mongo/db/storage/storage_options',
+        '$BUILD_DIR/mongo/unittest/unittest',
         ],
     LIBDEPS_TAGS=[
         # Depends on newHarnessHelper, which does not have a unique definition
@@ -152,7 +167,6 @@ env.Library(
         'storage_engine_lock_file_${TARGET_OS_FAMILY}.cpp',
         ],
     LIBDEPS=[
-        '$BUILD_DIR/mongo/platform/platform',
         'paths',
         ]
     )
@@ -172,6 +186,7 @@ env.Library(
         ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/bson/dotted_path_support',
         ]
     )
 

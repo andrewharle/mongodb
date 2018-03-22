@@ -46,25 +46,37 @@ namespace mongo {
 
 BSONObj generateSCRAMUserDocument(StringData username, StringData password) {
     const size_t scramIterationCount = 10000;
-    std::string database = "test";
+    auto database = "test"_sd;
 
     std::string digested = createPasswordDigest(username, password);
     BSONObj scramCred = scram::generateCredentials(digested, scramIterationCount);
-    return BSON("_id" << (str::stream() << database << "." << username).operator std::string()
-                      << AuthorizationManager::USER_NAME_FIELD_NAME << username
-                      << AuthorizationManager::USER_DB_FIELD_NAME << database << "credentials"
-                      << BSON("SCRAM-SHA-1" << scramCred) << "roles" << BSONArray() << "privileges"
+    return BSON("_id" << (str::stream() << database << "." << username).operator StringData()
+                      << AuthorizationManager::USER_NAME_FIELD_NAME
+                      << username
+                      << AuthorizationManager::USER_DB_FIELD_NAME
+                      << database
+                      << "credentials"
+                      << BSON("SCRAM-SHA-1" << scramCred)
+                      << "roles"
+                      << BSONArray()
+                      << "privileges"
                       << BSONArray());
 }
 
 BSONObj generateMONGODBCRUserDocument(StringData username, StringData password) {
-    std::string database = "test";
+    auto database = "test"_sd;
 
     std::string digested = createPasswordDigest(username, password);
-    return BSON("_id" << (str::stream() << database << "." << username).operator std::string()
-                      << AuthorizationManager::USER_NAME_FIELD_NAME << username
-                      << AuthorizationManager::USER_DB_FIELD_NAME << database << "credentials"
-                      << BSON("MONGODB-CR" << digested) << "roles" << BSONArray() << "privileges"
+    return BSON("_id" << (str::stream() << database << "." << username).operator StringData()
+                      << AuthorizationManager::USER_NAME_FIELD_NAME
+                      << username
+                      << AuthorizationManager::USER_DB_FIELD_NAME
+                      << database
+                      << "credentials"
+                      << BSON("MONGODB-CR" << digested)
+                      << "roles"
+                      << BSONArray()
+                      << "privileges"
                       << BSONArray());
 }
 
@@ -95,7 +107,7 @@ private:
     size_t stage;
 
 public:
-    std::tuple<size_t, Participant> lens() const {
+    auto lens() const -> decltype(std::tie(this->stage, this->participant)) {
         return std::tie(stage, participant);
     }
 
@@ -240,7 +252,7 @@ protected:
     }
 };
 
-/*TEST_F(SCRAMSHA1Fixture, testServerStep1DoesNotIncludeNonceFromClientStep1) {
+TEST_F(SCRAMSHA1Fixture, testServerStep1DoesNotIncludeNonceFromClientStep1) {
     authzManagerExternalState->insertPrivilegeDocument(
         txn.get(), generateSCRAMUserDocument("sajack", "sajack"), BSONObj());
 
@@ -261,7 +273,7 @@ protected:
                                Status(ErrorCodes::BadValue,
                                       "Server SCRAM-SHA-1 nonce does not match client nonce: r=")),
               runSteps(saslServerSession.get(), saslClientSession.get(), mutator));
-}*/
+}
 
 TEST_F(SCRAMSHA1Fixture, testClientStep2DoesNotIncludeNonceFromServerStep1) {
     authzManagerExternalState->insertPrivilegeDocument(
@@ -274,14 +286,11 @@ TEST_F(SCRAMSHA1Fixture, testClientStep2DoesNotIncludeNonceFromServerStep1) {
     ASSERT_OK(saslClientSession->initialize());
 
     SCRAMMutators mutator;
-    mutator.setMutator(SaslTestState(SaslTestState::kClient, 2),
-                       [](std::string& clientMessage) {
-                           std::string::iterator nonceBegin =
-                               clientMessage.begin() + clientMessage.find("r=");
-                           std::string::iterator nonceEnd =
-                               std::find(nonceBegin, clientMessage.end(), ',');
-                           clientMessage = clientMessage.replace(nonceBegin, nonceEnd, "r=");
-                       });
+    mutator.setMutator(SaslTestState(SaslTestState::kClient, 2), [](std::string& clientMessage) {
+        std::string::iterator nonceBegin = clientMessage.begin() + clientMessage.find("r=");
+        std::string::iterator nonceEnd = std::find(nonceBegin, clientMessage.end(), ',');
+        clientMessage = clientMessage.replace(nonceBegin, nonceEnd, "r=");
+    });
     ASSERT_EQ(SCRAMStepsResult(
                   SaslTestState(SaslTestState::kServer, 2),
                   Status(ErrorCodes::BadValue, "Incorrect SCRAM-SHA-1 client|server nonce: r=")),
@@ -299,15 +308,13 @@ TEST_F(SCRAMSHA1Fixture, testClientStep2GivesBadProof) {
     ASSERT_OK(saslClientSession->initialize());
 
     SCRAMMutators mutator;
-    mutator.setMutator(
-        SaslTestState(SaslTestState::kClient, 2),
-        [](std::string& clientMessage) {
-            std::string::iterator proofBegin = clientMessage.begin() + clientMessage.find("p=") + 2;
-            std::string::iterator proofEnd = std::find(proofBegin, clientMessage.end(), ',');
-            clientMessage = clientMessage.replace(
-                proofBegin, proofEnd, corruptEncodedPayload(clientMessage, proofBegin, proofEnd));
+    mutator.setMutator(SaslTestState(SaslTestState::kClient, 2), [](std::string& clientMessage) {
+        std::string::iterator proofBegin = clientMessage.begin() + clientMessage.find("p=") + 2;
+        std::string::iterator proofEnd = std::find(proofBegin, clientMessage.end(), ',');
+        clientMessage = clientMessage.replace(
+            proofBegin, proofEnd, corruptEncodedPayload(clientMessage, proofBegin, proofEnd));
 
-        });
+    });
 
     ASSERT_EQ(SCRAMStepsResult(SaslTestState(SaslTestState::kServer, 2),
                                Status(ErrorCodes::AuthenticationFailed,
@@ -328,8 +335,7 @@ TEST_F(SCRAMSHA1Fixture, testServerStep2GivesBadVerifier) {
     std::string encodedVerifier;
     SCRAMMutators mutator;
     mutator.setMutator(
-        SaslTestState(SaslTestState::kServer, 2),
-        [&encodedVerifier](std::string& serverMessage) {
+        SaslTestState(SaslTestState::kServer, 2), [&encodedVerifier](std::string& serverMessage) {
             std::string::iterator verifierBegin =
                 serverMessage.begin() + serverMessage.find("v=") + 2;
             std::string::iterator verifierEnd = std::find(verifierBegin, serverMessage.end(), ',');

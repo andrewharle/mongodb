@@ -137,14 +137,8 @@ function checkForNonExistentRoles() {
     }
 }
 
-var opts = {
-    auth: "",
-    enableExperimentalStorageDetailsCmd: ""
-};
-var impls = {
-    createUsers: createUsers,
-    runOneTest: runOneTest
-};
+var opts = {auth: "", enableExperimentalStorageDetailsCmd: ""};
+var impls = {createUsers: createUsers, runOneTest: runOneTest};
 
 checkForNonExistentRoles();
 

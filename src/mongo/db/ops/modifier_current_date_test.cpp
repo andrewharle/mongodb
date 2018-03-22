@@ -44,9 +44,9 @@ using mongo::BSONObj;
 using mongo::LogBuilder;
 using mongo::ModifierCurrentDate;
 using mongo::ModifierInterface;
-using mongo::Timestamp;
 using mongo::Status;
 using mongo::StringData;
+using mongo::Timestamp;
 using mongo::fromjson;
 using mongo::mutablebson::ConstElement;
 using mongo::mutablebson::Document;
@@ -177,7 +177,7 @@ TEST(BoolInput, EmptyStartDoc) {
 
     BSONObj olderDateObj = fromjson("{ a : { $date : 0 } }");
     ASSERT_OK(mod.apply());
-    ASSERT_LESS_THAN(olderDateObj, doc.getObject());
+    ASSERT_BSONOBJ_LT(olderDateObj, doc.getObject());
     ASSERT_FALSE(doc.isInPlaceModeEnabled());
 
     Document logDoc;
@@ -198,7 +198,7 @@ TEST(DateInput, EmptyStartDoc) {
 
     BSONObj olderDateObj = fromjson("{ a : { $date : 0 } }");
     ASSERT_OK(mod.apply());
-    ASSERT_LESS_THAN(olderDateObj, doc.getObject());
+    ASSERT_BSONOBJ_LT(olderDateObj, doc.getObject());
     ASSERT_FALSE(doc.isInPlaceModeEnabled());
 
     Document logDoc;
@@ -221,7 +221,7 @@ TEST(TimestampInput, EmptyStartDoc) {
     BSONObj olderDateObj = BSON("a" << ts);
     ASSERT_OK(mod.apply());
     ASSERT_FALSE(doc.isInPlaceModeEnabled());
-    ASSERT_LESS_THAN(olderDateObj, doc.getObject());
+    ASSERT_BSONOBJ_LT(olderDateObj, doc.getObject());
 
     Document logDoc;
     LogBuilder logBuilder(logDoc.root());
@@ -241,7 +241,7 @@ TEST(BoolInput, ExistingStringDoc) {
 
     BSONObj olderDateObj = fromjson("{ a : { $date : 0 } }");
     ASSERT_OK(mod.apply());
-    ASSERT_LESS_THAN(olderDateObj, doc.getObject());
+    ASSERT_BSONOBJ_LT(olderDateObj, doc.getObject());
     ASSERT_FALSE(doc.isInPlaceModeEnabled());
 
     Document logDoc;
@@ -262,7 +262,7 @@ TEST(BoolInput, ExistingDateDoc) {
 
     BSONObj olderDateObj = fromjson("{ a : { $date : 0 } }");
     ASSERT_OK(mod.apply());
-    ASSERT_LESS_THAN(olderDateObj, doc.getObject());
+    ASSERT_BSONOBJ_LT(olderDateObj, doc.getObject());
     ASSERT_TRUE(doc.isInPlaceModeEnabled());
 
     Document logDoc;
@@ -283,7 +283,7 @@ TEST(DateInput, ExistingDateDoc) {
 
     BSONObj olderDateObj = fromjson("{ a : { $date : 0 } }");
     ASSERT_OK(mod.apply());
-    ASSERT_LESS_THAN(olderDateObj, doc.getObject());
+    ASSERT_BSONOBJ_LT(olderDateObj, doc.getObject());
     ASSERT_TRUE(doc.isInPlaceModeEnabled());
 
     Document logDoc;
@@ -306,7 +306,7 @@ TEST(TimestampInput, ExistingDateDoc) {
     BSONObj olderDateObj = BSON("a" << ts);
     ASSERT_OK(mod.apply());
     ASSERT_TRUE(doc.isInPlaceModeEnabled());  // Same Size as Date
-    ASSERT_LESS_THAN(olderDateObj, doc.getObject());
+    ASSERT_BSONOBJ_LT(olderDateObj, doc.getObject());
 
     Document logDoc;
     LogBuilder logBuilder(logDoc.root());
@@ -328,7 +328,7 @@ TEST(TimestampInput, ExistingEmbeddedDateDoc) {
     BSONObj olderDateObj = BSON("a" << BSON("b" << ts));
     ASSERT_OK(mod.apply());
     ASSERT_TRUE(doc.isInPlaceModeEnabled());  // Same Size as Date
-    ASSERT_LESS_THAN(olderDateObj, doc.getObject());
+    ASSERT_BSONOBJ_LT(olderDateObj, doc.getObject());
 
     Document logDoc;
     LogBuilder logBuilder(logDoc.root());
@@ -350,13 +350,50 @@ TEST(DottedTimestampInput, EmptyStartDoc) {
     BSONObj olderDateObj = BSON("a" << BSON("b" << ts));
     ASSERT_OK(mod.apply());
     ASSERT_FALSE(doc.isInPlaceModeEnabled());
-    ASSERT_LESS_THAN(olderDateObj, doc.getObject());
+    ASSERT_BSONOBJ_LT(olderDateObj, doc.getObject());
 
     Document logDoc;
     LogBuilder logBuilder(logDoc.root());
     ASSERT_OK(mod.log(&logBuilder));
     BSONObj oplogFormat = fromjson("{ $set : { 'a.b' : { $timestamp : {t:0, i:0} } } }");
     validateOplogEntry(oplogFormat, logDoc);
+}
+
+TEST(BoolInput, PrepareReportCreatedArrayElement) {
+    Document doc(fromjson("{a: [{b: 0}]}"));
+    Mod mod(fromjson("{$currentDate: {'a.1.c': true}}"));
+
+    ModifierInterface::ExecInfo execInfo;
+    ASSERT_OK(mod.prepare(doc.root(), "", &execInfo));
+
+    ASSERT_EQUALS(execInfo.fieldRef[0]->dottedField(), "a.1.c");
+    ASSERT_TRUE(execInfo.indexOfArrayWithNewElement[0]);
+    ASSERT_EQUALS(*execInfo.indexOfArrayWithNewElement[0], 0u);
+    ASSERT_FALSE(execInfo.noOp);
+}
+
+TEST(BoolInput, PrepareDoNotReportModifiedArrayElement) {
+    Document doc(fromjson("{a: [{b: 0}]}"));
+    Mod mod(fromjson("{$currentDate: {'a.0.c': true}}"));
+
+    ModifierInterface::ExecInfo execInfo;
+    ASSERT_OK(mod.prepare(doc.root(), "", &execInfo));
+
+    ASSERT_EQUALS(execInfo.fieldRef[0]->dottedField(), "a.0.c");
+    ASSERT_FALSE(execInfo.indexOfArrayWithNewElement[0]);
+    ASSERT_FALSE(execInfo.noOp);
+}
+
+TEST(BoolInput, PrepareDoNotReportCreatedNumericObjectField) {
+    Document doc(fromjson("{a: {'0': {b: 0}}}"));
+    Mod mod(fromjson("{$currentDate: {'a.1.c': true}}"));
+
+    ModifierInterface::ExecInfo execInfo;
+    ASSERT_OK(mod.prepare(doc.root(), "", &execInfo));
+
+    ASSERT_EQUALS(execInfo.fieldRef[0]->dottedField(), "a.1.c");
+    ASSERT_FALSE(execInfo.indexOfArrayWithNewElement[0]);
+    ASSERT_FALSE(execInfo.noOp);
 }
 
 }  // namespace

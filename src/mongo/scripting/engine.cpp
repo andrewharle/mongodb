@@ -33,21 +33,22 @@
 
 #include "mongo/scripting/engine.h"
 
-#include <cctype>
 #include <boost/filesystem/operations.hpp>
+#include <cctype>
 
 #include "mongo/client/dbclientcursor.h"
 #include "mongo/client/dbclientinterface.h"
-#include "mongo/db/service_context.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/service_context.h"
 #include "mongo/platform/unordered_set.h"
+#include "mongo/scripting/dbdirectclient_factory.h"
+#include "mongo/util/fail_point_service.h"
 #include "mongo/util/file.h"
 #include "mongo/util/log.h"
 #include "mongo/util/text.h"
 
 namespace mongo {
 
-using std::endl;
 using std::set;
 using std::shared_ptr;
 using std::string;
@@ -55,9 +56,17 @@ using std::unique_ptr;
 
 AtomicInt64 Scope::_lastVersion(1);
 
+
 namespace {
+
+MONGO_FP_DECLARE(mr_killop_test_fp);
 // 2 GB is the largest support Javascript file size.
 const fileofs kMaxJsFileLength = fileofs(2) * 1024 * 1024 * 1024;
+
+const ServiceContext::Decoration<std::unique_ptr<ScriptEngine>> forService =
+    ServiceContext::declareDecoration<std::unique_ptr<ScriptEngine>>();
+static std::unique_ptr<ScriptEngine> globalScriptEngine;
+
 }  // namespace
 
 ScriptEngine::ScriptEngine() : _scopeInitCallback() {}
@@ -101,9 +110,8 @@ void Scope::append(BSONObjBuilder& builder, const char* fieldName, const char* s
             builder.appendNull(fieldName);
             break;
         case Date:
-            builder.appendDate(
-                fieldName,
-                Date_t::fromMillisSinceEpoch(static_cast<long long>(getNumber(scopeName))));
+            builder.appendDate(fieldName,
+                               Date_t::fromMillisSinceEpoch(getNumberLongLong(scopeName)));
             break;
         case Code:
             builder.appendCode(fieldName, getString(scopeName));
@@ -126,7 +134,7 @@ bool Scope::execFile(const string& filename, bool printResult, bool reportError,
     boost::filesystem::path p(filename);
 #endif
     if (!exists(p)) {
-        error() << "file [" << filename << "] doesn't exist" << endl;
+        error() << "file [" << filename << "] doesn't exist";
         return false;
     }
 
@@ -145,7 +153,7 @@ bool Scope::execFile(const string& filename, bool printResult, bool reportError,
         }
 
         if (empty) {
-            error() << "directory [" << filename << "] doesn't have any *.js files" << endl;
+            error() << "directory [" << filename << "] doesn't have any *.js files";
             return false;
         }
 
@@ -160,7 +168,7 @@ bool Scope::execFile(const string& filename, bool printResult, bool reportError,
 
     fileofs fo = f.len();
     if (fo > kMaxJsFileLength) {
-        warning() << "attempted to execute javascript file larger than 2GB" << endl;
+        warning() << "attempted to execute javascript file larger than 2GB";
         return false;
     }
     unsigned len = static_cast<unsigned>(fo);
@@ -212,7 +220,8 @@ void Scope::loadStored(OperationContext* txn, bool ignoreNotConnected) {
     _loadedVersion = lastVersion;
     string coll = _localDBName + ".system.js";
 
-    unique_ptr<DBClientBase> directDBClient(createDirectClient(txn));
+    auto directDBClient = DBDirectClientFactory::get(txn).create(txn);
+
     unique_ptr<DBClientCursor> c =
         directDBClient->query(coll, Query(), 0, 0, NULL, QueryOption_SlaveOk, 0);
     massert(16669, "unable to get db client cursor from query", c.get());
@@ -226,6 +235,15 @@ void Scope::loadStored(OperationContext* txn, bool ignoreNotConnected) {
         uassert(10209, str::stream() << "name has to be a string: " << n, n.type() == String);
         uassert(10210, "value has to be set", v.type() != EOO);
 
+        if (MONGO_FAIL_POINT(mr_killop_test_fp)) {
+
+            /* This thread sleep makes the interrupts in the test come in at a time
+            *  where the js misses the interrupt and throw an exception instead of
+            *  being interrupted
+            */
+            stdx::this_thread::sleep_for(stdx::chrono::seconds(1));
+        }
+
         try {
             setElement(n.valuestr(), v, o);
             thisTime.insert(n.valuestr());
@@ -236,7 +254,7 @@ void Scope::loadStored(OperationContext* txn, bool ignoreNotConnected) {
             }
 
             error() << "unable to load stored JavaScript function " << n.valuestr()
-                    << "(): " << setElemEx.what() << endl;
+                    << "(): " << redact(setElemEx);
         }
     }
 
@@ -316,7 +334,7 @@ public:
 
         if (scope->hasOutOfMemoryException()) {
             // make some room
-            log() << "Clearing all idle JS contexts due to out of memory" << endl;
+            log() << "Clearing all idle JS contexts due to out of memory";
             _pools.clear();
             return;
         }
@@ -443,6 +461,12 @@ public:
     double getNumber(const char* field) {
         return _real->getNumber(field);
     }
+    int getNumberInt(const char* field) {
+        return _real->getNumberInt(field);
+    }
+    long long getNumberLongLong(const char* field) {
+        return _real->getNumberLongLong(field);
+    }
     Decimal128 getNumberDecimal(const char* field) {
         return _real->getNumberDecimal(field);
     }
@@ -536,7 +560,20 @@ unique_ptr<Scope> ScriptEngine::getPooledScope(OperationContext* txn,
 }
 
 void (*ScriptEngine::_connectCallback)(DBClientWithCommands&) = 0;
-ScriptEngine* globalScriptEngine = 0;
+
+ScriptEngine* getGlobalScriptEngine() {
+    if (hasGlobalServiceContext())
+        return forService(getGlobalServiceContext()).get();
+    else
+        return globalScriptEngine.get();
+}
+
+void setGlobalScriptEngine(ScriptEngine* impl) {
+    if (hasGlobalServiceContext())
+        forService(getGlobalServiceContext()).reset(impl);
+    else
+        globalScriptEngine.reset(impl);
+}
 
 bool hasJSReturn(const string& code) {
     size_t x = code.find("return");

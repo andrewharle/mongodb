@@ -11,12 +11,9 @@ ruby_block 'allow sudo over tty' do
   end
 end
 
-# These files limits processes. They therefore interferere with `ulimit -u` when present.
+# This file limits processes to 1024. It therefore interfereres with `ulimit -u` when present.
 if platform_family? 'rhel'
   file '/etc/security/limits.d/90-nproc.conf' do
-    action :delete
-  end
-  file '/etc/security/limits.d/20-nproc.conf' do
     action :delete
   end
 end
@@ -87,6 +84,16 @@ if platform_family? 'suse'
   EOD
   end
 
+  %w(
+     SLES12-Pool
+     SLES12-Updates
+  ).each do |repo|
+    execute "add #{repo}" do
+      command "zypper addrepo --check --refresh --name \"#{repo}\" http://smt-ec2.susecloud.net/repo/SUSE/Products/SLE-SERVER/12/x86_64/product?credentials=SMT-http_smt-ec2_susecloud_net 'SMT-http_smt-ec2_susecloud_net:#{repo}'"
+      not_if "zypper lr | grep #{repo}"
+    end
+  end
+
   execute 'install mongod' do
     command 'zypper -n install `find . -name "*server*.rpm"`'
     cwd homedir
@@ -100,6 +107,7 @@ end
 
 inspec_wait = <<HEREDOC
 #!/bin/bash
+ulimit -v unlimited
 for i in {1..60}
 do
   mongo --eval "db.smoke.insert({answer: 42})"

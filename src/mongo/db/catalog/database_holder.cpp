@@ -63,7 +63,9 @@ StringData _todb(StringData ns) {
     uassert(13075, "db name can't be empty", i > 0);
 
     const StringData d = ns.substr(0, i);
-    uassert(13280, "invalid db name: " + ns.toString(), NamespaceString::validDBName(d));
+    uassert(13280,
+            "invalid db name: " + ns.toString(),
+            NamespaceString::validDBName(d, NamespaceString::DollarInDbNameBehavior::Allow));
 
     return d;
 }
@@ -133,7 +135,9 @@ Database* DatabaseHolder::openDb(OperationContext* txn, StringData ns, bool* jus
     auto duplicates = _getNamesWithConflictingCasing_inlock(dbname);
     uassert(ErrorCodes::DatabaseDifferCase,
             str::stream() << "db already exists with different case already have: ["
-                          << *duplicates.cbegin() << "] trying to create [" << dbname.toString()
+                          << *duplicates.cbegin()
+                          << "] trying to create ["
+                          << dbname.toString()
                           << "]",
             duplicates.empty());
 
@@ -159,11 +163,10 @@ Database* DatabaseHolder::openDb(OperationContext* txn, StringData ns, bool* jus
     lk.lock();
     auto it = _dbs.find(dbname);
     invariant(it != _dbs.end() && it->second == nullptr);
-    Database* newDbPointer = newDb.release();
-    _dbs[dbname] = newDbPointer;
+    it->second = newDb.release();
     invariant(_getNamesWithConflictingCasing_inlock(dbname.toString()).empty());
 
-    return newDbPointer;
+    return it->second;
 }
 
 void DatabaseHolder::close(OperationContext* txn, StringData ns) {

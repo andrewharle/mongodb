@@ -215,8 +215,8 @@ load("jstests/replsets/rslib.js");       // For startSetIfSupportsReadMajority.
     }
 
     function assertReadsSucceed(coll, timeoutMs = 20000) {
-        var res = coll.runCommand('find',
-                                  {"readConcern": {"level": "majority"}, "maxTimeMS": timeoutMs});
+        var res =
+            coll.runCommand('find', {"readConcern": {"level": "majority"}, "maxTimeMS": timeoutMs});
         assert.commandWorked(res, 'reading from ' + coll.getFullName());
         // Exhaust the cursor to avoid leaking cursors on the server.
         new DBCommandCursor(coll.getMongo(), res).itcount();
@@ -241,6 +241,7 @@ load("jstests/replsets/rslib.js");       // For startSetIfSupportsReadMajority.
             {"_id": 2, "host": nodes[2], arbiterOnly: true}
         ]
     };
+
     replTest.initiate(config);
 
     // Get connections.

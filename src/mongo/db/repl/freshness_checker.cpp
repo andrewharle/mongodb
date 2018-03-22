@@ -35,7 +35,7 @@
 #include "mongo/base/status.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/repl/member_heartbeat_data.h"
-#include "mongo/db/repl/replica_set_config.h"
+#include "mongo/db/repl/repl_set_config.h"
 #include "mongo/db/repl/replication_executor.h"
 #include "mongo/db/repl/scatter_gather_runner.h"
 #include "mongo/rpc/get_status_from_command_result.h"
@@ -49,7 +49,7 @@ namespace repl {
 using executor::RemoteCommandRequest;
 
 FreshnessChecker::Algorithm::Algorithm(Timestamp lastOpTimeApplied,
-                                       const ReplicaSetConfig& rsConfig,
+                                       const ReplSetConfig& rsConfig,
                                        int selfIndex,
                                        const std::vector<HostAndPort>& targets)
     : _responsesProcessed(0),
@@ -98,6 +98,7 @@ std::vector<RemoteCommandRequest> FreshnessChecker::Algorithm::getRequests() con
             *it,
             "admin",
             replSetFreshCmd,
+            nullptr,
             Milliseconds(30 * 1000)));  // trying to match current Socket timeout
     }
 
@@ -127,8 +128,7 @@ void FreshnessChecker::Algorithm::processResponse(const RemoteCommandRequest& re
 
     Status status = Status::OK();
 
-    if (!response.isOK() ||
-        !((status = getStatusFromCommandResult(response.getValue().data)).isOK())) {
+    if (!response.isOK() || !((status = getStatusFromCommandResult(response.data)).isOK())) {
         if (votingMember) {
             ++_failedVoterResponses;
             if (hadTooManyFailedVoterResponses()) {
@@ -144,7 +144,7 @@ void FreshnessChecker::Algorithm::processResponse(const RemoteCommandRequest& re
         return;
     }
 
-    const BSONObj res = response.getValue().data;
+    const BSONObj res = response.data;
 
     LOG(2) << "FreshnessChecker: Got response from " << request.target << " of " << res;
 
@@ -212,19 +212,18 @@ FreshnessChecker::~FreshnessChecker() {}
 StatusWith<ReplicationExecutor::EventHandle> FreshnessChecker::start(
     ReplicationExecutor* executor,
     const Timestamp& lastOpTimeApplied,
-    const ReplicaSetConfig& currentConfig,
+    const ReplSetConfig& currentConfig,
     int selfIndex,
-    const std::vector<HostAndPort>& targets,
-    const stdx::function<void()>& onCompletion) {
+    const std::vector<HostAndPort>& targets) {
     _originalConfigVersion = currentConfig.getConfigVersion();
     _algorithm.reset(new Algorithm(lastOpTimeApplied, currentConfig, selfIndex, targets));
-    _runner.reset(new ScatterGatherRunner(_algorithm.get()));
-    return _runner->start(executor, onCompletion);
+    _runner.reset(new ScatterGatherRunner(_algorithm.get(), executor));
+    return _runner->start();
 }
 
-void FreshnessChecker::cancel(ReplicationExecutor* executor) {
+void FreshnessChecker::cancel() {
     _isCanceled = true;
-    _runner->cancel(executor);
+    _runner->cancel();
 }
 
 }  // namespace repl

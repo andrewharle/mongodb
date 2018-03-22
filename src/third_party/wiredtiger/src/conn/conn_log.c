@@ -375,6 +375,7 @@ __log_file_server(void *arg)
 	WT_LOG *log;
 	WT_LSN close_end_lsn, min_lsn;
 	WT_SESSION_IMPL *session;
+	uint64_t yield_count;
 	uint32_t filenum;
 	bool locked;
 
@@ -382,6 +383,7 @@ __log_file_server(void *arg)
 	conn = S2C(session);
 	log = conn->log;
 	locked = false;
+	yield_count = 0;
 	while (F_ISSET(conn, WT_CONN_SERVER_LOG)) {
 		/*
 		 * If there is a log file to close, make sure any outstanding
@@ -512,6 +514,7 @@ __log_file_server(void *arg)
 				 * thread a chance to run and try again in
 				 * this case.
 				 */
+				yield_count++;
 				__wt_yield();
 				continue;
 			}
@@ -522,8 +525,9 @@ __log_file_server(void *arg)
 	}
 
 	if (0) {
-err:		__wt_err(session, ret, "log close server error");
+err:		WT_PANIC_MSG(session, ret, "log close server error");
 	}
+	WT_STAT_CONN_INCRV(session, log_server_sync_blocked, yield_count);
 	if (locked)
 		__wt_spin_unlock(session, &log->log_sync_lock);
 	return (WT_THREAD_RET_VALUE);
@@ -740,7 +744,8 @@ __log_wrlsn_server(void *arg)
 	WT_ERR(__wt_log_force_write(session, 1, NULL));
 	__wt_log_wrlsn(session, NULL);
 	if (0) {
-err:		__wt_err(session, ret, "log wrlsn server error");
+err:		WT_PANIC_MSG(session, ret, "log wrlsn server error");
+
 	}
 	return (WT_THREAD_RET_VALUE);
 }
@@ -757,7 +762,7 @@ __log_server(void *arg)
 	WT_DECL_RET;
 	WT_LOG *log;
 	WT_SESSION_IMPL *session;
-	uint64_t timediff;
+	uint64_t retry, timediff;
 	bool did_work, signalled;
 
 	session = arg;
@@ -783,6 +788,7 @@ __log_server(void *arg)
 	 * takes to sync out an earlier file.
 	 */
 	did_work = true;
+	retry = 0;
 	while (F_ISSET(conn, WT_CONN_SERVER_LOG)) {
 		/*
 		 * Slots depend on future activity.  Force out buffered
@@ -827,7 +833,24 @@ __log_server(void *arg)
 					ret = __log_archive_once(session, 0);
 					__wt_writeunlock(
 					    session, &log->log_archive_lock);
-					WT_ERR(ret);
+					/*
+					 * It is possible that an external
+					 * process on some systems may prevent
+					 * removal. If we get a permission
+					 * error, retry a few times.
+					 */
+					if (ret == EACCES &&
+					    retry < WT_RETRY_MAX) {
+						retry++;
+						ret = 0;
+					} else {
+						/*
+						 * Return the error if there is
+						 * one or reset on success.
+						 */
+						WT_ERR(ret);
+						retry = 0;
+					}
 				} else
 					__wt_verbose(session, WT_VERB_LOG,
 					    "log_archive: Blocked due to open "
@@ -844,7 +867,7 @@ __log_server(void *arg)
 	}
 
 	if (0) {
-err:		__wt_err(session, ret, "log server error");
+err:		WT_PANIC_MSG(session, ret, "log server error");
 	}
 	return (WT_THREAD_RET_VALUE);
 }
@@ -902,7 +925,7 @@ __wt_logmgr_create(WT_SESSION_IMPL *session, const char *cfg[])
 	WT_RET(__wt_cond_alloc(session, "log sync", &log->log_sync_cond));
 	WT_RET(__wt_cond_alloc(session, "log write", &log->log_write_cond));
 	WT_RET(__wt_log_open(session));
-	WT_RET(__wt_log_slot_init(session));
+	WT_RET(__wt_log_slot_init(session, true));
 
 	return (0);
 }

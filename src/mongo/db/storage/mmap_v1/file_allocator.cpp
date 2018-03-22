@@ -38,8 +38,8 @@
 #include <fcntl.h>
 
 #if defined(__FreeBSD__)
-#include <sys/param.h>
 #include <sys/mount.h>
+#include <sys/param.h>
 #endif
 
 #if defined(__linux__)
@@ -54,12 +54,14 @@
 #include "mongo/platform/posix_fadvise.h"
 #include "mongo/stdx/functional.h"
 #include "mongo/stdx/thread.h"
+#include "mongo/util/concurrency/idle_thread_block.h"
 #include "mongo/util/concurrency/thread_name.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/fail_point_service.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
 #include "mongo/util/processinfo.h"
+#include "mongo/util/text.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/timer.h"
 
@@ -373,8 +375,10 @@ void FileAllocator::run(FileAllocator* fa) {
     while (1) {
         {
             stdx::unique_lock<stdx::mutex> lk(fa->_pendingMutex);
-            if (fa->_pending.size() == 0)
+            if (fa->_pending.size() == 0) {
+                MONGO_IDLE_THREAD_BLOCK;
                 fa->_pendingUpdated.wait(lk);
+            }
         }
         while (1) {
             string name;
@@ -397,7 +401,9 @@ void FileAllocator::run(FileAllocator* fa) {
                 ensureParentDirCreated(tmp);
 
 #if defined(_WIN32)
-                fd = _open(tmp.c_str(), _O_RDWR | _O_CREAT | O_NOATIME, _S_IREAD | _S_IWRITE);
+                fd = _wopen(toNativeString(tmp.c_str()).c_str(),
+                            _O_RDWR | _O_CREAT | O_NOATIME,
+                            _S_IREAD | _S_IWRITE);
 #else
                 fd = open(tmp.c_str(), O_CREAT | O_RDWR | O_NOATIME, S_IRUSR | S_IWUSR);
 #endif
@@ -422,12 +428,15 @@ void FileAllocator::run(FileAllocator* fa) {
                 close(fd);
                 fd = 0;
 
-                if (rename(tmp.c_str(), name.c_str())) {
-                    const string& errStr = errnoWithDescription();
+                boost::system::error_code ec;
+                boost::filesystem::rename(tmp.c_str(), name.c_str(), ec);
+                if (ec) {
                     const string& errMessage = str::stream() << "error: couldn't rename " << tmp
-                                                             << " to " << name << ' ' << errStr;
+                                                             << " to " << name << ' '
+                                                             << ec.message();
                     msgasserted(13653, errMessage);
                 }
+
                 flushMyDirectory(name);
 
                 log() << "done allocating datafile " << name << ", "
@@ -472,12 +481,9 @@ void FileAllocator::run(FileAllocator* fa) {
     }
 }
 
-FileAllocator* FileAllocator::_instance = 0;
-
 FileAllocator* FileAllocator::get() {
-    if (!_instance)
-        _instance = new FileAllocator();
-    return _instance;
+    static FileAllocator instance;
+    return &instance;
 }
 
 }  // namespace mongo

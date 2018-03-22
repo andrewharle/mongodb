@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 #
 # Copyright (c) 2009 Google Inc. All rights reserved.
 #
@@ -1619,9 +1619,9 @@ def make_polyfill_regex():
     'async',
     'bind',
     'chrono',
-    'cref',
     'condition_variable',
     'condition_variable_any',
+    'cref',
     'cv_status',
     'defer_lock',
     'function',
@@ -1639,11 +1639,15 @@ def make_polyfill_regex():
     'shared_lock,',
     'shared_mutex',
     'shared_timed_mutex',
-    'this_thread',
+    'this_thread(?!::at_thread_exit)',
     'thread',
     'timed_mutex',
     'try_to_lock',
     'unique_lock',
+    'unordered_map',
+    'unordered_multimap',
+    'unordered_multiset',
+    'unordered_set',
   ]
 
   qualified_names = ['boost::' + name + "\\b" for name in polyfill_required_names]

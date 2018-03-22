@@ -34,17 +34,17 @@ var $config = (function() {
         }
     };
 
-    var transitions = {
-        init: {count: 1},
-        count: {remove: 1},
-        remove: {remove: 0.825, count: 0.125}
+    var skip = function skip(cluster) {
+        // When the balancer is enabled, the nRemoved result may be inaccurate as
+        // a chunk migration may be active, causing the count function to assert.
+        if (cluster.isBalancerEnabled()) {
+            return {skip: true, msg: 'does not run when balancer is enabled.'};
+        }
+        return {skip: false};
     };
 
-    return {
-        threadCount: 10,
-        iterations: 20,
-        states: states,
-        transitions: transitions
-    };
+    var transitions = {init: {count: 1}, count: {remove: 1}, remove: {remove: 0.825, count: 0.125}};
+
+    return {threadCount: 10, iterations: 20, states: states, transitions: transitions, skip: skip};
 
 })();

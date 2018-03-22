@@ -47,23 +47,23 @@ namespace mongo {
 namespace {
 
 static const std::vector<StringData> kCpuKeys{
-    "btime", "cpu", "ctxt", "processes", "procs_blocked", "procs_running"};
+    "btime"_sd, "cpu"_sd, "ctxt"_sd, "processes"_sd, "procs_blocked"_sd, "procs_running"_sd};
 
 static const std::vector<StringData> kMemKeys{
-    "MemTotal",
-    "MemFree",
-    "Cached",
-    "Dirty",
-    "Buffers",
-    "SwapTotal",
-    "SwapCached",
-    "SwapFree",
-    "Active",
-    "Inactive",
-    "Active(anon)",
-    "Inactive(anon)",
-    "Active(file)",
-    "Inactive(file)",
+    "MemTotal"_sd,
+    "MemFree"_sd,
+    "Cached"_sd,
+    "Dirty"_sd,
+    "Buffers"_sd,
+    "SwapTotal"_sd,
+    "SwapCached"_sd,
+    "SwapFree"_sd,
+    "Active"_sd,
+    "Inactive"_sd,
+    "Active(anon)"_sd,
+    "Inactive(anon)"_sd,
+    "Active(file)"_sd,
+    "Inactive(file)"_sd,
 };
 
 /**
@@ -71,7 +71,7 @@ static const std::vector<StringData> kMemKeys{
  */
 class LinuxSystemMetricsCollector final : public SystemMetricsCollector {
 public:
-    LinuxSystemMetricsCollector() : _disks(procparser::findPhysicalDisks("/sys/block")) {
+    LinuxSystemMetricsCollector() : _disks(procparser::findPhysicalDisks("/sys/block"_sd)) {
         for (const auto& disk : _disks) {
             _disksStringData.emplace_back(disk);
         }
@@ -79,22 +79,22 @@ public:
 
     void collect(OperationContext* txn, BSONObjBuilder& builder) override {
         {
-            BSONObjBuilder subObjBuilder(builder.subobjStart("cpu"));
+            BSONObjBuilder subObjBuilder(builder.subobjStart("cpu"_sd));
 
             // Include the number of cpus to simplify client calculations
             ProcessInfo p;
             subObjBuilder.append("num_cpus", p.getNumCores());
 
             processStatusErrors(
-                procparser::parseProcStatFile("/proc/stat", kCpuKeys, &subObjBuilder),
+                procparser::parseProcStatFile("/proc/stat"_sd, kCpuKeys, &subObjBuilder),
                 &subObjBuilder);
             subObjBuilder.doneFast();
         }
 
         {
-            BSONObjBuilder subObjBuilder(builder.subobjStart("memory"));
+            BSONObjBuilder subObjBuilder(builder.subobjStart("memory"_sd));
             processStatusErrors(
-                procparser::parseProcMemInfoFile("/proc/meminfo", kMemKeys, &subObjBuilder),
+                procparser::parseProcMemInfoFile("/proc/meminfo"_sd, kMemKeys, &subObjBuilder),
                 &subObjBuilder);
             subObjBuilder.doneFast();
         }
@@ -102,9 +102,9 @@ public:
         // Skip the disks section if we could not find any disks.
         // This can happen when we do not have permission to /sys/block for instance.
         if (!_disksStringData.empty()) {
-            BSONObjBuilder subObjBuilder(builder.subobjStart("disks"));
+            BSONObjBuilder subObjBuilder(builder.subobjStart("disks"_sd));
             processStatusErrors(procparser::parseProcDiskStatsFile(
-                                    "/proc/diskstats", _disksStringData, &subObjBuilder),
+                                    "/proc/diskstats"_sd, _disksStringData, &subObjBuilder),
                                 &subObjBuilder);
             subObjBuilder.doneFast();
         }

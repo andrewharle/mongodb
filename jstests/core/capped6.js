@@ -1,4 +1,11 @@
 // Test NamespaceDetails::cappedTruncateAfter via "captrunc" command
+//
+// @tags: [
+//   # This test attempts to perform read operations on a capped collection after truncating
+//   # documents using the captrunc command. The writes from the captrunc command aren't guaranteed
+//   # to become visible until a later w="majority" write occurs.
+//   assumes_write_concern_unchanged,
+// ]
 (function() {
     var coll = db.capped6;
 
@@ -38,9 +45,7 @@
         var c = "";
         for (i = 0; i < maxDocuments; ++i, c += "-") {
             // The a values are strings of increasing length.
-            valueArray[i] = {
-                a: c
-            };
+            valueArray[i] = {a: c};
         }
         if (shouldReverse) {
             valueArray.reverse();

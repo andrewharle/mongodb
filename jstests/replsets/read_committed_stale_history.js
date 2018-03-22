@@ -15,7 +15,11 @@
 
     var rst = new ReplSetTest({
         name: name,
-        nodes: [{}, {}, {rsConfig: {priority: 0}}, ],
+        nodes: [
+            {},
+            {},
+            {rsConfig: {priority: 0}},
+        ],
         nodeOptions: {enableMajorityReadConcern: ""},
         useBridge: true
     });
@@ -45,8 +49,9 @@
         assert.eq(0, docs.length, tojson(docs));
     }
 
+    // SERVER-20844 ReplSetTest starts up a single node replica set then reconfigures to the correct
+    // size for faster startup, so nodes[0] is always the first primary.
     jsTestLog("Make sure node 0 is primary.");
-    rst.stepUp(nodes[0]);
     var primary = rst.getPrimary();
     var secondaries = rst.getSecondaries();
     assert.eq(nodes[0], primary);
@@ -90,10 +95,6 @@
     // Ensure the new primary still cannot see the write from the old primary.
     assert.eq(null, nodes[1].getDB(dbName).getCollection(collName).findOne({a: 2}));
 
-    // Ensure the stale primary still hasn't committed the write it did that never reached
-    // the other nodes.
-    checkDocNotCommitted(nodes[0], {a: 2});
-
     jsTest.log("Reconnect the old primary to the rest of the nodes");
     nodes[1].reconnect(nodes[0]);
     nodes[2].reconnect(nodes[0]);
@@ -102,11 +103,6 @@
     // heartbeats don't cause the stale primary to incorrectly advance the commit point.
     sleep(10000);
 
-    // Ensure the new primary still cannot see the write from the old primary.
-    assert.eq(null, nodes[1].getDB(dbName).getCollection(collName).findOne({a: 2}));
-
-    // Ensure the stale primary still hasn't committed the write it did that never reached
-    // the other nodes.
     checkDocNotCommitted(nodes[0], {a: 2});
 
     jsTest.log("Allow the old primary to finish stepping down and become secondary");

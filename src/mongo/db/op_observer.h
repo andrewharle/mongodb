@@ -32,16 +32,30 @@
 
 #include "mongo/base/disallow_copying.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/db/s/collection_sharding_state.h"
 
 namespace mongo {
 struct CollectionOptions;
 class NamespaceString;
 class OperationContext;
 
-struct oplogUpdateEntryArgs {
+/**
+ * Holds document update information used in logging.
+ */
+struct OplogUpdateEntryArgs {
+    // Name of the collection in which document is being updated.
     std::string ns;
+
+    // Fully updated document with damages (update modifiers) applied.
+    BSONObj updatedDoc;
+
+    // Document containing update modifiers -- e.g. $set and $unset
     BSONObj update;
+
+    // Document containing the _id field of the doc being updated.
     BSONObj criteria;
+
+    // True if this update comes from a chunk migration.
     bool fromMigrate;
 };
 
@@ -49,25 +63,22 @@ class OpObserver {
     MONGO_DISALLOW_COPYING(OpObserver);
 
 public:
-    OpObserver() {}
-    ~OpObserver() {}
+    OpObserver() = default;
+    virtual ~OpObserver() = default;
 
-    struct DeleteState {
-        BSONObj idDoc;
-        bool isMigrating = false;
-    };
-
-    void onCreateIndex(OperationContext* txn,
-                       const std::string& ns,
-                       BSONObj indexDoc,
-                       bool fromMigrate = false);
-    void onInserts(OperationContext* txn,
-                   const NamespaceString& ns,
-                   std::vector<BSONObj>::const_iterator begin,
-                   std::vector<BSONObj>::const_iterator end,
-                   bool fromMigrate = false);
-    void onUpdate(OperationContext* txn, oplogUpdateEntryArgs args);
-    DeleteState aboutToDelete(OperationContext* txn, const NamespaceString& ns, const BSONObj& doc);
+    virtual void onCreateIndex(OperationContext* txn,
+                               const std::string& ns,
+                               BSONObj indexDoc,
+                               bool fromMigrate) = 0;
+    virtual void onInserts(OperationContext* txn,
+                           const NamespaceString& ns,
+                           std::vector<BSONObj>::const_iterator begin,
+                           std::vector<BSONObj>::const_iterator end,
+                           bool fromMigrate) = 0;
+    virtual void onUpdate(OperationContext* txn, const OplogUpdateEntryArgs& args) = 0;
+    virtual CollectionShardingState::DeleteState aboutToDelete(OperationContext* txn,
+                                                               const NamespaceString& ns,
+                                                               const BSONObj& doc) = 0;
     /**
      * Handles logging before document is deleted.
      *
@@ -77,30 +88,35 @@ public:
      * so should be ignored by the user as an internal maintenance operation and not a
      * real delete.
      */
-    void onDelete(OperationContext* txn,
-                  const NamespaceString& ns,
-                  DeleteState deleteState,
-                  bool fromMigrate);
-    void onOpMessage(OperationContext* txn, const BSONObj& msgObj);
-    void onCreateCollection(OperationContext* txn,
-                            const NamespaceString& collectionName,
-                            const CollectionOptions& options);
-    void onCollMod(OperationContext* txn, const std::string& dbName, const BSONObj& collModCmd);
-    void onDropDatabase(OperationContext* txn, const std::string& dbName);
-    void onDropCollection(OperationContext* txn, const NamespaceString& collectionName);
-    void onDropIndex(OperationContext* txn,
-                     const std::string& dbName,
-                     const BSONObj& idxDescriptor);
-    void onRenameCollection(OperationContext* txn,
-                            const NamespaceString& fromCollection,
-                            const NamespaceString& toCollection,
-                            bool dropTarget,
-                            bool stayTemp);
-    void onApplyOps(OperationContext* txn, const std::string& dbName, const BSONObj& applyOpCmd);
-    void onEmptyCapped(OperationContext* txn, const NamespaceString& collectionName);
-    void onConvertToCapped(OperationContext* txn,
-                           const NamespaceString& collectionName,
-                           double size);
+    virtual void onDelete(OperationContext* txn,
+                          const NamespaceString& ns,
+                          CollectionShardingState::DeleteState deleteState,
+                          bool fromMigrate) = 0;
+    virtual void onOpMessage(OperationContext* txn, const BSONObj& msgObj) = 0;
+    virtual void onCreateCollection(OperationContext* txn,
+                                    const NamespaceString& collectionName,
+                                    const CollectionOptions& options,
+                                    const BSONObj& idIndex) = 0;
+    virtual void onCollMod(OperationContext* txn,
+                           const std::string& dbName,
+                           const BSONObj& collModCmd) = 0;
+    virtual void onDropDatabase(OperationContext* txn, const std::string& dbName) = 0;
+    virtual void onDropCollection(OperationContext* txn, const NamespaceString& collectionName) = 0;
+    virtual void onDropIndex(OperationContext* txn,
+                             const std::string& dbName,
+                             const BSONObj& idxDescriptor) = 0;
+    virtual void onRenameCollection(OperationContext* txn,
+                                    const NamespaceString& fromCollection,
+                                    const NamespaceString& toCollection,
+                                    bool dropTarget,
+                                    bool stayTemp) = 0;
+    virtual void onApplyOps(OperationContext* txn,
+                            const std::string& dbName,
+                            const BSONObj& applyOpCmd) = 0;
+    virtual void onEmptyCapped(OperationContext* txn, const NamespaceString& collectionName) = 0;
+    virtual void onConvertToCapped(OperationContext* txn,
+                                   const NamespaceString& collectionName,
+                                   double size) = 0;
 };
 
 }  // namespace mongo

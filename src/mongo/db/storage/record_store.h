@@ -45,7 +45,6 @@ class CappedCallback;
 class Collection;
 struct CompactOptions;
 struct CompactStats;
-class DocWriter;
 class MAdvise;
 class NamespaceDetails;
 class OperationContext;
@@ -62,12 +61,15 @@ class ValidateAdaptor;
  */
 class DocWriter {
 public:
-    virtual ~DocWriter() {}
     virtual void writeDocument(char* buf) const = 0;
     virtual size_t documentSize() const = 0;
     virtual bool addPadding() const {
         return true;
     }
+
+protected:
+    // Can't delete through base pointer.
+    ~DocWriter() = default;
 };
 
 /**
@@ -76,10 +78,6 @@ public:
 class UpdateNotifier {
 public:
     virtual ~UpdateNotifier() {}
-    virtual Status recordStoreGoingToMove(OperationContext* txn,
-                                          const RecordId& oldLocation,
-                                          const char* oldBuffer,
-                                          size_t oldSize) = 0;
     virtual Status recordStoreGoingToUpdateInPlace(OperationContext* txn, const RecordId& loc) = 0;
 };
 
@@ -95,6 +93,13 @@ struct BsonRecord {
     RecordId id;
     const BSONObj* docPtr;
 };
+
+enum ValidateCmdLevel : int {
+    kValidateIndex = 0x01,
+    kValidateRecordStore = 0x02,
+    kValidateFull = 0x03
+};
+
 
 /**
  * Retrieves Records from a RecordStore.
@@ -272,6 +277,10 @@ public:
  * Many methods take an OperationContext parameter. This contains the RecoveryUnit, with
  * all RecordStore specific transaction information, as well as the LockState. Methods that take
  * an OperationContext may throw a WriteConflictException.
+ *
+ * This class must be thread-safe for document-level locking storage engines. In addition, for
+ * storage engines implementing the KVEngine some methods must be thread safe, see KVCatalog. Only
+ * for MMAPv1 is this class not thread-safe.
  */
 class RecordStore {
     MONGO_DISALLOW_COPYING(RecordStore);
@@ -366,10 +375,6 @@ public:
                                               int len,
                                               bool enforceQuota) = 0;
 
-    virtual StatusWith<RecordId> insertRecord(OperationContext* txn,
-                                              const DocWriter* doc,
-                                              bool enforceQuota) = 0;
-
     virtual Status insertRecords(OperationContext* txn,
                                  std::vector<Record>* records,
                                  bool enforceQuota) {
@@ -385,22 +390,48 @@ public:
     }
 
     /**
-     * @param notifier - Only used by record stores which do not support doc-locking.
-     *                   In the case of a document move, this is called after the document
-     *                   has been written to the new location, but before it is deleted from
-     *                   the old location.
-     *                   In the case of an in-place update, this is called just before the
-     *                   in-place write occurs.
-     * @return Status or RecordId, RecordId might be different
+     * Inserts nDocs documents into this RecordStore using the DocWriter interface.
+     *
+     * This allows the storage engine to reserve space for a record and have it built in-place
+     * rather than building the record then copying it into its destination.
+     *
+     * On success, if idsOut is non-null the RecordIds of the inserted records will be written into
+     * it. It must have space for nDocs RecordIds.
+     */
+    virtual Status insertRecordsWithDocWriter(OperationContext* txn,
+                                              const DocWriter* const* docs,
+                                              size_t nDocs,
+                                              RecordId* idsOut = nullptr) = 0;
+
+    /**
+     * A thin wrapper around insertRecordsWithDocWriter() to simplify handling of single DocWriters.
+     */
+    StatusWith<RecordId> insertRecordWithDocWriter(OperationContext* txn, const DocWriter* doc) {
+        RecordId out;
+        Status status = insertRecordsWithDocWriter(txn, &doc, 1, &out);
+        if (!status.isOK())
+            return status;
+        return out;
+    }
+
+    /**
+     * @param notifier - Only used by record stores which do not support doc-locking. Called only
+     *                   in the case of an in-place update. Called just before the in-place write
+     *                   occurs.
+     * @return Status  - If a document move is required (MMAPv1 only) then a status of
+     *                   ErrorCodes::NeedsDocumentMove will be returned. On receipt of this status
+     *                   no update will be performed. It is the caller's responsibility to:
+     *                     1. Remove the existing document and associated index keys.
+     *                     2. Insert a new document and index keys.
      *
      * For capped record stores, the record size will never change.
      */
-    virtual StatusWith<RecordId> updateRecord(OperationContext* txn,
-                                              const RecordId& oldLocation,
-                                              const char* data,
-                                              int len,
-                                              bool enforceQuota,
-                                              UpdateNotifier* notifier) = 0;
+    virtual Status updateRecord(OperationContext* txn,
+                                const RecordId& oldLocation,
+                                const char* data,
+                                int len,
+                                bool enforceQuota,
+                                UpdateNotifier* notifier) = 0;
 
     /**
      * @return Returns 'false' if this record store does not implement
@@ -519,15 +550,12 @@ public:
     }
 
     /**
-     * @param full - does more checks
-     * @param scanData - scans each document
      * @return OK if the validate run successfully
      *         OK will be returned even if corruption is found
      *         deatils will be in result
      */
     virtual Status validate(OperationContext* txn,
-                            bool full,
-                            bool scanData,
+                            ValidateCmdLevel level,
                             ValidateAdaptor* adaptor,
                             ValidateResults* results,
                             BSONObjBuilder* output) = 0;
@@ -612,6 +640,7 @@ struct ValidateResults {
     }
     bool valid;
     std::vector<std::string> errors;
+    std::vector<std::string> warnings;
 };
 
 /**
@@ -623,6 +652,8 @@ class ValidateAdaptor {
 public:
     virtual ~ValidateAdaptor() {}
 
-    virtual Status validate(const RecordData& recordData, size_t* dataSize) = 0;
+    virtual Status validate(const RecordId& recordId,
+                            const RecordData& recordData,
+                            size_t* dataSize) = 0;
 };
 }

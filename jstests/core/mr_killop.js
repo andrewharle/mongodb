@@ -4,7 +4,7 @@ t = db.jstests_mr_killop;
 t.drop();
 t2 = db.jstests_mr_killop_out;
 t2.drop();
-
+db.adminCommand({"configureFailPoint": 'mr_killop_test_fp', "mode": 'alwaysOn'});
 function debug(x) {
     //        printjson( x );
 }
@@ -51,12 +51,7 @@ function testOne(map, reduce, finalize, scope, childLoop, wait) {
     t.save({a: 1});
     t.save({a: 1});
 
-    spec = {
-        mapreduce: "jstests_mr_killop",
-        out: "jstests_mr_killop_out",
-        map: map,
-        reduce: reduce
-    };
+    spec = {mapreduce: "jstests_mr_killop", out: "jstests_mr_killop_out", map: map, reduce: reduce};
     if (finalize) {
         spec["finalize"] = finalize;
     }
@@ -176,3 +171,4 @@ var loop = function() {
 };
 runMRTests(loop, false);
 runFinalizeTests(loop, false);
+db.adminCommand({"configureFailPoint": 'mr_killop_test_fp', "mode": 'off'});

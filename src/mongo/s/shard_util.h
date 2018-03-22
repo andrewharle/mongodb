@@ -28,21 +28,28 @@
 
 #pragma once
 
+#include <boost/optional.hpp>
 #include <string>
+#include <vector>
 
+#include "mongo/s/catalog/type_chunk.h"
+#include "mongo/s/chunk_version.h"
 #include "mongo/s/client/shard.h"
 
 namespace mongo {
 
+class NamespaceString;
 class OperationContext;
+class ShardKeyPattern;
 class ShardRegistry;
 template <typename T>
 class StatusWith;
 
 /**
- * Set of methods used to introspect the state of individual shards.
+ * Set of functions used to introspect and manipulate the state of individual shards.
  */
 namespace shardutil {
+
 /**
  * Executes the listDatabases command against the specified shard and obtains the total data
  * size across all databases in bytes (essentially, the totalSize field).
@@ -51,9 +58,47 @@ namespace shardutil {
  *  ShardNotFound if shard by that id is not available on the registry
  *  NoSuchKey if the total shard size could not be retrieved
  */
-StatusWith<long long> retrieveTotalShardSize(OperationContext* txn,
-                                             ShardId shardId,
-                                             ShardRegistry* shardRegistry);
-};
+StatusWith<long long> retrieveTotalShardSize(OperationContext* txn, const ShardId& shardId);
 
+/**
+ * Ask the specified shard to figure out the split points for a given chunk.
+ *
+ * shardId The shard id to query.
+ * nss Namespace, which owns the chunk.
+ * shardKeyPattern The shard key which corresponds to this sharded namespace.
+ * chunkRange Bounds of the chunk to be split.
+ * chunkSize Chunk size to target in bytes.
+ * maxObjs Limits the number of objects in each chunk. Zero means max, unspecified means use the
+ *         server default.
+ */
+StatusWith<std::vector<BSONObj>> selectChunkSplitPoints(OperationContext* txn,
+                                                        const ShardId& shardId,
+                                                        const NamespaceString& nss,
+                                                        const ShardKeyPattern& shardKeyPattern,
+                                                        const ChunkRange& chunkRange,
+                                                        long long chunkSizeBytes,
+                                                        boost::optional<int> maxObjs);
+
+/**
+ * Asks the specified shard to split the chunk described by min/maxKey into the respective split
+ * points. If split was successful and the shard indicated that one of the resulting chunks should
+ * be moved off the currently owning shard, the return value will contain the bounds of this chunk.
+ *
+ * shardId The shard, which currently owns the chunk.
+ * nss Namespace, which owns the chunk.
+ * shardKeyPattern The shard key which corresponds to this sharded namespace.
+ * collectionVersion The expected collection version when doing the split.
+ * chunkRange Bounds of the chunk to be split.
+ * splitPoints The set of points at which the chunk should be split.
+ */
+StatusWith<boost::optional<ChunkRange>> splitChunkAtMultiplePoints(
+    OperationContext* txn,
+    const ShardId& shardId,
+    const NamespaceString& nss,
+    const ShardKeyPattern& shardKeyPattern,
+    ChunkVersion collectionVersion,
+    const ChunkRange& chunkRange,
+    const std::vector<BSONObj>& splitPoints);
+
+}  // namespace shardutil
 }  // namespace mongo

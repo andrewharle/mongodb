@@ -29,6 +29,8 @@
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/pipeline/accumulator.h"
+
+#include "mongo/db/pipeline/accumulation_statement.h"
 #include "mongo/db/pipeline/value.h"
 
 namespace mongo {
@@ -51,7 +53,8 @@ Value AccumulatorLast::getValue(bool toBeMerged) const {
     return _last;
 }
 
-AccumulatorLast::AccumulatorLast() {
+AccumulatorLast::AccumulatorLast(const boost::intrusive_ptr<ExpressionContext>& expCtx)
+    : Accumulator(expCtx) {
     _memUsageBytes = sizeof(*this);
 }
 
@@ -60,7 +63,8 @@ void AccumulatorLast::reset() {
     _last = Value();
 }
 
-intrusive_ptr<Accumulator> AccumulatorLast::create() {
-    return new AccumulatorLast();
+intrusive_ptr<Accumulator> AccumulatorLast::create(
+    const boost::intrusive_ptr<ExpressionContext>& expCtx) {
+    return new AccumulatorLast(expCtx);
 }
 }

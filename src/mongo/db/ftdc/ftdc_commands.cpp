@@ -61,13 +61,14 @@ public:
         return true;
     }
 
-    bool isWriteCommandForConfigServer() const override {
+    bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
 
-    Status checkAuthForCommand(ClientBasic* client,
+    Status checkAuthForCommand(Client* client,
                                const std::string& dbname,
                                const BSONObj& cmdObj) override {
+
         if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
                 ResourcePattern::forClusterResource(), ActionType::serverStatus)) {
             return Status(ErrorCodes::Unauthorized, "Unauthorized");
@@ -93,6 +94,7 @@ public:
              int options,
              std::string& errmsg,
              BSONObjBuilder& result) override {
+
         result.append(
             "data", FTDCController::get(txn->getServiceContext())->getMostRecentPeriodicDocument());
 

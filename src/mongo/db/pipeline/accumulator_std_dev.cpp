@@ -29,6 +29,8 @@
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/pipeline/accumulator.h"
+
+#include "mongo/db/pipeline/accumulation_statement.h"
 #include "mongo/db/pipeline/document.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context.h"
@@ -93,15 +95,19 @@ Value AccumulatorStdDev::getValue(bool toBeMerged) const {
     }
 }
 
-intrusive_ptr<Accumulator> AccumulatorStdDevSamp::create() {
-    return new AccumulatorStdDevSamp();
+intrusive_ptr<Accumulator> AccumulatorStdDevSamp::create(
+    const boost::intrusive_ptr<ExpressionContext>& expCtx) {
+    return new AccumulatorStdDevSamp(expCtx);
 }
 
-intrusive_ptr<Accumulator> AccumulatorStdDevPop::create() {
-    return new AccumulatorStdDevPop();
+intrusive_ptr<Accumulator> AccumulatorStdDevPop::create(
+    const boost::intrusive_ptr<ExpressionContext>& expCtx) {
+    return new AccumulatorStdDevPop(expCtx);
 }
 
-AccumulatorStdDev::AccumulatorStdDev(bool isSamp) : _isSamp(isSamp), _count(0), _mean(0), _m2(0) {
+AccumulatorStdDev::AccumulatorStdDev(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                                     bool isSamp)
+    : Accumulator(expCtx), _isSamp(isSamp), _count(0), _mean(0), _m2(0) {
     // This is a fixed size Accumulator so we never need to update this
     _memUsageBytes = sizeof(*this);
 }

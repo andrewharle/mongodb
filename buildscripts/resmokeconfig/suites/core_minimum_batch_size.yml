@@ -1,14 +1,13 @@
 selector:
   js_test:
     roots:
-    - jstests/core/*.js
+    - jstests/core/**/*.js
     exclude_files:
     # The following tests fail when specifying a minimal batchSize:
     - jstests/core/find9.js # Reduction of objsLeftInBatch.
     - jstests/core/finda.js # Reduction of objsLeftInBatch.
     - jstests/core/profile1.js # Extra operation for a getmore.
     - jstests/core/profile2.js # Extra operation for a getmore.
-    - jstests/core/profile4.js # Query now includes batchSize.
     - jstests/core/sortk.js # Negative limit value changes result to batchSize.
     - jstests/core/tailable_skip_limit.js # Negative limit value changes result to batchSize.
 

@@ -27,6 +27,8 @@
 
 #pragma once
 
+#include <asio/system_timer.hpp>
+
 #include <memory>
 
 #include "mongo/executor/async_stream_interface.h"
@@ -44,6 +46,8 @@ namespace connection_pool_asio {
  */
 class ASIOTimer final : public ConnectionPool::TimerInterface {
 public:
+    using clock_type = asio::system_timer::clock_type;
+
     ASIOTimer(asio::io_service::strand* strand);
     ~ASIOTimer();
 
@@ -58,7 +62,7 @@ private:
 
     TimeoutCallback _cb;
     asio::io_service::strand* const _strand;
-    asio::steady_timer _impl;
+    asio::basic_waitable_timer<clock_type> _impl;
     std::shared_ptr<CallbackSharedState> _callbackSharedState;
 };
 

@@ -4,6 +4,7 @@ Parser for command line arguments.
 
 from __future__ import absolute_import
 
+import collections
 import os
 import os.path
 import optparse
@@ -34,6 +35,7 @@ DEST_TO_CONFIG = {
     "mongos_executable": "mongos",
     "mongos_parameters": "mongosSetParameters",
     "no_journal": "nojournal",
+    "num_clients_per_fixture": "numClientsPerFixture",
     "prealloc_journal": "preallocJournal",
     "repeat": "repeat",
     "report_file": "reportFile",
@@ -95,19 +97,26 @@ def parse_command_line():
     parser.add_option("--dbtest", dest="dbtest_executable", metavar="PATH",
                       help="The path to the dbtest executable for resmoke to use.")
 
-    parser.add_option("--excludeWithAllTags", dest="exclude_with_all_tags", metavar="TAG1,TAG2",
+    parser.add_option("--excludeWithAllTags", action="append", dest="exclude_with_all_tags",
+                      metavar="TAG1,TAG2",
                       help=("Comma separated list of tags. Any jstest that contains all of the"
                             " specified tags will be excluded from any suites that are run."))
 
-    parser.add_option("--excludeWithAnyTags", dest="exclude_with_any_tags", metavar="TAG1,TAG2",
+    parser.add_option("--excludeWithAnyTags", action="append", dest="exclude_with_any_tags",
+                      metavar="TAG1,TAG2",
                       help=("Comma separated list of tags. Any jstest that contains any of the"
                             " specified tags will be excluded from any suites that are run."))
 
-    parser.add_option("--includeWithAllTags", dest="include_with_all_tags", metavar="TAG1,TAG2",
+    parser.add_option("-f", "--findSuites", action="store_true", dest="find_suites",
+                      help="List the names of the suites that will execute the specified tests.")
+
+    parser.add_option("--includeWithAllTags", action="append", dest="include_with_all_tags",
+                      metavar="TAG1,TAG2",
                       help=("Comma separated list of tags. For the jstest portion of the suite(s),"
                             " only tests which have all of the specified tags will be run."))
 
-    parser.add_option("--includeWithAnyTags", dest="include_with_any_tags", metavar="TAG1,TAG2",
+    parser.add_option("--includeWithAnyTags", action="append", dest="include_with_any_tags",
+                      metavar="TAG1,TAG2",
                       help=("Comma separated list of tags. For the jstest portion of the suite(s),"
                             " only tests which have at least one of the specified tags will be"
                             " run."))
@@ -155,6 +164,9 @@ def parse_command_line():
     parser.add_option("--nopreallocj", action="store_const", const="off", dest="prealloc_journal",
                       help="Disable preallocation of journal files for all mongod processes.")
 
+    parser.add_option("--numClientsPerFixture", type="int", dest="num_clients_per_fixture",
+                      help="Number of clients running tests per fixture")
+
     parser.add_option("--preallocJournal", type="choice", action="store", dest="prealloc_journal",
                       choices=("on", "off"), metavar="ON|OFF",
                       help=("Enable or disable preallocation of journal files for all mongod"
@@ -200,6 +212,7 @@ def parse_command_line():
     parser.set_defaults(executor_file="with_server",
                         logger_file="console",
                         dry_run="off",
+                        find_suites=False,
                         list_suites=False,
                         prealloc_journal="off")
 
@@ -242,6 +255,7 @@ def update_config_vars(values):
     _config.MONGOS_SET_PARAMETERS = config.pop("mongosSetParameters")
     _config.NO_JOURNAL = config.pop("nojournal")
     _config.NO_PREALLOC_JOURNAL = config.pop("preallocJournal") == "off"
+    _config.NUM_CLIENTS_PER_FIXTURE = config.pop("numClientsPerFixture")
     _config.RANDOM_SEED = config.pop("seed")
     _config.REPEAT = config.pop("repeat")
     _config.REPORT_FILE = config.pop("reportFile")
@@ -258,9 +272,39 @@ def update_config_vars(values):
         raise optparse.OptionValueError("Unknown option(s): %s" % (config.keys()))
 
 
+def create_test_membership_map(fail_on_missing_selector=False):
+    """
+    Returns a dict keyed by test name containing all of the suites that will run that test.
+    Since this iterates through every available suite, it should only be run once.
+    """
+
+    test_membership = collections.defaultdict(list)
+    suite_names = get_named_suites()
+    for suite_name in suite_names:
+        try:
+            suite_config = _get_suite_config(suite_name)
+            suite = testing.suite.Suite(suite_name, suite_config)
+        except IOError as err:
+            # If unittests.txt or integration_tests.txt aren't there we'll ignore the error because
+            # unittests haven't been built yet (this is highly likely using find interactively).
+            if err.filename in _config.EXTERNAL_SUITE_SELECTORS:
+                if not fail_on_missing_selector:
+                    continue
+            raise
+
+        for group in suite.test_groups:
+            for testfile in group.tests:
+                if isinstance(testfile, dict):
+                    continue
+                test_membership[testfile].append(suite_name)
+    return test_membership
+
+
 def get_suites(values, args):
     if (values.suite_files is None and not args) or (values.suite_files is not None and args):
         raise optparse.OptionValueError("Must specify either --suites or a list of tests")
+
+    _config.INTERNAL_EXECUTOR_NAME = values.executor_file
 
     # If there are no suites specified, but there are args, assume they are jstests.
     if args:

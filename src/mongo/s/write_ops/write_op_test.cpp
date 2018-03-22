@@ -31,9 +31,9 @@
 #include "mongo/base/error_codes.h"
 #include "mongo/base/owned_pointer_vector.h"
 #include "mongo/db/operation_context_noop.h"
-#include "mongo/s/mock_ns_targeter.h"
 #include "mongo/s/write_ops/batched_command_request.h"
 #include "mongo/s/write_ops/batched_delete_document.h"
+#include "mongo/s/write_ops/mock_ns_targeter.h"
 #include "mongo/s/write_ops/write_error_detail.h"
 #include "mongo/s/write_ops/write_op.h"
 #include "mongo/unittest/unittest.h"
@@ -86,7 +86,7 @@ TEST(WriteOpTests, TargetSingle) {
     OperationContextNoop txn;
     NamespaceString nss("foo.bar");
 
-    ShardEndpoint endpoint("shard", ChunkVersion::IGNORED());
+    ShardEndpoint endpoint(ShardId("shard"), ChunkVersion::IGNORED());
 
     vector<MockRange*> mockRanges;
     mockRanges.push_back(new MockRange(endpoint, nss, BSON("x" << MINKEY), BSON("x" << MAXKEY)));
@@ -144,9 +144,9 @@ TEST(WriteOpTests, TargetMultiOneShard) {
     OperationContextNoop txn;
     NamespaceString nss("foo.bar");
 
-    ShardEndpoint endpointA("shardA", ChunkVersion(10, 0, OID()));
-    ShardEndpoint endpointB("shardB", ChunkVersion(20, 0, OID()));
-    ShardEndpoint endpointC("shardB", ChunkVersion(20, 0, OID()));
+    ShardEndpoint endpointA(ShardId("shardA"), ChunkVersion(10, 0, OID()));
+    ShardEndpoint endpointB(ShardId("shardB"), ChunkVersion(20, 0, OID()));
+    ShardEndpoint endpointC(ShardId("shardB"), ChunkVersion(20, 0, OID()));
 
     vector<MockRange*> mockRanges;
     mockRanges.push_back(new MockRange(endpointA, nss, BSON("x" << MINKEY), BSON("x" << 0)));
@@ -187,9 +187,9 @@ TEST(WriteOpTests, TargetMultiAllShards) {
     OperationContextNoop txn;
     NamespaceString nss("foo.bar");
 
-    ShardEndpoint endpointA("shardA", ChunkVersion(10, 0, OID()));
-    ShardEndpoint endpointB("shardB", ChunkVersion(20, 0, OID()));
-    ShardEndpoint endpointC("shardB", ChunkVersion(20, 0, OID()));
+    ShardEndpoint endpointA(ShardId("shardA"), ChunkVersion(10, 0, OID()));
+    ShardEndpoint endpointB(ShardId("shardB"), ChunkVersion(20, 0, OID()));
+    ShardEndpoint endpointC(ShardId("shardB"), ChunkVersion(20, 0, OID()));
 
     vector<MockRange*> mockRanges;
     mockRanges.push_back(new MockRange(endpointA, nss, BSON("x" << MINKEY), BSON("x" << 0)));
@@ -239,7 +239,7 @@ TEST(WriteOpTests, ErrorSingle) {
     OperationContextNoop txn;
     NamespaceString nss("foo.bar");
 
-    ShardEndpoint endpoint("shard", ChunkVersion::IGNORED());
+    ShardEndpoint endpoint(ShardId("shard"), ChunkVersion::IGNORED());
 
     vector<MockRange*> mockRanges;
     mockRanges.push_back(new MockRange(endpoint, nss, BSON("x" << MINKEY), BSON("x" << MAXKEY)));
@@ -285,7 +285,7 @@ TEST(WriteOpTests, CancelSingle) {
     OperationContextNoop txn;
     NamespaceString nss("foo.bar");
 
-    ShardEndpoint endpoint("shard", ChunkVersion::IGNORED());
+    ShardEndpoint endpoint(ShardId("shard"), ChunkVersion::IGNORED());
 
     vector<MockRange*> mockRanges;
     mockRanges.push_back(new MockRange(endpoint, nss, BSON("x" << MINKEY), BSON("x" << MAXKEY)));
@@ -328,7 +328,7 @@ TEST(WriteOpTests, RetrySingleOp) {
     OperationContextNoop txn;
     NamespaceString nss("foo.bar");
 
-    ShardEndpoint endpoint("shard", ChunkVersion::IGNORED());
+    ShardEndpoint endpoint(ShardId("shard"), ChunkVersion::IGNORED());
 
     vector<MockRange*> mockRanges;
     mockRanges.push_back(new MockRange(endpoint, nss, BSON("x" << MINKEY), BSON("x" << MAXKEY)));

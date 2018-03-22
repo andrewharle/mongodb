@@ -6,21 +6,27 @@
  *   Displays index filters for all query shapes in a collection.
  *
  * - planCacheClearFilters
- *   Clears index filter for a single query shape or,
- *   if the query shape is omitted, all filters for the collection.
+ *   Clears index filter for a single query shape or, if the query shape is omitted, all filters for
+ *   the collection.
  *
  * - planCacheSetFilter
  *   Sets index filter for a query shape. Overrides existing filter.
  *
- * Not a lot of data access in this test suite. Hint commands
- * manage a non-persistent mapping in the server of
- * query shape to list of index specs.
+ * Not a lot of data access in this test suite. Hint commands manage a non-persistent mapping in the
+ * server of query shape to list of index specs.
  *
- * Only time we might need to execute a query is to check the plan
- * cache state. We would do this with the planCacheListPlans command
- * on the same query shape with the index filters.
+ * Only time we might need to execute a query is to check the plan cache state. We would do this
+ * with the planCacheListPlans command on the same query shape with the index filters.
  *
+ * @tags: [
+ *   # This test attempts to perform queries with plan cache filters set up. The former operation
+ *   # may be routed to a secondary in the replica set, whereas the latter must be routed to the
+ *   # primary.
+ *   assumes_read_preference_unchanged,
+ * ]
  */
+
+load("jstests/libs/analyze_plan.js");
 
 var t = db.jstests_index_filter_commands;
 
@@ -32,36 +38,23 @@ t.drop();
 t.save({a: 1});
 t.save({a: 1});
 t.save({a: 1, b: 1});
+t.save({_id: 1});
 
 // Add 2 indexes.
 // 1st index is more efficient.
 // 2nd and 3rd indexes will be used to test index filters.
-var indexA1 = {
-    a: 1
-};
-var indexA1B1 = {
-    a: 1,
-    b: 1
-};
-var indexA1C1 = {
-    a: 1,
-    c: 1
-};
+var indexA1 = {a: 1};
+var indexA1B1 = {a: 1, b: 1};
+var indexA1C1 = {a: 1, c: 1};
 t.ensureIndex(indexA1);
 t.ensureIndex(indexA1B1);
 t.ensureIndex(indexA1C1);
 
-var queryA1 = {
-    a: 1,
-    b: 1
-};
-var projectionA1 = {
-    _id: 0,
-    a: 1
-};
-var sortA1 = {
-    a: -1
-};
+var queryAA = {a: "A"};
+var queryA1 = {a: 1, b: 1};
+var projectionA1 = {_id: 0, a: 1};
+var sortA1 = {a: -1};
+var queryID = {_id: 1};
 
 //
 // Tests for planCacheListFilters, planCacheClearFilters, planCacheSetFilter
@@ -110,17 +103,12 @@ assert.eq(0, filters.length, 'unexpected number of index filters in planCacheLis
 
 // Check details of winning plan in plan cache before setting index filter.
 assert.eq(1, t.find(queryA1, projectionA1).sort(sortA1).itcount(), 'unexpected document count');
-var shape = {
-    query: queryA1,
-    sort: sortA1,
-    projection: projectionA1
-};
+var shape = {query: queryA1, sort: sortA1, projection: projectionA1};
 var planBeforeSetFilter = getPlans(shape)[0];
 print('Winning plan (before setting index filters) = ' + tojson(planBeforeSetFilter));
 // Check filterSet field in plan details
-assert.eq(false,
-          planBeforeSetFilter.filterSet,
-          'missing or invalid filterSet field in plan details');
+assert.eq(
+    false, planBeforeSetFilter.filterSet, 'missing or invalid filterSet field in plan details');
 
 // Adding index filters to a non-existent collection should be an error.
 assert.commandFailed(missingCollection.runCommand(
@@ -132,9 +120,8 @@ assert.commandWorked(t.runCommand(
     'planCacheSetFilter',
     {query: queryA1, sort: sortA1, projection: projectionA1, indexes: [indexA1B1, indexA1C1]}));
 filters = getFilters();
-assert.eq(1,
-          filters.length,
-          'no change in query settings after successfully setting index filters');
+assert.eq(
+    1, filters.length, 'no change in query settings after successfully setting index filters');
 assert.eq(queryA1, filters[0].query, 'unexpected query in filters');
 assert.eq(sortA1, filters[0].sort, 'unexpected sort in filters');
 assert.eq(projectionA1, filters[0].projection, 'unexpected projection in filters');
@@ -157,6 +144,13 @@ assert.eq(true, planAfterSetFilter.filterSet, 'missing or invalid filterSet fiel
 // of indexes provided to the planner.
 // If the planner still tries to use the user hint, we will get a 'bad hint' error.
 t.find(queryA1, projectionA1).sort(sortA1).hint(indexA1).itcount();
+
+// Test that index filters are ignored for idhack queries.
+assert.commandWorked(t.runCommand('planCacheSetFilter', {query: queryID, indexes: [indexA1]}));
+var explain = t.explain("executionStats").find(queryID).finish();
+assert.commandWorked(explain);
+var planStage = getPlanStage(explain.executionStats.executionStages, 'IDHACK');
+assert.neq(null, planStage);
 
 // Clear filters
 // Clearing filters on a missing collection should be a no-op.
@@ -196,13 +190,9 @@ if (db.isMaster().msg !== "isdbgrid") {
                   .queryPlanner.indexFilterSet);
 
     // With two filters set.
-    assert.commandWorked(t.runCommand('planCacheSetFilter',
-                                      {
-                                        query: queryA1,
-                                        projection: projectionA1,
-                                        sort: sortA1,
-                                        indexes: [indexA1B1, indexA1C1]
-                                      }));
+    assert.commandWorked(t.runCommand(
+        'planCacheSetFilter',
+        {query: queryA1, projection: projectionA1, sort: sortA1, indexes: [indexA1B1, indexA1C1]}));
     assert.eq(true, t.find({z: 1}).explain('queryPlanner').queryPlanner.indexFilterSet);
     assert.eq(true,
               t.find(queryA1, projectionA1)
@@ -210,3 +200,37 @@ if (db.isMaster().msg !== "isdbgrid") {
                   .explain('queryPlanner')
                   .queryPlanner.indexFilterSet);
 }
+
+//
+// Tests for index filter commands and multiple indexes with the same key pattern.
+//
+
+t.drop();
+
+var collationEN = {locale: "en_US"};
+assert.commandWorked(t.createIndex(indexA1, {collation: collationEN, name: "a_1:en_US"}));
+assert.commandWorked(t.createIndex(indexA1, {name: "a_1"}));
+
+assert.writeOK(t.insert({a: "a"}));
+
+assert.commandWorked(t.runCommand('planCacheSetFilter', {query: queryAA, indexes: [indexA1]}));
+
+assert.commandWorked(t.runCommand('planCacheSetFilter',
+                                  {query: queryAA, collation: collationEN, indexes: [indexA1]}));
+
+// Ensure that index key patterns in planCacheSetFilter select any index with a matching key
+// pattern.
+
+explain = t.find(queryAA).explain();
+assert(isIxscan(explain.queryPlanner.winningPlan), "Expected index scan: " + tojson(explain));
+
+explain = t.find(queryAA).collation(collationEN).explain();
+assert(isIxscan(explain.queryPlanner.winningPlan), "Expected index scan: " + tojson(explain));
+
+// Ensure that index names in planCacheSetFilter only select matching names.
+
+assert.commandWorked(
+    t.runCommand('planCacheSetFilter', {query: queryAA, collation: collationEN, indexes: ["a_1"]}));
+
+explain = t.find(queryAA).collation(collationEN).explain();
+assert(isCollscan(explain.queryPlanner.winningPlan), "Expected collscan: " + tojson(explain));

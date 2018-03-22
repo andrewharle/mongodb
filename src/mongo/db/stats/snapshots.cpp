@@ -34,9 +34,11 @@
 
 #include "mongo/db/stats/snapshots.h"
 
+#include "mongo/base/static_assert.h"
 #include "mongo/db/client.h"
 #include "mongo/db/clientcursor.h"
 #include "mongo/db/service_context.h"
+#include "mongo/util/concurrency/idle_thread_block.h"
 #include "mongo/util/exit.h"
 #include "mongo/util/log.h"
 
@@ -93,7 +95,7 @@ StatusWith<SnapshotDiff> Snapshots::computeDelta() {
     }
 
     // The following logic depends on there being exactly 2 stored snapshots
-    static_assert(kNumSnapshots == 2, "kNumSnapshots == 2");
+    MONGO_STATIC_ASSERT(kNumSnapshots == 2);
 
     // Current and previous napshot alternates between indexes 0 and 1
     int currIdx = _loc;
@@ -109,9 +111,10 @@ void StatsSnapshotThread::run() {
         try {
             statsSnapshots.takeSnapshot();
         } catch (std::exception& e) {
-            log() << "ERROR in SnapshotThread: " << e.what() << endl;
+            log() << "ERROR in SnapshotThread: " << redact(e.what()) << endl;
         }
 
+        MONGO_IDLE_THREAD_BLOCK;
         sleepsecs(4);
     }
 }

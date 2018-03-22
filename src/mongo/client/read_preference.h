@@ -28,7 +28,10 @@
 
 #pragma once
 
+#include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/db/repl/optime.h"
+#include "mongo/util/duration.h"
 
 namespace mongo {
 template <typename T>
@@ -101,7 +104,7 @@ public:
     }
 
     bool operator==(const TagSet& other) const {
-        return _tags == other._tags;
+        return SimpleBSONObjComparator::kInstance.evaluate(_tags == other._tags);
     }
     bool operator!=(const TagSet& other) const {
         return !(*this == other);
@@ -119,12 +122,14 @@ struct ReadPreferenceSetting {
      *     object's copy of tag will have the iterator in the initial
      *     position).
      */
+    ReadPreferenceSetting(ReadPreference pref, TagSet tags, Seconds maxStalenessSeconds);
+    ReadPreferenceSetting(ReadPreference pref, Seconds maxStalenessSeconds);
     ReadPreferenceSetting(ReadPreference pref, TagSet tags);
-
     explicit ReadPreferenceSetting(ReadPreference pref);
 
     inline bool equals(const ReadPreferenceSetting& other) const {
-        return (pref == other.pref) && (tags == other.tags);
+        return (pref == other.pref) && (tags == other.tags) &&
+            (maxStalenessSeconds == other.maxStalenessSeconds) && (minOpTime == other.minOpTime);
     }
 
     /**
@@ -139,16 +144,23 @@ struct ReadPreferenceSetting {
 
     /**
      * Parses a ReadPreferenceSetting from a BSON document of the form:
-     * { mode: <mode>, tags: <array of tags> }. The 'mode' element must a string equal to either
-     * "primary", "primaryPreferred", "secondary", "secondaryPreferred", or "nearest". Although
-     * the tags array is intended to be an array of unique BSON documents, no further validation
-     * is performed on it other than checking that it is an array, and that it is empty if
-     * 'mode' is 'primary'.
+     * { mode: <mode>, tags: <array of tags>, maxStalenessSeconds: Number }. The 'mode' element must
+     * be a string equal to either "primary", "primaryPreferred", "secondary", "secondaryPreferred",
+     * or "nearest". Although the tags array is intended to be an array of unique BSON documents, no
+     * further validation is performed on it other than checking that it is an array, and that it is
+     * empty if 'mode' is 'primary'.
      */
     static StatusWith<ReadPreferenceSetting> fromBSON(const BSONObj& readPrefSettingObj);
 
     ReadPreference pref;
     TagSet tags;
+    Seconds maxStalenessSeconds{};
+    repl::OpTime minOpTime{};
+
+    /**
+     * The minimal value maxStalenessSeconds can have.
+     */
+    static const Seconds kMinimalMaxStalenessValue;
 };
 
 }  // namespace mongo

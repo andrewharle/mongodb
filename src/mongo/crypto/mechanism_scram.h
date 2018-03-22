@@ -53,15 +53,22 @@ const std::string serverKeyFieldName = "serverKey";
  */
 struct SCRAMPresecrets {
     SCRAMPresecrets(std::string hashedPassword,
-                    std::vector<std::uint8_t> salt,
-                    size_t iterationCount)
+                    std::vector<std::uint8_t> salt_,
+                    size_t iterationCount_)
         : hashedPassword(std::move(hashedPassword)),
-          salt(std::move(salt)),
-          iterationCount(iterationCount) {}
+          salt(std::move(salt_)),
+          iterationCount(iterationCount_) {
+        uassert(ErrorCodes::BadValue,
+                "Invalid salt for SCRAM mechanism",
+                salt.size() >= kSaltLengthMin);
+    }
 
     std::string hashedPassword;
     std::vector<std::uint8_t> salt;
     size_t iterationCount;
+
+private:
+    static const size_t kSaltLengthMin = 16;
 };
 
 inline bool operator==(const SCRAMPresecrets& lhs, const SCRAMPresecrets& rhs) {
@@ -106,15 +113,17 @@ public:
         return static_cast<bool>(_ptr);
     }
 
-    const SecureHandle<SCRAMSecretsHolder>& operator*() const {
+    const SecureHandle<SCRAMSecretsHolder>& operator*() const& {
         invariant(_ptr);
         return *_ptr;
     }
+    void operator*() && = delete;
 
-    const SecureHandle<SCRAMSecretsHolder>& operator->() const {
+    const SecureHandle<SCRAMSecretsHolder>& operator->() const& {
         invariant(_ptr);
         return *_ptr;
     }
+    void operator->() && = delete;
 
 private:
     std::shared_ptr<SecureHandle<SCRAMSecretsHolder>> _ptr;

@@ -39,16 +39,9 @@ load("jstests/replsets/rslib.js");  // For startSetIfSupportsReadMajority.
     var replTest = new ReplSetTest(
         {name: name, nodes: 5, useBridge: true, nodeOptions: {enableMajorityReadConcern: ''}});
 
-    try {
-        replTest.startSet();
-    } catch (e) {
-        var conn = MongoRunner.runMongod();
-        if (!conn.getDB('admin').serverStatus().storageEngine.supportsCommittedReads) {
-            jsTest.log("skipping test since storage engine doesn't support committed reads");
-            MongoRunner.stopMongod(conn);
-            return;
-        }
-        throw e;
+    if (!startSetIfSupportsReadMajority(replTest)) {
+        jsTest.log("skipping test since storage engine doesn't support committed reads");
+        return;
     }
 
     var nodes = replTest.nodeList();
@@ -65,6 +58,7 @@ load("jstests/replsets/rslib.js");  // For startSetIfSupportsReadMajority.
             {"_id": 4, "host": nodes[4], arbiterOnly: true},
         ]
     };
+
     replTest.initiate(config);
 
     // Get connections.

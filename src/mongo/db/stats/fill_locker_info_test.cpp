@@ -84,7 +84,7 @@ TEST(FillLockerInfo, DoesReportLockStats) {
 DEATH_TEST(FillLockerInfo, ShouldFailIfLocksAreNotSortedAppropriately, "Invariant failure") {
     LockerInfo info;
     // The global lock is supposed to come before the database lock.
-    info.locks = {OneLock{ResourceId(RESOURCE_DATABASE, std::string("TestDB")), MODE_X},
+    info.locks = {OneLock{ResourceId(RESOURCE_DATABASE, "TestDB"_sd), MODE_X},
                   OneLock{kGlobalId, MODE_IX}};
 
     BSONObjBuilder infoBuilder;
@@ -92,7 +92,7 @@ DEATH_TEST(FillLockerInfo, ShouldFailIfLocksAreNotSortedAppropriately, "Invarian
 }
 
 TEST(FillLockerInfo, DoesReportLocksHeld) {
-    const ResourceId dbId(RESOURCE_DATABASE, std::string("TestDB"));
+    const ResourceId dbId(RESOURCE_DATABASE, "TestDB"_sd);
     LockerInfo info;
     info.locks = {OneLock{kGlobalId, MODE_IX}, OneLock{dbId, MODE_IX}};
 
@@ -108,8 +108,8 @@ TEST(FillLockerInfo, DoesReportLocksHeld) {
 }
 
 TEST(FillLockerInfo, ShouldReportMaxTypeHeldForResourceType) {
-    const ResourceId firstDbId(RESOURCE_DATABASE, std::string("FirstDB"));
-    const ResourceId secondDbId(RESOURCE_DATABASE, std::string("SecondDB"));
+    const ResourceId firstDbId(RESOURCE_DATABASE, "FirstDB"_sd);
+    const ResourceId secondDbId(RESOURCE_DATABASE, "SecondDB"_sd);
     LockerInfo info;
     info.locks = {
         OneLock{kGlobalId, MODE_IX}, OneLock{firstDbId, MODE_IX}, OneLock{secondDbId, MODE_X}};

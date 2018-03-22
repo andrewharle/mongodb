@@ -32,7 +32,6 @@
 
 #include "mongo/db/storage/mmap_v1/catalog/namespace_details_collection_entry.h"
 
-#include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/index/index_descriptor.h"
@@ -40,6 +39,7 @@
 #include "mongo/db/record_id.h"
 #include "mongo/db/storage/mmap_v1/catalog/namespace_details.h"
 #include "mongo/db/storage/mmap_v1/catalog/namespace_details_rsv1_metadata.h"
+#include "mongo/db/storage/mmap_v1/data_file.h"
 #include "mongo/db/storage/mmap_v1/mmap_v1_database_catalog_entry.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/util/log.h"
@@ -107,7 +107,10 @@ void NamespaceDetailsCollectionCatalogEntry::getAllIndexes(OperationContext* txn
 }
 
 bool NamespaceDetailsCollectionCatalogEntry::isIndexMultikey(OperationContext* txn,
-                                                             StringData idxName) const {
+                                                             StringData idxName,
+                                                             MultikeyPaths* multikeyPaths) const {
+    // TODO SERVER-22727: Populate 'multikeyPaths' with path components that cause 'idxName' to be
+    // multikey.
     int idxNo = _findIndexNumber(txn, idxName);
     invariant(idxNo >= 0);
     return isIndexMultikey(idxNo);
@@ -117,11 +120,13 @@ bool NamespaceDetailsCollectionCatalogEntry::isIndexMultikey(int idxNo) const {
     return (_details->multiKeyIndexBits & (((unsigned long long)1) << idxNo)) != 0;
 }
 
-bool NamespaceDetailsCollectionCatalogEntry::setIndexIsMultikey(OperationContext* txn,
-                                                                StringData indexName,
-                                                                bool multikey) {
+bool NamespaceDetailsCollectionCatalogEntry::setIndexIsMultikey(
+    OperationContext* txn, StringData indexName, const MultikeyPaths& multikeyPaths) {
+    // TODO SERVER-22727: Store new path components from 'multikeyPaths' that cause 'indexName' to
+    // be multikey.
     int idxNo = _findIndexNumber(txn, indexName);
     invariant(idxNo >= 0);
+    const bool multikey = true;
     return setIndexIsMultikey(txn, idxNo, multikey);
 }
 
@@ -292,6 +297,13 @@ Status NamespaceDetailsCollectionCatalogEntry::prepareForIndexBuild(OperationCon
     // 3) indexes entry in .ns file and system.namespaces
     _db->createNamespaceForIndex(txn, desc->indexNamespace());
 
+    // TODO SERVER-22727: Create an entry for path-level multikey info when creating the new index.
+
+    // Mark the collation feature as in use if the index has a non-simple collation.
+    if (spec["collation"]) {
+        _db->markCollationFeatureAsInUse(txn);
+    }
+
     return Status::OK();
 }
 
@@ -369,21 +381,24 @@ void NamespaceDetailsCollectionCatalogEntry::_updateSystemNamespaces(OperationCo
     RecordData entry = _namespacesRecordStore->dataFor(txn, _namespacesRecordId);
     const BSONObj newEntry = applyUpdateOperators(entry.releaseToBson(), update);
 
-    // Get update notifier
-    invariant(txn->lockState()->isDbLockedForMode(_db->name(), MODE_X));
-    Database* db = dbHolder().get(txn, _db->name());
-    Collection* systemCollection =
-        db->getCollection(NamespaceString(_db->name(), "system.namespaces"));
-    UpdateNotifier* namespacesNotifier = systemCollection->getUpdateNotifier();
+    Status result = _namespacesRecordStore->updateRecord(
+        txn, _namespacesRecordId, newEntry.objdata(), newEntry.objsize(), false, NULL);
 
-    StatusWith<RecordId> result = _namespacesRecordStore->updateRecord(txn,
-                                                                       _namespacesRecordId,
-                                                                       newEntry.objdata(),
-                                                                       newEntry.objsize(),
-                                                                       false,
-                                                                       namespacesNotifier);
-    fassert(17486, result.getStatus());
-    setNamespacesRecordId(txn, result.getValue());
+    if (ErrorCodes::NeedsDocumentMove == result) {
+        StatusWith<RecordId> newLocation = _namespacesRecordStore->insertRecord(
+            txn, newEntry.objdata(), newEntry.objsize(), false);
+        fassert(40074, newLocation.getStatus().isOK());
+
+        // Invalidate old namespace record
+        MMAPV1DatabaseCatalogEntry::invalidateSystemCollectionRecord(
+            txn, NamespaceString(_db->name(), "system.namespaces"), _namespacesRecordId);
+
+        _namespacesRecordStore->deleteRecord(txn, _namespacesRecordId);
+
+        setNamespacesRecordId(txn, newLocation.getValue());
+    } else {
+        fassert(17486, result.isOK());
+    }
 }
 
 void NamespaceDetailsCollectionCatalogEntry::updateFlags(OperationContext* txn, int newValue) {
@@ -403,7 +418,8 @@ void NamespaceDetailsCollectionCatalogEntry::updateValidator(OperationContext* t
     _updateSystemNamespaces(
         txn,
         BSON("$set" << BSON("options.validator" << validator << "options.validationLevel"
-                                                << validationLevel << "options.validationAction"
+                                                << validationLevel
+                                                << "options.validationAction"
                                                 << validationAction)));
 }
 
@@ -424,32 +440,4 @@ void NamespaceDetailsCollectionCatalogEntry::setNamespacesRecordId(OperationCont
         _namespacesRecordId = newId;
     }
 }
-
-bool NamespaceDetailsCollectionCatalogEntry::hasCollationMetadata(OperationContext* txn,
-                                                                  const std::string& ns) const {
-    // Check for a collection default collation.
-    CollectionOptions options = _db->getCollectionOptions(txn, _namespacesRecordId);
-    if (!options.collation.isEmpty()) {
-        log() << "Collection '" << ns << "' has a default collation: " << options.collation;
-        return true;
-    }
-
-    // Examine indexes for collation metadata.
-    bool indexWithCollationFound = false;
-
-    const bool includeBackgroundInprog = true;
-    NamespaceDetails::IndexIterator ii = _details->ii(includeBackgroundInprog);
-    while (ii.more()) {
-        const IndexDetails& indexDetails = ii.next();
-        const BSONObj infoObj =
-            _indexRecordStore->dataFor(txn, indexDetails.info.toRecordId()).toBson();
-        if (infoObj["collation"]) {
-            log() << "Collection '" << ns << "' has an index with a collation: " << infoObj;
-            indexWithCollationFound = true;
-        }
-    }
-
-    return indexWithCollationFound;
 }
-
-}  // namespace mongo

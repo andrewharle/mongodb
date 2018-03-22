@@ -36,14 +36,16 @@
 #include "mongo/bson/mutable/document.h"
 #include "mongo/bson/mutable/mutable_bson_test_utils.h"
 #include "mongo/db/catalog/collection.h"
+#include "mongo/db/client.h"
 #include "mongo/db/db.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/json.h"
-#include "mongo/db/operation_context_impl.h"
+#include "mongo/db/op_observer_impl.h"
 #include "mongo/db/ops/update.h"
 #include "mongo/db/repl/master_slave.h"
 #include "mongo/db/repl/oplog.h"
+#include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/replication_coordinator_global.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/repl/sync_tail.h"
@@ -66,7 +68,8 @@ BSONObj f(const char* s) {
 
 class Base {
 protected:
-    mutable OperationContextImpl _txn;
+    const ServiceContext::UniqueOperationContext _txnPtr = cc().makeOperationContext();
+    OperationContext& _txn = *_txnPtr;
     mutable DBDirectClient _client;
 
 public:
@@ -75,6 +78,13 @@ public:
         replSettings.setOplogSizeBytes(10 * 1024 * 1024);
         replSettings.setMaster(true);
         setGlobalReplicationCoordinator(new repl::ReplicationCoordinatorMock(replSettings));
+
+        // Since the Client object persists across tests, even though the global
+        // ReplicationCoordinator does not, we need to clear the last op associated with the client
+        // to avoid the invariant in ReplClientInfo::setLastOp that the optime only goes forward.
+        repl::ReplClientInfo::forClient(_txn.getClient()).clearLastOp_forTest();
+
+        getGlobalServiceContext()->setOpObserver(stdx::make_unique<OpObserverImpl>());
 
         setOplogCollectionName();
         createOplog(&_txn);
@@ -127,7 +137,7 @@ protected:
             ::mongo::log() << "expected: " << expected.toString() << ", got: " << got.toString()
                            << endl;
         }
-        ASSERT_EQUALS(expected, got);
+        ASSERT_BSONOBJ_EQ(expected, got);
     }
     BSONObj oneOp() const {
         return _client.findOne(cllNS(), BSONObj());
@@ -162,7 +172,7 @@ protected:
             DBDirectClient db(&_txn);
             auto cursor = db.query(cllNS(), BSONObj());
             while (cursor->more()) {
-                ops.push_back(cursor->nextSafe().getOwned());
+                ops.push_back(cursor->nextSafeOwned());
             }
         }
         {
@@ -226,9 +236,10 @@ protected:
             coll = db->createCollection(&_txn, ns());
         }
 
+        OpDebug* const nullOpDebug = nullptr;
         if (o.hasField("_id")) {
             _txn.setReplicatedWrites(false);
-            coll->insertDocument(&_txn, o, true);
+            coll->insertDocument(&_txn, o, nullOpDebug, true);
             _txn.setReplicatedWrites(true);
             wunit.commit();
             return;
@@ -240,7 +251,7 @@ protected:
         b.appendOID("_id", &id);
         b.appendElements(o);
         _txn.setReplicatedWrites(false);
-        coll->insertDocument(&_txn, b.obj(), true);
+        coll->insertDocument(&_txn, b.obj(), nullOpDebug, true);
         _txn.setReplicatedWrites(true);
         wunit.commit();
     }
@@ -892,7 +903,8 @@ public:
         _client.insert("unittests.system.indexes",
                        BSON("ns" << ns() << "key" << BSON("a" << 1) << "name"
                                  << "foo"
-                                 << "sparse" << true));
+                                 << "sparse"
+                                 << true));
     }
     ~EmptyPushSparseIndex() {
         _client.dropIndexes(ns());
@@ -1369,7 +1381,7 @@ public:
     bool returnEmpty;
     SyncTest() : SyncTail(nullptr, SyncTail::MultiSyncApplyFunc()), returnEmpty(false) {}
     virtual ~SyncTest() {}
-    virtual BSONObj getMissingDoc(OperationContext* txn, Database* db, const BSONObj& o) {
+    virtual BSONObj getMissingDoc(OperationContext* txn, const BSONObj& o) {
         if (returnEmpty) {
             BSONObj o;
             return o;
@@ -1381,15 +1393,17 @@ public:
     }
 };
 
-class ShouldRetry : public Base {
+class FetchAndInsertMissingDocument : public Base {
 public:
     void run() {
         bool threw = false;
         BSONObj o = BSON("ns" << ns() << "o" << BSON("foo"
-                                                     << "bar") << "o2" << BSON("_id"
-                                                                               << "in oplog"
-                                                                               << "foo"
-                                                                               << "bar"));
+                                                     << "bar")
+                              << "o2"
+                              << BSON("_id"
+                                      << "in oplog"
+                                      << "foo"
+                                      << "bar"));
 
         ScopedTransaction transaction(&_txn, MODE_X);
         Lock::GlobalWrite lk(_txn.lockState());
@@ -1400,7 +1414,7 @@ public:
             badSource.setHostname("localhost:123");
 
             OldClientContext ctx(&_txn, ns());
-            badSource.getMissingDoc(&_txn, ctx.db(), o);
+            badSource.getMissingDoc(&_txn, o);
         } catch (DBException&) {
             threw = true;
         }
@@ -1408,14 +1422,16 @@ public:
 
         // now this should succeed
         SyncTest t;
-        verify(t.shouldRetry(&_txn, o));
-        verify(!_client.findOne(ns(),
-                                BSON("_id"
-                                     << "on remote")).isEmpty());
+        verify(t.fetchAndInsertMissingDocument(&_txn, o));
+        verify(!_client
+                    .findOne(ns(),
+                             BSON("_id"
+                                  << "on remote"))
+                    .isEmpty());
 
         // force it not to find an obj
         t.returnEmpty = true;
-        verify(!t.shouldRetry(&_txn, o));
+        verify(!t.fetchAndInsertMissingDocument(&_txn, o));
     }
 };
 
@@ -1482,7 +1498,7 @@ public:
         add<DeleteOpIsIdBased>();
         add<DatabaseIgnorerBasic>();
         add<DatabaseIgnorerUpdate>();
-        add<ShouldRetry>();
+        add<FetchAndInsertMissingDocument>();
     }
 };
 

@@ -73,54 +73,28 @@ struct ThreadOstreamCacheFinalizer {
 namespace logger {
 
 LogstreamBuilder::LogstreamBuilder(MessageLogDomain* domain,
-                                   std::string contextName,
+                                   StringData contextName,
                                    LogSeverity severity)
-    : LogstreamBuilder(
-          domain, std::move(contextName), std::move(severity), LogComponent::kDefault) {}
+    : LogstreamBuilder(domain, contextName, std::move(severity), LogComponent::kDefault) {}
 
 LogstreamBuilder::LogstreamBuilder(MessageLogDomain* domain,
-                                   std::string contextName,
+                                   StringData contextName,
                                    LogSeverity severity,
                                    LogComponent component,
                                    bool shouldCache)
     : _domain(domain),
-      _contextName(std::move(contextName)),
+      _contextName(contextName.toString()),
       _severity(std::move(severity)),
       _component(std::move(component)),
       _tee(nullptr),
       _shouldCache(shouldCache) {}
 
 LogstreamBuilder::LogstreamBuilder(logger::MessageLogDomain* domain,
-                                   const std::string& contextName,
+                                   StringData contextName,
                                    LabeledLevel labeledLevel)
-    : LogstreamBuilder(domain, std::move(contextName), static_cast<LogSeverity>(labeledLevel)) {
+    : LogstreamBuilder(domain, contextName, static_cast<LogSeverity>(labeledLevel)) {
     setBaseMessage(labeledLevel.getLabel());
 }
-
-LogstreamBuilder::LogstreamBuilder(LogstreamBuilder&& other)
-    : _domain(std::move(other._domain)),
-      _contextName(std::move(other._contextName)),
-      _severity(std::move(other._severity)),
-      _component(std::move(other._component)),
-      _baseMessage(std::move(other._baseMessage)),
-      _os(std::move(other._os)),
-      _tee(std::move(other._tee)),
-      _isTruncatable(other._isTruncatable),
-      _shouldCache(other._shouldCache) {}
-
-LogstreamBuilder& LogstreamBuilder::operator=(LogstreamBuilder&& other) {
-    _domain = std::move(other._domain);
-    _contextName = std::move(other._contextName);
-    _severity = std::move(other._severity);
-    _component = std::move(other._component);
-    _baseMessage = std::move(other._baseMessage);
-    _os = std::move(other._os);
-    _tee = std::move(other._tee);
-    _isTruncatable = std::move(other._isTruncatable);
-    _shouldCache = other._shouldCache;
-    return *this;
-}
-
 
 LogstreamBuilder::~LogstreamBuilder() {
     if (_os) {

@@ -27,7 +27,10 @@ opts = {
 var NUM_NODES = 3;
 var rst = new ReplSetTest({name: 'sslSet', nodes: NUM_NODES, nodeOptions: opts});
 rst.startSet();
-rst.initiate();
+
+// ReplSetTest.initiate() requires all nodes to be to be authorized to run replSetGetStatus.
+// TODO(SERVER-14017): Remove this in favor of using initiate() everywhere.
+rst.initiateWithAnyNodeAsPrimary();
 
 // Connect to master and do some basic operations
 var rstConn1 = rst.getPrimary();
@@ -38,17 +41,16 @@ assert.eq(1, rstConn1.getDB("test").a.count(), "Error interacting with replSet")
 
 print("===== UPGRADE disabled,keyFile -> allowSSL,sendKeyfile =====");
 authAllNodes();
-rst.upgradeSet(
-    {
-      sslMode: "allowSSL",
-      sslPEMKeyFile: SERVER_CERT,
-      sslAllowInvalidCertificates: "",
-      clusterAuthMode: "sendKeyFile",
-      keyFile: KEYFILE,
-      sslCAFile: CA_CERT
-    },
-    "root",
-    "pwd");
+rst.upgradeSet({
+    sslMode: "allowSSL",
+    sslPEMKeyFile: SERVER_CERT,
+    sslAllowInvalidCertificates: "",
+    clusterAuthMode: "sendKeyFile",
+    keyFile: KEYFILE,
+    sslCAFile: CA_CERT
+},
+               "root",
+               "pwd");
 authAllNodes();
 rst.awaitReplication();
 
@@ -57,17 +59,16 @@ rstConn2.getDB("test").a.insert({a: 2, str: "CHECKCHECKCHECK"});
 assert.eq(2, rstConn2.getDB("test").a.count(), "Error interacting with replSet");
 
 print("===== UPGRADE allowSSL,sendKeyfile -> preferSSL,sendX509 =====");
-rst.upgradeSet(
-    {
-      sslMode: "preferSSL",
-      sslPEMKeyFile: SERVER_CERT,
-      sslAllowInvalidCertificates: "",
-      clusterAuthMode: "sendX509",
-      keyFile: KEYFILE,
-      sslCAFile: CA_CERT
-    },
-    "root",
-    "pwd");
+rst.upgradeSet({
+    sslMode: "preferSSL",
+    sslPEMKeyFile: SERVER_CERT,
+    sslAllowInvalidCertificates: "",
+    clusterAuthMode: "sendX509",
+    keyFile: KEYFILE,
+    sslCAFile: CA_CERT
+},
+               "root",
+               "pwd");
 authAllNodes();
 rst.awaitReplication();
 
@@ -88,17 +89,16 @@ assert.eq(0, canConnectSSL, "SSL Connection attempt failed when it should succee
 
 print("===== UPGRADE preferSSL,sendX509 -> preferSSL,x509 =====");
 // we cannot upgrade past preferSSL here because it will break the test client
-rst.upgradeSet(
-    {
-      sslMode: "preferSSL",
-      sslPEMKeyFile: SERVER_CERT,
-      sslAllowInvalidCertificates: "",
-      clusterAuthMode: "x509",
-      keyFile: KEYFILE,
-      sslCAFile: CA_CERT
-    },
-    "root",
-    "pwd");
+rst.upgradeSet({
+    sslMode: "preferSSL",
+    sslPEMKeyFile: SERVER_CERT,
+    sslAllowInvalidCertificates: "",
+    clusterAuthMode: "x509",
+    keyFile: KEYFILE,
+    sslCAFile: CA_CERT
+},
+               "root",
+               "pwd");
 authAllNodes();
 rst.awaitReplication();
 var rstConn4 = rst.getPrimary();

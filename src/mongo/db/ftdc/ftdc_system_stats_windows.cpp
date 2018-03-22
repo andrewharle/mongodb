@@ -49,47 +49,47 @@ namespace mongo {
 namespace {
 
 const std::vector<StringData> kCpuCounters = {
-    "\\Processor(_Total)\\% Idle Time",
-    "\\Processor(_Total)\\% Interrupt Time",
-    "\\Processor(_Total)\\% Privileged Time",
-    "\\Processor(_Total)\\% Processor Time",
-    "\\Processor(_Total)\\% User Time",
-    "\\Processor(_Total)\\Interrupts/sec",
-    "\\System\\Context Switches/sec",
-    "\\System\\Processes",
-    "\\System\\Processor Queue Length",
-    "\\System\\System Up Time",
-    "\\System\\Threads",
+    "\\Processor(_Total)\\% Idle Time"_sd,
+    "\\Processor(_Total)\\% Interrupt Time"_sd,
+    "\\Processor(_Total)\\% Privileged Time"_sd,
+    "\\Processor(_Total)\\% Processor Time"_sd,
+    "\\Processor(_Total)\\% User Time"_sd,
+    "\\Processor(_Total)\\Interrupts/sec"_sd,
+    "\\System\\Context Switches/sec"_sd,
+    "\\System\\Processes"_sd,
+    "\\System\\Processor Queue Length"_sd,
+    "\\System\\System Up Time"_sd,
+    "\\System\\Threads"_sd,
 };
 
 const std::vector<StringData> kMemoryCounters = {
-    "\\Memory\\Available Bytes",
-    "\\Memory\\Cache Bytes",
-    "\\Memory\\Cache Faults/sec",
-    "\\Memory\\Committed Bytes",
-    "\\Memory\\Commit Limit",
-    "\\Memory\\Page Reads/sec",
-    "\\Memory\\Page Writes/sec",
-    "\\Memory\\Pages Input/sec",
-    "\\Memory\\Pages Output/sec",
-    "\\Memory\\Pool Nonpaged Bytes",
-    "\\Memory\\Pool Paged Bytes",
-    "\\Memory\\Pool Paged Resident Bytes",
-    "\\Memory\\System Cache Resident Bytes",
-    "\\Memory\\System Code Total Bytes",
+    "\\Memory\\Available Bytes"_sd,
+    "\\Memory\\Cache Bytes"_sd,
+    "\\Memory\\Cache Faults/sec"_sd,
+    "\\Memory\\Committed Bytes"_sd,
+    "\\Memory\\Commit Limit"_sd,
+    "\\Memory\\Page Reads/sec"_sd,
+    "\\Memory\\Page Writes/sec"_sd,
+    "\\Memory\\Pages Input/sec"_sd,
+    "\\Memory\\Pages Output/sec"_sd,
+    "\\Memory\\Pool Nonpaged Bytes"_sd,
+    "\\Memory\\Pool Paged Bytes"_sd,
+    "\\Memory\\Pool Paged Resident Bytes"_sd,
+    "\\Memory\\System Cache Resident Bytes"_sd,
+    "\\Memory\\System Code Total Bytes"_sd,
 
 };
 
 const std::vector<StringData> kDiskCounters = {
-    "\\PhysicalDisk(*)\\% Disk Read Time",
-    "\\PhysicalDisk(*)\\% Disk Write Time",
-    "\\PhysicalDisk(*)\\Avg. Disk Read Queue Length",
-    "\\PhysicalDisk(*)\\Avg. Disk Write Queue Length",
-    "\\PhysicalDisk(*)\\Disk Read Bytes/sec",
-    "\\PhysicalDisk(*)\\Disk Write Bytes/sec",
-    "\\PhysicalDisk(*)\\Disk Reads/sec",
-    "\\PhysicalDisk(*)\\Disk Writes/sec",
-    "\\PhysicalDisk(*)\\Current Disk Queue Length",
+    "\\PhysicalDisk(*)\\% Disk Read Time"_sd,
+    "\\PhysicalDisk(*)\\% Disk Write Time"_sd,
+    "\\PhysicalDisk(*)\\Avg. Disk Read Queue Length"_sd,
+    "\\PhysicalDisk(*)\\Avg. Disk Write Queue Length"_sd,
+    "\\PhysicalDisk(*)\\Disk Read Bytes/sec"_sd,
+    "\\PhysicalDisk(*)\\Disk Write Bytes/sec"_sd,
+    "\\PhysicalDisk(*)\\Disk Reads/sec"_sd,
+    "\\PhysicalDisk(*)\\Disk Writes/sec"_sd,
+    "\\PhysicalDisk(*)\\Current Disk Queue Length"_sd,
 };
 
 
@@ -140,6 +140,7 @@ StatusWith<std::unique_ptr<PerfCounterCollector>> createCollector() {
 }  // namespace
 
 void installSystemMetricsCollector(FTDCController* controller) {
+
     auto swCollector = createCollector();
     if (!swCollector.getStatus().isOK()) {
         warning() << "Failed to initialize Performance Counters for FTDC: "

@@ -1,3 +1,5 @@
+// @tags: [assumes_write_concern_unchanged]
+
 (function() {
     "use strict";
 
@@ -32,9 +34,7 @@
             if (db.getMongo().writeMode() === 'commands') {
                 assert.docEq(first, second);
             } else {
-                var overrideModifiedCount = {
-                    modifiedCount: undefined
-                };
+                var overrideModifiedCount = {modifiedCount: undefined};
                 assert.docEq(Object.merge(first, overrideModifiedCount),
                              Object.merge(second, overrideModifiedCount));
             }

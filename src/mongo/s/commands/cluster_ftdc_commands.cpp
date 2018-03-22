@@ -60,13 +60,35 @@ public:
         return true;
     }
 
-    bool isWriteCommandForConfigServer() const override {
+    bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
 
-    Status checkAuthForCommand(ClientBasic* client,
+    Status checkAuthForCommand(Client* client,
                                const std::string& dbname,
                                const BSONObj& cmdObj) override {
+
+        if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
+                ResourcePattern::forClusterResource(), ActionType::serverStatus)) {
+            return Status(ErrorCodes::Unauthorized, "Unauthorized");
+        }
+
+        if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
+                ResourcePattern::forClusterResource(), ActionType::replSetGetStatus)) {
+            return Status(ErrorCodes::Unauthorized, "Unauthorized");
+        }
+
+        if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
+                ResourcePattern::forClusterResource(), ActionType::connPoolStats)) {
+            return Status(ErrorCodes::Unauthorized, "Unauthorized");
+        }
+
+        if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
+                ResourcePattern::forExactNamespace(NamespaceString("local", "oplog.rs")),
+                ActionType::collStats)) {
+            return Status(ErrorCodes::Unauthorized, "Unauthorized");
+        }
+
         return Status::OK();
     }
 
@@ -76,9 +98,11 @@ public:
              int options,
              std::string& errmsg,
              BSONObjBuilder& result) override {
-        errmsg = "getDiagnosticData not allowed through mongos";
 
-        return false;
+        result.append(
+            "data", FTDCController::get(txn->getServiceContext())->getMostRecentPeriodicDocument());
+
+        return true;
     }
 };
 

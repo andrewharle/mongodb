@@ -27,7 +27,9 @@
 
 #include <stdexcept>
 
-#include <boost/filesystem/operations.hpp>
+#include <boost/filesystem/path.hpp>
+#include <codecvt>
+#include <locale>
 
 #include "mongo/base/init.h"
 #include "mongo/util/mongoutils/str.h"
@@ -49,6 +51,13 @@ MONGO_INITIALIZER_GENERAL(ValidateLocale, MONGO_NO_PREREQUISITES, MONGO_DEFAULT_
 #endif
                 << e.what());
     }
+
+#ifdef _WIN32
+    // Make boost filesystem treat all strings as UTF-8 encoded instead of CP_ACP.
+    std::locale loc(std::locale(""), new std::codecvt_utf8_utf16<wchar_t>);
+    boost::filesystem::path::imbue(loc);
+#endif
+
     return Status::OK();
 }
 

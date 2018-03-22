@@ -37,6 +37,12 @@ function _getErrorWithCode(codeOrObj, message) {
     return e;
 }
 
+// Checks if a javascript exception is a network error.
+function isNetworkError(error) {
+    return error.message.indexOf("error doing query") >= 0 ||
+        error.message.indexOf("socket exception") >= 0;
+}
+
 // Please consider using bsonWoCompare instead of this as much as possible.
 friendlyEqual = function(a, b) {
     if (a == b)
@@ -80,13 +86,6 @@ setVerboseShell = function(value) {
     if (value == undefined)
         value = true;
     _verboseShell = value;
-};
-
-argumentsToArray = function(a) {
-    var arr = [];
-    for (var i = 0; i < a.length; i++)
-        arr[i] = a[i];
-    return arr;
 };
 
 // Formats a simple stacked horizontal histogram bar in the shell.
@@ -159,8 +158,45 @@ print.captureAllOutput = function(fn, args) {
     return res;
 };
 
+var indentStr = function(indent, s) {
+    if (typeof(s) === "undefined") {
+        s = indent;
+        indent = 0;
+    }
+    if (indent > 0) {
+        indent = (new Array(indent + 1)).join(" ");
+        s = indent + s.replace(/\n/g, "\n" + indent);
+    }
+    return s;
+};
+
 if (typeof TestData == "undefined") {
     TestData = undefined;
+}
+
+function __sanitizeMatch(flag) {
+    var sanitizeMatch = /-fsanitize=([^\s]+) /.exec(getBuildInfo()["buildEnvironment"]["ccflags"]);
+    if (flag && sanitizeMatch && RegExp(flag).exec(sanitizeMatch[1])) {
+        return true;
+    } else {
+        return false;
+    }
+}
+
+function _isAddressSanitizerActive() {
+    return __sanitizeMatch("address");
+}
+
+function _isLeakSanitizerActive() {
+    return __sanitizeMatch("leak");
+}
+
+function _isThreadSanitizerActive() {
+    return __sanitizeMatch("thread");
+}
+
+function _isUndefinedBehaviorSanitizerActive() {
+    return __sanitizeMatch("undefined");
 }
 
 jsTestName = function() {
@@ -169,54 +205,46 @@ jsTestName = function() {
     return "__unknown_name__";
 };
 
-jsTestFile = function() {
-    if (TestData)
-        return TestData.testFile;
-    return "__unknown_file__";
-};
-
-jsTestPath = function() {
-    if (TestData)
-        return TestData.testPath;
-    return "__unknown_path__";
-};
-
-var _jsTestOptions = {
-    enableTestCommands: true
-};  // Test commands should be enabled by default
+var _jsTestOptions = {enableTestCommands: true};  // Test commands should be enabled by default
 
 jsTestOptions = function() {
     if (TestData) {
-        return Object.merge(
-            _jsTestOptions,
-            {
-              setParameters: TestData.setParameters,
-              setParametersMongos: TestData.setParametersMongos,
-              storageEngine: TestData.storageEngine,
-              storageEngineCacheSizeGB: TestData.storageEngineCacheSizeGB,
-              wiredTigerEngineConfigString: TestData.wiredTigerEngineConfigString,
-              wiredTigerCollectionConfigString: TestData.wiredTigerCollectionConfigString,
-              wiredTigerIndexConfigString: TestData.wiredTigerIndexConfigString,
-              noJournal: TestData.noJournal,
-              noJournalPrealloc: TestData.noJournalPrealloc,
-              auth: TestData.auth,
-              keyFile: TestData.keyFile,
-              authUser: "__system",
-              authPassword: TestData.keyFileData,
-              authMechanism: TestData.authMechanism,
-              adminUser: TestData.adminUser || "admin",
-              adminPassword: TestData.adminPassword || "password",
-              useLegacyConfigServers: TestData.useLegacyConfigServers || false,
-              useLegacyReplicationProtocol: TestData.useLegacyReplicationProtocol || false,
-              enableMajorityReadConcern: TestData.enableMajorityReadConcern,
-              enableEncryption: TestData.enableEncryption,
-              encryptionKeyFile: TestData.encryptionKeyFile,
-              auditDestination: TestData.auditDestination,
-              minPort: TestData.minPort,
-              maxPort: TestData.maxPort,
-              // Note: does not support the array version
-              mongosBinVersion: TestData.mongosBinVersion || "",
-            });
+        return Object.merge(_jsTestOptions, {
+            setParameters: TestData.setParameters,
+            setParametersMongos: TestData.setParametersMongos,
+            storageEngine: TestData.storageEngine,
+            storageEngineCacheSizeGB: TestData.storageEngineCacheSizeGB,
+            wiredTigerEngineConfigString: TestData.wiredTigerEngineConfigString,
+            wiredTigerCollectionConfigString: TestData.wiredTigerCollectionConfigString,
+            wiredTigerIndexConfigString: TestData.wiredTigerIndexConfigString,
+            noJournal: TestData.noJournal,
+            noJournalPrealloc: TestData.noJournalPrealloc,
+            auth: TestData.auth,
+            keyFile: TestData.keyFile,
+            authUser: TestData.authUser || "__system",
+            authPassword: TestData.keyFileData,
+            authenticationDatabase: TestData.authenticationDatabase || "admin",
+            authMechanism: TestData.authMechanism,
+            adminUser: TestData.adminUser || "admin",
+            adminPassword: TestData.adminPassword || "password",
+            useLegacyConfigServers: TestData.useLegacyConfigServers || false,
+            forceReplicationProtocolVersion: TestData.forceReplicationProtocolVersion,
+            enableMajorityReadConcern: TestData.enableMajorityReadConcern,
+            writeConcernMajorityShouldJournal: TestData.writeConcernMajorityShouldJournal,
+            enableEncryption: TestData.enableEncryption,
+            encryptionKeyFile: TestData.encryptionKeyFile,
+            auditDestination: TestData.auditDestination,
+            minPort: TestData.minPort,
+            maxPort: TestData.maxPort,
+            // Note: does not support the array version
+            mongosBinVersion: TestData.mongosBinVersion || "",
+            shardMixedBinVersions: TestData.shardMixedBinVersions || false,
+            networkMessageCompressors: TestData.networkMessageCompressors,
+            skipValidationOnInvalidViewDefinitions: TestData.skipValidationOnInvalidViewDefinitions,
+            forceValidationWithFeatureCompatibilityVersion:
+                TestData.forceValidationWithFeatureCompatibilityVersion,
+            skipValidationNamespaces: TestData.skipValidationNamespaces || [],
+        });
     }
     return _jsTestOptions;
 };
@@ -232,25 +260,12 @@ jsTestLog = function(msg) {
 jsTest = {};
 
 jsTest.name = jsTestName;
-jsTest.file = jsTestFile;
-jsTest.path = jsTestPath;
 jsTest.options = jsTestOptions;
 jsTest.setOption = setJsTestOption;
 jsTest.log = jsTestLog;
 jsTest.readOnlyUserRoles = ["read"];
 jsTest.basicUserRoles = ["dbOwner"];
 jsTest.adminUserRoles = ["root"];
-
-jsTest.dir = function() {
-    return jsTest.path().replace(/\/[^\/]+$/, "/");
-};
-
-jsTest.randomize = function(seed) {
-    if (seed == undefined)
-        seed = new Date().getTime();
-    Random.srand(seed);
-    print("Random seed for test : " + seed);
-};
 
 jsTest.authenticate = function(conn) {
     if (!jsTest.options().auth && !jsTest.options().keyFile) {
@@ -263,10 +278,9 @@ jsTest.authenticate = function(conn) {
             // Set authenticated to stop an infinite recursion from getDB calling
             // back into authenticate.
             conn.authenticated = true;
-            print("Authenticating as internal " + jsTestOptions().authUser +
-                  " user with mechanism " + DB.prototype._defaultAuthenticationMechanism +
-                  " on connection: " + conn);
-            conn.authenticated = conn.getDB('admin').auth({
+            print("Authenticating as user " + jsTestOptions().authUser + " with mechanism " +
+                  DB.prototype._defaultAuthenticationMechanism + " on connection: " + conn);
+            conn.authenticated = conn.getDB(jsTestOptions().authenticationDatabase).auth({
                 user: jsTestOptions().authUser,
                 pwd: jsTestOptions().authPassword,
             });
@@ -316,7 +330,15 @@ defaultPrompt = function() {
         var buildInfo = db.runCommand({buildInfo: 1});
         try {
             if (buildInfo.modules.indexOf("enterprise") > -1) {
-                prefix = "MongoDB Enterprise ";
+                prefix += "MongoDB Enterprise ";
+            }
+        } catch (e) {
+            // Don't do anything here. Just throw the error away.
+        }
+        var isMasterRes = db.runCommand({isMaster: 1, forShell: 1});
+        try {
+            if (isMasterRes.hasOwnProperty("automationServiceDescriptor")) {
+                prefix += "[automated] ";
             }
         } catch (e) {
             // Don't do anything here. Just throw the error away.
@@ -330,19 +352,12 @@ defaultPrompt = function() {
             try {
                 var prompt = replSetMemberStatePrompt();
                 // set our status that it was good
-                db.getMongo().authStatus = {
-                    replSetGetStatus: true,
-                    isMaster: true
-                };
+                db.getMongo().authStatus = {replSetGetStatus: true, isMaster: true};
                 return prefix + prompt;
             } catch (e) {
                 // don't have permission to run that, or requires auth
                 // print(e);
-                status = {
-                    authRequired: true,
-                    replSetGetStatus: false,
-                    isMaster: true
-                };
+                status = {authRequired: true, replSetGetStatus: false, isMaster: true};
             }
         }
         // auth detected
@@ -366,7 +381,7 @@ defaultPrompt = function() {
         // try to use isMaster?
         if (status.isMaster) {
             try {
-                var prompt = isMasterStatePrompt();
+                var prompt = isMasterStatePrompt(isMasterRes);
                 status.isMaster = true;
                 db.getMongo().authStatus = status;
                 return prefix + prompt;
@@ -378,9 +393,7 @@ defaultPrompt = function() {
     } catch (ex) {
         printjson(ex);
         // reset status and let it figure it out next time.
-        status = {
-            isMaster: true
-        };
+        status = {isMaster: true};
     }
 
     db.getMongo().authStatus = status;
@@ -413,9 +426,9 @@ replSetMemberStatePrompt = function() {
     return state + '> ';
 };
 
-isMasterStatePrompt = function() {
+isMasterStatePrompt = function(isMasterResponse) {
     var state = '';
-    var isMaster = db.runCommand({isMaster: 1, forShell: 1});
+    var isMaster = isMasterResponse || db.runCommand({isMaster: 1, forShell: 1});
     if (isMaster.ok) {
         var role = "";
 
@@ -580,8 +593,8 @@ shellAutocomplete = function(
 
     var worker = function(prefix) {
         var global = (function() {
-            return this;
-        }).call();  // trick to get global object
+                         return this;
+                     }).call();  // trick to get global object
 
         var curObj = global;
         var parts = prefix.split('.');
@@ -870,6 +883,39 @@ shellHelper.show = function(what) {
         }
     }
 
+    if (what == "automationNotices") {
+        var dbDeclared, ex;
+        try {
+            // !!db essentially casts db to a boolean
+            // Will throw a reference exception if db hasn't been declared.
+            dbDeclared = !!db;
+        } catch (ex) {
+            dbDeclared = false;
+        }
+
+        if (dbDeclared) {
+            var res = db.runCommand({isMaster: 1, forShell: 1});
+            if (!res.ok) {
+                print("Note: Cannot determine if automation is active");
+                return "";
+            }
+
+            if (res.hasOwnProperty("automationServiceDescriptor")) {
+                print("Note: This server is managed by automation service '" +
+                      res.automationServiceDescriptor + "'.");
+                print(
+                    "Note: Many administrative actions are inappropriate, and may be automatically reverted.");
+                return "";
+            }
+
+            return "";
+
+        } else {
+            print("Cannot show automationNotices, \"db\" is not set");
+            return "";
+        }
+    }
+
     throw Error("don't know how to show [" + what + "]");
 
 };
@@ -882,58 +928,105 @@ Math.sigFig = function(x, N) {
     return Math.round(x * p) / p;
 };
 
-Random = function() {};
+var Random = (function() {
+    var initialized = false;
+    var errorMsg =
+        "The random number generator hasn't been seeded yet; " + "call Random.setRandomSeed()";
 
-// set random seed
-Random.srand = function(s) {
-    return _srand(s);
-};
+    // Set the random generator seed.
+    function srand(s) {
+        initialized = true;
+        return _srand(s);
+    }
 
-// random number 0 <= r < 1
-Random.rand = function() {
-    return _rand();
-};
+    // Set the random generator seed & print the result.
+    function setRandomSeed(s) {
+        var seed = srand(s);
+        print("setting random seed: " + seed);
+    }
 
-// random integer 0 <= r < n
-Random.randInt = function(n) {
-    return Math.floor(Random.rand() * n);
-};
+    // Generate a random number 0 <= r < 1.
+    function rand() {
+        if (!initialized) {
+            throw new Error(errorMsg);
+        }
+        return _rand();
+    }
 
-Random.setRandomSeed = function(s) {
-    var seed = Random.srand(s);
-    print("setting random seed: " + seed);
-};
+    // Generate a random integer 0 <= r < n.
+    function randInt(n) {
+        if (!initialized) {
+            throw new Error(errorMsg);
+        }
+        return Math.floor(rand() * n);
+    }
 
-// generate a random value from the exponential distribution with the specified mean
-Random.genExp = function(mean) {
-    var r = Random.rand();
-    if (r == 0) {
-        r = Random.rand();
+    // Generate a random value from the exponential distribution with the specified mean.
+    function genExp(mean) {
+        if (!initialized) {
+            throw new Error(errorMsg);
+        }
+        var r = rand();
         if (r == 0) {
-            r = 0.000001;
+            r = rand();
+            if (r == 0) {
+                r = 0.000001;
+            }
+        }
+        return -Math.log(r) * mean;
+    }
+
+    /**
+     * Generate a random value from the normal distribution with specified 'mean' and
+     * 'standardDeviation'.
+     */
+    function genNormal(mean, standardDeviation) {
+        if (!initialized) {
+            throw new Error(errorMsg);
+        }
+        // See http://en.wikipedia.org/wiki/Marsaglia_polar_method
+        while (true) {
+            var x = (2 * rand()) - 1;
+            var y = (2 * rand()) - 1;
+            var s = (x * x) + (y * y);
+
+            if (s > 0 && s < 1) {
+                var standardNormal = x * Math.sqrt(-2 * Math.log(s) / s);
+                return mean + (standardDeviation * standardNormal);
+            }
         }
     }
-    return -Math.log(r) * mean;
-};
+
+    return {
+        genExp: genExp,
+        genNormal: genNormal,
+        rand: rand,
+        randInt: randInt,
+        setRandomSeed: setRandomSeed,
+        srand: srand,
+    };
+
+})();
 
 /**
- * Generate a random value from the normal distribution with specified 'mean' and
- * 'standardDeviation'.
+ * Compares Timestamp objects. Returns -1 if ts1 is 'earlier' than ts2, 1 if 'later'
+ * and 0 if equal.
  */
-Random.genNormal = function(mean, standardDeviation) {
-
-    // See http://en.wikipedia.org/wiki/Marsaglia_polar_method
-    while (true) {
-        var x = (2 * Random.rand()) - 1;
-        var y = (2 * Random.rand()) - 1;
-        var s = (x * x) + (y * y);
-
-        if (s > 0 && s < 1) {
-            var standardNormal = x * Math.sqrt(-2 * Math.log(s) / s);
-            return mean + (standardDeviation * standardNormal);
+function timestampCmp(ts1, ts2) {
+    if (ts1.getTime() == ts2.getTime()) {
+        if (ts1.getInc() < ts2.getInc()) {
+            return -1;
+        } else if (ts1.getInc() > ts2.getInc()) {
+            return 1;
+        } else {
+            return 0;
         }
+    } else if (ts1.getTime() < ts2.getTime()) {
+        return -1;
+    } else {
+        return 1;
     }
-};
+}
 
 Geo = {};
 Geo.distance = function(a, b) {
@@ -1012,9 +1105,7 @@ _awaitRSHostViaRSMonitor = function(hostAddr, desiredState, rsName, timeout) {
     timeout = timeout || 60 * 1000;
 
     if (desiredState == undefined) {
-        desiredState = {
-            ok: true
-        };
+        desiredState = {ok: true};
     }
 
     print("Awaiting " + hostAddr + " to be " + tojson(desiredState) + " in " + " rs " + rsName);
@@ -1116,7 +1207,7 @@ rs._runCmd = function(c) {
     try {
         res = db.adminCommand(c);
     } catch (e) {
-        if (("" + e).indexOf("error doing query") >= 0) {
+        if (isNetworkError(e)) {
             // closed connection.  reconnect.
             db.getLastErrorObj();
             var o = db.getLastErrorObj();
@@ -1136,9 +1227,7 @@ rs._runCmd = function(c) {
 };
 rs.reconfig = function(cfg, options) {
     cfg.version = rs.conf().version + 1;
-    cmd = {
-        replSetReconfig: cfg
-    };
+    cmd = {replSetReconfig: cfg};
     for (var i in options) {
         cmd[i] = options[i];
     }
@@ -1160,10 +1249,7 @@ rs.add = function(hostport, arb) {
         if (c.members[i]._id > max)
             max = c.members[i]._id;
     if (isString(hostport)) {
-        cfg = {
-            _id: max + 1,
-            host: hostport
-        };
+        cfg = {_id: max + 1, host: hostport};
         if (arb)
             cfg.arbiterOnly = true;
     } else if (arb == true) {
@@ -1181,9 +1267,7 @@ rs.syncFrom = function(host) {
     return db._adminCommand({replSetSyncFrom: host});
 };
 rs.stepDown = function(stepdownSecs, catchUpSecs) {
-    var cmdObj = {
-        replSetStepDown: stepdownSecs === undefined ? 60 : stepdownSecs
-    };
+    var cmdObj = {replSetStepDown: stepdownSecs === undefined ? 60 : stepdownSecs};
     if (catchUpSecs !== undefined) {
         cmdObj['secondaryCatchUpPeriodSecs'] = catchUpSecs;
     }
@@ -1242,9 +1326,7 @@ rs.debug.nullLastOpWritten = function(primary, secondary) {
     if (!last.value.o || !last.value.o._id) {
         print("couldn't find an _id?");
     } else {
-        last.value.o = {
-            _id: last.value.o._id
-        };
+        last.value.o = {_id: last.value.o._id};
     }
 
     print("nulling out this op:");
@@ -1259,6 +1341,52 @@ rs.debug.getLastOpWritten = function(server) {
     s.getMongo().setSlaveOk();
 
     return s.oplog.rs.find().sort({$natural: -1}).limit(1).next();
+};
+
+/**
+ * Compares OpTimes. Returns -1 if ot1 is 'earlier' than ot2, 1 if 'later' and 0 if equal.
+ *
+ * Note: Since Protocol Version 1 was introduced for replication, 'OpTimes'
+ * can come in two different formats. This function will throw an error when the OpTime
+ * passed do not have the same protocol version.
+ *
+ * OpTime Formats:
+ * PV0: Timestamp
+ * PV1: {ts:Timestamp, t:NumberLong}
+ */
+rs.compareOpTimes = function(ot1, ot2) {
+    function _isOpTimeV1(opTime) {
+        return (opTime.hasOwnProperty("ts") && opTime.hasOwnProperty("t"));
+    }
+    function _isEmptyOpTime(opTime) {
+        return (opTime.ts.getTime() == 0 && opTime.ts.getInc() == 0 && opTime.t == -1);
+    }
+
+    // Make sure both OpTimes have a timestamp and a term.
+    var ot1 = _isOpTimeV1(ot1) ? ot1 : {ts: ot1, t: NumberLong(-1)};
+    var ot2 = _isOpTimeV1(ot2) ? ot2 : {ts: ot2, t: NumberLong(-1)};
+
+    if (_isEmptyOpTime(ot1) || _isEmptyOpTime(ot2)) {
+        throw Error("cannot do comparison with empty OpTime, received: " + tojson(ot1) + " and " +
+                    tojson(ot2));
+    }
+
+    if ((ot1.t == -1 && ot2.t != -1) || (ot1.t != -1 && ot2.t == -1)) {
+        throw Error("cannot compare OpTimes between different protocol versions, received: " +
+                    tojson(ot1) + " and " + tojson(ot2));
+    }
+
+    if (!friendlyEqual(ot1.t, ot2.t)) {
+        if (ot1.t < ot2.t) {
+            return -1;
+        } else {
+            return 1;
+        }
+    }
+    // else equal terms, so proceed to compare timestamp component.
+
+    // Otherwise, choose the OpTime with the lower timestamp.
+    return timestampCmp(ot1.ts, ot2.ts);
 };
 
 help = shellHelper.help = function(x) {

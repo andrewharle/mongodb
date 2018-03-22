@@ -32,7 +32,6 @@
 #include <vector>
 
 #include "mongo/db/auth/authorization_session.h"
-#include "mongo/db/auth/authz_session_external_state.h"
 #include "mongo/db/auth/user.h"
 
 namespace mongo {
@@ -41,15 +40,11 @@ class AuthorizationSessionForTest : public AuthorizationSession {
     MONGO_DISALLOW_COPYING(AuthorizationSessionForTest);
 
 public:
+    using AuthorizationSession::AuthorizationSession;
+
     // A database name used for testing purposes, deliberately named to minimize collisions with
     // other test users.
-    static const StringData kTestDBName;
-
-    /**
-     * Construct a new AuthorizationSessionForTest, taking ownership of 'externalState'.
-     */
-    explicit AuthorizationSessionForTest(std::unique_ptr<AuthzSessionExternalState> externalState)
-        : AuthorizationSession(std::move(externalState)) {}
+    static constexpr StringData kTestDBName = "authorizationSessionForTestDB"_sd;
 
     /**
      * Cleans up any privileges granted via assumePrivilegesForDB().

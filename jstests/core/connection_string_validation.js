@@ -8,49 +8,63 @@ if (db.getMongo().host.indexOf(":") >= 0) {
     port = db.getMongo().host.substring(idx + 1);
 }
 
-var goodStrings = ["localhost:" + port + "/test", "127.0.0.1:" + port + "/test"];
-
-var badStrings = [
-    {s: undefined, r: /^Missing connection string$/},
-    {s: 7, r: /^Incorrect type/},
-    {s: null, r: /^Incorrect type/},
-    {s: "", r: /^Empty connection string$/},
-    {s: "    ", r: /^Empty connection string$/},
-    {s: ":", r: /^Missing host name/},
-    {s: "/", r: /^Missing host name/},
-    {s: ":/", r: /^Missing host name/},
-    {s: ":/test", r: /^Missing host name/},
-    {s: ":" + port + "/", r: /^Missing host name/},
-    {s: ":" + port + "/test", r: /^Missing host name/},
-    {s: "/test", r: /^Missing host name/},
-    {s: "localhost:/test", r: /^Missing port number/},
-    {s: "127.0.0.1:/test", r: /^Missing port number/},
-    {s: "127.0.0.1:cat/test", r: /^Invalid port number/},
-    {s: "127.0.0.1:1cat/test", r: /^Invalid port number/},
-    {s: "127.0.0.1:123456/test", r: /^Invalid port number/},
-    {s: "127.0.0.1:65536/test", r: /^Invalid port number/},
-    {s: "::1:65536/test", r: /^Invalid port number/},
-    {s: "127.0.0.1:" + port + "/", r: /^Missing database name/},
-    {s: "::1:" + port + "/", r: /^Missing database name/}
+var goodStrings = [
+    "localhost:" + port + "/test",
+    "127.0.0.1:" + port + "/test",
+    "127.0.0.1:" + port + "/",
 ];
 
-function testGood(i, connectionString) {
-    print("\nTesting good connection string " + i + " (\"" + connectionString + "\") ...");
+var missingConnString = /^Missing connection string$/;
+var incorrectType = /^Incorrect type/;
+var emptyConnString = /^Empty connection string$/;
+var badHost = /^Failed to parse mongodb/;
+var emptyHost = /^Empty host component/;
+var noPort = /^No digits/;
+var badPort = /^Bad digit/;
+var invalidPort = /^Port number \d+ out of range/;
+var multipleColon = /^More than one ':' detected./;
+var noReplSet = /^connect failed to replica set/;
+var badStrings = [
+    {s: undefined, r: missingConnString},
+    {s: 7, r: incorrectType},
+    {s: null, r: incorrectType},
+    {s: "", r: emptyConnString},
+    {s: "    ", r: emptyConnString},
+    {s: ":", r: emptyHost},
+    {s: "/", r: badHost},
+    {s: "/test", r: badHost},
+    {s: ":/", r: emptyHost},
+    {s: ":/test", r: emptyHost},
+    {s: "mongodb://:" + port + "/", r: emptyHost},
+    {s: "mongodb://:" + port + "/test", r: emptyHost},
+    {s: "mongodb://localhost:/test", r: noPort},
+    {s: "mongodb://127.0.0.1:/test", r: noPort},
+    {s: "mongodb://127.0.0.1:cat/test", r: badPort},
+    {s: "mongodb://127.0.0.1:1cat/test", r: badPort},
+    {s: "mongodb://127.0.0.1:123456/test", r: invalidPort},
+    {s: "mongodb://127.0.0.1:65536/test", r: invalidPort},
+    {s: "mongodb://::1:65536/test", r: multipleColon},
+    {s: "mongodb://::1:" + port + "/", r: multipleColon}
+];
+
+function testGoodAsURI(i, uri) {
+    uri = "mongodb://" + uri;
+    print("\nTesting good uri " + i + " (\"" + uri + "\") ...");
     var gotException = false;
     var exception;
     try {
-        var connectDB = connect(connectionString);
+        var m_uri = MongoURI(uri);
+        var connectDB = connect(uri);
         connectDB = null;
     } catch (e) {
         gotException = true;
         exception = e;
     }
     if (!gotException) {
-        print("Good connection string " + i + " (\"" + connectionString +
-              "\") correctly validated");
+        print("Good uri " + i + " (\"" + uri + "\") correctly validated");
         return;
     }
-    var message = "FAILED to correctly validate goodString " + i + " (\"" + connectionString +
+    var message = "FAILED to correctly validate goodString " + i + " (\"" + uri +
         "\"):  exception was \"" + tojson(exception) + "\"";
     doassert(message);
 }
@@ -89,7 +103,7 @@ function testBad(i, connectionString, errorRegex) {
 var i;
 jsTest.log("TESTING " + goodStrings.length + " good connection strings");
 for (i = 0; i < goodStrings.length; ++i) {
-    testGood(i, goodStrings[i]);
+    testGoodAsURI(i, goodStrings[i]);
 }
 
 jsTest.log("TESTING " + badStrings.length + " bad connection strings");

@@ -36,6 +36,7 @@
 
 namespace mongo {
 
+class CollatorInterface;
 class LogBuilder;
 
 /**
@@ -146,27 +147,41 @@ public:
      *     array before operating on it.
      */
     virtual Status log(LogBuilder* logBuilder) const = 0;
+
+    /**
+     * Set the collation on the modifier.  This is a no-op on modifiers that are not
+     * collation-aware.
+     *
+     * setCollator() should update any initialization that occured during init() to respect the
+     * provided collator, which may be different than the collator provided in the modifier
+     * options.
+     *
+     * If setCollator() is called, it is required that the current collator of the modifier is
+     * the simple collator (nullptr).
+     *
+     * The collator must outlive the modifier interface.
+     */
+    virtual void setCollator(const CollatorInterface* collator) = 0;
 };
 
 /**
  * Options used to control Modifier behavior
  */
 struct ModifierInterface::Options {
-    Options() : fromReplication(false), enforceOkForStorage(true) {}
-    Options(bool repl, bool ofs) : fromReplication(repl), enforceOkForStorage(ofs) {}
+    Options() = default;
+    Options(bool repl, bool ofs, const CollatorInterface* collator)
+        : fromReplication(repl), enforceOkForStorage(ofs), collator(collator) {}
 
-    static Options normal() {
-        return Options(false, true);
+    static Options normal(const CollatorInterface* collator = nullptr) {
+        return Options(false, true, collator);
     }
-    static Options fromRepl() {
-        return Options(true, false);
-    }
-    static Options unchecked() {
-        return Options(false, false);
+    static Options fromRepl(const CollatorInterface* collator = nullptr) {
+        return Options(true, false, collator);
     }
 
-    bool fromReplication;
-    bool enforceOkForStorage;
+    bool fromReplication = false;
+    bool enforceOkForStorage = true;
+    const CollatorInterface* collator = nullptr;
 };
 
 struct ModifierInterface::ExecInfo {
@@ -190,11 +205,17 @@ struct ModifierInterface::ExecInfo {
     ExecInfo() : noOp(false), context(ANY_CONTEXT) {
         for (int i = 0; i < MAX_NUM_FIELDS; i++) {
             fieldRef[i] = NULL;
+            indexOfArrayWithNewElement[i] = boost::none;
         }
     }
 
     // The fields of concern to the driver: no other op may modify the fields listed here.
     FieldRef* fieldRef[MAX_NUM_FIELDS];  // not owned here
+
+    // For each modified field ref, the index of the path component representing an existing array
+    // that gained a new element.
+    boost::optional<size_t> indexOfArrayWithNewElement[MAX_NUM_FIELDS];
+
     bool noOp;
     UpdateContext context;
 };

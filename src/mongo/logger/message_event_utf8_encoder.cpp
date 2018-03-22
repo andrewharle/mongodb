@@ -31,9 +31,11 @@
 
 #include <iostream>
 
+#include "mongo/logger/max_log_size.h"
 #include "mongo/util/time_support.h"
 
 namespace mongo {
+
 namespace logger {
 
 static MessageEventDetailsEncoder::DateFormatter _dateFormatter = outputDateAsISOStringLocal;
@@ -48,16 +50,16 @@ MessageEventDetailsEncoder::DateFormatter MessageEventDetailsEncoder::getDateFor
 
 namespace {
 #ifdef _WIN32
-const auto kEOL = StringData("\r\n", StringData::LiteralTag());
+constexpr auto kEOL = "\r\n"_sd;
 #else
-const auto kEOL = StringData("\n", StringData::LiteralTag());
+constexpr auto kEOL = "\n"_sd;
 #endif
 }  // namespace
 
 MessageEventDetailsEncoder::~MessageEventDetailsEncoder() {}
 std::ostream& MessageEventDetailsEncoder::encode(const MessageEventEphemeral& event,
                                                  std::ostream& os) {
-    static const size_t maxLogLine = 10 * 1024;
+    const size_t maxLogSize = MaxLogSizeKB::get() * 1024;
 
     _dateFormatter(os, event.getDate());
     os << ' ';
@@ -95,12 +97,12 @@ std::ostream& MessageEventDetailsEncoder::encode(const MessageEventEphemeral& ev
     }
 #endif
 
-    if (event.isTruncatable() && msg.size() > maxLogLine) {
+    if (event.isTruncatable() && msg.size() > maxLogSize) {
         os << "warning: log line attempted (" << msg.size() / 1024 << "kB) over max size ("
-           << maxLogLine / 1024 << "kB), printing beginning and end ... ";
-        os << msg.substr(0, maxLogLine / 3);
+           << MaxLogSizeKB::get() << "kB), printing beginning and end ... ";
+        os << msg.substr(0, maxLogSize / 3);
         os << " .......... ";
-        os << msg.substr(msg.size() - (maxLogLine / 3));
+        os << msg.substr(msg.size() - (maxLogSize / 3));
     } else {
         os << msg;
     }

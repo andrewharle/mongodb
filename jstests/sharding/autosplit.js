@@ -1,17 +1,26 @@
+/**
+ * This test confirms that chunks get split as they grow due to data insertion.
+ */
 (function() {
+    'use strict';
 
-    var s = new ShardingTest({name: "auto1", shards: 2, mongos: 1, other: {enableAutoSplit: true}});
+    var s = new ShardingTest({
+        name: "auto1",
+        shards: 2,
+        mongos: 1,
+        other: {enableAutoSplit: true, chunkSize: 10},
+    });
 
-    s.adminCommand({enablesharding: "test"});
+    assert.commandWorked(s.s0.adminCommand({enablesharding: "test"}));
     s.ensurePrimaryShard('test', 'shard0001');
-    s.adminCommand({shardcollection: "test.foo", key: {num: 1}});
+    assert.commandWorked(s.s0.adminCommand({shardcollection: "test.foo", key: {num: 1}}));
 
-    bigString = "";
+    var bigString = "";
     while (bigString.length < 1024 * 50)
         bigString += "asocsancdnsjfnsdnfsjdhfasdfasdfasdfnsadofnsadlkfnsaldknfsad";
 
-    db = s.getDB("test");
-    coll = db.foo;
+    var db = s.getDB("test");
+    var coll = db.foo;
 
     var i = 0;
 
@@ -21,16 +30,16 @@
     }
     assert.writeOK(bulk.execute());
 
-    primary = s.getServer("test").getDB("test");
+    var primary = s.getPrimaryShard("test").getDB("test");
 
-    counts = [];
+    var counts = [];
 
     s.printChunks();
     counts.push(s.config.chunks.count());
     assert.eq(100, db.foo.find().itcount());
 
     print("datasize: " +
-          tojson(s.getServer("test").getDB("admin").runCommand({datasize: "test.foo"})));
+          tojson(s.getPrimaryShard("test").getDB("admin").runCommand({datasize: "test.foo"})));
 
     bulk = coll.initializeUnorderedBulkOp();
     for (; i < 200; i++) {
@@ -63,7 +72,7 @@
     counts.push(s.config.chunks.count());
 
     assert(counts[counts.length - 1] > counts[0], "counts 1 : " + tojson(counts));
-    sorted = counts.slice(0);
+    var sorted = counts.slice(0);
     // Sort doesn't sort numbers correctly by default, resulting in fail
     sorted.sort(function(a, b) {
         return a - b;
@@ -75,5 +84,4 @@
     printjson(db.stats());
 
     s.stop();
-
 })();

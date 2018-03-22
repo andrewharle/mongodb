@@ -9,7 +9,7 @@ env.Library(
         'thread_pool.cpp',
     ],
     LIBDEPS=[
-        '$BUILD_DIR/mongo/util/foundation',
+        '$BUILD_DIR/mongo/base',
     ],
 )
 
@@ -30,6 +30,7 @@ env.CppUnitTest(
     LIBDEPS=[
         'thread_pool',
         'thread_pool_test_fixture',
+        '$BUILD_DIR/mongo/unittest/concurrency',
     ])
 
 env.Library('ticketholder',
@@ -37,15 +38,14 @@ env.Library('ticketholder',
             LIBDEPS=['$BUILD_DIR/mongo/base',
                      '$BUILD_DIR/third_party/shim_boost'])
 
-env.Library(
-    target='synchronization',
-    source=[
-        'synchronization.cpp'
-    ],
+
+env.CppUnitTest(
+    target='ticketholder_test',
+    source=['ticketholder_test.cpp'],
     LIBDEPS=[
-        '$BUILD_DIR/mongo/base',
-    ],
-)
+        'ticketholder',
+        '$BUILD_DIR/mongo/unittest/unittest',
+    ])
 
 env.Library(
     target='spin_lock',
@@ -62,20 +62,6 @@ env.CppUnitTest(
     LIBDEPS=[
         'spin_lock',
         '$BUILD_DIR/third_party/shim_boost',
-    ],
-)
-
-env.Library(
-    target='task',
-    source=[
-        'task.cpp',
-    ],
-    LIBDEPS=[
-        '$BUILD_DIR/mongo/util/background_job',
-    ],
-    LIBDEPS_TAGS=[
-        # Depends on inShutdown
-        'incomplete',
     ],
 )
 

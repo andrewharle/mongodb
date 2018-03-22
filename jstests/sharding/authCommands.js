@@ -1,18 +1,22 @@
 /**
  * This tests using DB commands with authentication enabled when sharded.
  */
-var doTest = function() {
+(function() {
+    'use strict';
+    load("jstests/replsets/rslib.js");
 
-    var rsOpts = {
-        oplogSize: 10,
-        useHostname: false
-    };
     var st = new ShardingTest({
-        keyFile: 'jstests/libs/key1',
         shards: 2,
-        chunksize: 2,
-        rs: rsOpts,
-        other: {nopreallocj: 1, useHostname: false, enableAutoSplit: true}
+        rs: {oplogSize: 10, useHostname: false},
+        other: {
+            // Temporarily increasing mongos/config verbosity for BF insight (SERVER-28519)
+            mongosOptions: {verbose: 1},
+            configOptions: {verbose: 1},
+            keyFile: 'jstests/libs/key1',
+            useHostname: false,
+            chunkSize: 2,
+            enableAutoSplit: true
+        },
     });
 
     var mongos = st.s;
@@ -32,13 +36,13 @@ var doTest = function() {
 
     // Secondaries should be up here, since we awaitReplication in the ShardingTest, but we *don't*
     // wait for the mongos to explicitly detect them.
-    ReplSetTest.awaitRSClientHosts(mongos, st.rs0.getSecondaries(), {ok: true, secondary: true});
-    ReplSetTest.awaitRSClientHosts(mongos, st.rs1.getSecondaries(), {ok: true, secondary: true});
+    awaitRSClientHosts(mongos, st.rs0.getSecondaries(), {ok: true, secondary: true});
+    awaitRSClientHosts(mongos, st.rs1.getSecondaries(), {ok: true, secondary: true});
 
     testDB.createUser({user: rwUser, pwd: password, roles: jsTest.basicUserRoles});
     testDB.createUser({user: roUser, pwd: password, roles: jsTest.readOnlyUserRoles});
 
-    authenticatedConn = new Mongo(mongos.host);
+    var authenticatedConn = new Mongo(mongos.host);
     authenticatedConn.getDB('admin').auth(rwUser, password);
 
     // Add user to shards to prevent localhost connections from having automatic full access
@@ -88,6 +92,7 @@ var doTest = function() {
     var map = function() {
         emit(this.i, this.j);
     };
+
     var reduce = function(key, values) {
         var jCount = 0;
         values.forEach(function(j) {
@@ -99,7 +104,7 @@ var doTest = function() {
     var checkCommandSucceeded = function(db, cmdObj) {
         print("Running command that should succeed: ");
         printjson(cmdObj);
-        resultObj = db.runCommand(cmdObj);
+        var resultObj = db.runCommand(cmdObj);
         printjson(resultObj);
         assert(resultObj.ok);
         return resultObj;
@@ -108,7 +113,7 @@ var doTest = function() {
     var checkCommandFailed = function(db, cmdObj) {
         print("Running command that should fail: ");
         printjson(cmdObj);
-        resultObj = db.runCommand(cmdObj);
+        var resultObj = db.runCommand(cmdObj);
         printjson(resultObj);
         assert(!resultObj.ok);
         return resultObj;
@@ -132,12 +137,10 @@ var doTest = function() {
             assert.eq(100, res.results.length);
             assert.eq(45, res.results[0].value);
 
-            res = checkCommandSucceeded(
-                testDB,
-                {
-                  aggregate: 'foo',
-                  pipeline: [{$project: {j: 1}}, {$group: {_id: 'j', sum: {$sum: '$j'}}}]
-                });
+            res = checkCommandSucceeded(testDB, {
+                aggregate: 'foo',
+                pipeline: [{$project: {j: 1}}, {$group: {_id: 'j', sum: {$sum: '$j'}}}]
+            });
             assert.eq(4500, res.result[0].sum);
         } else {
             print("Checking read operations, should fail");
@@ -148,12 +151,10 @@ var doTest = function() {
             checkCommandFailed(testDB, {collstats: 'foo'});
             checkCommandFailed(testDB,
                                {mapreduce: 'foo', map: map, reduce: reduce, out: {inline: 1}});
-            checkCommandFailed(
-                testDB,
-                {
-                  aggregate: 'foo',
-                  pipeline: [{$project: {j: 1}}, {$group: {_id: 'j', sum: {$sum: '$j'}}}]
-                });
+            checkCommandFailed(testDB, {
+                aggregate: 'foo',
+                pipeline: [{$project: {j: 1}}, {$group: {_id: 'j', sum: {$sum: '$j'}}}]
+            });
         }
     };
 
@@ -161,7 +162,7 @@ var doTest = function() {
         if (hasWriteAuth) {
             print("Checking write operations, should work");
             testDB.foo.insert({a: 1, i: 1, j: 1});
-            res = checkCommandSucceeded(
+            var res = checkCommandSucceeded(
                 testDB, {findAndModify: "foo", query: {a: 1, i: 1, j: 1}, update: {$set: {b: 1}}});
             assert.eq(1, res.value.a);
             assert.eq(null, res.value.b);
@@ -194,11 +195,11 @@ var doTest = function() {
                                {mapreduce: 'foo', map: map, reduce: reduce, out: 'mrOutput'});
             checkCommandFailed(testDB, {drop: 'foo'});
             checkCommandFailed(testDB, {dropDatabase: 1});
-            passed = true;
+            var passed = true;
             try {
                 // For some reason when create fails it throws an exception instead of just
                 // returning ok:0
-                res = testDB.runCommand({create: 'baz'});
+                var res = testDB.runCommand({create: 'baz'});
                 if (!res.ok) {
                     passed = false;
                 }
@@ -220,7 +221,7 @@ var doTest = function() {
             checkCommandSucceeded(adminDB, {isdbgrid: 1});
             checkCommandSucceeded(adminDB, {ismaster: 1});
             checkCommandSucceeded(adminDB, {split: 'test.foo', find: {i: 1, j: 1}});
-            chunk = configDB.chunks.findOne({shard: st.rs0.name});
+            var chunk = configDB.chunks.findOne({shard: st.rs0.name});
             checkCommandSucceeded(
                 adminDB,
                 {moveChunk: 'test.foo', find: chunk.min, to: st.rs1.name, _waitForDelete: true});
@@ -233,10 +234,7 @@ var doTest = function() {
             checkCommandSucceeded(adminDB, {isdbgrid: 1});
             checkCommandSucceeded(adminDB, {ismaster: 1});
             checkCommandFailed(adminDB, {split: 'test.foo', find: {i: 1, j: 1}});
-            chunkKey = {
-                i: {$minKey: 1},
-                j: {$minKey: 1}
-            };
+            var chunkKey = {i: {$minKey: 1}, j: {$minKey: 1}};
             checkCommandFailed(
                 adminDB,
                 {moveChunk: 'test.foo', find: chunkKey, to: st.rs1.name, _waitForDelete: true});
@@ -249,7 +247,7 @@ var doTest = function() {
             checkCommandSucceeded(adminDB, {removeshard: st.rs1.name});
             // Wait for shard to be completely removed
             checkRemoveShard = function() {
-                res = checkCommandSucceeded(adminDB, {removeshard: st.rs1.name});
+                var res = checkCommandSucceeded(adminDB, {removeshard: st.rs1.name});
                 return res.msg == 'removeshard completed successfully';
             };
             assert.soon(checkRemoveShard, "failed to remove shard");
@@ -297,16 +295,14 @@ var doTest = function() {
     assert(adminDB.auth(rwUser, password));
     assert(testDB.dropDatabase().ok);
     checkRemoveShard(true);
-    adminDB.printShardingStatus();
+    st.printShardingStatus();
 
     jsTestLog("Check adding a shard");
     assert(adminDB.logout().ok);
     checkAddShard(false);
     assert(adminDB.auth(rwUser, password));
     checkAddShard(true);
-    adminDB.printShardingStatus();
+    st.printShardingStatus();
 
     st.stop();
-};
-
-doTest();
+})();

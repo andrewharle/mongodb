@@ -34,7 +34,7 @@
 #include "mongo/base/disallow_copying.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/repl/optime.h"
-#include "mongo/db/repl/replica_set_config.h"
+#include "mongo/db/repl/repl_set_config.h"
 #include "mongo/db/repl/replication_executor.h"
 #include "mongo/db/repl/scatter_gather_algorithm.h"
 #include "mongo/platform/unordered_set.h"
@@ -47,7 +47,6 @@ class Status;
 namespace repl {
 
 class ScatterGatherRunner;
-class ReplSetDeclareRequestVotesArgs;
 
 class VoteRequester {
     MONGO_DISALLOW_COPYING(VoteRequester);
@@ -61,7 +60,7 @@ public:
 
     class Algorithm : public ScatterGatherAlgorithm {
     public:
-        Algorithm(const ReplicaSetConfig& rsConfig,
+        Algorithm(const ReplSetConfig& rsConfig,
                   long long candidateIndex,
                   long long term,
                   bool dryRun,
@@ -85,7 +84,7 @@ public:
         unordered_set<HostAndPort> getResponders() const;
 
     private:
-        const ReplicaSetConfig _rsConfig;
+        const ReplSetConfig _rsConfig;
         const long long _candidateIndex;
         const long long _term;
         bool _dryRun = false;  // this bool indicates this is a mock election when true
@@ -105,26 +104,19 @@ public:
      * in currentConfig, in attempt to receive sufficient votes to win the election.
      *
      * evh can be used to schedule a callback when the process is complete.
-     * This function must be run in the executor, as it must be synchronous with the command
-     * callbacks that it schedules.
      * If this function returns Status::OK(), evh is then guaranteed to be signaled.
      **/
-    StatusWith<ReplicationExecutor::EventHandle> start(
-        ReplicationExecutor* executor,
-        const ReplicaSetConfig& rsConfig,
-        long long candidateIndex,
-        long long term,
-        bool dryRun,
-        OpTime lastDurableOpTime,
-        const stdx::function<void()>& onCompletion = stdx::function<void()>());
+    StatusWith<ReplicationExecutor::EventHandle> start(ReplicationExecutor* executor,
+                                                       const ReplSetConfig& rsConfig,
+                                                       long long candidateIndex,
+                                                       long long term,
+                                                       bool dryRun,
+                                                       OpTime lastDurableOpTime);
 
     /**
-     * Informs the VoteRequester to cancel further processing.  The "executor"
-     * argument must point to the same executor passed to "start()".
-     *
-     * Like start(), this method must run in the executor context.
+     * Informs the VoteRequester to cancel further processing.
      */
-    void cancel(ReplicationExecutor* executor);
+    void cancel();
 
     Result getResult() const;
     unordered_set<HostAndPort> getResponders() const;

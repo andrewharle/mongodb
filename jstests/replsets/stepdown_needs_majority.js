@@ -51,9 +51,7 @@
     var primary = replTest.getPrimary();
     var testDB = primary.getDB('testdb');
     var coll = testDB[name];
-    var dummy_doc = {
-        "dummy_key": "dummy_val"
-    };
+    var dummy_doc = {"dummy_key": "dummy_val"};
     var timeout = 5 * 60 * 1000;
 
     //

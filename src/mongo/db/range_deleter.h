@@ -42,7 +42,7 @@
 #include "mongo/stdx/mutex.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/util/concurrency/mutex.h"
-#include "mongo/util/concurrency/synchronization.h"
+#include "mongo/util/concurrency/notification.h"
 #include "mongo/util/time_support.h"
 
 namespace mongo {
@@ -138,7 +138,7 @@ public:
      */
     bool queueDelete(OperationContext* txn,
                      const RangeDeleterOptions& options,
-                     Notification* notifyDone,
+                     Notification<void>* doneSignal,
                      std::string* errMsg);
 
     /**
@@ -254,6 +254,7 @@ struct DeleteJobStats {
     Date_t deleteEndTS;
     Date_t waitForReplStartTS;
     Date_t waitForReplEndTS;
+    Milliseconds waitForReplDurationMs;
 
     long long int deletedDocCount;
 
@@ -286,7 +287,7 @@ struct RangeDeleteEntry {
 
     // Not owned here.
     // Important invariant: Can only be set and used by one thread.
-    Notification* notifyDone;
+    Notification<void>* doneSignal;
 
     // Time since the last time we reported this object.
     Date_t lastLoggedTS;
@@ -314,6 +315,7 @@ struct RangeDeleterEnv {
     virtual bool deleteRange(OperationContext* txn,
                              const RangeDeleteEntry& taskDetails,
                              long long int* deletedDocs,
+                             Milliseconds& replWaitDuration,
                              std::string* errMsg) = 0;
 
     /**

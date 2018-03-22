@@ -28,9 +28,9 @@
 
 #pragma once
 
-#include <string>
-#include <memory>
 #include <functional>
+#include <memory>
+#include <string>
 
 #include "mongo/base/disallow_copying.h"
 #include "mongo/base/status.h"
@@ -38,6 +38,7 @@
 #include "mongo/base/string_data.h"
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/executor/remote_command_response.h"
+#include "mongo/platform/hash_namespace.h"
 #include "mongo/stdx/functional.h"
 #include "mongo/util/time_support.h"
 
@@ -82,7 +83,7 @@ public:
     class EventState;
     class EventHandle;
 
-    using ResponseStatus = StatusWith<RemoteCommandResponse>;
+    using ResponseStatus = RemoteCommandResponse;
 
     /**
      * Type of a regular callback function.
@@ -135,7 +136,7 @@ public:
     /**
      * Returns diagnostic information.
      */
-    virtual std::string getDiagnosticString() = 0;
+    virtual std::string getDiagnosticString() const = 0;
 
     /**
      * Gets the current time.  Callbacks should use this method to read the system clock.
@@ -194,6 +195,8 @@ public:
 
     /**
      * Schedules "work" to be run by the executor no sooner than "when".
+     *
+     * If "when" is <= now(), then it schedules the "work" to be run ASAP.
      *
      * Returns a handle for waiting on or canceling the callback, or
      * ErrorCodes::ShutdownInProgress.
@@ -404,24 +407,23 @@ struct TaskExecutor::RemoteCommandCallbackArgs {
     RemoteCommandCallbackArgs(TaskExecutor* theExecutor,
                               const CallbackHandle& theHandle,
                               const RemoteCommandRequest& theRequest,
-                              const StatusWith<RemoteCommandResponse>& theResponse);
+                              const ResponseStatus& theResponse);
 
     TaskExecutor* executor;
     CallbackHandle myHandle;
     RemoteCommandRequest request;
-    StatusWith<RemoteCommandResponse> response;
+    ResponseStatus response;
 };
 
 }  // namespace executor
 }  // namespace mongo
 
-// Provide a specialization for std::hash<CallbackHandle> so it can easily
-// be stored in unordered_set.
-namespace std {
+// Provide a specialization for hash<CallbackHandle> so it can easily be stored in unordered_set.
+MONGO_HASH_NAMESPACE_START
 template <>
 struct hash<::mongo::executor::TaskExecutor::CallbackHandle> {
     size_t operator()(const ::mongo::executor::TaskExecutor::CallbackHandle& x) const {
         return x.hash();
     }
 };
-}  // namespace std
+MONGO_HASH_NAMESPACE_END

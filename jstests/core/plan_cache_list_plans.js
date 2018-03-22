@@ -1,15 +1,18 @@
 // Test the planCacheListPlans command.
+//
+// @tags: [
+//   # This test attempts to perform queries and introspect the server's plan cache entries. The
+//   # former operation may be routed to a secondary in the replica set, whereas the latter must be
+//   # routed to the primary.
+//   assumes_read_preference_unchanged,
+// ]
 
 var t = db.jstests_plan_cache_list_plans;
 t.drop();
 
 // Utility function to list plans for a query.
 function getPlans(query, sort, projection) {
-    var key = {
-        query: query,
-        sort: sort,
-        projection: projection
-    };
+    var key = {query: query, sort: sort, projection: projection};
     var res = t.runCommand('planCacheListPlans', key);
     assert.commandWorked(res, 'planCacheListPlans(' + tojson(key, '', true) + ' failed');
     assert(res.hasOwnProperty('plans'),
@@ -32,9 +35,8 @@ assert.eq(0,
           'planCacheListPlans should return empty results on unknown query shape');
 
 // Create a cache entry.
-assert.eq(1,
-          t.find({a: 1, b: 1}, {_id: 0, a: 1}).sort({a: -1}).itcount(),
-          'unexpected document count');
+assert.eq(
+    1, t.find({a: 1, b: 1}, {_id: 0, a: 1}).sort({a: -1}).itcount(), 'unexpected document count');
 
 // Retrieve plans for valid cache entry.
 var plans = getPlans({a: 1, b: 1}, {a: -1}, {_id: 0, a: 1});

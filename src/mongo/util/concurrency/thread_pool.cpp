@@ -35,6 +35,7 @@
 #include "mongo/base/status.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/concurrency/idle_thread_block.h"
 #include "mongo/util/concurrency/thread_name.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
@@ -132,28 +133,28 @@ void ThreadPool::join() {
         stdx::unique_lock<stdx::mutex> lk(_mutex);
         _join_inlock(&lk);
     } catch (...) {
+        severe() << "Exception escaped join in thread pool " << _options.poolName << ": "
+                 << exceptionToStatus();
         std::terminate();
     }
 }
 
 void ThreadPool::_join_inlock(stdx::unique_lock<stdx::mutex>* lk) {
-    _stateChange.wait(*lk,
-                      [this] {
-                          switch (_state) {
-                              case preStart:
-                                  return false;
-                              case running:
-                                  return false;
-                              case joinRequired:
-                                  return true;
-                              case joining:
-                              case shutdownComplete:
-                                  severe() << "Attempted to join pool " << _options.poolName
-                                           << " more than once";
-                                  fassertFailed(28700);
-                          }
-                          MONGO_UNREACHABLE;
-                      });
+    _stateChange.wait(*lk, [this] {
+        switch (_state) {
+            case preStart:
+                return false;
+            case running:
+                return false;
+            case joinRequired:
+                return true;
+            case joining:
+            case shutdownComplete:
+                severe() << "Attempted to join pool " << _options.poolName << " more than once";
+                fassertFailed(28700);
+        }
+        MONGO_UNREACHABLE;
+    });
     _setState_inlock(joining);
     ++_numIdleThreads;
     while (!_pendingTasks.empty()) {
@@ -208,7 +209,7 @@ void ThreadPool::waitForIdle() {
     }
 }
 
-ThreadPool::Stats ThreadPool::getStats() {
+ThreadPool::Stats ThreadPool::getStats() const {
     stdx::lock_guard<stdx::mutex> lk(_mutex);
     Stats result;
     result.options = _options;
@@ -220,13 +221,15 @@ ThreadPool::Stats ThreadPool::getStats() {
 }
 
 void ThreadPool::_workerThreadBody(ThreadPool* pool, const std::string& threadName) {
-    std::string poolName = pool->_options.poolName;
     setThreadName(threadName);
+    pool->_options.onCreateThread(threadName);
+    const auto poolName = pool->_options.poolName;
     LOG(1) << "starting thread in pool " << poolName;
     try {
         pool->_consumeTasks();
     } catch (...) {
-        severe() << "Exception reached top of stack in thread pool " << poolName;
+        severe() << "Exception reached top of stack in thread pool " << poolName << ": "
+                 << exceptionToStatus();
         std::terminate();
     }
 
@@ -260,6 +263,7 @@ void ThreadPool::_consumeTasks() {
 
                 LOG(3) << "Not reaping because the earliest retirement date is "
                        << nextThreadRetirementDate;
+                MONGO_IDLE_THREAD_BLOCK;
                 _workAvailable.wait_until(lk, nextThreadRetirementDate.toSystemTimePoint());
             } else {
                 // Since the number of threads is not more than minThreads, this thread is not
@@ -268,6 +272,7 @@ void ThreadPool::_consumeTasks() {
                 // would be eligible for retirement once they had no work left to do.
                 LOG(3) << "waiting for work; I am one of " << _threads.size() << " thread(s);"
                        << " the minimum number of threads is " << _options.minThreads;
+                MONGO_IDLE_THREAD_BLOCK;
                 _workAvailable.wait(lk);
             }
             continue;
@@ -328,7 +333,8 @@ void ThreadPool::_doOneTask(stdx::unique_lock<stdx::mutex>* lk) {
             _poolIsIdle.notify_all();
         }
     } catch (...) {
-        severe() << "Exception escaped task in thread pool " << _options.poolName;
+        severe() << "Exception escaped task in thread pool " << _options.poolName << ": "
+                 << exceptionToStatus();
         std::terminate();
     }
 }
@@ -363,7 +369,7 @@ void ThreadPool::_startWorkerThread_inlock() {
     } catch (const std::exception& ex) {
         error() << "Failed to start " << threadName << "; " << _threads.size()
                 << " other thread(s) still running in pool " << _options.poolName
-                << "; caught exception: " << ex.what();
+                << "; caught exception: " << redact(ex.what());
     }
 }
 

@@ -2,13 +2,46 @@
  * The ParallelTester class is used to test more than one test concurrently
  */
 if (typeof _threadInject != "undefined") {
+    // With --enableJavaScriptProtection functions are presented as Code objects.
+    // This function evals all the Code objects then calls the provided start function.
+    // arguments: [startFunction, startFunction args...]
+    function _threadStartWrapper() {
+        // Recursively evals all the Code objects present in arguments
+        // NOTE: This is a naive implementation that cannot handle cyclic objects.
+        function evalCodeArgs(arg) {
+            if (arg instanceof Code) {
+                return eval("(" + arg.code + ")");
+            } else if (arg !== null && isObject(arg)) {
+                var newArg = arg instanceof Array ? [] : {};
+                for (var prop in arg) {
+                    if (arg.hasOwnProperty(prop)) {
+                        newArg[prop] = evalCodeArgs(arg[prop]);
+                    }
+                }
+                return newArg;
+            }
+            return arg;
+        }
+        var realStartFn;
+        var newArgs = [];
+        for (var i = 0, l = arguments.length; i < l; i++) {
+            newArgs.push(evalCodeArgs(arguments[i]));
+        }
+        realStartFn = newArgs.shift();
+        return realStartFn.apply(this, newArgs);
+    }
+
     Thread = function() {
-        this.init.apply(this, arguments);
+        var args = Array.prototype.slice.call(arguments);
+        args.unshift(_threadStartWrapper);
+        this.init.apply(this, args);
     };
     _threadInject(Thread.prototype);
 
     ScopedThread = function() {
-        this.init.apply(this, arguments);
+        var args = Array.prototype.slice.call(arguments);
+        args.unshift(_threadStartWrapper);
+        this.init.apply(this, args);
     };
     ScopedThread.prototype = new Thread(function() {});
     _scopedThreadInject(ScopedThread.prototype);
@@ -39,6 +72,10 @@ if (typeof _threadInject != "undefined") {
         this._add("t.remove( " + tojson(obj) + " )");
     };
 
+    EventGenerator.prototype.addCurrentOp = function() {
+        this._add("db.currentOp()");
+    };
+
     EventGenerator.prototype.addUpdate = function(objOld, objNew) {
         this._add("t.update( " + tojson(objOld) + ", " + tojson(objNew) + " )");
     };
@@ -63,12 +100,16 @@ if (typeof _threadInject != "undefined") {
     };
 
     EventGenerator.dispatch = function() {
-        var args = argumentsToArray(arguments);
+        var args = Array.from(arguments);
         var me = args.shift();
         var collectionName = args.shift();
         var host = args.shift();
         var m = new Mongo(host);
-        var t = m.getDB("test")[collectionName];
+
+        // We define 'db' and 't' as local variables so that calling eval() on the stringified
+        // JavaScript expression 'args[i][1]' can take advantage of using them.
+        var db = m.getDB("test");
+        var t = db[collectionName];
         for (var i in args) {
             sleep(args[i][0]);
             eval(args[i][1]);
@@ -118,29 +159,19 @@ if (typeof _threadInject != "undefined") {
             "extent.js",
             "indexb.js",
 
-            // sets a failpoint that causes the server to ignore long keys,
-            // which makes index_bigkeys.js fail
+            // Tests that set a parameter that causes the server to ignore
+            // long index keys.
             "index_bigkeys_nofail.js",
-
-            // tests turn on profiling
-            "profile1.js",
-            "profile3.js",
-            "profile4.js",
-            "profile5.js",
-            "geo_s2cursorlimitskip.js",
+            "index_bigkeys_validation.js",
 
             "mr_drop.js",
             "mr3.js",
             "indexh.js",
-            "apitest_db.js",
-            "evalb.js",
             "evald.js",
             "evalf.js",
-            "killop.js",
             "run_program1.js",
             "notablescan.js",
             "dropdb_race.js",
-            "fsync2.js",  // May be placed in serialTestsArr once SERVER-4243 is fixed.
             "bench_test1.js",
             "padding.js",
             "queryoptimizera.js",
@@ -171,11 +202,31 @@ if (typeof _threadInject != "undefined") {
             parallelFilesDir + "/currentop.js",
             parallelFilesDir + "/killop_drop_collection.js",
 
-            // These tests expect the profiler to be on or off at specific points
-            // during the test run.
-            parallelFilesDir + "/cursor6.js",
+            // These tests expect the profiler to be on or off at specific points. They should not
+            // be run in parallel with tests that perform fsyncLock. User operations skip writing to
+            // the system.profile collection while the server is fsyncLocked.
+            //
+            // The profiler tests can be run in parallel with each other as they use test-specific
+            // databases.
+            parallelFilesDir + "/apitest_db.js",
+            parallelFilesDir + "/evalb.js",
+            parallelFilesDir + "/geo_s2cursorlimitskip.js",
+            parallelFilesDir + "/profile1.js",
             parallelFilesDir + "/profile2.js",
-            parallelFilesDir + "/updatee.js"
+            parallelFilesDir + "/profile3.js",
+            parallelFilesDir + "/profile_agg.js",
+            parallelFilesDir + "/profile_count.js",
+            parallelFilesDir + "/profile_delete.js",
+            parallelFilesDir + "/profile_distinct.js",
+            parallelFilesDir + "/profile_find.js",
+            parallelFilesDir + "/profile_findandmodify.js",
+            parallelFilesDir + "/profile_geonear.js",
+            parallelFilesDir + "/profile_getmore.js",
+            parallelFilesDir + "/profile_group.js",
+            parallelFilesDir + "/profile_insert.js",
+            parallelFilesDir + "/profile_mapreduce.js",
+            parallelFilesDir + "/profile_no_such_db.js",
+            parallelFilesDir + "/profile_update.js"
         ];
         var serialTests = makeKeys(serialTestsArr);
 
@@ -211,7 +262,7 @@ if (typeof _threadInject != "undefined") {
     // runs a set of test files
     // first argument is an identifier for this tester, remaining arguments are file names
     ParallelTester.fileTester = function() {
-        var args = argumentsToArray(arguments);
+        var args = Array.from(arguments);
         var suite = args.shift();
         args.forEach(function(x) {
             print("         S" + suite + " Test : " + x + " ...");

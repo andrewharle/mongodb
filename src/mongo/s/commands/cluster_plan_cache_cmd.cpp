@@ -26,17 +26,18 @@
  *    it in the license file.
  */
 
-#include "mongo/base/init.h"
 #include "mongo/base/error_codes.h"
+#include "mongo/base/init.h"
 #include "mongo/db/auth/authorization_session.h"
-#include "mongo/db/client_basic.h"
+#include "mongo/db/client.h"
 #include "mongo/db/commands.h"
-#include "mongo/s/config.h"
+#include "mongo/db/query/collation/collation_spec.h"
+#include "mongo/s/commands/strategy.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/stale_exception.h"
-#include "mongo/s/strategy.h"
 
 namespace mongo {
+namespace {
 
 using std::string;
 using std::stringstream;
@@ -61,7 +62,7 @@ public:
         return true;
     }
 
-    virtual bool isWriteCommandForConfigServer() const {
+    bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
 
@@ -69,9 +70,11 @@ public:
         ss << _helpText;
     }
 
-    Status checkAuthForCommand(ClientBasic* client,
-                               const std::string& dbname,
-                               const BSONObj& cmdObj) {
+    std::string parseNs(const std::string& dbname, const BSONObj& cmdObj) const override {
+        return parseNsCollectionRequired(dbname, cmdObj).ns();
+    }
+
+    Status checkAuthForCommand(Client* client, const std::string& dbname, const BSONObj& cmdObj) {
         AuthorizationSession* authzSession = AuthorizationSession::get(client);
         ResourcePattern pattern = parseResourcePattern(dbname, cmdObj);
 
@@ -113,14 +116,15 @@ bool ClusterPlanCacheCmd::run(OperationContext* txn,
                               int options,
                               std::string& errMsg,
                               BSONObjBuilder& result) {
-    const std::string fullns = parseNs(dbName, cmdObj);
-    NamespaceString nss(fullns);
+    const NamespaceString nss(parseNsCollectionRequired(dbName, cmdObj));
 
     // Dispatch command to all the shards.
     // Targeted shard commands are generally data-dependent but plan cache
     // commands are tied to query shape (data has no effect on query shape).
     vector<Strategy::CommandResult> results;
-    Strategy::commandOp(txn, dbName, cmdObj, options, nss.ns(), BSONObj(), &results);
+    const BSONObj query;
+    Strategy::commandOp(
+        txn, dbName, cmdObj, options, nss.ns(), query, CollationSpec::kSimpleSpec, &results);
 
     // Set value of first shard result's "ok" field.
     bool clusterCmdResult = true;
@@ -138,7 +142,7 @@ bool ClusterPlanCacheCmd::run(OperationContext* txn,
 
         // Append shard result as a sub object.
         // Name the field after the shard.
-        string shardName = cmdResult.shardTargetId;
+        string shardName = cmdResult.shardTargetId.toString();
         result.append(shardName, cmdResult.result);
     }
 
@@ -148,8 +152,6 @@ bool ClusterPlanCacheCmd::run(OperationContext* txn,
 //
 // Register plan cache commands at startup
 //
-
-namespace {
 
 MONGO_INITIALIZER(RegisterPlanCacheCommands)(InitializerContext* context) {
     // Leaked intentionally: a Command registers itself when constructed.
@@ -170,5 +172,4 @@ MONGO_INITIALIZER(RegisterPlanCacheCommands)(InitializerContext* context) {
 }
 
 }  // namespace
-
 }  // namespace mongo

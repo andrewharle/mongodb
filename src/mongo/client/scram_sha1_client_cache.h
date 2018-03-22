@@ -31,8 +31,8 @@
 #include <string>
 
 #include "mongo/crypto/mechanism_scram.h"
-#include "mongo/platform/unordered_map.h"
 #include "mongo/stdx/mutex.h"
+#include "mongo/stdx/unordered_map.h"
 #include "mongo/util/net/hostandport.h"
 
 namespace mongo {
@@ -81,7 +81,7 @@ public:
 
 private:
     mutable stdx::mutex _hostToSecretsMutex;
-    std::unordered_map<HostAndPort, std::pair<scram::SCRAMPresecrets, scram::SCRAMSecrets>>
+    stdx::unordered_map<HostAndPort, std::pair<scram::SCRAMPresecrets, scram::SCRAMSecrets>>
         _hostToSecrets;
 };
 

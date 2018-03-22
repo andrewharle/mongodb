@@ -71,6 +71,9 @@ public:
     OpTime getAppliedOpTime() const {
         return _lastResponse.getAppliedOpTime();
     }
+    OpTime getDurableOpTime() const {
+        return _lastResponse.hasDurableOpTime() ? _lastResponse.getDurableOpTime() : OpTime();
+    }
     int getConfigVersion() const {
         return _lastResponse.getConfigVersion();
     }
@@ -120,6 +123,17 @@ public:
      */
     void setAuthIssue(Date_t now);
 
+    /**
+     * Reset the boolean to record the last restart.
+     */
+    void restart() {
+        _updatedSinceRestart = false;
+    }
+
+    bool isUpdatedSinceRestart() const {
+        return _updatedSinceRestart;
+    }
+
 private:
     // -1 = not checked yet, 0 = member is down/unreachable, 1 = member is up
     int _health;
@@ -136,6 +150,9 @@ private:
 
     // The last heartbeat response we received.
     ReplSetHeartbeatResponse _lastResponse;
+
+    // Have we received heartbeats since the last restart?
+    bool _updatedSinceRestart = false;
 };
 
 }  // namespace repl

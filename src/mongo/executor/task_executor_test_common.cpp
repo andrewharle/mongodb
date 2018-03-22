@@ -90,29 +90,21 @@ public:
     }
 };
 
-#define COMMON_EXECUTOR_TEST(TEST_NAME)                                                   \
-    class CET_##TEST_NAME : public CommonTaskExecutorTestFixture {                        \
-    public:                                                                               \
-        CET_##TEST_NAME(ExecutorFactory makeExecutor)                                     \
-            : CommonTaskExecutorTestFixture(std::move(makeExecutor)) {}                   \
-                                                                                          \
-    private:                                                                              \
-        void _doTest() override;                                                          \
-        static const CetRegistrationAgent _agent;                                         \
-    };                                                                                    \
-    const CetRegistrationAgent CET_##TEST_NAME::_agent(#TEST_NAME,                        \
-                                                       [](ExecutorFactory makeExecutor) { \
-        return stdx::make_unique<CET_##TEST_NAME>(std::move(makeExecutor));               \
-                                                       });                                \
+#define COMMON_EXECUTOR_TEST(TEST_NAME)                                         \
+    class CET_##TEST_NAME : public CommonTaskExecutorTestFixture {              \
+    public:                                                                     \
+        CET_##TEST_NAME(ExecutorFactory makeExecutor)                           \
+            : CommonTaskExecutorTestFixture(std::move(makeExecutor)) {}         \
+                                                                                \
+    private:                                                                    \
+        void _doTest() override;                                                \
+        static const CetRegistrationAgent _agent;                               \
+    };                                                                          \
+    const CetRegistrationAgent CET_##TEST_NAME::_agent(                         \
+        #TEST_NAME, [](ExecutorFactory makeExecutor) {                          \
+            return stdx::make_unique<CET_##TEST_NAME>(std::move(makeExecutor)); \
+        });                                                                     \
     void CET_##TEST_NAME::_doTest()
-
-bool operator==(const RemoteCommandRequest lhs, const RemoteCommandRequest rhs) {
-    return lhs.target == rhs.target && lhs.dbname == rhs.dbname && lhs.cmdObj == rhs.cmdObj;
-}
-
-bool operator!=(const RemoteCommandRequest lhs, const RemoteCommandRequest rhs) {
-    return !(lhs == rhs);
-}
 
 void setStatus(const TaskExecutor::CallbackArgs& cbData, Status* target) {
     *target = cbData.status;
@@ -140,9 +132,10 @@ void scheduleSetStatusAndShutdown(const TaskExecutor::CallbackArgs& cbData,
         *outStatus1 = cbData.status;
         return;
     }
-    *outStatus1 = cbData.executor->scheduleWork(stdx::bind(setStatusAndShutdown,
-                                                           stdx::placeholders::_1,
-                                                           outStatus2)).getStatus();
+    *outStatus1 =
+        cbData.executor
+            ->scheduleWork(stdx::bind(setStatusAndShutdown, stdx::placeholders::_1, outStatus2))
+            .getStatus();
 }
 
 COMMON_EXECUTOR_TEST(RunOne) {
@@ -188,10 +181,10 @@ COMMON_EXECUTOR_TEST(OneSchedulesAnother) {
     TaskExecutor& executor = getExecutor();
     Status status1 = getDetectableErrorStatus();
     Status status2 = getDetectableErrorStatus();
-    ASSERT_OK(executor.scheduleWork(stdx::bind(scheduleSetStatusAndShutdown,
-                                               stdx::placeholders::_1,
-                                               &status1,
-                                               &status2)).getStatus());
+    ASSERT_OK(executor
+                  .scheduleWork(stdx::bind(
+                      scheduleSetStatusAndShutdown, stdx::placeholders::_1, &status1, &status2))
+                  .getStatus());
     launchExecutorThread();
     joinExecutorThread();
     ASSERT_OK(status1);
@@ -335,14 +328,22 @@ COMMON_EXECUTOR_TEST(ScheduleWorkAt) {
     Status status1 = getDetectableErrorStatus();
     Status status2 = getDetectableErrorStatus();
     Status status3 = getDetectableErrorStatus();
+    Status status4 = getDetectableErrorStatus();
+
     const Date_t now = net->now();
     const TaskExecutor::CallbackHandle cb1 = unittest::assertGet(executor.scheduleWorkAt(
         now + Milliseconds(100), stdx::bind(setStatus, stdx::placeholders::_1, &status1)));
+    const TaskExecutor::CallbackHandle cb4 = unittest::assertGet(executor.scheduleWorkAt(
+        now - Milliseconds(50), stdx::bind(setStatus, stdx::placeholders::_1, &status4)));
     unittest::assertGet(executor.scheduleWorkAt(
         now + Milliseconds(5000), stdx::bind(setStatus, stdx::placeholders::_1, &status3)));
     const TaskExecutor::CallbackHandle cb2 = unittest::assertGet(executor.scheduleWorkAt(
         now + Milliseconds(200),
         stdx::bind(setStatusAndShutdown, stdx::placeholders::_1, &status2)));
+
+    executor.wait(cb4);
+    ASSERT_OK(status4);
+
     const Date_t startTime = net->now();
     net->enterNetwork();
     net->runUntil(startTime + Milliseconds(200));
@@ -368,12 +369,13 @@ static void setStatusOnRemoteCommandCompletion(
     Status* outStatus) {
     if (cbData.request != expectedRequest) {
         *outStatus = Status(ErrorCodes::BadValue,
-                            mongoutils::str::stream()
-                                << "Actual request: " << getRequestDescription(cbData.request)
-                                << "; expected: " << getRequestDescription(expectedRequest));
+                            mongoutils::str::stream() << "Actual request: "
+                                                      << getRequestDescription(cbData.request)
+                                                      << "; expected: "
+                                                      << getRequestDescription(expectedRequest));
         return;
     }
-    *outStatus = cbData.response.getStatus();
+    *outStatus = cbData.response.status;
 }
 
 COMMON_EXECUTOR_TEST(ScheduleRemoteCommand) {
@@ -384,15 +386,15 @@ COMMON_EXECUTOR_TEST(ScheduleRemoteCommand) {
     const RemoteCommandRequest request(HostAndPort("localhost", 27017),
                                        "mydb",
                                        BSON("whatsUp"
-                                            << "doc"));
+                                            << "doc"),
+                                       nullptr);
     TaskExecutor::CallbackHandle cbHandle = unittest::assertGet(executor.scheduleRemoteCommand(
         request,
         stdx::bind(setStatusOnRemoteCommandCompletion, stdx::placeholders::_1, request, &status1)));
     net->enterNetwork();
     ASSERT(net->hasReadyRequests());
     NetworkInterfaceMock::NetworkOperationIterator noi = net->getNextReadyRequest();
-    net->scheduleResponse(
-        noi, net->now(), TaskExecutor::ResponseStatus(ErrorCodes::NoSuchKey, "I'm missing"));
+    net->scheduleResponse(noi, net->now(), {ErrorCodes::NoSuchKey, "I'm missing"});
     net->runReadyNetworkOperations();
     ASSERT(!net->hasReadyRequests());
     net->exitNetwork();
@@ -408,7 +410,8 @@ COMMON_EXECUTOR_TEST(ScheduleAndCancelRemoteCommand) {
     const RemoteCommandRequest request(HostAndPort("localhost", 27017),
                                        "mydb",
                                        BSON("whatsUp"
-                                            << "doc"));
+                                            << "doc"),
+                                       nullptr);
     TaskExecutor::CallbackHandle cbHandle = unittest::assertGet(executor.scheduleRemoteCommand(
         request,
         stdx::bind(setStatusOnRemoteCommandCompletion, stdx::placeholders::_1, request, &status1)));
@@ -430,7 +433,7 @@ COMMON_EXECUTOR_TEST(RemoteCommandWithTimeout) {
     Status status(ErrorCodes::InternalError, "");
     launchExecutorThread();
     const RemoteCommandRequest request(
-        HostAndPort("lazy", 27017), "admin", BSON("sleep" << 1), Milliseconds(1));
+        HostAndPort("lazy", 27017), "admin", BSON("sleep" << 1), nullptr, Milliseconds(1));
     TaskExecutor::CallbackHandle cbHandle = unittest::assertGet(executor.scheduleRemoteCommand(
         request,
         stdx::bind(setStatusOnRemoteCommandCompletion, stdx::placeholders::_1, request, &status)));
@@ -438,22 +441,20 @@ COMMON_EXECUTOR_TEST(RemoteCommandWithTimeout) {
     ASSERT(net->hasReadyRequests());
     const Date_t startTime = net->now();
     NetworkInterfaceMock::NetworkOperationIterator noi = net->getNextReadyRequest();
-    net->scheduleResponse(
-        noi,
-        startTime + Milliseconds(2),
-        TaskExecutor::ResponseStatus(ErrorCodes::ExceededTimeLimit, "I took too long"));
+    net->scheduleResponse(noi, startTime + Milliseconds(2), {});
     net->runUntil(startTime + Milliseconds(2));
     ASSERT_EQUALS(startTime + Milliseconds(2), net->now());
     net->exitNetwork();
     executor.wait(cbHandle);
-    ASSERT_EQUALS(ErrorCodes::ExceededTimeLimit, status);
+    ASSERT_EQUALS(ErrorCodes::NetworkTimeout, status);
 }
 
 COMMON_EXECUTOR_TEST(CallbackHandleComparison) {
     TaskExecutor& executor = getExecutor();
     auto status1 = getDetectableErrorStatus();
     auto status2 = getDetectableErrorStatus();
-    const RemoteCommandRequest request(HostAndPort("lazy", 27017), "admin", BSON("cmd" << 1));
+    const RemoteCommandRequest request(
+        HostAndPort("lazy", 27017), "admin", BSON("cmd" << 1), nullptr);
     TaskExecutor::CallbackHandle cbHandle1 = unittest::assertGet(executor.scheduleRemoteCommand(
         request,
         stdx::bind(setStatusOnRemoteCommandCompletion, stdx::placeholders::_1, request, &status1)));

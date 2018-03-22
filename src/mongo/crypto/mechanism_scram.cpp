@@ -168,8 +168,10 @@ BSONObj generateCredentials(const std::string& hashedPassword, int iterationCoun
     std::string encodedServerKey = secrets->serverKey.toString();
 
     return BSON(iterationCountFieldName << iterationCount << saltFieldName << encodedUserSalt
-                                        << storedKeyFieldName << encodedStoredKey
-                                        << serverKeyFieldName << encodedServerKey);
+                                        << storedKeyFieldName
+                                        << encodedStoredKey
+                                        << serverKeyFieldName
+                                        << encodedServerKey);
 }
 
 std::string generateClientProof(const SCRAMSecrets& clientCredentials,
@@ -223,6 +225,10 @@ bool verifyClientProof(StringData clientProof, StringData storedKey, StringData 
     // StoredKey := H(clientSignature)
     SHA1Block computedStoredKey =
         SHA1Block::computeHash(clientSignature.data(), clientSignature.size());
+
+    if (storedKey.size() != computedStoredKey.size()) {
+        return false;
+    }
 
     return consttimeMemEqual(reinterpret_cast<const unsigned char*>(storedKey.rawData()),
                              computedStoredKey.data(),

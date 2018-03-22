@@ -11,10 +11,9 @@
     db[coll].insert({loc: [0, 0]});
 
     // $geoNear is only allowed as the first stage in a pipeline, nowhere else.
-    assertErrorCode(
-        db[coll],
-        [{$match: {x: 1}}, {$geoNear: {near: [1, 1], spherical: true, distanceField: 'dis'}}],
-        28837);
+    assert.throws(
+        () => db[coll].aggregate(
+            [{$match: {x: 1}}, {$geoNear: {near: [1, 1], spherical: true, distanceField: 'dis'}}]));
 
     function checkOutput(cmdOut, aggOut, expectedNum) {
         assert.commandWorked(cmdOut, "geoNear command");
@@ -31,10 +30,7 @@
         for (var i = 0; i < cmdOut.length; i++) {
             massaged = {};
             Object.extend(massaged, cmdOut[i].obj, /*deep=*/true);
-            massaged.stats = {
-                'dis': cmdOut[i].dis,
-                'loc': cmdOut[i].loc
-            };
+            massaged.stats = {'dis': cmdOut[i].dis, 'loc': cmdOut[i].loc};
 
             if (!friendlyEqual(massaged, aggOut[i])) {
                 allSame = false;  // don't bail yet since we want to print all differences
@@ -90,12 +86,7 @@
 
         // test with defaults
         var queryPoint = pointMaker.mkPt(0.25);  // stick to center of map
-        var geoCmd = {
-            geoNear: coll,
-            near: queryPoint,
-            includeLocs: true,
-            spherical: true
-        };
+        var geoCmd = {geoNear: coll, near: queryPoint, includeLocs: true, spherical: true};
         var aggCmd = {
             $geoNear: {
                 near: queryPoint,

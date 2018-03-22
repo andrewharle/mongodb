@@ -164,8 +164,7 @@
 
     // Explain an upsert operation and verify that it hits only a single shard
     explain = db.runCommand({
-        explain:
-            {update: collSharded.getName(), updates: [{q: {a: 10}, u: {a: 10}, upsert: true}]},
+        explain: {update: collSharded.getName(), updates: [{q: {a: 10}, u: {a: 10}, upsert: true}]},
         verbosity: "allPlansExecution"
     });
     assert.commandWorked(explain, tojson(explain));
@@ -175,8 +174,7 @@
 
     // Explain an upsert operation which cannot be targeted, ensure an error is thrown
     explain = db.runCommand({
-        explain:
-            {update: collSharded.getName(), updates: [{q: {b: 10}, u: {b: 10}, upsert: true}]},
+        explain: {update: collSharded.getName(), updates: [{q: {b: 10}, u: {b: 10}, upsert: true}]},
         verbosity: "allPlansExecution"
     });
     assert.commandFailed(explain, tojson(explain));

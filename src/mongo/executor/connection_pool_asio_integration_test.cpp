@@ -103,16 +103,16 @@ TEST(ConnectionPoolASIO, TestPing) {
     for (auto& thread : threads) {
         thread = stdx::thread([&net, &fixture]() {
             auto status = Status::OK();
-            Deferred<StatusWith<RemoteCommandResponse>> deferred;
+            Deferred<RemoteCommandResponse> deferred;
 
-            net.startCommand(makeCallbackHandle(),
-                             RemoteCommandRequest{
-                                 fixture.getServers()[0], "admin", BSON("ping" << 1), BSONObj()},
-                             [&deferred](StatusWith<RemoteCommandResponse> resp) {
-                                 deferred.emplace(std::move(resp));
-                             });
+            RemoteCommandRequest request{
+                fixture.getServers()[0], "admin", BSON("ping" << 1), BSONObj(), nullptr};
+            net.startCommand(
+                makeCallbackHandle(), request, [&deferred](RemoteCommandResponse resp) {
+                    deferred.emplace(std::move(resp));
+                });
 
-            ASSERT_OK(deferred.get().getStatus());
+            ASSERT_OK(deferred.get().status);
         });
     }
 
@@ -140,13 +140,14 @@ TEST(ConnectionPoolASIO, TestHostTimeoutRace) {
     auto guard = MakeGuard([&] { net.shutdown(); });
 
     for (int i = 0; i < 1000; i++) {
-        Deferred<StatusWith<RemoteCommandResponse>> deferred;
-        net.startCommand(
-            makeCallbackHandle(),
-            RemoteCommandRequest{fixture.getServers()[0], "admin", BSON("ping" << 1), BSONObj()},
-            [&](StatusWith<RemoteCommandResponse> resp) { deferred.emplace(std::move(resp)); });
+        Deferred<RemoteCommandResponse> deferred;
+        RemoteCommandRequest request{
+            fixture.getServers()[0], "admin", BSON("ping" << 1), BSONObj(), nullptr};
+        net.startCommand(makeCallbackHandle(), request, [&](RemoteCommandResponse resp) {
+            deferred.emplace(std::move(resp));
+        });
 
-        ASSERT_OK(deferred.get().getStatus());
+        ASSERT_OK(deferred.get().status);
         sleepmillis(1);
     }
 }
@@ -167,13 +168,14 @@ TEST(ConnectionPoolASIO, ConnSetupTimeout) {
     net.startup();
     auto guard = MakeGuard([&] { net.shutdown(); });
 
-    Deferred<StatusWith<RemoteCommandResponse>> deferred;
-    net.startCommand(
-        makeCallbackHandle(),
-        RemoteCommandRequest{fixture.getServers()[0], "admin", BSON("ping" << 1), BSONObj()},
-        [&](StatusWith<RemoteCommandResponse> resp) { deferred.emplace(std::move(resp)); });
+    Deferred<RemoteCommandResponse> deferred;
+    RemoteCommandRequest request{
+        fixture.getServers()[0], "admin", BSON("ping" << 1), BSONObj(), nullptr};
+    net.startCommand(makeCallbackHandle(), request, [&](RemoteCommandResponse resp) {
+        deferred.emplace(std::move(resp));
+    });
 
-    ASSERT_EQ(deferred.get().getStatus().code(), ErrorCodes::ExceededTimeLimit);
+    ASSERT_EQ(deferred.get().status.code(), ErrorCodes::ExceededTimeLimit);
 }
 
 /**
@@ -192,18 +194,21 @@ TEST(ConnectionPoolASIO, ConnRefreshHappens) {
     net.startup();
     auto guard = MakeGuard([&] { net.shutdown(); });
 
-    std::array<Deferred<StatusWith<RemoteCommandResponse>>, 10> deferreds;
+    std::array<Deferred<RemoteCommandResponse>, 10> deferreds;
 
-    for (auto& deferred : deferreds) {
-        net.startCommand(
-            makeCallbackHandle(),
-            RemoteCommandRequest{fixture.getServers()[0],
+    RemoteCommandRequest request{fixture.getServers()[0],
                                  "admin",
                                  BSON("sleep" << 1 << "lock"
                                               << "none"
-                                              << "secs" << 2),
-                                 BSONObj()},
-            [&](StatusWith<RemoteCommandResponse> resp) { deferred.emplace(std::move(resp)); });
+                                              << "secs"
+                                              << 2),
+                                 BSONObj(),
+                                 nullptr};
+
+    for (auto& deferred : deferreds) {
+        net.startCommand(makeCallbackHandle(), request, [&](RemoteCommandResponse resp) {
+            deferred.emplace(std::move(resp));
+        });
     }
 
     for (auto& deferred : deferreds) {
@@ -234,12 +239,13 @@ TEST(ConnectionPoolASIO, ConnRefreshSurvivesFailure) {
     net.startup();
     auto guard = MakeGuard([&] { net.shutdown(); });
 
-    Deferred<StatusWith<RemoteCommandResponse>> deferred;
+    Deferred<RemoteCommandResponse> deferred;
 
-    net.startCommand(
-        makeCallbackHandle(),
-        RemoteCommandRequest{fixture.getServers()[0], "admin", BSON("ping" << 1), BSONObj()},
-        [&](StatusWith<RemoteCommandResponse> resp) { deferred.emplace(std::move(resp)); });
+    RemoteCommandRequest request{
+        fixture.getServers()[0], "admin", BSON("ping" << 1), BSONObj(), nullptr};
+    net.startCommand(makeCallbackHandle(), request, [&](RemoteCommandResponse resp) {
+        deferred.emplace(std::move(resp));
+    });
 
     deferred.get();
 
@@ -262,19 +268,20 @@ TEST(ConnectionPoolASIO, ConnRefreshSurvivesFailure) {
  * timers before they're invoked
  */
 TEST(ConnectionPoolASIO, ConnSetupSurvivesFailure) {
+    const int kNumThreads = 8;
+    const int kNumOps = 1000;
+
     auto fixture = unittest::getFixtureConnectionString();
 
     NetworkInterfaceASIO::Options options;
     options.streamFactory = stdx::make_unique<AsyncStreamFactory>();
     options.timerFactory = stdx::make_unique<AsyncTimerFactoryASIO>();
     options.connectionPoolOptions.refreshTimeout = Seconds(1);
+    options.connectionPoolOptions.maxConnections = kNumThreads;
     NetworkInterfaceASIO net{std::move(options)};
 
     net.startup();
     auto guard = MakeGuard([&] { net.shutdown(); });
-
-    const int kNumThreads = 8;
-    const int kNumOps = 1000;
 
     AtomicWord<size_t> unfinished(kNumThreads * kNumOps);
     AtomicWord<size_t> unstarted(kNumThreads * kNumOps);
@@ -290,15 +297,15 @@ TEST(ConnectionPoolASIO, ConnSetupSurvivesFailure) {
                                              "admin",
                                              BSON("sleep" << 1 << "lock"
                                                           << "none"
-                                                          << "secs" << 3),
-                                             BSONObj()};
-                net.startCommand(makeCallbackHandle(),
-                                 request,
-                                 [&](StatusWith<RemoteCommandResponse> resp) {
-                                     if (!unfinished.subtractAndFetch(1)) {
-                                         condvar.notify_one();
-                                     }
-                                 });
+                                                          << "secs"
+                                                          << 3),
+                                             BSONObj(),
+                                             nullptr};
+                net.startCommand(makeCallbackHandle(), request, [&](RemoteCommandResponse resp) {
+                    if (!unfinished.subtractAndFetch(1)) {
+                        condvar.notify_one();
+                    }
+                });
                 unstarted.subtractAndFetch(1);
             }
         });

@@ -34,11 +34,7 @@
             var tmpHomeDrive = _pwd.substr(0, 2);
             var tmpHomePath = tmpHome;
         }
-        env = {
-            USERPROFILE: tmpHome,
-            HOMEDRIVE: tmpHomeDrive,
-            HOMEPATH: tmpHomePath
-        };
+        env = {USERPROFILE: tmpHome, HOMEDRIVE: tmpHomeDrive, HOMEPATH: tmpHomePath};
 
     } else {
         args.push("sh");
@@ -58,27 +54,15 @@
         if (!tmpHome.startsWith("/")) {
             tmpHome = pwd() + "/" + tmpHome;
         }
-        env = {
-            HOME: tmpHome
-        };
-    }
-
-    // Workaround for SERVER-18877 not being fixed in earlier versions.
-    if (_isWindows()) {
-        for (var envvar in env) {
-            cmdline = "set " + envvar + "=" + env[envvar] + "&&" + cmdline;
-        }
-    } else {
-        for (var envvar in env) {
-            cmdline = envvar + "='" + env[envvar] + "' ; " + cmdline;
-        }
+        env = {HOME: tmpHome};
     }
 
     // Add redirection to cmdline, and add cmdline to args.
     cmdline += " " + redirection;
     args.push(cmdline);
     jsTestLog("Running args:\n    " + tojson(args) + "\nwith env:\n    " + tojson(env));
-    var rc = runProgram.apply(this, args);
+    var pid = _startMongoProgram({args, env});
+    var rc = waitProgram(pid);
 
     assert.eq(rc, 0);
 

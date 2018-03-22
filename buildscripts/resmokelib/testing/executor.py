@@ -5,6 +5,7 @@ Driver of the test execution framework.
 from __future__ import absolute_import
 
 import threading
+import time
 
 from . import fixtures
 from . import hooks as _hooks
@@ -70,6 +71,7 @@ class TestGroupExecutor(object):
         self.logger.info("Starting execution of %ss...", self._test_group.test_kind)
 
         return_code = 0
+        teardown_flag = None
         try:
             if not self._setup_fixtures():
                 return_code = 2
@@ -82,12 +84,21 @@ class TestGroupExecutor(object):
                 partial_reports = [job.report for job in self._jobs]
                 self._test_group.record_start(partial_reports)
 
-                (report, interrupted) = self._run_tests(test_queue)
+                # Have the Job threads destroy their fixture during the final repetition after they
+                # finish running their last test. This avoids having a large number of processes
+                # still running if an Evergreen task were to time out from a hang/deadlock being
+                # triggered.
+                teardown_flag = threading.Event() if num_repeats == 1 else None
+                (report, interrupted) = self._run_tests(test_queue, teardown_flag)
+
                 self._test_group.record_end(report)
 
                 # If the user triggered a KeyboardInterrupt, then we should stop.
                 if interrupted:
                     raise errors.UserInterrupt("Received interrupt from user")
+
+                if teardown_flag and teardown_flag.is_set():
+                    return_code = 2
 
                 sb = []  # String builder.
                 self._test_group.summarize_latest(sb)
@@ -103,8 +114,9 @@ class TestGroupExecutor(object):
                     job.report.reset()
                 num_repeats -= 1
         finally:
-            if not self._teardown_fixtures():
-                return_code = 2
+            if not teardown_flag:
+                if not self._teardown_fixtures():
+                    return_code = 2
             self._test_group.return_code = return_code
 
     def _setup_fixtures(self):
@@ -130,7 +142,7 @@ class TestGroupExecutor(object):
 
         return True
 
-    def _run_tests(self, test_queue):
+    def _run_tests(self, test_queue, teardown_flag):
         """
         Starts a thread for each Job instance and blocks until all of
         the tests are run.
@@ -146,11 +158,17 @@ class TestGroupExecutor(object):
         try:
             # Run each Job instance in its own thread.
             for job in self._jobs:
-                t = threading.Thread(target=job, args=(test_queue, interrupt_flag))
+                t = threading.Thread(target=job,
+                                     args=(test_queue, interrupt_flag),
+                                     kwargs=dict(teardown_flag=teardown_flag))
                 # Do not wait for tests to finish executing if interrupted by the user.
                 t.daemon = True
                 t.start()
                 threads.append(t)
+                # SERVER-24729 Need to stagger when jobs start to reduce I/O load if there
+                # are many of them.  Both the 5 and the 10 are arbitrary.
+                if len(threads) >= 5:
+                    time.sleep(10)
 
             joined = False
             while not joined:
@@ -184,7 +202,7 @@ class TestGroupExecutor(object):
         success = True
         for job in self._jobs:
             try:
-                if not job.fixture.teardown():
+                if not job.fixture.teardown(finished=True):
                     self.logger.warn("Teardown of %s was not successful.", job.fixture)
                     success = False
             except:

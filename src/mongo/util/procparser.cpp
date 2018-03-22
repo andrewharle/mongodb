@@ -92,8 +92,8 @@ StatusWith<std::string> readFileAsString(StringData filename) {
     if (fd == -1) {
         int err = errno;
         return Status(ErrorCodes::FileOpenFailed,
-                      str::stream() << "Failed to open file " << filename
-                                    << " with error: " << errnoWithDescription(err));
+                      str::stream() << "Failed to open file " << filename << " with error: "
+                                    << errnoWithDescription(err));
     }
     auto scopedGuard = MakeGuard([fd] { close(fd); });
 
@@ -104,6 +104,7 @@ StatusWith<std::string> readFileAsString(StringData filename) {
 
     // Read until the end as needed
     do {
+
         // Retry if interrupted
         size_t retry = 0;
 
@@ -120,8 +121,8 @@ StatusWith<std::string> readFileAsString(StringData filename) {
                 }
 
                 return Status(ErrorCodes::FileStreamFailed,
-                              str::stream() << "Failed to read file " << filename
-                                            << " with error: " << errnoWithDescription(err));
+                              str::stream() << "Failed to read file " << filename << " with error: "
+                                            << errnoWithDescription(err));
             }
 
             break;
@@ -219,6 +220,7 @@ Status parseProcStat(const std::vector<StringData>& keys,
              boost::token_finder([](char c) { return c == '\n'; }, boost::token_compress_on));
          lineIt != string_split_iterator();
          ++lineIt) {
+
         StringData line((*lineIt).begin(), (*lineIt).end());
 
         // Split the line by spaces since that is the only delimiter for stat files.
@@ -246,6 +248,7 @@ Status parseProcStat(const std::vector<StringData>& keys,
         // Check if the key is in the list. /proc/stat will have extra keys, and
         // may not have the keys we want.
         if (keys.empty() || std::find(keys.begin(), keys.end(), key) != keys.end()) {
+
             foundKeys = true;
 
             if (key == "cpu") {
@@ -254,6 +257,7 @@ Status parseProcStat(const std::vector<StringData>& keys,
                 for (size_t index = 0;
                      partIt != string_split_iterator() && index < kAdditionCpuFieldCount;
                      ++partIt, ++index) {
+
                     StringData stringValue((*partIt).begin(), (*partIt).end() - (*partIt).begin());
 
                     uint64_t value;
@@ -274,7 +278,7 @@ Status parseProcStat(const std::vector<StringData>& keys,
                     value = 0;
                 }
 
-                builder->appendNumber(key, static_cast<long long>(value));
+                builder->appendNumber(key, value);
             }
         }
     }
@@ -328,16 +332,17 @@ Status parseProcMemInfo(const std::vector<StringData>& keys,
              boost::token_finder([](char c) { return c == '\n'; }, boost::token_compress_on));
          lineIt != string_split_iterator();
          ++lineIt) {
+
         StringData line((*lineIt).begin(), (*lineIt).end());
 
         // Split the line by spaces and colons since these are the delimiters for meminfo files.
         // token_compress_on means the iterator skips over consecutive ' '. This is needed for
         // every line.
-        string_split_iterator partIt = string_split_iterator(line.begin(),
-                                                             line.end(),
-                                                             boost::token_finder([](char c) {
-                                                                 return c == ' ' || c == ':';
-                                                             }, boost::token_compress_on));
+        string_split_iterator partIt =
+            string_split_iterator(line.begin(),
+                                  line.end(),
+                                  boost::token_finder([](char c) { return c == ' ' || c == ':'; },
+                                                      boost::token_compress_on));
 
         // Skip processing this line if we do not have a key.
         if (partIt == string_split_iterator()) {
@@ -378,9 +383,10 @@ Status parseProcMemInfo(const std::vector<StringData>& keys,
                     keyWithSuffix.append("_kb");
                 }
 
-                builder->appendNumber(keyWithSuffix, static_cast<long long>(value));
+                builder->appendNumber(keyWithSuffix, value);
             } else {
-                builder->appendNumber(key, static_cast<long long>(value));
+
+                builder->appendNumber(key, value);
             }
         }
     }
@@ -434,6 +440,7 @@ Status parseProcDiskStats(const std::vector<StringData>& disks,
              boost::token_finder([](char c) { return c == '\n'; }, boost::token_compress_on));
          lineIt != string_split_iterator();
          ++lineIt) {
+
         StringData line((*lineIt).begin(), (*lineIt).end());
 
         // Skip leading whitespace so that the split_iterator starts on non-whitespace otherwise we
@@ -491,6 +498,7 @@ Status parseProcDiskStats(const std::vector<StringData>& disks,
 
             for (size_t index = 0; partIt != string_split_iterator() && index < kDiskFieldCount;
                  ++partIt, ++index) {
+
                 StringData stringValue((*partIt).begin(), (*partIt).end());
 
                 uint64_t value;
@@ -511,7 +519,7 @@ Status parseProcDiskStats(const std::vector<StringData>& disks,
                 BSONObjBuilder sub(builder->subobjStart(disk));
 
                 for (size_t index = 0; index < stats.size() && index < kDiskFieldCount; ++index) {
-                    sub.appendNumber(kDiskFields[index], static_cast<long long>(stats[index]));
+                    sub.appendNumber(kDiskFields[index], stats[index]);
                 }
 
                 sub.doneFast();

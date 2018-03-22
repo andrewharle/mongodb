@@ -25,12 +25,12 @@
     assert.commandWorked(s.s0.adminCommand({split: "test.foo", middle: {x: 30}}));
     assert.commandWorked(s.s0.adminCommand({split: "test.foo", middle: {x: 66}}));
     assert.commandWorked(s.s0.adminCommand(
-        {movechunk: "test.foo", find: {x: 90}, to: s.getOther(s.getServer("test")).name}));
+        {movechunk: "test.foo", find: {x: 90}, to: s.getOther(s.getPrimaryShard("test")).name}));
 
-    db.printShardingStatus();
+    s.printShardingStatus();
 
-    print("YO : " + s.getServer("test").host);
-    var direct = new Mongo(s.getServer("test").host);
+    print("YO : " + s.getPrimaryShard("test").host);
+    var direct = new Mongo(s.getPrimaryShard("test").host);
     print("direct : " + direct);
 
     var directDB = direct.getDB("test");
@@ -39,12 +39,11 @@
         assert.writeOK(directDB.foo.insert({x: 50 + Math.random(), big: big}));
     }
 
-    db.printShardingStatus();
+    s.printShardingStatus();
 
-    assert.throws(function() {
-        assert.commandWorked(s.s0.adminCommand(
-            {movechunk: "test.foo", find: {x: 50}, to: s.getOther(s.getServer("test")).name}));
-    }, [], "move should fail");
+    // This is a large chunk, which should not be able to move
+    assert.commandFailed(s.s0.adminCommand(
+        {movechunk: "test.foo", find: {x: 50}, to: s.getOther(s.getPrimaryShard("test")).name}));
 
     for (var i = 0; i < 20; i += 2) {
         try {
@@ -55,7 +54,7 @@
         }
     }
 
-    db.printShardingStatus();
+    s.printShardingStatus();
 
     s.startBalancer();
 
@@ -64,12 +63,6 @@
         print("chunk diff: " + x);
         return x < 2;
     }, "no balance happened", 8 * 60 * 1000, 2000);
-
-    assert.soon(function() {
-        return !s.isAnyBalanceInFlight();
-    });
-
-    assert.eq(coll.count(), coll.find().itcount());
 
     s.stop();
 })();

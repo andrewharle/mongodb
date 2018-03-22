@@ -8,11 +8,6 @@
 
 load("jstests/replsets/rslib.js");
 
-// utility to check if an error was due to connection failure.
-var errorWasDueToConnectionFailure = function(error) {
-    return error.message.indexOf("error doing query: failed") >= 0;
-};
-
 var replTest = new ReplSetTest({
     name: 'testSet',
     nodes: {"n0": {rsConfig: {priority: 2}}, "n1": {}, "n2": {rsConfig: {votes: 1, priority: 0}}},
@@ -72,8 +67,8 @@ try {
     // presence of an exception to confirm the forced stepdown result.
     jsTestLog('Do stepdown of primary ' + master + ' that should work');
     var exceptionFromForcedStepDown = assert.throws(function() {
-        master.getDB("admin")
-            .runCommand({replSetStepDown: ReplSetTest.kDefaultTimeoutMS, force: true});
+        master.getDB("admin").runCommand(
+            {replSetStepDown: ReplSetTest.kDefaultTimeoutMS, force: true});
     });
     jsTestLog('Forced stepdown ' + master + ' expected failure: ' +
               tojson(exceptionFromForcedStepDown));
@@ -117,7 +112,7 @@ try {
 } catch (e) {
     // ignore errors due to connection failures as we expect the master to close connections
     // on stepdown
-    if (!errorWasDueToConnectionFailure(e)) {
+    if (!isNetworkError(e)) {
         throw e;
     }
 }
@@ -176,7 +171,7 @@ var currentMaster = replTest.getPrimary();
 try {
     printjson(currentMaster.getDB("admin").runCommand({shutdown: 1, force: true}));
 } catch (e) {
-    if (!errorWasDueToConnectionFailure(e)) {
+    if (!isNetworkError(e)) {
         throw e;
     }
 }

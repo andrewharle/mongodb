@@ -29,185 +29,125 @@
 #pragma once
 
 #include <map>
+#include <set>
 #include <string>
-#include <vector>
 
-#include "mongo/db/repl/optime.h"
+#include "mongo/base/disallow_copying.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/s/chunk.h"
+#include "mongo/s/chunk_version.h"
+#include "mongo/s/client/shard.h"
 #include "mongo/s/shard_key_pattern.h"
 #include "mongo/util/concurrency/ticketholder.h"
 
 namespace mongo {
 
 class CanonicalQuery;
-class ChunkManager;
-class CollectionType;
 struct QuerySolutionNode;
 class OperationContext;
 
-typedef std::shared_ptr<ChunkManager> ChunkManagerPtr;
+// Ordered map from the max for each chunk to an entry describing the chunk
+using ChunkMap = BSONObjIndexedMap<std::shared_ptr<Chunk>>;
 
-// The key for the map is max for each Chunk or ChunkRange
-typedef std::map<BSONObj, std::shared_ptr<Chunk>, BSONObjCmp> ChunkMap;
+// Map from a shard is to the max chunk version on that shard
+using ShardVersionMap = std::map<ShardId, ChunkVersion>;
 
-class ChunkRange {
-public:
-    ChunkRange(ChunkMap::const_iterator begin, const ChunkMap::const_iterator end);
-
-    // Merge min and max (must be adjacent ranges)
-    ChunkRange(const ChunkRange& min, const ChunkRange& max);
-
-    const ChunkManager* getManager() const {
-        return _manager;
-    }
-    ShardId getShardId() const {
-        return _shardId;
-    }
-
-    const BSONObj& getMin() const {
-        return _min;
-    }
-    const BSONObj& getMax() const {
-        return _max;
-    }
-
-    // clones of Chunk methods
-    // Returns true if this ChunkRange contains the given shard key, and false otherwise
-    //
-    // Note: this function takes an extracted *key*, not an original document
-    // (the point may be computed by, say, hashing a given field or projecting
-    //  to a subset of fields).
-    bool containsKey(const BSONObj& shardKey) const;
-
-    std::string toString() const;
-
-private:
-    const ChunkManager* _manager;
-    const ShardId _shardId;
-    const BSONObj _min;
-    const BSONObj _max;
-};
-
-typedef std::map<BSONObj, std::shared_ptr<ChunkRange>, BSONObjCmp> ChunkRangeMap;
-
-
-class ChunkRangeManager {
-public:
-    const ChunkRangeMap& ranges() const {
-        return _ranges;
-    }
-
-    void clear() {
-        _ranges.clear();
-    }
-
-    void reloadAll(const ChunkMap& chunks);
-
-    // Slow operation -- wrap with DEV
-    void assertValid() const;
-
-    ChunkRangeMap::const_iterator upper_bound(const BSONObj& o) const {
-        return _ranges.upper_bound(o);
-    }
-    ChunkRangeMap::const_iterator lower_bound(const BSONObj& o) const {
-        return _ranges.lower_bound(o);
-    }
-
-private:
-    // assumes nothing in this range exists in _ranges
-    void _insertRange(ChunkMap::const_iterator begin, const ChunkMap::const_iterator end);
-
-    ChunkRangeMap _ranges;
-};
-
-
-/* config.sharding
-     { ns: 'alleyinsider.fs.chunks' ,
-       key: { ts : 1 } ,
-       shards: [ { min: 1, max: 100, server: a } , { min: 101, max: 200 , server : b } ]
-     }
-*/
 class ChunkManager {
+    MONGO_DISALLOW_COPYING(ChunkManager);
+
 public:
-    typedef std::map<std::string, ChunkVersion> ShardVersionMap;
+    ChunkManager(NamespaceString nss,
+                 KeyPattern shardKeyPattern,
+                 std::unique_ptr<CollatorInterface> defaultCollator,
+                 bool unique,
+                 ChunkMap chunkMap,
+                 ChunkVersion collectionVersion);
 
-    // Loads a new chunk manager from a collection document
-    explicit ChunkManager(const CollectionType& coll);
-
-    // Creates an empty chunk manager for the namespace
-    ChunkManager(const std::string& ns, const ShardKeyPattern& pattern, bool unique);
-
-    const std::string& getns() const {
-        return _ns;
-    }
-    const ShardKeyPattern& getShardKeyPattern() const {
-        return _keyPattern;
-    }
-    bool isUnique() const {
-        return _unique;
-    }
+    ~ChunkManager();
 
     /**
-     * this is just an increasing number of how many ChunkManagers we have so we know if something
-     * has been updated
+     * Returns an increasing number of the reload sequence number of this chunk manager.
      */
     unsigned long long getSequenceNumber() const {
         return _sequenceNumber;
     }
 
-    //
-    // After constructor is invoked, we need to call loadExistingRanges.  If this is a new
-    // sharded collection, we can call createFirstChunks first.
-    //
+    const std::string& getns() const {
+        return _nss.ns();
+    }
 
-    // Creates new chunks based on info in chunk manager
-    Status createFirstChunks(OperationContext* txn,
-                             const ShardId& primaryShardId,
-                             const std::vector<BSONObj>* initPoints,
-                             const std::set<ShardId>* initShardIds);
+    const ShardKeyPattern& getShardKeyPattern() const {
+        return _shardKeyPattern;
+    }
 
-    // Loads existing ranges based on info in chunk manager
-    void loadExistingRanges(OperationContext* txn, const ChunkManager* oldManager);
+    const CollatorInterface* getDefaultCollator() const {
+        return _defaultCollator.get();
+    }
 
+    bool isUnique() const {
+        return _unique;
+    }
 
-    // Helpers for load
-    void calcInitSplitsAndShards(OperationContext* txn,
-                                 const ShardId& primaryShardId,
-                                 const std::vector<BSONObj>* initPoints,
-                                 const std::set<ShardId>* initShardIds,
-                                 std::vector<BSONObj>* splitPoints,
-                                 std::vector<ShardId>* shardIds) const;
+    ChunkVersion getVersion() const {
+        return _collectionVersion;
+    }
 
-    //
-    // Methods to use once loaded / created
-    //
+    ChunkVersion getVersion(const ShardId& shardId) const;
+
+    const ChunkMap& chunkMap() const {
+        return _chunkMap;
+    }
 
     int numChunks() const {
         return _chunkMap.size();
     }
 
-    /**
-     * Given a key that has been extracted from a document, returns the
-     * chunk that contains that key.
-     *
-     * For instance, to locate the chunk for document {a : "foo" , b : "bar"}
-     * when the shard key is {a : "hashed"}, you can call
-     *  findIntersectingChunk() on {a : hash("foo") }
-     */
-    ChunkPtr findIntersectingChunk(OperationContext* txn, const BSONObj& shardKey) const;
+    const ShardVersionMap& shardVersions() const {
+        return _chunkMapViews.shardVersions;
+    }
 
+    /**
+     * Given a shard key (or a prefix) that has been extracted from a document, returns the chunk
+     * that contains that key.
+     *
+     * Example: findIntersectingChunk({a : hash('foo')}) locates the chunk for document
+     *          {a: 'foo', b: 'bar'} if the shard key is {a : 'hashed'}.
+     *
+     * If 'collation' is empty, we use the collection default collation for targeting.
+     *
+     * Throws a DBException with the ShardKeyNotFound code if unable to target a single shard due to
+     * collation or due to the key not matching the shard key pattern.
+     */
+    std::shared_ptr<Chunk> findIntersectingChunk(const BSONObj& shardKey,
+                                                 const BSONObj& collation) const;
+
+    /**
+     * Same as findIntersectingChunk, but assumes the simple collation.
+     */
+    std::shared_ptr<Chunk> findIntersectingChunkWithSimpleCollation(const BSONObj& shardKey) const;
+
+    /**
+     * Finds the shard IDs for a given filter and collation. If collation is empty, we use the
+     * collection default collation for targeting.
+     */
     void getShardIdsForQuery(OperationContext* txn,
                              const BSONObj& query,
+                             const BSONObj& collation,
                              std::set<ShardId>* shardIds) const;
 
-    void getAllShardIds(std::set<ShardId>* all) const;
-
-    /** @param shardIds set to the shard ids for shards
-     *         covered by the interval [min, max], see SERVER-4791
+    /**
+     * Returns all shard ids which contain chunks overlapping the range [min, max]. Please note the
+     * inclusive bounds on both sides (SERVER-20768).
      */
-    void getShardIdsForRange(std::set<ShardId>& shardIds,
-                             const BSONObj& min,
-                             const BSONObj& max) const;
+    void getShardIdsForRange(const BSONObj& min,
+                             const BSONObj& max,
+                             std::set<ShardId>* shardIds) const;
+
+    /**
+     * Returns the ids of all shards on which the collection has any chunks.
+     */
+    void getAllShardIds(std::set<ShardId>* all) const;
 
     // Transforms query into bounds for each field in the shard key
     // for example :
@@ -228,99 +168,97 @@ public:
     //   =>  { a: (0, 1), (2, 3), b: (0, 1), (2, 3) }
     static IndexBounds collapseQuerySolution(const QuerySolutionNode* node);
 
-    const ChunkMap& getChunkMap() const {
-        return _chunkMap;
-    }
-
     /**
      * Returns true if, for this shard, the chunks are identical in both chunk managers
      */
-    bool compatibleWith(const ChunkManager& other, const std::string& shard) const;
+    bool compatibleWith(const ChunkManager& other, const ShardId& shard) const;
 
     std::string toString() const;
 
-    ChunkVersion getVersion(const std::string& shardName) const;
-    ChunkVersion getVersion() const;
-
-    void _printChunks() const;
-
-    int getCurrentDesiredChunkSize() const;
-
-    std::shared_ptr<ChunkManager> reload(OperationContext* txn,
-                                         bool force = true) const;  // doesn't modify self!
+private:
+    friend class CollectionRoutingDataLoader;
 
     /**
-     * Returns the opTime of config server the last time chunks were loaded.
+     * Represents a range of chunk keys [getMin(), getMax()) and the id of the shard on which they
+     * reside according to the metadata.
      */
-    repl::OpTime getConfigOpTime() const;
+    struct ShardAndChunkRange {
+        const BSONObj& min() const {
+            return range.getMin();
+        }
 
-private:
-    // returns true if load was consistent
-    bool _load(OperationContext* txn,
-               ChunkMap& chunks,
-               std::set<ShardId>& shardIds,
-               ShardVersionMap* shardVersions,
-               const ChunkManager* oldManager);
+        const BSONObj& max() const {
+            return range.getMax();
+        }
 
+        ChunkRange range;
+        ShardId shardId;
+    };
 
-    // All members should be const for thread-safety
-    const std::string _ns;
-    const ShardKeyPattern _keyPattern;
-    const bool _unique;
+    using ChunkRangeMap = BSONObjIndexedMap<ShardAndChunkRange>;
+
+    /**
+     * Contains different transformations of the chunk map for efficient querying
+     */
+    struct ChunkMapViews {
+        // Transformation of the chunk map containing what range of keys reside on which shard. The
+        // index is the max key of the respective range and the union of all ranges in a such
+        // constructed map must cover the complete space from [MinKey, MaxKey).
+        const ChunkRangeMap chunkRangeMap;
+
+        // Map from shard id to the maximum chunk version for that shard. If a shard contains no
+        // chunks, it won't be present in this map.
+        const ShardVersionMap shardVersions;
+    };
+
+    /**
+     * Does a single pass over the chunkMap and constructs the ChunkMapViews object.
+     */
+    static ChunkMapViews _constructChunkMapViews(const OID& epoch, const ChunkMap& chunkMap);
 
     // The shard versioning mechanism hinges on keeping track of the number of times we reload
-    // ChunkManagers. Increasing this number here will prompt checkShardVersion to refresh the
-    // connection-level versions to the most up to date value.
+    // ChunkManagers.
     const unsigned long long _sequenceNumber;
 
-    ChunkMap _chunkMap;
-    ChunkRangeManager _chunkRanges;
+    // Namespace to which this routing information corresponds
+    const NamespaceString _nss;
 
-    std::set<ShardId> _shardIds;
+    // The key pattern used to shard the collection
+    const ShardKeyPattern _shardKeyPattern;
 
-    // Max known version per shard
-    ShardVersionMap _shardVersions;
+    // Default collation to use for routing data queries for this collection
+    const std::unique_ptr<CollatorInterface> _defaultCollator;
+
+    // Whether the sharding key is unique
+    const bool _unique;
+
+    // Map from the max for each chunk to an entry describing the chunk. The union of all chunks'
+    // ranges must cover the complete space from [MinKey, MaxKey).
+    const ChunkMap _chunkMap;
+
+    // Different transformations of the chunk map for efficient querying
+    const ChunkMapViews _chunkMapViews;
 
     // Max version across all chunks
-    ChunkVersion _version;
+    const ChunkVersion _collectionVersion;
 
-    // OpTime of config server the last time chunks were loaded.
-    repl::OpTime _configOpTime;
-
-    //
-    // Split Heuristic info
-    //
-    class SplitHeuristics {
+    // Auto-split throttling state (state mutable by write commands)
+    struct AutoSplitThrottle {
     public:
-        SplitHeuristics() : _splitTickets(maxParallelSplits) {}
+        AutoSplitThrottle() : _splitTickets(maxParallelSplits) {}
 
         TicketHolder _splitTickets;
 
-        // Test whether we should split once data * splitTestFactor > chunkSize (approximately)
-        static const int splitTestFactor = 5;
         // Maximum number of parallel threads requesting a split
         static const int maxParallelSplits = 5;
 
-        // The idea here is that we're over-aggressive on split testing by a factor of
-        // splitTestFactor, so we can safely wait until we get to splitTestFactor invalid splits
-        // before changing.  Unfortunately, we also potentially over-request the splits by a
-        // factor of maxParallelSplits, but since the factors are identical it works out
-        // (for now) for parallel or sequential oversplitting.
-        // TODO: Make splitting a separate thread with notifications?
-        static const int staleMinorReloadThreshold = maxParallelSplits;
-    };
+    } _autoSplitThrottle;
 
-    mutable SplitHeuristics _splitHeuristics;
-
-    //
-    // End split heuristics
-    //
-
-    friend class Chunk;
-    friend class ChunkRangeManager;  // only needed for CRM::assertValid()
-    static AtomicUInt32 NextSequenceNumber;
-
-    friend class TestableChunkManager;
+    // This function needs to be able to access the auto-split throttle
+    friend void updateChunkWriteStatsAndSplitIfNeeded(OperationContext*,
+                                                      ChunkManager*,
+                                                      Chunk*,
+                                                      long);
 };
 
 }  // namespace mongo

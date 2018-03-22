@@ -32,52 +32,30 @@
 
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/s/local_sharding_info.h"
 #include "mongo/scripting/mozjs/idwrapper.h"
 #include "mongo/scripting/mozjs/implscope.h"
 #include "mongo/scripting/mozjs/internedstring.h"
 #include "mongo/scripting/mozjs/objectwrapper.h"
 #include "mongo/scripting/mozjs/valuereader.h"
 #include "mongo/scripting/mozjs/valuewriter.h"
-#include "mongo/s/d_state.h"
 
 namespace mongo {
 namespace mozjs {
 
 const char* const DBInfo::className = "DB";
 
-void DBInfo::getProperty(JSContext* cx,
-                         JS::HandleObject obj,
-                         JS::HandleId id,
-                         JS::MutableHandleValue vp) {
-    // 2nd look into real values, may be cached collection object
-    if (!vp.isUndefined()) {
-        auto scope = getScope(cx);
-        auto opContext = scope->getOpContext();
+void DBInfo::resolve(JSContext* cx, JS::HandleObject obj, JS::HandleId id, bool* resolvedp) {
+    *resolvedp = false;
 
-        if (opContext && vp.isObject()) {
-            ObjectWrapper o(cx, vp);
-
-            if (o.hasOwnField(InternedString::_fullName)) {
-                // need to check every time that the collection did not get sharded
-                if (haveLocalShardingInfo(opContext->getClient(),
-                                          o.getString(InternedString::_fullName)))
-                    uasserted(ErrorCodes::BadValue, "can't use sharded collection from db.eval");
-            }
-        }
-
-        return;
-    }
+    JS::RootedValue coll(cx);
 
     JS::RootedObject parent(cx);
     if (!JS_GetPrototype(cx, obj, &parent))
         uasserted(ErrorCodes::JSInterpreterFailure, "Couldn't get prototype");
 
     ObjectWrapper parentWrapper(cx, parent);
-
-    if (parentWrapper.hasOwnField(id)) {
-        parentWrapper.getValue(id, vp);
-        return;
-    }
+    ObjectWrapper o(cx, obj);
 
     IdWrapper idw(cx, id);
 
@@ -88,21 +66,39 @@ void DBInfo::getProperty(JSContext* cx,
         if (sname.size() == 0 || sname[0] == '_') {
             return;
         }
+
+        // SpiderMonkey will call resolve even for __proto__ so acknowledge it exists.
+        if (sname == "__proto__"_sd) {
+            *resolvedp = true;
+            return;
+        }
+    }
+
+    // Check if this exists on the parent, ie. DBCollection::resolve case
+    if (parentWrapper.hasOwnField(id)) {
+        parentWrapper.getValue(id, &coll);
+
+        o.defineProperty(id, coll, 0);
+
+        *resolvedp = true;
+        return;
     }
 
     // no hit, create new collection
     JS::RootedValue getCollection(cx);
     parentWrapper.getValue(InternedString::getCollection, &getCollection);
 
+    // Check if getCollection has been installed yet
+    // It is undefined if the user has a db name the same as one of methods/properties of the DB
+    // object.
     if (!(getCollection.isObject() && JS_ObjectIsFunction(cx, getCollection.toObjectOrNull()))) {
-        uasserted(ErrorCodes::BadValue, "getCollection is not a function");
+        return;
     }
 
     JS::AutoValueArray<1> args(cx);
 
     idw.toValue(args[0]);
 
-    JS::RootedValue coll(cx);
     ObjectWrapper(cx, obj).callMethod(getCollection, args, &coll);
 
     uassert(16861,
@@ -112,7 +108,7 @@ void DBInfo::getProperty(JSContext* cx,
     // cache collection for reuse, don't enumerate
     ObjectWrapper(cx, obj).defineProperty(id, coll, 0);
 
-    vp.set(coll);
+    *resolvedp = true;
 }
 
 void DBInfo::construct(JSContext* cx, JS::CallArgs args) {
@@ -136,7 +132,7 @@ void DBInfo::construct(JSContext* cx, JS::CallArgs args) {
 
     std::string dbName = ValueWriter(cx, args.get(1)).toString();
 
-    if (!NamespaceString::validDBName(dbName))
+    if (!NamespaceString::validDBName(dbName, NamespaceString::DollarInDbNameBehavior::Allow))
         uasserted(ErrorCodes::BadValue,
                   str::stream() << "[" << dbName << "] is not a valid database name");
 

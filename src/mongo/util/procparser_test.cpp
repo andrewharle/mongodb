@@ -92,6 +92,7 @@ StringMap toNestedStringMap(BSONObj& obj) {
     auto stringMap = toNestedStringMap(obj);
 
 TEST(FTDCProcStat, TestStat) {
+
     std::vector<StringData> keys{"cpu", "ctxt", "processes"};
 
     // Normal case
@@ -238,6 +239,7 @@ TEST(FTDCProcStat, TestLocalNonExistentStat) {
 }
 
 TEST(FTDCProcMemInfo, TestMemInfo) {
+
     std::vector<StringData> keys{"Key1", "Key2", "Key3"};
 
     // Normal case
@@ -290,44 +292,25 @@ TEST(FTDCProcMemInfo, TestMemInfo) {
 // otherwise.
 TEST(FTDCProcMemInfo, TestLocalMemInfo) {
     std::vector<StringData> keys{
-        "Active",
-        "Active(anon)",
-        "Active(file)",
-        "AnonHugePages",
-        "AnonPages",
-        "Bounce",
-        "Buffers",
-        "Cached",
-        "CmaFree",
-        "CmaTotal",
-        "CommitLimit",
-        "Committed_AS",
-        "Dirty",
-        "HardwareCorrupted",
-        "Inactive",
-        "Inactive(anon)",
-        "Inactive(file)",
-        "KernelStack",
-        "Mapped",
-        "MemAvailable",
-        "MemFree",
-        "MemTotal",
-        "Mlocked",
-        "NFS_Unstable",
-        "PageTables",
-        "SReclaimable",
-        "SUnreclaim",
-        "Shmem",
-        "Slab",
-        "SwapCached",
-        "SwapFree",
-        "SwapTotal",
-        "Unevictable",
-        "VmallocChunk",
-        "VmallocTotal",
-        "VmallocUsed",
-        "Writeback",
-        "WritebackTmp",
+        "Active",         "Active(anon)",
+        "Active(file)",   "AnonHugePages",
+        "AnonPages",      "Bounce",
+        "Buffers",        "Cached",
+        "CmaFree",        "CmaTotal",
+        "CommitLimit",    "Committed_AS",
+        "Dirty",          "HardwareCorrupted",
+        "Inactive",       "Inactive(anon)",
+        "Inactive(file)", "KernelStack",
+        "Mapped",         "MemAvailable",
+        "MemFree",        "MemTotal",
+        "Mlocked",        "NFS_Unstable",
+        "PageTables",     "SReclaimable",
+        "SUnreclaim",     "Shmem",
+        "Slab",           "SwapCached",
+        "SwapFree",       "SwapTotal",
+        "Unevictable",    "VmallocChunk",
+        "VmallocTotal",   "VmallocUsed",
+        "Writeback",      "WritebackTmp",
     };
 
     BSONObjBuilder builder;
@@ -387,6 +370,7 @@ TEST(FTDCProcMemInfo, TestLocalNonExistentMemInfo) {
 
 
 TEST(FTDCProcDiskStats, TestDiskStats) {
+
     std::vector<StringData> disks{"dm-1", "sda", "sdb"};
 
     // Normal case including high device major numbers.

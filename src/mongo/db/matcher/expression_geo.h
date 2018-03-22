@@ -91,7 +91,7 @@ public:
 
     virtual void debugString(StringBuilder& debug, int level = 0) const;
 
-    virtual void toBSON(BSONObjBuilder* out) const;
+    virtual void serialize(BSONObjBuilder* out) const;
 
     virtual bool equivalent(const MatchExpression* other) const;
 
@@ -108,12 +108,11 @@ public:
     const GeoExpression& getGeoExpression() const {
         return *_query;
     }
-    const BSONObj getRawObj() const {
-        return _rawObj;
-    }
 
 private:
+    // The original geo specification provided by the user.
     BSONObj _rawObj;
+
     // Share ownership of our query with all of our clones
     std::shared_ptr<const GeoExpression> _query;
     bool _canSkipValidation;
@@ -174,7 +173,7 @@ public:
 
     virtual void debugString(StringBuilder& debug, int level = 0) const;
 
-    virtual void toBSON(BSONObjBuilder* out) const;
+    virtual void serialize(BSONObjBuilder* out) const;
 
     virtual bool equivalent(const MatchExpression* other) const;
 
@@ -183,12 +182,11 @@ public:
     const GeoNearExpression& getData() const {
         return *_query;
     }
-    const BSONObj getRawObj() const {
-        return _rawObj;
-    }
 
 private:
+    // The original geo specification provided by the user.
     BSONObj _rawObj;
+
     // Share ownership of our query with all of our clones
     std::shared_ptr<const GeoNearExpression> _query;
 };

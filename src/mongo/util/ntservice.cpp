@@ -37,8 +37,6 @@
 
 #include "mongo/util/ntservice.h"
 
-#include "mongo/db/client.h"
-#include "mongo/db/instance.h"
 #include "mongo/stdx/chrono.h"
 #include "mongo/stdx/future.h"
 #include "mongo/stdx/thread.h"
@@ -78,8 +76,10 @@ bool shouldStartService() {
     return _startService;
 }
 
-static DWORD WINAPI
-serviceCtrl(DWORD dwControl, DWORD dwEventType, LPVOID lpEventData, LPVOID lpContext);
+static DWORD WINAPI serviceCtrl(DWORD dwControl,
+                                DWORD dwEventType,
+                                LPVOID lpEventData,
+                                LPVOID lpContext);
 
 void configureService(ServiceCallback serviceCallback,
                       const moe::Environment& params,
@@ -524,30 +524,27 @@ bool reportStatus(DWORD reportState, DWORD waitHint, DWORD exitCode) {
 // Minimum of time we tell Windows to wait before we are guilty of a hung shutdown
 const int kStopWaitHintMillis = 30000;
 
-// Run exitCleanly on a separate thread so we can report progress to Windows
+// Run shutdownNoTerminate on a separate thread so we can report progress to Windows
 // Note: Windows may still kill us for taking too long,
 // On client OSes, SERVICE_CONTROL_SHUTDOWN has a 5 second timeout configured in
 // HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control
 static void serviceStop() {
-    // VS2013 Doesn't support future<void>, so fake it with a bool.
-    stdx::packaged_task<bool()> exitCleanlyTask([] {
-        Client::initThread("serviceStopWorker");
+    stdx::packaged_task<void()> shutdownNoTerminateTask([] {
+        setThreadName("serviceStopWorker");
         // Stop the process
-        // TODO: SERVER-5703, separate the "cleanup for shutdown" functionality from
-        // the "terminate process" functionality in exitCleanly.
-        exitCleanly(EXIT_WINDOWS_SERVICE_STOP);
+        shutdownNoTerminate();
         return true;
     });
-    stdx::future<bool> exitedCleanly = exitCleanlyTask.get_future();
+    stdx::future<void> exitedCleanly = shutdownNoTerminateTask.get_future();
 
     // Launch the packaged task in a thread. We needn't ever join it,
     // so it doesn't even need a name.
-    stdx::thread(std::move(exitCleanlyTask)).detach();
+    stdx::thread(std::move(shutdownNoTerminateTask)).detach();
 
-    const auto timeout = stdx::chrono::milliseconds(kStopWaitHintMillis / 2);
+    const auto timeout = Milliseconds(kStopWaitHintMillis / 2);
 
     // We periodically check if we are done exiting by polling at half of each wait interval
-    while (exitedCleanly.wait_for(timeout) != stdx::future_status::ready) {
+    while (exitedCleanly.wait_for(timeout.toSystemDuration()) != stdx::future_status::ready) {
         reportStatus(SERVICE_STOP_PENDING, kStopWaitHintMillis);
         log() << "Service Stop is waiting for storage engine to finish shutdown";
     }
@@ -572,26 +569,24 @@ static void WINAPI initService(DWORD argc, LPTSTR* argv) {
 }
 
 static void serviceShutdown(const char* controlCodeName) {
-    // We spawn a detached thread here because signalShudown may block and it is illegal to block in
-    // anything called from serviceCtrl(). We are required to return ASAP.
-    stdx::thread([controlCodeName] {
-        Client::initThread("serviceShutdown");
+    setThreadName("serviceShutdown");
 
-        log() << "got " << controlCodeName << " request from Windows Service Control Manager, "
-              << (inShutdown() ? "already in shutdown" : "will terminate after current cmd ends");
+    log() << "got " << controlCodeName << " request from Windows Service Control Manager, "
+          << (inShutdown() ? "already in shutdown" : "will terminate after current cmd ends");
 
-        reportStatus(SERVICE_STOP_PENDING, kStopWaitHintMillis);
+    reportStatus(SERVICE_STOP_PENDING, kStopWaitHintMillis);
 
-        // Note: This triggers _serviceCallback, ie  ServiceMain,
-        // to stop by setting inShutdown() == true
-        signalShutdown();
+    // Note: This triggers _serviceCallback, ie  ServiceMain,
+    // to stop by setting inShutdown() == true
+    shutdownNoTerminate();
 
-        // Note: we will report exit status in initService
-    }).detach();
+    // Note: we will report exit status in initService
 }
 
-static DWORD WINAPI
-serviceCtrl(DWORD dwControl, DWORD dwEventType, LPVOID lpEventData, LPVOID lpContext) {
+static DWORD WINAPI serviceCtrl(DWORD dwControl,
+                                DWORD dwEventType,
+                                LPVOID lpEventData,
+                                LPVOID lpContext) {
     switch (dwControl) {
         case SERVICE_CONTROL_INTERROGATE:
             // Return NO_ERROR per MSDN even though we do nothing for this control code.

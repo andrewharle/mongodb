@@ -28,12 +28,15 @@
 
 #pragma once
 
+#include <map>
+#include <sstream>
 #include <string>
 #include <vector>
 
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
+#include "mongo/bson/util/builder.h"
 #include "mongo/client/connection_string.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/assert_util.h"
@@ -42,11 +45,37 @@
 namespace mongo {
 
 /**
+ * Encode a string for embedding in a URI.
+ * Replaces reserved bytes with %xx sequences.
+ *
+ * Optionally allows passthrough characters to remain unescaped.
+ */
+void uriEncode(std::ostream& ss, StringData str, StringData passthrough = ""_sd);
+inline std::string uriEncode(StringData str, StringData passthrough = ""_sd) {
+    std::ostringstream ss;
+    uriEncode(ss, str, passthrough);
+    return ss.str();
+}
+
+/**
+ * Decode a URI encoded string.
+ * Replaces + and %xx sequences with their original byte.
+ */
+StatusWith<std::string> uriDecode(StringData str);
+
+/**
  * MongoURI handles parsing of URIs for mongodb, and falls back to old-style
  * ConnectionString parsing. It's used primarily by the shell.
  * It parses URIs with the following format:
  *
  *    mongodb://[usr:pwd@]host1[:port1]...[,hostN[:portN]]][/[db][?options]]
+ *
+ * While this format is generally RFC 3986 compliant, some exceptions do exist:
+ *   1. The 'host' field, as defined by section 3.2.2 is expanded in the following ways:
+ *     a. Multiple hosts may be specified as a comma separated list.
+ *     b. Hosts may take the form of absolute paths for unix domain sockets.
+ *       i. Sockets must end in the suffix '.sock'
+ *   2. The 'fragment' field, as defined by section 3.5 is not permitted.
  *
  * For a complete list of URI string options, see
  * https://wiki.mongodb.com/display/DH/Connection+String+Format
@@ -67,9 +96,13 @@ namespace mongo {
  */
 class MongoURI {
 public:
+    using OptionsMap = std::map<std::string, std::string>;
+
     static StatusWith<MongoURI> parse(const std::string& url);
 
-    DBClientBase* connect(std::string& errmsg, double socketTimeout = 0) const;
+    DBClientBase* connect(StringData applicationName,
+                          std::string& errmsg,
+                          boost::optional<double> socketTimeoutSecs = boost::none) const;
 
     const std::string& getUser() const {
         return _user;
@@ -79,7 +112,7 @@ public:
         return _password;
     }
 
-    const BSONObj& getOptions() const {
+    const OptionsMap& getOptions() const {
         return _options;
     }
 
@@ -103,24 +136,37 @@ public:
         return _connectString.getServers();
     }
 
+    // If you are trying to clone a URI (including its options/auth information) for a single
+    // server (say a member of a replica-set), you can pass in its HostAndPort information to
+    // get a new URI with the same info, except type() will be MASTER and getServers() will
+    // be the single host you pass in.
+    MongoURI cloneURIForServer(const HostAndPort& hostAndPort) const {
+        return MongoURI(ConnectionString(hostAndPort), _user, _password, _database, _options);
+    }
+
     ConnectionString::ConnectionType type() const {
         return _connectString.type();
     }
 
-private:
-    explicit MongoURI(const ConnectionString cs)
-        : _connectString(std::move(cs)), _user(), _password(), _database(), _options(){};
+    explicit MongoURI(const ConnectionString connectString)
+        : _connectString(std::move(connectString)){};
 
-    MongoURI(ConnectionString _connectString,
+    MongoURI() = default;
+
+    friend std::ostream& operator<<(std::ostream&, const MongoURI&);
+    friend StringBuilder& operator<<(StringBuilder&, const MongoURI&);
+
+private:
+    MongoURI(ConnectionString connectString,
              const std::string& user,
              const std::string& password,
              const std::string& database,
-             const BSONObj& options)
-        : _connectString(std::move(_connectString)),
+             OptionsMap options)
+        : _connectString(std::move(connectString)),
           _user(user),
           _password(password),
           _database(database),
-          _options(options){};
+          _options(std::move(options)){};
 
     BSONObj _makeAuthObjFromOptions(int maxWireVersion) const;
 
@@ -128,6 +174,17 @@ private:
     std::string _user;
     std::string _password;
     std::string _database;
-    BSONObj _options;
+    OptionsMap _options;
 };
+
+inline std::ostream& operator<<(std::ostream& ss, const MongoURI& uri) {
+    ss << uri._connectString;
+    return ss;
+}
+
+inline StringBuilder& operator<<(StringBuilder& sb, const MongoURI& uri) {
+    sb << uri._connectString;
+    return sb;
+}
+
 }  // namespace mongo

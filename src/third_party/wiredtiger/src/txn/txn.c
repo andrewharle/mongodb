@@ -607,7 +607,6 @@ __wt_txn_commit(WT_SESSION_IMPL *session, const char *cfg[])
 			    &txn_global->visibility_rwlock);
 		WT_TRET(__wt_txn_rollback(session, cfg));
 		return (ret);
-
 	}
 
 	/* Free memory associated with updates. */

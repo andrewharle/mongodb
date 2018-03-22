@@ -32,29 +32,43 @@
 
 #include "mongo/db/pipeline/pipeline_d.h"
 
+#include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/client/dbclientinterface.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/document_validation.h"
+#include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
+#include "mongo/db/db_raii.h"
+#include "mongo/db/dbdirectclient.h"
 #include "mongo/db/exec/fetch.h"
 #include "mongo/db/exec/index_iterator.h"
 #include "mongo/db/exec/multi_iterator.h"
 #include "mongo/db/exec/shard_filter.h"
 #include "mongo/db/exec/working_set.h"
-#include "mongo/db/db_raii.h"
-#include "mongo/db/dbdirectclient.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/matcher/extensions_callback_real.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/document_source.h"
+#include "mongo/db/pipeline/document_source_cursor.h"
+#include "mongo/db/pipeline/document_source_match.h"
+#include "mongo/db/pipeline/document_source_merge_cursors.h"
+#include "mongo/db/pipeline/document_source_sample.h"
+#include "mongo/db/pipeline/document_source_sample_from_random_cursor.h"
+#include "mongo/db/pipeline/document_source_sort.h"
 #include "mongo/db/pipeline/pipeline.h"
+#include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/get_executor.h"
+#include "mongo/db/query/plan_summary_stats.h"
 #include "mongo/db/query/query_planner.h"
-#include "mongo/db/service_context.h"
-#include "mongo/db/storage/record_store.h"
-#include "mongo/db/storage/sorted_data_interface.h"
+#include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/s/sharded_connection_info.h"
 #include "mongo/db/s/sharding_state.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/stats/storage_stats.h"
+#include "mongo/db/stats/top.h"
+#include "mongo/db/storage/record_store.h"
+#include "mongo/db/storage/sorted_data_interface.h"
 #include "mongo/s/chunk_version.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/util/log.h"
@@ -81,17 +95,10 @@ public:
         return &_client;
     }
 
-    bool isSharded(const NamespaceString& ns) final {
-        const ChunkVersion unsharded(0, 0, OID());
-        return !(ShardingState::get(_ctx->opCtx)
-                     ->getVersion(ns.ns())
-                     .isWriteCompatibleWith(unsharded));
-    }
-
-    bool isCapped(const NamespaceString& ns) final {
-        AutoGetCollectionForRead ctx(_ctx->opCtx, ns.ns());
-        Collection* collection = ctx.getCollection();
-        return collection && collection->isCapped();
+    bool isSharded(const NamespaceString& nss) final {
+        AutoGetCollectionForRead autoColl(_ctx->opCtx, nss);
+        auto css = CollectionShardingState::get(_ctx->opCtx, nss);
+        return bool(css->getMetadata());
     }
 
     BSONObj insert(const NamespaceString& ns, const std::vector<BSONObj>& objs) final {
@@ -114,6 +121,80 @@ public:
         }
 
         return collection->infoCache()->getIndexUsageStats();
+    }
+
+    void appendLatencyStats(const NamespaceString& nss,
+                            bool includeHistograms,
+                            BSONObjBuilder* builder) const final {
+        Top::get(_ctx->opCtx->getServiceContext())
+            .appendLatencyStats(nss.ns(), includeHistograms, builder);
+    }
+
+    Status appendStorageStats(const NamespaceString& nss,
+                              const BSONObj& param,
+                              BSONObjBuilder* builder) const final {
+        return appendCollectionStorageStats(_ctx->opCtx, nss, param, builder);
+    }
+
+    BSONObj getCollectionOptions(const NamespaceString& nss) final {
+        const auto infos =
+            _client.getCollectionInfos(nss.db().toString(), BSON("name" << nss.coll()));
+        return infos.empty() ? BSONObj() : infos.front().getObjectField("options").getOwned();
+    }
+
+    Status renameIfOptionsAndIndexesHaveNotChanged(
+        const BSONObj& renameCommandObj,
+        const NamespaceString& targetNs,
+        const BSONObj& originalCollectionOptions,
+        const std::list<BSONObj>& originalIndexes) final {
+        Lock::GlobalWrite globalLock(_ctx->opCtx->lockState());
+
+        if (SimpleBSONObjComparator::kInstance.evaluate(originalCollectionOptions !=
+                                                        getCollectionOptions(targetNs))) {
+            return {ErrorCodes::CommandFailed,
+                    str::stream() << "collection options of target collection " << targetNs.ns()
+                                  << " changed during processing. Original options: "
+                                  << originalCollectionOptions
+                                  << ", new options: "
+                                  << getCollectionOptions(targetNs)};
+        }
+
+        auto currentIndexes = _client.getIndexSpecs(targetNs.ns());
+        if (originalIndexes.size() != currentIndexes.size() ||
+            !std::equal(originalIndexes.begin(),
+                        originalIndexes.end(),
+                        currentIndexes.begin(),
+                        SimpleBSONObjComparator::kInstance.makeEqualTo())) {
+            return {ErrorCodes::CommandFailed,
+                    str::stream() << "indexes of target collection " << targetNs.ns()
+                                  << " changed during processing."};
+        }
+
+        BSONObj info;
+        bool ok = _client.runCommand("admin", renameCommandObj, info);
+        return ok ? Status::OK() : Status{ErrorCodes::CommandFailed,
+                                          str::stream() << "renameCollection failed: " << info};
+    }
+
+    StatusWith<boost::intrusive_ptr<Pipeline>> makePipeline(
+        const std::vector<BSONObj>& rawPipeline,
+        const boost::intrusive_ptr<ExpressionContext>& expCtx) final {
+        // 'expCtx' may represent the settings for an aggregation pipeline on a different namespace
+        // than the DocumentSource this MongodImplementation is injected into, but both
+        // ExpressionContext instances should still have the same OperationContext.
+        invariant(_ctx->opCtx == expCtx->opCtx);
+
+        auto pipeline = Pipeline::parse(rawPipeline, expCtx);
+        if (!pipeline.isOK()) {
+            return pipeline.getStatus();
+        }
+
+        pipeline.getValue()->optimizePipeline();
+
+        AutoGetCollectionForRead autoColl(expCtx->opCtx, expCtx->ns);
+        PipelineD::prepareCursorSource(autoColl.getCollection(), pipeline.getValue());
+
+        return pipeline;
     }
 
 private:
@@ -173,14 +254,22 @@ StatusWith<unique_ptr<PlanExecutor>> createRandomCursorExecutor(Collection* coll
             txn, ws.get(), idxIterator.release(), nullptr, collection);
     }
 
-    ShardingState* const shardingState = ShardingState::get(txn);
+    {
+        AutoGetCollection autoColl(txn, collection->ns(), MODE_IS);
 
-    // If we're in a sharded environment, we need to filter out documents we don't own.
-    if (shardingState->needCollectionMetadata(txn, txn->getNS())) {
-        auto shardFilterStage = stdx::make_unique<ShardFilterStage>(
-            txn, shardingState->getCollectionMetadata(txn->getNS()), ws.get(), stage.release());
-        return PlanExecutor::make(
-            txn, std::move(ws), std::move(shardFilterStage), collection, PlanExecutor::YIELD_AUTO);
+        // If we're in a sharded environment, we need to filter out documents we don't own.
+        if (ShardingState::get(txn)->needCollectionMetadata(txn, collection->ns().ns())) {
+            auto shardFilterStage = stdx::make_unique<ShardFilterStage>(
+                txn,
+                CollectionShardingState::get(txn, collection->ns())->getMetadata(),
+                ws.get(),
+                stage.release());
+            return PlanExecutor::make(txn,
+                                      std::move(ws),
+                                      std::move(shardFilterStage),
+                                      collection,
+                                      PlanExecutor::YIELD_AUTO);
+        }
     }
 
     return PlanExecutor::make(
@@ -195,10 +284,24 @@ StatusWith<std::unique_ptr<PlanExecutor>> attemptToGetExecutor(
     BSONObj projectionObj,
     BSONObj sortObj,
     const size_t plannerOpts) {
+    auto qr = stdx::make_unique<QueryRequest>(pExpCtx->ns);
+    qr->setFilter(queryObj);
+    qr->setProj(projectionObj);
+    qr->setSort(sortObj);
+
+    // If the pipeline has a non-null collator, set the collation option to the result of
+    // serializing the collator's spec back into BSON. We do this in order to fill in all options
+    // that the user omitted.
+    //
+    // If pipeline has a null collator (representing the "simple" collation), we simply set the
+    // collation option to the original user BSON, which is either the empty object (unspecified),
+    // or the specification for the "simple" collation.
+    qr->setCollation(pExpCtx->getCollator() ? pExpCtx->getCollator()->getSpec().toBSON()
+                                            : pExpCtx->collation);
+
     const ExtensionsCallbackReal extensionsCallback(pExpCtx->opCtx, &pExpCtx->ns);
 
-    auto cq = CanonicalQuery::canonicalize(
-        pExpCtx->ns, queryObj, sortObj, projectionObj, extensionsCallback);
+    auto cq = CanonicalQuery::canonicalize(txn, std::move(qr), extensionsCallback);
 
     if (!cq.isOK()) {
         // Return an error instead of uasserting, since there are cases where the combination of
@@ -214,20 +317,20 @@ StatusWith<std::unique_ptr<PlanExecutor>> attemptToGetExecutor(
 }
 }  // namespace
 
-shared_ptr<PlanExecutor> PipelineD::prepareCursorSource(
-    OperationContext* txn,
-    Collection* collection,
-    const intrusive_ptr<Pipeline>& pPipeline,
-    const intrusive_ptr<ExpressionContext>& pExpCtx) {
+void PipelineD::prepareCursorSource(Collection* collection,
+                                    const intrusive_ptr<Pipeline>& pipeline) {
+    auto expCtx = pipeline->getContext();
+    dassert(expCtx->opCtx->lockState()->isCollectionLockedForMode(expCtx->ns.ns(), MODE_IS));
+
     // We will be modifying the source vector as we go.
-    Pipeline::SourceContainer& sources = pPipeline->sources;
+    Pipeline::SourceContainer& sources = pipeline->_sources;
 
     // Inject a MongodImplementation to sources that need them.
-    for (size_t i = 0; i < sources.size(); i++) {
+    for (auto&& source : sources) {
         DocumentSourceNeedsMongod* needsMongod =
-            dynamic_cast<DocumentSourceNeedsMongod*>(sources[i].get());
+            dynamic_cast<DocumentSourceNeedsMongod*>(source.get());
         if (needsMongod) {
-            needsMongod->injectMongodInterface(std::make_shared<MongodImplementation>(pExpCtx));
+            needsMongod->injectMongodInterface(std::make_shared<MongodImplementation>(expCtx));
         }
     }
 
@@ -240,41 +343,53 @@ shared_ptr<PlanExecutor> PipelineD::prepareCursorSource(
                 // on secondaries, this is needed.
                 ShardedConnectionInfo::addHook();
             }
-            return std::shared_ptr<PlanExecutor>();  // don't need a cursor
+            return;  // don't need a cursor
         }
 
         auto sampleStage = dynamic_cast<DocumentSourceSample*>(sources.front().get());
         // Optimize an initial $sample stage if possible.
         if (collection && sampleStage) {
             const long long sampleSize = sampleStage->getSampleSize();
-            const long long numRecords = collection->getRecordStore()->numRecords(txn);
+            const long long numRecords = collection->getRecordStore()->numRecords(expCtx->opCtx);
             auto exec = uassertStatusOK(
-                createRandomCursorExecutor(collection, txn, sampleSize, numRecords));
+                createRandomCursorExecutor(collection, expCtx->opCtx, sampleSize, numRecords));
             if (exec) {
                 // Replace $sample stage with $sampleFromRandomCursor stage.
                 sources.pop_front();
                 std::string idString = collection->ns().isOplog() ? "ts" : "_id";
                 sources.emplace_front(DocumentSourceSampleFromRandomCursor::create(
-                    pExpCtx, sampleSize, idString, numRecords));
+                    expCtx, sampleSize, idString, numRecords));
 
-                const BSONObj initialQuery;
-                return addCursorSource(
-                    pPipeline, pExpCtx, std::move(exec), pPipeline->getDependencies(initialQuery));
+                addCursorSource(
+                    collection,
+                    pipeline,
+                    expCtx,
+                    std::move(exec),
+                    pipeline->getDependencies(DepsTracker::MetadataAvailable::kNoMetadata));
+                return;
             }
         }
     }
 
-    // Look for an initial match. This works whether we got an initial query or not.
-    // If not, it results in a "{}" query, which will be what we want in that case.
-    const BSONObj queryObj = pPipeline->getInitialQuery();
+    // Look for an initial match. This works whether we got an initial query or not. If not, it
+    // results in a "{}" query, which will be what we want in that case.
+    const BSONObj queryObj = pipeline->getInitialQuery();
     if (!queryObj.isEmpty()) {
-        // This will get built in to the Cursor we'll create, so
-        // remove the match from the pipeline
-        sources.pop_front();
+        if (dynamic_cast<DocumentSourceMatch*>(sources.front().get())) {
+            // If a $match query is pulled into the cursor, the $match is redundant, and can be
+            // removed from the pipeline.
+            sources.pop_front();
+        } else {
+            // A $geoNear stage, the only other stage that can produce an initial query, is also
+            // a valid initial stage and will be handled above.
+            MONGO_UNREACHABLE;
+        }
     }
 
     // Find the set of fields in the source documents depended on by this pipeline.
-    DepsTracker deps = pPipeline->getDependencies(queryObj);
+    DepsTracker deps = pipeline->getDependencies(DocumentSourceMatch::isTextQuery(queryObj)
+                                                     ? DepsTracker::MetadataAvailable::kTextScore
+                                                     : DepsTracker::MetadataAvailable::kNoMetadata);
 
     BSONObj projForQuery = deps.toProjection();
 
@@ -296,16 +411,25 @@ shared_ptr<PlanExecutor> PipelineD::prepareCursorSource(
     }
 
     // Create the PlanExecutor.
-    auto exec = uassertStatusOK(prepareExecutor(
-        txn, collection, pPipeline, pExpCtx, sortStage, deps, queryObj, &sortObj, &projForQuery));
+    auto exec = uassertStatusOK(prepareExecutor(expCtx->opCtx,
+                                                collection,
+                                                expCtx->ns,
+                                                pipeline,
+                                                expCtx,
+                                                sortStage,
+                                                deps,
+                                                queryObj,
+                                                &sortObj,
+                                                &projForQuery));
 
-    return addCursorSource(
-        pPipeline, pExpCtx, std::move(exec), deps, queryObj, sortObj, projForQuery);
+    addCursorSource(
+        collection, pipeline, expCtx, std::move(exec), deps, queryObj, sortObj, projForQuery);
 }
 
 StatusWith<std::unique_ptr<PlanExecutor>> PipelineD::prepareExecutor(
     OperationContext* txn,
     Collection* collection,
+    const NamespaceString& nss,
     const intrusive_ptr<Pipeline>& pipeline,
     const intrusive_ptr<ExpressionContext>& expCtx,
     const intrusive_ptr<DocumentSourceSort>& sortStage,
@@ -331,13 +455,24 @@ StatusWith<std::unique_ptr<PlanExecutor>> PipelineD::prepareExecutor(
     //
     // LATER - We should attempt to determine if the results from the query are returned in some
     // order so we can then apply other optimizations there are tickets for, such as SERVER-4507.
-    size_t plannerOpts = QueryPlannerParams::DEFAULT | QueryPlannerParams::INCLUDE_SHARD_FILTER |
-        QueryPlannerParams::NO_BLOCKING_SORT;
+    size_t plannerOpts = QueryPlannerParams::DEFAULT | QueryPlannerParams::NO_BLOCKING_SORT;
+
+    // If we are connecting directly to the shard rather than through a mongos, don't filter out
+    // orphaned documents.
+    if (ShardingState::get(txn)->needCollectionMetadata(txn, nss.ns())) {
+        plannerOpts |= QueryPlannerParams::INCLUDE_SHARD_FILTER;
+    }
+
+    if (deps.hasNoRequirements()) {
+        // If we don't need any fields from the input document, performing a count is faster, and
+        // will output empty documents, which is okay.
+        plannerOpts |= QueryPlannerParams::IS_COUNT;
+    }
 
     // The only way to get a text score is to let the query system handle the projection. In all
     // other cases, unless the query system can do an index-covered projection and avoid going to
     // the raw record at all, it is faster to have ParsedDeps filter the fields we need.
-    if (!deps.needTextScore) {
+    if (!deps.getNeedTextScore()) {
         plannerOpts |= QueryPlannerParams::NO_UNCOVERED_PROJECTIONS;
     }
 
@@ -368,11 +503,11 @@ StatusWith<std::unique_ptr<PlanExecutor>> PipelineD::prepareExecutor(
             }
 
             // We know the sort is being handled by the query system, so remove the $sort stage.
-            pipeline->sources.pop_front();
+            pipeline->_sources.pop_front();
 
             if (sortStage->getLimitSrc()) {
                 // We need to reinsert the coalesced $limit after removing the $sort.
-                pipeline->sources.push_front(sortStage->getLimitSrc());
+                pipeline->_sources.push_front(sortStage->getLimitSrc());
             }
             return std::move(exec);
         } else if (swExecutorSort == ErrorCodes::QueryPlanKilled) {
@@ -410,51 +545,78 @@ StatusWith<std::unique_ptr<PlanExecutor>> PipelineD::prepareExecutor(
         txn, collection, expCtx, queryObj, *projectionObj, *sortObj, plannerOpts);
 }
 
-shared_ptr<PlanExecutor> PipelineD::addCursorSource(const intrusive_ptr<Pipeline>& pipeline,
-                                                    const intrusive_ptr<ExpressionContext>& expCtx,
-                                                    unique_ptr<PlanExecutor> exec,
-                                                    DepsTracker deps,
-                                                    const BSONObj& queryObj,
-                                                    const BSONObj& sortObj,
-                                                    const BSONObj& projectionObj) {
+void PipelineD::addCursorSource(Collection* collection,
+                                const intrusive_ptr<Pipeline>& pipeline,
+                                const intrusive_ptr<ExpressionContext>& expCtx,
+                                unique_ptr<PlanExecutor> exec,
+                                DepsTracker deps,
+                                const BSONObj& queryObj,
+                                const BSONObj& sortObj,
+                                const BSONObj& projectionObj) {
     // Get the full "namespace" name.
     const string& fullName = expCtx->ns.ns();
 
-    // We convert the unique_ptr to a shared_ptr because both the PipelineProxyStage and the
-    // DocumentSourceCursor need to reference the PlanExecutor.
-    std::shared_ptr<PlanExecutor> sharedExec(std::move(exec));
+    // DocumentSourceCursor expects a yielding PlanExecutor that has had its state saved.
+    exec->saveState();
 
     // Put the PlanExecutor into a DocumentSourceCursor and add it to the front of the pipeline.
     intrusive_ptr<DocumentSourceCursor> pSource =
-        DocumentSourceCursor::create(fullName, sharedExec, expCtx);
+        DocumentSourceCursor::create(collection, fullName, std::move(exec), expCtx);
 
     // Note the query, sort, and projection for explain.
     pSource->setQuery(queryObj);
     pSource->setSort(sortObj);
+
+    if (deps.hasNoRequirements()) {
+        pSource->shouldProduceEmptyDocs();
+    }
 
     if (!projectionObj.isEmpty()) {
         pSource->setProjection(projectionObj, boost::none);
     } else {
         // There may be fewer dependencies now if the sort was covered.
         if (!sortObj.isEmpty()) {
-            deps = pipeline->getDependencies(queryObj);
+            deps = pipeline->getDependencies(DocumentSourceMatch::isTextQuery(queryObj)
+                                                 ? DepsTracker::MetadataAvailable::kTextScore
+                                                 : DepsTracker::MetadataAvailable::kNoMetadata);
         }
 
         pSource->setProjection(deps.toProjection(), deps.toParsedDeps());
     }
 
-    while (!pipeline->sources.empty() && pSource->coalesce(pipeline->sources.front())) {
-        pipeline->sources.pop_front();
+    // Add the initial DocumentSourceCursor to the front of the pipeline. Then optimize again in
+    // case the new stage can be absorbed with the first stages of the pipeline.
+    pipeline->addInitialSource(pSource);
+    pipeline->optimizePipeline();
+}
+
+std::string PipelineD::getPlanSummaryStr(const boost::intrusive_ptr<Pipeline>& pPipeline) {
+    if (auto docSourceCursor =
+            dynamic_cast<DocumentSourceCursor*>(pPipeline->_sources.front().get())) {
+        return docSourceCursor->getPlanSummaryStr();
     }
 
-    pipeline->addInitialSource(pSource);
+    return "";
+}
 
-    // DocumentSourceCursor expects a yielding PlanExecutor that has had its state saved. We
-    // deregister the PlanExecutor so that it can be registered with ClientCursor.
-    sharedExec->deregisterExec();
-    sharedExec->saveState();
+void PipelineD::getPlanSummaryStats(const boost::intrusive_ptr<Pipeline>& pPipeline,
+                                    PlanSummaryStats* statsOut) {
+    invariant(statsOut);
 
-    return sharedExec;
+    if (auto docSourceCursor =
+            dynamic_cast<DocumentSourceCursor*>(pPipeline->_sources.front().get())) {
+        *statsOut = docSourceCursor->getPlanSummaryStats();
+    }
+
+    bool hasSortStage{false};
+    for (auto&& source : pPipeline->_sources) {
+        if (dynamic_cast<DocumentSourceSort*>(source.get())) {
+            hasSortStage = true;
+            break;
+        }
+    }
+
+    statsOut->hasSortStage = hasSortStage;
 }
 
 }  // namespace mongo

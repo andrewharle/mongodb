@@ -26,17 +26,18 @@
  *    it in the license file.
  */
 
+#include "mongo/platform/basic.h"
+
 #include <string>
 
-#include "mongo/db/field_parser.h"
 #include "mongo/db/range_deleter.h"
 #include "mongo/db/range_deleter_mock_env.h"
 #include "mongo/db/repl/repl_settings.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
-#include "mongo/db/service_context.h"
-#include "mongo/db/write_concern_options.h"
+#include "mongo/db/service_context_noop.h"
 #include "mongo/stdx/functional.h"
 #include "mongo/stdx/future.h"
+#include "mongo/stdx/memory.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/scopeguard.h"
@@ -46,8 +47,6 @@ namespace {
 
 using std::string;
 
-OperationContext* const noTxn = NULL;  // MockEnv doesn't need txn XXX SERVER-13931
-
 // The range deleter cursor close wait interval increases exponentially from 5 milliseconds to an
 // upper bound of 500 msec. Three seconds should be enough time for changes in the cursors set to be
 // noticed.
@@ -55,8 +54,27 @@ const Seconds MAX_IMMEDIATE_DELETE_WAIT(3);
 
 const mongo::repl::ReplSettings replSettings = {};
 
+class RangeDeleterTestFixture : public unittest::Test {
+public:
+    RangeDeleterTestFixture()
+        : _client(_serviceContext.makeClient("TestClient")),
+          _opCtx(_client->makeOperationContext()) {}
+
+protected:
+    OperationContext* opCtx() const {
+        return _opCtx.get();
+    }
+
+private:
+    ServiceContextNoop _serviceContext;
+    ServiceContext::UniqueClient _client;
+    ServiceContext::UniqueOperationContext _opCtx;
+};
+
+using QueuedDelete = RangeDeleterTestFixture;
+
 // Should not be able to queue deletes if deleter workers were not started.
-TEST(QueueDelete, CantAfterStop) {
+TEST_F(QueuedDelete, CantAfterStop) {
     RangeDeleterMockEnv* env = new RangeDeleterMockEnv();
     RangeDeleter deleter(env);
 
@@ -70,7 +88,7 @@ TEST(QueueDelete, CantAfterStop) {
 
     string errMsg;
     ASSERT_FALSE(
-        deleter.queueDelete(noTxn,
+        deleter.queueDelete(opCtx(),
                             RangeDeleterOptions(KeyRange(
                                 "test.user", BSON("x" << 120), BSON("x" << 200), BSON("x" << 1))),
                             NULL /* notifier not needed */,
@@ -81,7 +99,7 @@ TEST(QueueDelete, CantAfterStop) {
 
 // Should not start delete if the set of cursors that were open when the
 // delete was queued is still open.
-TEST(QueuedDelete, ShouldWaitCursor) {
+TEST_F(QueuedDelete, ShouldWaitCursor) {
     const string ns("test.user");
 
     RangeDeleterMockEnv* env = new RangeDeleterMockEnv();
@@ -96,13 +114,13 @@ TEST(QueuedDelete, ShouldWaitCursor) {
 
     env->addCursorId(ns, 345);
 
-    Notification notifyDone;
+    Notification<void> doneSignal;
     RangeDeleterOptions deleterOptions(
         KeyRange(ns, BSON("x" << 0), BSON("x" << 10), BSON("x" << 1)));
     deleterOptions.waitForOpenCursors = true;
 
     ASSERT_TRUE(
-        deleter.queueDelete(noTxn, deleterOptions, &notifyDone, NULL /* errMsg not needed */));
+        deleter.queueDelete(opCtx(), deleterOptions, &doneSignal, NULL /* errMsg not needed */));
 
     env->waitForNthGetCursor(1u);
 
@@ -113,20 +131,20 @@ TEST(QueuedDelete, ShouldWaitCursor) {
     env->addCursorId(ns, 200);
     env->removeCursorId(ns, 345);
 
-    notifyDone.waitToBeNotified();
+    doneSignal.get(opCtx());
 
     ASSERT_TRUE(env->deleteOccured());
     const DeletedRange deletedChunk(env->getLastDelete());
 
     ASSERT_EQUALS(ns, deletedChunk.ns);
-    ASSERT_TRUE(deletedChunk.min.equal(BSON("x" << 0)));
-    ASSERT_TRUE(deletedChunk.max.equal(BSON("x" << 10)));
+    ASSERT_BSONOBJ_EQ(deletedChunk.min, BSON("x" << 0));
+    ASSERT_BSONOBJ_EQ(deletedChunk.max, BSON("x" << 10));
 
     deleter.stopWorkers();
 }
 
 // Should terminate when stop is requested.
-TEST(QueuedDelete, StopWhileWaitingCursor) {
+TEST_F(QueuedDelete, StopWhileWaitingCursor) {
     const string ns("test.user");
 
     RangeDeleterMockEnv* env = new RangeDeleterMockEnv();
@@ -141,12 +159,12 @@ TEST(QueuedDelete, StopWhileWaitingCursor) {
 
     env->addCursorId(ns, 345);
 
-    Notification notifyDone;
+    Notification<void> doneSignal;
     RangeDeleterOptions deleterOptions(
         KeyRange(ns, BSON("x" << 0), BSON("x" << 10), BSON("x" << 1)));
     deleterOptions.waitForOpenCursors = true;
     ASSERT_TRUE(
-        deleter.queueDelete(noTxn, deleterOptions, &notifyDone, NULL /* errMsg not needed */));
+        deleter.queueDelete(opCtx(), deleterOptions, &doneSignal, NULL /* errMsg not needed */));
 
 
     env->waitForNthGetCursor(1u);
@@ -155,9 +173,11 @@ TEST(QueuedDelete, StopWhileWaitingCursor) {
     ASSERT_FALSE(env->deleteOccured());
 }
 
-// Should not start delete if the set of cursors that were open when the
-// deleteNow method is called is still open.
-TEST(ImmediateDelete, ShouldWaitCursor) {
+using ImmediateDelete = RangeDeleterTestFixture;
+
+// Should not start delete if the set of cursors that were open when the deleteNow method is called
+// is still open.
+TEST_F(ImmediateDelete, ShouldWaitCursor) {
     const string ns("test.user");
 
     RangeDeleterMockEnv* env = new RangeDeleterMockEnv();
@@ -178,7 +198,7 @@ TEST(ImmediateDelete, ShouldWaitCursor) {
     deleterOption.waitForOpenCursors = true;
 
     stdx::packaged_task<bool()> deleterTask(
-        [&] { return deleter.deleteNow(noTxn, deleterOption, &errMsg); });
+        [&] { return deleter.deleteNow(opCtx(), deleterOption, &errMsg); });
     stdx::future<bool> deleterFuture = deleterTask.get_future();
     stdx::thread deleterThread(std::move(deleterTask));
 
@@ -199,20 +219,21 @@ TEST(ImmediateDelete, ShouldWaitCursor) {
     env->addCursorId(ns, 200);
     env->removeCursorId(ns, 345);
 
-    ASSERT_TRUE(stdx::future_status::ready == deleterFuture.wait_for(MAX_IMMEDIATE_DELETE_WAIT));
+    ASSERT_TRUE(stdx::future_status::ready ==
+                deleterFuture.wait_for(MAX_IMMEDIATE_DELETE_WAIT.toSystemDuration()));
     ASSERT_TRUE(deleterFuture.get());
     ASSERT_TRUE(env->deleteOccured());
 
     const DeletedRange deletedChunk(env->getLastDelete());
 
     ASSERT_EQUALS(ns, deletedChunk.ns);
-    ASSERT_TRUE(deletedChunk.min.equal(BSON("x" << 0)));
-    ASSERT_TRUE(deletedChunk.max.equal(BSON("x" << 10)));
-    ASSERT_TRUE(deletedChunk.shardKeyPattern.equal(BSON("x" << 1)));
+    ASSERT_BSONOBJ_EQ(deletedChunk.min, BSON("x" << 0));
+    ASSERT_BSONOBJ_EQ(deletedChunk.max, BSON("x" << 10));
+    ASSERT_BSONOBJ_EQ(deletedChunk.shardKeyPattern, BSON("x" << 1));
 }
 
 // Should terminate when stop is requested.
-TEST(ImmediateDelete, StopWhileWaitingCursor) {
+TEST_F(ImmediateDelete, StopWhileWaitingCursor) {
     const string ns("test.user");
 
     RangeDeleterMockEnv* env = new RangeDeleterMockEnv();
@@ -233,7 +254,7 @@ TEST(ImmediateDelete, StopWhileWaitingCursor) {
     deleterOption.waitForOpenCursors = true;
 
     stdx::packaged_task<bool()> deleterTask(
-        [&] { return deleter.deleteNow(noTxn, deleterOption, &errMsg); });
+        [&] { return deleter.deleteNow(opCtx(), deleterOption, &errMsg); });
     stdx::future<bool> deleterFuture = deleterTask.get_future();
     stdx::thread deleterThread(std::move(deleterTask));
 
@@ -250,17 +271,19 @@ TEST(ImmediateDelete, StopWhileWaitingCursor) {
 
     stop_deleter_guard.Execute();
 
-    ASSERT_TRUE(stdx::future_status::ready == deleterFuture.wait_for(MAX_IMMEDIATE_DELETE_WAIT));
+    ASSERT_TRUE(stdx::future_status::ready ==
+                deleterFuture.wait_for(MAX_IMMEDIATE_DELETE_WAIT.toSystemDuration()));
     ASSERT_FALSE(deleterFuture.get());
     ASSERT_FALSE(env->deleteOccured());
 }
 
-// Tests the interaction of multiple deletes queued with different states.
-// Starts by adding a new delete task, waits for the worker to work on it,
-// and then adds 2 more task, one of which is ready to be deleted, while the
-// other one is waiting for an open cursor. The test then makes sure that the
-// deletes are performed in the right order.
-TEST(MixedDeletes, MultipleDeletes) {
+using MixedDeletes = RangeDeleterTestFixture;
+
+// Tests the interaction of multiple deletes queued with different states. Starts by adding a new
+// delete task, waits for the worker to work on it, and then adds 2 more task, one of which is ready
+// to be deleted, while the other one is waiting for an open cursor. The test then makes sure that
+// the deletes are performed in the right order.
+TEST_F(MixedDeletes, MultipleDeletes) {
     const string blockedNS("foo.bar");
     const string ns("test.user");
 
@@ -277,31 +300,31 @@ TEST(MixedDeletes, MultipleDeletes) {
     env->addCursorId(blockedNS, 345);
     env->pauseDeletes();
 
-    Notification notifyDone1;
+    Notification<void> doneSignal1;
     RangeDeleterOptions deleterOption1(
         KeyRange(ns, BSON("x" << 10), BSON("x" << 20), BSON("x" << 1)));
     deleterOption1.waitForOpenCursors = true;
     ASSERT_TRUE(
-        deleter.queueDelete(noTxn, deleterOption1, &notifyDone1, NULL /* don't care errMsg */));
+        deleter.queueDelete(opCtx(), deleterOption1, &doneSignal1, NULL /* don't care errMsg */));
 
     env->waitForNthPausedDelete(1u);
 
     // Make sure that the delete is already in progress before proceeding.
     ASSERT_EQUALS(1U, deleter.getDeletesInProgress());
 
-    Notification notifyDone2;
+    Notification<void> doneSignal2;
     RangeDeleterOptions deleterOption2(
         KeyRange(blockedNS, BSON("x" << 20), BSON("x" << 30), BSON("x" << 1)));
     deleterOption2.waitForOpenCursors = true;
     ASSERT_TRUE(
-        deleter.queueDelete(noTxn, deleterOption2, &notifyDone2, NULL /* don't care errMsg */));
+        deleter.queueDelete(opCtx(), deleterOption2, &doneSignal2, NULL /* don't care errMsg */));
 
-    Notification notifyDone3;
+    Notification<void> doneSignal3;
     RangeDeleterOptions deleterOption3(
         KeyRange(ns, BSON("x" << 30), BSON("x" << 40), BSON("x" << 1)));
     deleterOption3.waitForOpenCursors = true;
     ASSERT_TRUE(
-        deleter.queueDelete(noTxn, deleterOption3, &notifyDone3, NULL /* don't care errMsg */));
+        deleter.queueDelete(opCtx(), deleterOption3, &doneSignal3, NULL /* don't care errMsg */));
 
     // Now, the setup is:
     // { x: 10 } => { x: 20 } in progress.
@@ -315,7 +338,7 @@ TEST(MixedDeletes, MultipleDeletes) {
 
     // Let the first delete proceed.
     env->resumeOneDelete();
-    notifyDone1.waitToBeNotified();
+    doneSignal1.get(opCtx());
 
     ASSERT_TRUE(env->deleteOccured());
 
@@ -324,13 +347,13 @@ TEST(MixedDeletes, MultipleDeletes) {
     DeletedRange deleted1(env->getLastDelete());
 
     ASSERT_EQUALS(ns, deleted1.ns);
-    ASSERT_TRUE(deleted1.min.equal(BSON("x" << 10)));
-    ASSERT_TRUE(deleted1.max.equal(BSON("x" << 20)));
-    ASSERT_TRUE(deleted1.shardKeyPattern.equal(BSON("x" << 1)));
+    ASSERT_BSONOBJ_EQ(deleted1.min, BSON("x" << 10));
+    ASSERT_BSONOBJ_EQ(deleted1.max, BSON("x" << 20));
+    ASSERT_BSONOBJ_EQ(deleted1.shardKeyPattern, BSON("x" << 1));
 
     // Let the second delete proceed.
     env->resumeOneDelete();
-    notifyDone3.waitToBeNotified();
+    doneSignal3.get(opCtx());
 
     DeletedRange deleted2(env->getLastDelete());
 
@@ -338,21 +361,21 @@ TEST(MixedDeletes, MultipleDeletes) {
     // cursors open for blockedNS.
 
     ASSERT_EQUALS(ns, deleted2.ns);
-    ASSERT_TRUE(deleted2.min.equal(BSON("x" << 30)));
-    ASSERT_TRUE(deleted2.max.equal(BSON("x" << 40)));
-    ASSERT_TRUE(deleted2.shardKeyPattern.equal(BSON("x" << 1)));
+    ASSERT_BSONOBJ_EQ(deleted2.min, BSON("x" << 30));
+    ASSERT_BSONOBJ_EQ(deleted2.max, BSON("x" << 40));
+    ASSERT_BSONOBJ_EQ(deleted2.shardKeyPattern, BSON("x" << 1));
 
     env->removeCursorId(blockedNS, 345);
     // Let the last delete proceed.
     env->resumeOneDelete();
-    notifyDone2.waitToBeNotified();
+    doneSignal2.get(opCtx());
 
     DeletedRange deleted3(env->getLastDelete());
 
     ASSERT_EQUALS(blockedNS, deleted3.ns);
-    ASSERT_TRUE(deleted3.min.equal(BSON("x" << 20)));
-    ASSERT_TRUE(deleted3.max.equal(BSON("x" << 30)));
-    ASSERT_TRUE(deleted3.shardKeyPattern.equal(BSON("x" << 1)));
+    ASSERT_BSONOBJ_EQ(deleted3.min, BSON("x" << 20));
+    ASSERT_BSONOBJ_EQ(deleted3.max, BSON("x" << 30));
+    ASSERT_BSONOBJ_EQ(deleted3.shardKeyPattern, BSON("x" << 1));
 
     deleter.stopWorkers();
 }

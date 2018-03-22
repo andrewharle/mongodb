@@ -123,11 +123,10 @@ TEST(AsyncStreamTest, IsOpen) {
     executor::Deferred<bool> opened;
 
     log() << "opening up outgoing connection";
-    stream.connect(endpoints,
-                   [opened](std::error_code ec) mutable {
-                       log() << "opened outgoing connection";
-                       opened.emplace(!ec);
-                   });
+    stream.connect(endpoints, [opened](std::error_code ec) mutable {
+        log() << "opened outgoing connection";
+        opened.emplace(!ec);
+    });
 
     ASSERT_TRUE(opened.get());
     ASSERT_TRUE(stream.isOpen());
@@ -137,7 +136,7 @@ TEST(AsyncStreamTest, IsOpen) {
     // There is nothing we can wait on to determinstically know when
     // the socket will transition to closed. Busy wait for that.
     while (stream.isOpen()) {
-        stdx::this_thread::sleep_for(Milliseconds(1));
+        stdx::this_thread::sleep_for(Milliseconds(1).toSystemDuration());
     }
 }
 

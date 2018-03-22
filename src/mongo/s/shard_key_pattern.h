@@ -40,6 +40,7 @@ namespace mongo {
 
 class CanonicalQuery;
 class FieldRef;
+class OperationContext;
 
 /**
  * Helper struct when generating flattened bounds below
@@ -89,6 +90,8 @@ public:
     bool isHashedPattern() const;
 
     const KeyPattern& getKeyPattern() const;
+
+    const std::vector<FieldRef*>& getKeyPatternFields() const;
 
     const BSONObj& toBSON() const;
 
@@ -163,8 +166,9 @@ public:
      *   { a : { b : { $eq : "hi" } } } --> returns {} because the query language treats this as
      *                                                 a : { $eq : { b : ... } }
      */
-    StatusWith<BSONObj> extractShardKeyFromQuery(const BSONObj& basicQuery) const;
-    StatusWith<BSONObj> extractShardKeyFromQuery(const CanonicalQuery& query) const;
+    StatusWith<BSONObj> extractShardKeyFromQuery(OperationContext* txn,
+                                                 const BSONObj& basicQuery) const;
+    BSONObj extractShardKeyFromQuery(const CanonicalQuery& query) const;
 
     /**
      * Returns true if the shard key pattern can ensure that the unique index pattern is
@@ -221,8 +225,9 @@ public:
 
 private:
     // Ordered, parsed paths
-    const OwnedPointerVector<FieldRef> _keyPatternPaths;
+    OwnedPointerVector<FieldRef> _keyPatternPaths;
 
-    const KeyPattern _keyPattern;
+    KeyPattern _keyPattern;
 };
-}
+
+}  // namespace mongo

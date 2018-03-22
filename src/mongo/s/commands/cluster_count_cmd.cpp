@@ -30,76 +30,55 @@
 
 #include <vector>
 
+#include "mongo/bson/util/bson_extract.h"
 #include "mongo/db/commands.h"
-#include "mongo/s/cluster_explain.h"
+#include "mongo/db/query/count_request.h"
+#include "mongo/db/query/view_response_formatter.h"
+#include "mongo/db/views/resolved_view.h"
+#include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/s/commands/cluster_commands_common.h"
-#include "mongo/s/strategy.h"
+#include "mongo/s/commands/cluster_explain.h"
+#include "mongo/s/commands/strategy.h"
 #include "mongo/util/timer.h"
 
 namespace mongo {
-
-using std::string;
-using std::vector;
-
 namespace {
-
-long long applySkipLimit(long long num, const BSONObj& cmd) {
-    BSONElement s = cmd["skip"];
-    BSONElement l = cmd["limit"];
-
-    if (s.isNumber()) {
-        num = num - s.numberLong();
-        if (num < 0) {
-            num = 0;
-        }
-    }
-
-    if (l.isNumber()) {
-        long long limit = l.numberLong();
-        if (limit < 0) {
-            limit = -limit;
-        }
-
-        // 0 limit means no limit
-        if (limit < num && limit != 0) {
-            num = limit;
-        }
-    }
-
-    return num;
-}
-
 
 class ClusterCountCmd : public Command {
 public:
     ClusterCountCmd() : Command("count", false) {}
 
-    virtual bool slaveOk() const {
+    bool slaveOk() const override {
         return true;
     }
 
-    virtual bool adminOnly() const {
+    bool adminOnly() const override {
         return false;
     }
 
-    virtual bool isWriteCommandForConfigServer() const {
+    bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
 
-    virtual void addRequiredPrivileges(const std::string& dbname,
-                                       const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
+    void addRequiredPrivileges(const std::string& dbname,
+                               const BSONObj& cmdObj,
+                               std::vector<Privilege>* out) override {
         ActionSet actions;
         actions.addAction(ActionType::find);
         out->push_back(Privilege(parseResourcePattern(dbname, cmdObj), actions));
     }
 
-    virtual bool run(OperationContext* txn,
-                     const std::string& dbname,
-                     BSONObj& cmdObj,
-                     int options,
-                     std::string& errmsg,
-                     BSONObjBuilder& result) {
+    bool run(OperationContext* opCtx,
+             const std::string& dbname,
+             BSONObj& cmdObj,
+             int options,
+             std::string& errmsg,
+             BSONObjBuilder& result) override {
+        const NamespaceString nss(parseNs(dbname, cmdObj));
+        uassert(ErrorCodes::InvalidNamespace,
+                str::stream() << "Invalid namespace specified '" << nss.ns() << "'",
+                nss.isValid());
+
         long long skip = 0;
 
         if (cmdObj["skip"].isNumber()) {
@@ -113,16 +92,23 @@ public:
             return false;
         }
 
-        const string collection = cmdObj.firstElement().valuestrsafe();
-        const string fullns = dbname + "." + collection;
-
         BSONObjBuilder countCmdBuilder;
-        countCmdBuilder.append("count", collection);
+        countCmdBuilder.append("count", nss.coll());
 
         BSONObj filter;
         if (cmdObj["query"].isABSONObj()) {
             countCmdBuilder.append("query", cmdObj["query"].Obj());
             filter = cmdObj["query"].Obj();
+        }
+
+        BSONObj collation;
+        BSONElement collationElement;
+        auto status =
+            bsonExtractTypedField(cmdObj, "collation", BSONType::Object, &collationElement);
+        if (status.isOK()) {
+            collation = collationElement.Obj();
+        } else if (status != ErrorCodes::NoSuchKey) {
+            return appendCommandStatus(result, status);
         }
 
         if (cmdObj["limit"].isNumber()) {
@@ -142,7 +128,7 @@ public:
         }
 
         const std::initializer_list<StringData> passthroughFields = {
-            "hint", "$queryOptions", "readConcern", LiteParsedQuery::cmdOptionMaxTimeMS,
+            "$queryOptions", "collation", "hint", "readConcern", QueryRequest::cmdOptionMaxTimeMS,
         };
         for (auto name : passthroughFields) {
             if (auto field = cmdObj[name]) {
@@ -150,27 +136,66 @@ public:
             }
         }
 
-        vector<Strategy::CommandResult> countResult;
-        Strategy::commandOp(
-            txn, dbname, countCmdBuilder.done(), options, fullns, filter, &countResult);
+        std::vector<Strategy::CommandResult> countResult;
+        Strategy::commandOp(opCtx,
+                            dbname,
+                            countCmdBuilder.done(),
+                            options,
+                            nss.ns(),
+                            filter,
+                            collation,
+                            &countResult);
+
+        if (countResult.size() == 1 &&
+            ResolvedView::isResolvedViewErrorResponse(countResult[0].result)) {
+            auto countRequest = CountRequest::parseFromBSON(dbname, cmdObj, false);
+            if (!countRequest.isOK()) {
+                return appendCommandStatus(result, countRequest.getStatus());
+            }
+
+            auto aggCmdOnView = countRequest.getValue().asAggregationCommand();
+            if (!aggCmdOnView.isOK()) {
+                return appendCommandStatus(result, aggCmdOnView.getStatus());
+            }
+
+            auto resolvedView = ResolvedView::fromBSON(countResult[0].result);
+            auto aggCmd = resolvedView.asExpandedViewAggregation(aggCmdOnView.getValue());
+            if (!aggCmd.isOK()) {
+                return appendCommandStatus(result, aggCmd.getStatus());
+            }
+
+
+            BSONObjBuilder aggResult;
+            Command::findCommand("aggregate")
+                ->run(opCtx, dbname, aggCmd.getValue(), options, errmsg, aggResult);
+
+            result.resetToEmpty();
+            ViewResponseFormatter formatter(aggResult.obj());
+            auto formatStatus = formatter.appendAsCountResponse(&result);
+            if (!formatStatus.isOK()) {
+                return appendCommandStatus(result, formatStatus);
+            }
+
+            return true;
+        }
+
 
         long long total = 0;
         BSONObjBuilder shardSubTotal(result.subobjStart("shards"));
 
-        for (vector<Strategy::CommandResult>::const_iterator iter = countResult.begin();
-             iter != countResult.end();
-             ++iter) {
-            const string& shardName = iter->shardTargetId;
+        for (const auto& resultEntry : countResult) {
+            const ShardId& shardName = resultEntry.shardTargetId;
+            const auto resultBSON = resultEntry.result;
 
-            if (iter->result["ok"].trueValue()) {
-                long long shardCount = iter->result["n"].numberLong();
+            if (resultBSON["ok"].trueValue()) {
+                long long shardCount = resultBSON["n"].numberLong();
 
-                shardSubTotal.appendNumber(shardName, shardCount);
+                shardSubTotal.appendNumber(shardName.toString(), shardCount);
                 total += shardCount;
             } else {
                 shardSubTotal.doneFast();
-                errmsg = "failed on : " + shardName;
-                result.append("cause", iter->result);
+                errmsg = "failed on : " + shardName.toString();
+                result.append("cause", resultBSON);
 
                 // Add "code" to the top-level response, if the failure of the sharded command
                 // can be accounted to a single error
@@ -190,18 +215,32 @@ public:
         return true;
     }
 
-    virtual Status explain(OperationContext* txn,
-                           const std::string& dbname,
-                           const BSONObj& cmdObj,
-                           ExplainCommon::Verbosity verbosity,
-                           const rpc::ServerSelectionMetadata& serverSelectionMetadata,
-                           BSONObjBuilder* out) const {
-        const string fullns = parseNs(dbname, cmdObj);
+    Status explain(OperationContext* opCtx,
+                   const std::string& dbname,
+                   const BSONObj& cmdObj,
+                   ExplainCommon::Verbosity verbosity,
+                   const rpc::ServerSelectionMetadata& serverSelectionMetadata,
+                   BSONObjBuilder* out) const override {
+        const NamespaceString nss(parseNs(dbname, cmdObj));
+        uassert(ErrorCodes::InvalidNamespace,
+                str::stream() << "Invalid namespace specified '" << nss.ns() << "'",
+                nss.isValid());
 
         // Extract the targeting query.
         BSONObj targetingQuery;
         if (Object == cmdObj["query"].type()) {
             targetingQuery = cmdObj["query"].Obj();
+        }
+
+        // Extract the targeting collation.
+        BSONObj targetingCollation;
+        BSONElement targetingCollationElement;
+        auto status = bsonExtractTypedField(
+            cmdObj, "collation", BSONType::Object, &targetingCollationElement);
+        if (status.isOK()) {
+            targetingCollation = targetingCollationElement.Obj();
+        } else if (status != ErrorCodes::NoSuchKey) {
+            return status;
         }
 
         BSONObjBuilder explainCmdBob;
@@ -212,16 +251,76 @@ public:
         // We will time how long it takes to run the commands on the shards
         Timer timer;
 
-        vector<Strategy::CommandResult> shardResults;
-        Strategy::commandOp(
-            txn, dbname, explainCmdBob.obj(), options, fullns, targetingQuery, &shardResults);
+        std::vector<Strategy::CommandResult> shardResults;
+        Strategy::commandOp(opCtx,
+                            dbname,
+                            explainCmdBob.obj(),
+                            options,
+                            nss.ns(),
+                            targetingQuery,
+                            targetingCollation,
+                            &shardResults);
 
         long long millisElapsed = timer.millis();
+
+        if (shardResults.size() == 1 &&
+            ResolvedView::isResolvedViewErrorResponse(shardResults[0].result)) {
+            auto countRequest = CountRequest::parseFromBSON(dbname, cmdObj, true);
+            if (!countRequest.isOK()) {
+                return countRequest.getStatus();
+            }
+
+            auto aggCmdOnView = countRequest.getValue().asAggregationCommand();
+            if (!aggCmdOnView.isOK()) {
+                return aggCmdOnView.getStatus();
+            }
+
+            auto resolvedView = ResolvedView::fromBSON(shardResults[0].result);
+            auto aggCmd = resolvedView.asExpandedViewAggregation(aggCmdOnView.getValue());
+            if (!aggCmd.isOK()) {
+                return aggCmd.getStatus();
+            }
+
+            std::string errMsg;
+            if (Command::findCommand("aggregate")
+                    ->run(opCtx, dbname, aggCmd.getValue(), 0, errMsg, *out)) {
+                return Status::OK();
+            }
+
+            return getStatusFromCommandResult(out->asTempObj());
+        }
 
         const char* mongosStageName = ClusterExplain::getStageNameForReadOp(shardResults, cmdObj);
 
         return ClusterExplain::buildExplainResult(
-            txn, shardResults, mongosStageName, millisElapsed, out);
+            opCtx, shardResults, mongosStageName, millisElapsed, out);
+    }
+
+private:
+    static long long applySkipLimit(long long num, const BSONObj& cmd) {
+        BSONElement s = cmd["skip"];
+        BSONElement l = cmd["limit"];
+
+        if (s.isNumber()) {
+            num = num - s.numberLong();
+            if (num < 0) {
+                num = 0;
+            }
+        }
+
+        if (l.isNumber()) {
+            long long limit = l.numberLong();
+            if (limit < 0) {
+                limit = -limit;
+            }
+
+            // 0 limit means no limit
+            if (limit < num && limit != 0) {
+                num = limit;
+            }
+        }
+
+        return num;
     }
 
 } clusterCountCmd;

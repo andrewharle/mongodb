@@ -112,6 +112,21 @@ def _dump_suite_config(suite, logging_config):
     return "\n".join(sb)
 
 
+def find_suites_by_test(suites):
+    """
+    Looks up what other resmoke suites run the tests specified in the suites
+    parameter. Returns a dict keyed by test name, value is array of suite names.
+    """
+
+    memberships = {}
+    test_membership = resmokelib.parser.create_test_membership_map()
+    for suite in suites:
+        for group in suite.test_groups:
+            for test in group.tests:
+                memberships[test] = test_membership[test]
+    return memberships
+
+
 def main():
     start_time = time.time()
 
@@ -137,6 +152,14 @@ def main():
     # Register a signal handler or Windows event object so we can write the report file if the task
     # times out.
     resmokelib.sighandler.register(resmoke_logger, suites)
+
+    # Run the suite finder after the test suite parsing is complete.
+    if values.find_suites:
+        suites_by_test = find_suites_by_test(suites)
+        for test in sorted(suites_by_test):
+            suite_names = suites_by_test[test]
+            resmoke_logger.info("%s will be run by the following suite(s): %s", test, suite_names)
+        sys.exit(0)
 
     try:
         for suite in suites:

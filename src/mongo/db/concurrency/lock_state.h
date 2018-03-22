@@ -55,9 +55,9 @@ public:
     /**
      * Uninterruptible blocking method, which waits for the notification to fire.
      *
-     * @param timeoutMs How many milliseconds to wait before returning LOCK_TIMEOUT.
+     * @param timeout How many milliseconds to wait before returning LOCK_TIMEOUT.
      */
-    LockResult wait(unsigned timeoutMs);
+    LockResult wait(Milliseconds timeout);
 
 private:
     virtual void notify(ResourceId resId, LockResult result);
@@ -99,13 +99,17 @@ public:
         return _id;
     }
 
-    virtual LockResult lockGlobal(LockMode mode, unsigned timeoutMs = UINT_MAX);
-    virtual LockResult lockGlobalBegin(LockMode mode);
-    virtual LockResult lockGlobalComplete(unsigned timeoutMs);
+    stdx::thread::id getThreadId() const override;
+
+    virtual LockResult lockGlobal(LockMode mode);
+    virtual LockResult lockGlobalBegin(LockMode mode, Milliseconds timeout) {
+        return _lockGlobalBegin(mode, timeout);
+    }
+    virtual LockResult lockGlobalComplete(Milliseconds timeout);
     virtual void lockMMAPV1Flush();
 
     virtual void downgradeGlobalXtoSForMMAPV1();
-    virtual bool unlockAll();
+    virtual bool unlockGlobal();
 
     virtual void beginWriteUnitOfWork();
     virtual void endWriteUnitOfWork();
@@ -116,7 +120,7 @@ public:
 
     virtual LockResult lock(ResourceId resId,
                             LockMode mode,
-                            unsigned timeoutMs = UINT_MAX,
+                            Milliseconds timeout = Milliseconds::max(),
                             bool checkDeadlock = false);
 
     virtual void downgrade(ResourceId resId, LockMode newMode);
@@ -165,12 +169,12 @@ public:
      *
      * @param resId Resource id which was passed to an earlier lockBegin call. Must match.
      * @param mode Mode which was passed to an earlier lockBegin call. Must match.
-     * @param timeoutMs How long to wait for the lock acquisition to complete.
+     * @param timeout How long to wait for the lock acquisition to complete.
      * @param checkDeadlock whether to perform deadlock detection while waiting.
      */
     LockResult lockComplete(ResourceId resId,
                             LockMode mode,
-                            unsigned timeoutMs,
+                            Milliseconds timeout,
                             bool checkDeadlock);
 
 private:
@@ -178,10 +182,15 @@ private:
 
     typedef FastMapNoAlloc<ResourceId, LockRequest, 16> LockRequestsMap;
 
+    /**
+     * Like lockGlobalBegin, but accepts a timeout for acquiring a ticket.
+     */
+    LockResult _lockGlobalBegin(LockMode, Milliseconds timeout);
 
     /**
      * The main functionality of the unlock method, except accepts iterator in order to avoid
-     * additional lookups during unlockAll. Frees locks immediately, so must not call inside WUOW.
+     * additional lookups during unlockGlobal. Frees locks immediately, so must not be called from
+     * inside a WUOW.
      */
     bool _unlockImpl(LockRequestsMap::Iterator* it);
 
@@ -222,6 +231,9 @@ private:
     // Indicates whether the client is active reader/writer or is queued.
     AtomicWord<ClientState> _clientState{kInactive};
 
+    // Track the thread who owns the lock for debugging purposes
+    stdx::thread::id _threadId;
+
     //////////////////////////////////////////////////////////////////////////////////////////
     //
     // Methods merged from LockState, which should eventually be removed or changed to methods
@@ -243,18 +255,6 @@ public:
     virtual bool hasLockPending() const {
         return getWaitingResource().isValid();
     }
-
-    virtual void setIsBatchWriter(bool newValue) {
-        _batchWriter = newValue;
-    }
-    virtual bool isBatchWriter() const {
-        return _batchWriter;
-    }
-
-    virtual bool hasStrongLocks() const;
-
-private:
-    bool _batchWriter;
 };
 
 typedef LockerImpl<false> DefaultLockerImpl;

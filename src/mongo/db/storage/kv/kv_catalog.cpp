@@ -53,9 +53,6 @@ namespace {
 // This is a global resource, which protects accesses to the catalog metadata (instance-wide).
 // It is never used with KVEngines that support doc-level locking so this should never conflict
 // with anything else.
-//
-// NOTE: Must be locked *before* _identLock.
-const ResourceId resourceIdCatalogMetadata(RESOURCE_METADATA, 1ULL);
 
 const char kIsFeatureDocumentFieldName[] = "isFeatureDoc";
 const char kNamespaceFieldName[] = "ns";
@@ -123,12 +120,6 @@ bool KVCatalog::FeatureTracker::isFeatureDocument(BSONObj obj) {
 }
 
 Status KVCatalog::FeatureTracker::isCompatibleWithCurrentCode(OperationContext* opCtx) const {
-    std::unique_ptr<Lock::ResourceLock> rLk;
-    if (!_catalog->_isRsThreadSafe && opCtx->lockState()) {
-        rLk = stdx::make_unique<Lock::ResourceLock>(
-            opCtx->lockState(), resourceIdCatalogMetadata, MODE_S);
-    }
-
     FeatureBits versionInfo = getInfo(opCtx);
 
     uint64_t unrecognizedNonRepairableFeatures =
@@ -156,47 +147,6 @@ Status KVCatalog::FeatureTracker::isCompatibleWithCurrentCode(OperationContext* 
     return Status::OK();
 }
 
-Status KVCatalog::FeatureTracker::hasNoFeaturesMarkedAsInUse(OperationContext* opCtx) const {
-    std::unique_ptr<Lock::ResourceLock> rLk;
-    if (!_catalog->_isRsThreadSafe && opCtx->lockState()) {
-        rLk = stdx::make_unique<Lock::ResourceLock>(
-            opCtx->lockState(), resourceIdCatalogMetadata, MODE_S);
-    }
-
-    FeatureBits versionInfo = getInfo(opCtx);
-
-    if (versionInfo.nonRepairableFeatures) {
-        StringBuilder sb;
-        sb << "The data files use features not supported by this version of mongod; the NR feature"
-              " bits in positions ";
-        appendPositionsOfBitsSet(versionInfo.nonRepairableFeatures, &sb);
-        sb << " are still enabled";
-        return {ErrorCodes::MustUpgrade, sb.str()};
-    }
-
-    if (versionInfo.repairableFeatures) {
-        StringBuilder sb;
-        sb << "The data files use features not supported by this version of mongod; the R feature"
-              " bits in positions ";
-        appendPositionsOfBitsSet(versionInfo.repairableFeatures, &sb);
-        sb << " are still enabled";
-        return {ErrorCodes::MustUpgrade, sb.str()};
-    }
-
-    return Status::OK();
-}
-
-void KVCatalog::FeatureTracker::deleteFeatureDocument(OperationContext* opCtx) {
-    std::unique_ptr<Lock::ResourceLock> rLk;
-    if (!_catalog->_isRsThreadSafe && opCtx->lockState()) {
-        rLk.reset(new Lock::ResourceLock(opCtx->lockState(), resourceIdCatalogMetadata, MODE_X));
-    }
-
-    if (!_rid.isNull()) {
-        _catalog->_rs->deleteRecord(opCtx, _rid);
-    }
-}
-
 std::unique_ptr<KVCatalog::FeatureTracker> KVCatalog::FeatureTracker::get(OperationContext* opCtx,
                                                                           KVCatalog* catalog,
                                                                           RecordId rid) {
@@ -214,22 +164,12 @@ std::unique_ptr<KVCatalog::FeatureTracker> KVCatalog::FeatureTracker::create(
 
 bool KVCatalog::FeatureTracker::isNonRepairableFeatureInUse(OperationContext* opCtx,
                                                             NonRepairableFeature feature) const {
-    std::unique_ptr<Lock::ResourceLock> rLk;
-    if (!_catalog->_isRsThreadSafe && opCtx->lockState()) {
-        rLk.reset(new Lock::ResourceLock(opCtx->lockState(), resourceIdCatalogMetadata, MODE_S));
-    }
-
     FeatureBits versionInfo = getInfo(opCtx);
     return versionInfo.nonRepairableFeatures & static_cast<NonRepairableFeatureMask>(feature);
 }
 
 void KVCatalog::FeatureTracker::markNonRepairableFeatureAsInUse(OperationContext* opCtx,
                                                                 NonRepairableFeature feature) {
-    std::unique_ptr<Lock::ResourceLock> rLk;
-    if (!_catalog->_isRsThreadSafe && opCtx->lockState()) {
-        rLk.reset(new Lock::ResourceLock(opCtx->lockState(), resourceIdCatalogMetadata, MODE_X));
-    }
-
     FeatureBits versionInfo = getInfo(opCtx);
     versionInfo.nonRepairableFeatures |= static_cast<NonRepairableFeatureMask>(feature);
     putInfo(opCtx, versionInfo);
@@ -237,11 +177,6 @@ void KVCatalog::FeatureTracker::markNonRepairableFeatureAsInUse(OperationContext
 
 void KVCatalog::FeatureTracker::markNonRepairableFeatureAsNotInUse(OperationContext* opCtx,
                                                                    NonRepairableFeature feature) {
-    std::unique_ptr<Lock::ResourceLock> rLk;
-    if (!_catalog->_isRsThreadSafe && opCtx->lockState()) {
-        rLk.reset(new Lock::ResourceLock(opCtx->lockState(), resourceIdCatalogMetadata, MODE_X));
-    }
-
     FeatureBits versionInfo = getInfo(opCtx);
     versionInfo.nonRepairableFeatures &= ~static_cast<NonRepairableFeatureMask>(feature);
     putInfo(opCtx, versionInfo);
@@ -249,22 +184,12 @@ void KVCatalog::FeatureTracker::markNonRepairableFeatureAsNotInUse(OperationCont
 
 bool KVCatalog::FeatureTracker::isRepairableFeatureInUse(OperationContext* opCtx,
                                                          RepairableFeature feature) const {
-    std::unique_ptr<Lock::ResourceLock> rLk;
-    if (!_catalog->_isRsThreadSafe && opCtx->lockState()) {
-        rLk.reset(new Lock::ResourceLock(opCtx->lockState(), resourceIdCatalogMetadata, MODE_S));
-    }
-
     FeatureBits versionInfo = getInfo(opCtx);
     return versionInfo.repairableFeatures & static_cast<RepairableFeatureMask>(feature);
 }
 
 void KVCatalog::FeatureTracker::markRepairableFeatureAsInUse(OperationContext* opCtx,
                                                              RepairableFeature feature) {
-    std::unique_ptr<Lock::ResourceLock> rLk;
-    if (!_catalog->_isRsThreadSafe && opCtx->lockState()) {
-        rLk.reset(new Lock::ResourceLock(opCtx->lockState(), resourceIdCatalogMetadata, MODE_X));
-    }
-
     FeatureBits versionInfo = getInfo(opCtx);
     versionInfo.repairableFeatures |= static_cast<RepairableFeatureMask>(feature);
     putInfo(opCtx, versionInfo);
@@ -272,11 +197,6 @@ void KVCatalog::FeatureTracker::markRepairableFeatureAsInUse(OperationContext* o
 
 void KVCatalog::FeatureTracker::markRepairableFeatureAsNotInUse(OperationContext* opCtx,
                                                                 RepairableFeature feature) {
-    std::unique_ptr<Lock::ResourceLock> rLk;
-    if (!_catalog->_isRsThreadSafe && opCtx->lockState()) {
-        rLk.reset(new Lock::ResourceLock(opCtx->lockState(), resourceIdCatalogMetadata, MODE_X));
-    }
-
     FeatureBits versionInfo = getInfo(opCtx);
     versionInfo.repairableFeatures &= ~static_cast<RepairableFeatureMask>(feature);
     putInfo(opCtx, versionInfo);
@@ -284,10 +204,6 @@ void KVCatalog::FeatureTracker::markRepairableFeatureAsNotInUse(OperationContext
 
 KVCatalog::FeatureTracker::FeatureBits KVCatalog::FeatureTracker::getInfo(
     OperationContext* opCtx) const {
-    if (!_catalog->_isRsThreadSafe && opCtx->lockState()) {
-        invariant(opCtx->lockState()->isLockHeldForMode(resourceIdCatalogMetadata, MODE_S));
-    }
-
     if (_rid.isNull()) {
         return {};
     }
@@ -315,10 +231,6 @@ KVCatalog::FeatureTracker::FeatureBits KVCatalog::FeatureTracker::getInfo(
 }
 
 void KVCatalog::FeatureTracker::putInfo(OperationContext* opCtx, const FeatureBits& versionInfo) {
-    if (!_catalog->_isRsThreadSafe && opCtx->lockState()) {
-        invariant(opCtx->lockState()->isLockHeldForMode(resourceIdCatalogMetadata, MODE_X));
-    }
-
     BSONObjBuilder bob;
     bob.appendBool(kIsFeatureDocumentFieldName, true);
     // We intentionally include the "ns" field with a null value in the feature document to prevent
@@ -341,19 +253,14 @@ void KVCatalog::FeatureTracker::putInfo(OperationContext* opCtx, const FeatureBi
     } else {
         const bool enforceQuota = false;
         UpdateNotifier* notifier = nullptr;
-        auto rid = _catalog->_rs->updateRecord(
+        auto status = _catalog->_rs->updateRecord(
             opCtx, _rid, obj.objdata(), obj.objsize(), enforceQuota, notifier);
-        fassert(40114, rid.getStatus());
-        invariant(_rid == rid.getValue());
+        fassert(40114, status);
     }
 }
 
-KVCatalog::KVCatalog(RecordStore* rs,
-                     bool isRsThreadSafe,
-                     bool directoryPerDb,
-                     bool directoryForIndexes)
+KVCatalog::KVCatalog(RecordStore* rs, bool directoryPerDb, bool directoryForIndexes)
     : _rs(rs),
-      _isRsThreadSafe(isRsThreadSafe),
       _directoryPerDb(directoryPerDb),
       _directoryForIndexes(directoryForIndexes),
       _rand(_newRand()) {}
@@ -434,11 +341,6 @@ Status KVCatalog::newCollection(OperationContext* opCtx,
     invariant(opCtx->lockState() == NULL ||
               opCtx->lockState()->isDbLockedForMode(nsToDatabaseSubstring(ns), MODE_X));
 
-    std::unique_ptr<Lock::ResourceLock> rLk;
-    if (!_isRsThreadSafe && opCtx->lockState()) {
-        rLk.reset(new Lock::ResourceLock(opCtx->lockState(), resourceIdCatalogMetadata, MODE_X));
-    }
-
     const string ident = _newUniqueIdent(ns, "collection");
 
     stdx::lock_guard<stdx::mutex> lk(_identsLock);
@@ -486,11 +388,6 @@ std::string KVCatalog::getIndexIdent(OperationContext* opCtx,
 }
 
 BSONObj KVCatalog::_findEntry(OperationContext* opCtx, StringData ns, RecordId* out) const {
-    std::unique_ptr<Lock::ResourceLock> rLk;
-    if (!_isRsThreadSafe && opCtx->lockState()) {
-        rLk.reset(new Lock::ResourceLock(opCtx->lockState(), resourceIdCatalogMetadata, MODE_S));
-    }
-
     RecordId dl;
     {
         stdx::lock_guard<stdx::mutex> lk(_identsLock);
@@ -530,11 +427,6 @@ const BSONCollectionCatalogEntry::MetaData KVCatalog::getMetaData(OperationConte
 void KVCatalog::putMetaData(OperationContext* opCtx,
                             StringData ns,
                             BSONCollectionCatalogEntry::MetaData& md) {
-    std::unique_ptr<Lock::ResourceLock> rLk;
-    if (!_isRsThreadSafe && opCtx->lockState()) {
-        rLk.reset(new Lock::ResourceLock(opCtx->lockState(), resourceIdCatalogMetadata, MODE_X));
-    }
-
     RecordId loc;
     BSONObj obj = _findEntry(opCtx, ns, &loc);
 
@@ -567,21 +459,14 @@ void KVCatalog::putMetaData(OperationContext* opCtx,
     }
 
     LOG(3) << "recording new metadata: " << obj;
-    StatusWith<RecordId> status =
-        _rs->updateRecord(opCtx, loc, obj.objdata(), obj.objsize(), false, NULL);
-    fassert(28521, status.getStatus());
-    invariant(status.getValue() == loc);
+    Status status = _rs->updateRecord(opCtx, loc, obj.objdata(), obj.objsize(), false, NULL);
+    fassert(28521, status.isOK());
 }
 
 Status KVCatalog::renameCollection(OperationContext* opCtx,
                                    StringData fromNS,
                                    StringData toNS,
                                    bool stayTemp) {
-    std::unique_ptr<Lock::ResourceLock> rLk;
-    if (!_isRsThreadSafe && opCtx->lockState()) {
-        rLk.reset(new Lock::ResourceLock(opCtx->lockState(), resourceIdCatalogMetadata, MODE_X));
-    }
-
     RecordId loc;
     BSONObj old = _findEntry(opCtx, fromNS, &loc).getOwned();
     {
@@ -599,10 +484,8 @@ Status KVCatalog::renameCollection(OperationContext* opCtx,
         b.appendElementsUnique(old);
 
         BSONObj obj = b.obj();
-        StatusWith<RecordId> status =
-            _rs->updateRecord(opCtx, loc, obj.objdata(), obj.objsize(), false, NULL);
-        fassert(28522, status.getStatus());
-        invariant(status.getValue() == loc);
+        Status status = _rs->updateRecord(opCtx, loc, obj.objdata(), obj.objsize(), false, NULL);
+        fassert(28522, status.isOK());
     }
 
     stdx::lock_guard<stdx::mutex> lk(_identsLock);
@@ -621,11 +504,6 @@ Status KVCatalog::renameCollection(OperationContext* opCtx,
 Status KVCatalog::dropCollection(OperationContext* opCtx, StringData ns) {
     invariant(opCtx->lockState() == NULL ||
               opCtx->lockState()->isDbLockedForMode(nsToDatabaseSubstring(ns), MODE_X));
-    std::unique_ptr<Lock::ResourceLock> rLk;
-    if (!_isRsThreadSafe && opCtx->lockState()) {
-        rLk.reset(new Lock::ResourceLock(opCtx->lockState(), resourceIdCatalogMetadata, MODE_X));
-    }
-
     stdx::lock_guard<stdx::mutex> lk(_identsLock);
     const NSToIdentMap::iterator it = _idents.find(ns.toString());
     if (it == _idents.end()) {
@@ -690,11 +568,4 @@ bool KVCatalog::isUserDataIdent(StringData ident) const {
         ident.find("collection-") != std::string::npos ||
         ident.find("collection/") != std::string::npos;
 }
-
-void KVCatalog::destroyFeatureTracker(OperationContext* opCtx) {
-    invariant(_featureTracker);
-    _featureTracker->deleteFeatureDocument(opCtx);
-    _featureTracker.reset();
 }
-
-}  // namespace mongo

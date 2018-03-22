@@ -21,38 +21,34 @@ replTest.awaitReplication();
 jsTestLog("mongodump from primary");
 var data = MongoRunner.dataDir + "/dumprestore3-other1/";
 resetDbpath(data);
-var ret = MongoRunner.runMongoTool("mongodump",
-                                   {
-                                     host: primary.host,
-                                     out: data,
-                                   });
+var ret = MongoRunner.runMongoTool("mongodump", {
+    host: primary.host,
+    out: data,
+});
 assert.eq(ret, 0, "mongodump should exit w/ 0 on primary");
 
 jsTestLog("try mongorestore to secondary");
-ret = MongoRunner.runMongoTool("mongorestore",
-                               {
-                                 host: secondary.host,
-                                 dir: data,
-                               });
+ret = MongoRunner.runMongoTool("mongorestore", {
+    host: secondary.host,
+    dir: data,
+});
 assert.neq(ret, 0, "mongorestore should exit w/ 1 on secondary");
 
 jsTestLog("mongoexport from primary");
 dataFile = MongoRunner.dataDir + "/dumprestore3-other2.json";
-ret = MongoRunner.runMongoTool("mongoexport",
-                               {
-                                 host: primary.host,
-                                 out: dataFile,
-                                 db: "foo",
-                                 collection: "bar",
-                               });
+ret = MongoRunner.runMongoTool("mongoexport", {
+    host: primary.host,
+    out: dataFile,
+    db: "foo",
+    collection: "bar",
+});
 assert.eq(ret, 0, "mongoexport should exit w/ 0 on primary");
 
 jsTestLog("mongoimport from secondary");
-ret = MongoRunner.runMongoTool("mongoimport",
-                               {
-                                 host: secondary.host,
-                                 file: dataFile,
-                               });
+ret = MongoRunner.runMongoTool("mongoimport", {
+    host: secondary.host,
+    file: dataFile,
+});
 assert.neq(ret, 0, "mongoimport should exit w/ 1 on secondary");
 
 jsTestLog("stopSet");
