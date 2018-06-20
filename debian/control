@@ -1,7 +1,7 @@
 Source: mongodb
 Section: database
 Priority: optional
-Maintainer: Debian MongoDB Maintainers <pkg-mongodb-maintainers@lists.alioth.debian.org>
+Maintainer: Debian MongoDB Maintainers <team+mongodb@tracker.debian.org>
 Uploaders: Laszlo Boszormenyi (GCS) <gcs@debian.org>,
            Jérémy Lal <kapouer@melix.org>,
            Apollon Oikonomopoulos <apoikos@debian.org>
