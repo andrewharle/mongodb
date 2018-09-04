@@ -6,7 +6,6 @@ from __future__ import absolute_import
 
 import os
 import os.path
-import shutil
 import threading
 import unittest
 
@@ -236,7 +235,7 @@ class DBTestCase(TestCase):
         dbpath = os.path.join(dbpath_prefix, "job%d" % (self.fixture.job_num), "unittest")
         self.dbtest_options["dbpath"] = dbpath
 
-        shutil.rmtree(dbpath, ignore_errors=True)
+        utils.rmtree(dbpath, ignore_errors=True)
 
         try:
             os.makedirs(dbpath)
@@ -352,7 +351,7 @@ class JSTestCase(TestCase):
         global_vars["TestData"] = test_data
         self.shell_options["global_vars"] = global_vars
 
-        shutil.rmtree(data_dir, ignore_errors=True)
+        utils.rmtree(data_dir, ignore_errors=True)
 
         self.num_clients = num_clients
 
@@ -364,14 +363,19 @@ class JSTestCase(TestCase):
 
         process_kwargs = self.shell_options.get("process_kwargs", {}).copy()
 
-        if "KRB5_CONFIG" in process_kwargs and "KRB5CCNAME" not in process_kwargs:
+        if process_kwargs \
+            and "env_vars" in process_kwargs \
+            and "KRB5_CONFIG" in process_kwargs["env_vars"] \
+            and "KRB5CCNAME" not in process_kwargs["env_vars"]:
             # Use a job-specific credential cache for JavaScript tests involving Kerberos.
             krb5_dir = os.path.join(data_dir, "krb5")
+
             try:
                 os.makedirs(krb5_dir)
             except os.error:
                 pass
-            process_kwargs["KRB5CCNAME"] = "DIR:" + os.path.join(krb5_dir, ".")
+
+            process_kwargs["env_vars"]["KRB5CCNAME"] = "DIR:" + krb5_dir
 
         self.shell_options["process_kwargs"] = process_kwargs
 

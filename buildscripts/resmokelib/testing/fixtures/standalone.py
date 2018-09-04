@@ -6,7 +6,6 @@ from __future__ import absolute_import
 
 import os
 import os.path
-import shutil
 import time
 
 import pymongo
@@ -34,7 +33,7 @@ class MongoDFixture(interface.Fixture):
                  dbpath_prefix=None,
                  preserve_dbpath=False):
 
-        interface.Fixture.__init__(self, logger, job_num)
+        interface.Fixture.__init__(self, logger, job_num, dbpath_prefix=dbpath_prefix)
 
         if "dbpath" in mongod_options and dbpath_prefix is not None:
             raise ValueError("Cannot specify both mongod_options.dbpath and dbpath_prefix")
@@ -48,19 +47,16 @@ class MongoDFixture(interface.Fixture):
         # The dbpath in mongod_options takes precedence over other settings to make it easier for
         # users to specify a dbpath containing data to test against.
         if "dbpath" not in self.mongod_options:
-            # Command line options override the YAML configuration.
-            dbpath_prefix = utils.default_if_none(config.DBPATH_PREFIX, dbpath_prefix)
-            dbpath_prefix = utils.default_if_none(dbpath_prefix, config.DEFAULT_DBPATH_PREFIX)
-            self.mongod_options["dbpath"] = os.path.join(dbpath_prefix,
-                                                         "job%d" % (self.job_num),
-                                                         config.FIXTURE_SUBDIR)
+            self.mongod_options["dbpath"] = os.path.join(
+                self._dbpath_prefix, config.FIXTURE_SUBDIR)
         self._dbpath = self.mongod_options["dbpath"]
 
         self.mongod = None
 
     def setup(self):
-        if not self.preserve_dbpath:
-            shutil.rmtree(self._dbpath, ignore_errors=True)
+        """Set up the mongod."""
+        if not self.preserve_dbpath and os.path.lexists(self._dbpath):
+            utils.rmtree(self._dbpath, ignore_errors=False)
 
         try:
             os.makedirs(self._dbpath)
@@ -144,6 +140,10 @@ class MongoDFixture(interface.Fixture):
 
     def is_running(self):
         return self.mongod is not None and self.mongod.poll() is None
+
+    def get_dbpath_prefix(self):
+        """ Returns the _dbpath, as this is the root of the data directory. """
+        return self._dbpath
 
     def get_internal_connection_string(self):
         if self.mongod is None:
