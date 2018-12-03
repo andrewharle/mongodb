@@ -26,6 +26,7 @@ COMMON_OPTIONS = --use-system-tcmalloc --use-system-pcre \
 		 --use-system-boost --use-system-snappy \
 		 --use-system-zlib --use-system-valgrind \
 		 --use-system-stemmer --use-system-yaml \
+		 --disable-warnings-as-errors \
 		 --ssl $(DEB_SCONS_OPTIONS) \
 		 CC=$(CC) CXX=$(CXX)
 
