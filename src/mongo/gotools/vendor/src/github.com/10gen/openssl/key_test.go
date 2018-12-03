@@ -1,4 +1,4 @@
-// Copyright (C) 2014 Space Monkey, Inc.
+// Copyright (C) 2017. See AUTHORS.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -76,7 +76,7 @@ func TestMarshal(t *testing.T) {
 	}
 	tls_der := x509.MarshalPKCS1PrivateKey(tls_key)
 	if !bytes.Equal(der, tls_der) {
-		t.Fatal("invalid private key der bytes: %s\n v.s. %s\n",
+		t.Fatalf("invalid private key der bytes: %s\n v.s. %s\n",
 			hex.Dump(der), hex.Dump(tls_der))
 	}
 

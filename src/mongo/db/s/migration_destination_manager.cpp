@@ -47,6 +47,8 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/ops/delete.h"
+#include "mongo/db/ops/write_ops.h"
+#include "mongo/db/ops/write_ops_exec.h"
 #include "mongo/db/range_deleter_service.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/replication_coordinator_global.h"
@@ -56,6 +58,7 @@
 #include "mongo/db/s/move_timing_helper.h"
 #include "mongo/db/s/sharded_connection_info.h"
 #include "mongo/db/s/sharding_state.h"
+#include "mongo/db/server_parameters.h"
 #include "mongo/db/service_context.h"
 #include "mongo/logger/ramlog.h"
 #include "mongo/s/catalog/type_chunk.h"
@@ -349,7 +352,7 @@ Status MigrationDestinationManager::start(const NamespaceString& nss,
 
 void MigrationDestinationManager::cloneDocumentsFromDonor(
     OperationContext* txn,
-    stdx::function<void(OperationContext*, BSONObjIterator)> insertBatchFn,
+    stdx::function<void(OperationContext*, BSONObj)> insertBatchFn,
     stdx::function<BSONObj(OperationContext*)> fetchBatchFn) {
 
     ProducerConsumerQueue<BSONObj> batches(1);
@@ -364,7 +367,7 @@ void MigrationDestinationManager::cloneDocumentsFromDonor(
                 if (arr.isEmpty()) {
                     return;
                 }
-                insertBatchFn(inserterTxn.get(), BSONObjIterator(arr));
+                insertBatchFn(inserterTxn.get(), arr);
             }
         } catch (...) {
             stdx::lock_guard<Client> lk(*txn->getClient());
@@ -505,6 +508,17 @@ void MigrationDestinationManager::_migrateThread(BSONObj min,
     _scopedRegisterReceiveChunk.reset();
     _isActiveCV.notify_all();
 }
+
+// The maximum number of documents to insert in a single batch during migration clone.
+// secondaryThrottle and migrateCloneInsertionBatchDelayMS apply between each batch.
+// 0 or negative values (the default) means no limit to batch size.
+// 1 corresponds to 3.4.16 (and earlier) behavior.
+MONGO_EXPORT_SERVER_PARAMETER(migrateCloneInsertionBatchSize, int, 0);
+
+// Time in milliseconds between batches of insertions during migration clone.
+// This is in addition to any time spent waiting for replication (secondaryThrottle).
+// Defaults to 0.
+MONGO_EXPORT_SERVER_PARAMETER(migrateCloneInsertionBatchDelayMS, int, 0);
 
 void MigrationDestinationManager::_migrateDriver(OperationContext* txn,
                                                  const BSONObj& min,
@@ -665,6 +679,12 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* txn,
             wunit.commit();
         }
 
+        Status status = _notePending(txn, _nss, min, max, epoch);
+        if (!status.isOK()) {
+            setState(FAIL);
+            return;
+        }
+
         timing.done(1);
         MONGO_FAIL_POINT_PAUSE_WHILE_SET(migrateThreadHangAtStep1);
     }
@@ -680,17 +700,16 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* txn,
         // results
         deleterOptions.waitForOpenCursors = false;
         deleterOptions.fromMigrate = true;
-        deleterOptions.onlyRemoveOrphanedDocs = true;
+
+        // There is no need to perform checking for orphaned docs as part of the range deletion,
+        // because the call above (to _notePending) will ensure that the chunk which is coming in is
+        // not currently owned by this shard and the scopedRegisterReceiveChunk would prevent this
+        // chunk from getting received while range deletion is running.
+        deleterOptions.onlyRemoveOrphanedDocs = false;
         deleterOptions.removeSaverReason = "preCleanup";
 
         if (!getDeleter()->deleteNow(txn, deleterOptions, &errmsg)) {
             warning() << "Failed to queue delete for migrate abort: " << redact(errmsg);
-            setState(FAIL);
-            return;
-        }
-
-        Status status = _notePending(txn, _nss, min, max, epoch);
-        if (!status.isOK()) {
             setState(FAIL);
             return;
         }
@@ -705,57 +724,61 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* txn,
 
         const BSONObj migrateCloneRequest = createMigrateCloneRequest(_nss, *_sessionId);
 
-        auto insertBatchFn = [&](OperationContext* txn, BSONObjIterator docs) {
-            while (docs.more()) {
-                txn->checkForInterrupt();
+        auto assertNotAborted = [&](OperationContext* opCtx) {
+            opCtx->checkForInterrupt();
+            uassert(40655, "Migration aborted while copying documents", getState() != ABORT);
+        };
 
-                if (getState() == ABORT) {
-                    auto message = "Migration aborted while copying documents";
-                    log() << message << migrateLog;
-                    uasserted(40655, message);
+        auto insertBatchFn = [&](OperationContext* opCtx, BSONObj arr) {
+            auto it = arr.begin();
+            while (it != arr.end()) {
+                int batchNumCloned = 0;
+                int batchClonedBytes = 0;
+                int batchMaxCloned = migrateCloneInsertionBatchSize.load();
+
+                assertNotAborted(opCtx);
+
+                std::vector<BSONObj> toInsert;
+                while (it != arr.end() &&
+                       (batchMaxCloned <= 0 || batchNumCloned < batchMaxCloned)) {
+                    const auto& doc = *it;
+                    BSONObj docToClone = doc.Obj();
+                    toInsert.push_back(docToClone);
+                    batchNumCloned++;
+                    batchClonedBytes += docToClone.objsize();
+                    it++;
+                }
+                InsertOp insertOp;
+                insertOp.ns = _nss;
+                insertOp.documents = toInsert;
+
+                const WriteResult reply = performInserts(opCtx, insertOp, true);
+
+                for (unsigned long i = 0; i < reply.results.size(); ++i) {
+                    uassertStatusOK(reply.results[i]);
                 }
 
-                BSONObj docToClone = docs.next().Obj();
-                {
-                    OldClientWriteContext cx(txn, _nss.ns());
-                    BSONObj localDoc;
-                    if (willOverrideLocalId(txn,
-                                            _nss.ns(),
-                                            min,
-                                            max,
-                                            shardKeyPattern,
-                                            cx.db(),
-                                            docToClone,
-                                            &localDoc)) {
-                        const std::string errMsg = str::stream()
-                            << "cannot migrate chunk, local document " << redact(localDoc)
-                            << " has same _id as cloned "
-                            << "remote document " << redact(docToClone);
-                        warning() << errMsg;
-
-                        // Exception will abort migration cleanly
-                        uasserted(16976, errMsg);
-                    }
-                    Helpers::upsert(txn, _nss.ns(), docToClone, true);
-                }
                 {
                     stdx::lock_guard<stdx::mutex> statsLock(_mutex);
-                    _numCloned++;
-                    _clonedBytes += docToClone.objsize();
+                    _numCloned += batchNumCloned;
+                    _clonedBytes += batchClonedBytes;
                 }
+
                 if (writeConcern.shouldWaitForOtherNodes()) {
                     repl::ReplicationCoordinator::StatusAndDuration replStatus =
-                        repl::ReplicationCoordinator::get(txn)->awaitReplication(
-                            txn,
-                            repl::ReplClientInfo::forClient(txn->getClient()).getLastOp(),
+                        repl::ReplicationCoordinator::get(opCtx)->awaitReplication(
+                            opCtx,
+                            repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp(),
                             writeConcern);
                     if (replStatus.status.code() == ErrorCodes::WriteConcernFailed) {
                         warning() << "secondaryThrottle on, but doc insert timed out; "
                                      "continuing";
                     } else {
-                        massertStatusOK(replStatus.status);
+                        uassertStatusOK(replStatus.status);
                     }
                 }
+
+                sleepmillis(migrateCloneInsertionBatchDelayMS.load());
             }
         };
 

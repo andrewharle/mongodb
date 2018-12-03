@@ -207,6 +207,7 @@ functions:
           aws_secret_key: "${terraform_secret}"
           perf_jira_user: "${perf_jira_user}"
           perf_jira_pw: "${perf_jira_pw}"
+          dsi_analysis_atlas_user: "${dsi_analysis_atlas_user}"
           dsi_analysis_atlas_pw: "${dsi_analysis_atlas_pw}"
           EOF
           chmod 400 runtime_secret.yml
@@ -267,7 +268,7 @@ functions:
         script: |
           set -o errexit
           set -o verbose
-          TAG="3.2.20-Baseline"
+          TAG="3.4.17-Baseline"
           OVERRIDEFILE="../src/dsi/dsi/analysis/${branch_name}/system_perf_override.json"
           python -u ../src/dsi/dsi/analysis/post_run_check.py ${script_flags} --reports-analysis reports --perf-file perf.json --rev ${revision} --refTag $TAG --overrideFile $OVERRIDEFILE --project_id sys-perf --variant ${build_variant} --task ${task_name}
 
@@ -456,7 +457,7 @@ buildvariants:
 # proper artifacts directly from that project, we should do that and remove these tasks.
 - name: compile-rhel70
   display_name: Compile on rhel70
-  batchtime: 1440 # 24 hours
+  batchtime: 10080 # 7 days
   modules:
     - wtdevelop
   expansions:

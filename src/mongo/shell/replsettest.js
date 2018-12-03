@@ -64,9 +64,6 @@
  *  nodes {Array.<Mongo>} - connection to replica set members
  */
 
-/* Global default timeout variable */
-const kReplDefaultTimeoutMS = 10 * 60 * 1000;
-
 var ReplSetTest = function(opts) {
     'use strict';
 
@@ -91,7 +88,9 @@ var ReplSetTest = function(opts) {
 
     var _causalConsistency;
 
-    this.kDefaultTimeoutMS = kReplDefaultTimeoutMS;
+    // Some code still references kDefaultTimeoutMS as a (non-static) member variable, so make sure
+    // it's still accessible that way.
+    this.kDefaultTimeoutMS = ReplSetTest.kDefaultTimeoutMS;
     var oplogName = 'oplog.rs';
 
     // Publicly exposed variables
@@ -1290,6 +1289,9 @@ var ReplSetTest = function(opts) {
             // liveNodes must have been populated.
             var primary = rst.liveNodes.master;
             var combinedDBs = new Set(primary.getDBNames());
+            // replSetConfig will be undefined for master/slave passthrough.
+            const replSetConfig =
+                rst.getReplSetConfigFromNode ? rst.getReplSetConfigFromNode() : undefined;
 
             rst.getSecondaries().forEach(secondary => {
                 secondary.getDBNames().forEach(dbName => combinedDBs.add(dbName));
@@ -1378,8 +1380,10 @@ var ReplSetTest = function(opts) {
                     // Check that the following collection stats are the same across replica set
                     // members:
                     //  capped
-                    //  nindexes
+                    //  nindexes, except on nodes with buildIndexes: false
                     //  ns
+                    const hasSecondaryIndexes = !replSetConfig ||
+                        replSetConfig.members[rst.getNodeId(secondary)].buildIndexes !== false;
                     primaryCollections.forEach(collName => {
                         var primaryCollStats =
                             primary.getDB(dbName).runCommand({collStats: collName});
@@ -1389,7 +1393,8 @@ var ReplSetTest = function(opts) {
                         assert.commandWorked(secondaryCollStats);
 
                         if (primaryCollStats.capped !== secondaryCollStats.capped ||
-                            primaryCollStats.nindexes !== secondaryCollStats.nindexes ||
+                            (hasSecondaryIndexes &&
+                             primaryCollStats.nindexes !== secondaryCollStats.nindexes) ||
                             primaryCollStats.ns !== secondaryCollStats.ns) {
                             print(msgPrefix +
                                   ', the primary and secondary have different stats for the ' +
@@ -1887,17 +1892,21 @@ var ReplSetTest = function(opts) {
     }
 
     if (typeof opts === 'string' || opts instanceof String) {
-        _constructFromExistingSeedNode(opts);
+        retryOnNetworkError(function() {
+            // The primary may unexpectedly step down during startup if under heavy load
+            // and too slowly processing heartbeats. When it steps down, it closes all of
+            // its connections.
+            _constructFromExistingSeedNode(opts);
+        }, 10);
     } else {
         _constructStartNewInstances(opts);
     }
 };
 
 /**
- * Declare kDefaultTimeoutMS as a static property so we don't have to initialize
- * a ReplSetTest object to use it.
+ *  Global default timeout (10 minutes).
  */
-ReplSetTest.kDefaultTimeoutMS = kReplDefaultTimeoutMS;
+ReplSetTest.kDefaultTimeoutMS = 10 * 60 * 1000;
 
 /**
  * Set of states that the replica set can be in. Used for the wait functions.
