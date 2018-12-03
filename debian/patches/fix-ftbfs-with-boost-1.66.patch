@@ -1,0 +1,50 @@
+From 6963cce5a828ff9de37732882b312de950c0e653 Mon Sep 17 00:00:00 2001
+From: Apollon Oikonomopoulos <apoikos@debian.org>
+Date: Mon, 3 Dec 2018 21:49:18 +0200
+Subject: [PATCH] Fix build with Boost-1.66
+
+commit a071f0b62ebc0cdd20de382e96805614d5e6b6c9
+Author: Judah Schvimer <judah@mongodb.com>
+Date:   Wed Jan 31 11:38:57 2018 -0500
+
+    SERVER-32516 remove make_optional type
+
+commit af58c52eaa8a7c4164748d77fe88126288e0d116
+Author: Mathias Stearn <mathias@10gen.com>
+Date:   Mon Mar 26 11:27:58 2018 -0400
+
+    SERVER-33508 Fix compile with boost-1.66
+---
+ src/mongo/db/repl/oplog_fetcher.cpp                | 2 +-
+ src/mongo/executor/network_interface_mock_test.cpp | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/mongo/db/repl/oplog_fetcher.cpp b/src/mongo/db/repl/oplog_fetcher.cpp
+index 36a6e237e7..8f87abd8e5 100644
+--- a/src/mongo/db/repl/oplog_fetcher.cpp
++++ b/src/mongo/db/repl/oplog_fetcher.cpp
+@@ -282,7 +282,7 @@ StatusWith<boost::optional<rpc::OplogQueryMetadata>> parseOplogQueryMetadata(
+         if (!metadataResult.isOK()) {
+             return metadataResult.getStatus();
+         }
+-        oqMetadata = boost::make_optional<rpc::OplogQueryMetadata>(metadataResult.getValue());
++        oqMetadata = boost::make_optional(metadataResult.getValue());
+     }
+     return oqMetadata;
+ }
+diff --git a/src/mongo/executor/network_interface_mock_test.cpp b/src/mongo/executor/network_interface_mock_test.cpp
+index b1a2e4edff..59c33e1fc8 100644
+--- a/src/mongo/executor/network_interface_mock_test.cpp
++++ b/src/mongo/executor/network_interface_mock_test.cpp
+@@ -143,7 +143,7 @@ TEST_F(NetworkInterfaceMockTest, ConnectionHook) {
+         [&](const HostAndPort& remoteHost) {
+             makeRequestCalled = true;
+             hostCorrectForRequest = (remoteHost == testHost());
+-            return boost::make_optional<RemoteCommandRequest>(expectedRequest);
++            return boost::make_optional(expectedRequest);
+         },
+         [&](const HostAndPort& remoteHost, RemoteCommandResponse&& response) {
+             handleReplyCalled = true;
+-- 
+2.18.0
+
