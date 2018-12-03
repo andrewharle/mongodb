@@ -30,7 +30,7 @@ Build-Depends:
  scons,
  tzdata,
  valgrind
-Standards-Version: 4.1.4
+Standards-Version: 4.2.1
 Vcs-Git: https://salsa.debian.org/mongodb-team/mongodb.git
 Vcs-Browser: https://salsa.debian.org/mongodb-team/mongodb
 Homepage: https://www.mongodb.org
