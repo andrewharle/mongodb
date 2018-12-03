@@ -402,6 +402,31 @@ functions:
         https_validate_certificates = False
         EOF
 
+  "call BF Suggestion service":
+    command: shell.exec
+    params:
+      working_dir: src
+      shell: bash
+      silent: true
+      script: |
+        report_file="report.json"
+        # Check if the report file exists and has failures.
+        if [ -f $report_file ] && grep -Eq "\"failures\": [1-9]" $report_file; then
+          # Calling the BF Suggestion server endpoint to start feature extraction.
+          payload="{\"task_id\": \"${task_id}\", \"execution\": ${execution}}"
+          echo "Sending task info to the BF suggestion service"
+          # The --user option is passed through stdin to avoid showing in process list.
+          user_option="--user ${bfsuggestion_user}:${bfsuggestion_password}"
+          curl --header "Content-Type: application/json" \
+               --data "$payload" \
+               --max-time 10 \
+               --silent \
+               --show-error \
+               --config - \
+               https://bfsuggestion.corp.mongodb.com/tasks <<< $user_option
+          echo "Request to BF Suggestion service status: $?"
+        fi
+
   "upload debugsymbols" : &upload_debugsymbols
     command: s3.put
     params:
@@ -767,6 +792,10 @@ functions:
           set +o errexit
           npm test > npm_test-${task_id}.log 2>&1
           if [ $? -ne 0 ]; then
+            echo "jstestfuzz self-tests failure"
+            branch=$(git symbolic-ref --short HEAD)
+            commit=$(git show -s --pretty=format:"%h - %an, %ar: %s")
+            echo "Git branch: $branch, commit: $commit"
             which node
             node --version
             which npm
@@ -955,8 +984,6 @@ pre:
     params:
       system_log: true
       script: |
-        set -o errexit
-        set -o verbose
 
         ulimit -a
         # Clear the dmesg ring buffer. The "post" phase will check dmesg for OOM messages.
@@ -969,7 +996,6 @@ pre:
         fi
 
 
-
 post:
   - command: attach.results
     params:
@@ -979,6 +1005,7 @@ post:
       ignore_artifacts_for_spawn: false
       files:
         - src/archive.json
+  - func: "call BF Suggestion service"
   - func: "kill processes"
   # Print out any Out of Memory killed process messages.
   - command: shell.exec
@@ -2457,7 +2484,7 @@ tasks:
   - func: "do setup"
   - func: "run tests"
     vars:
-      resmoke_args: --suites=no_passthrough --storageEngine=mmapv1
+      resmoke_args: --suites=no_passthrough --storageEngine=mmapv1 --excludeWithAnyTags=requires_document_locking
       run_multiple_jobs: true
 
 - <<: *task_template
@@ -3137,7 +3164,7 @@ tasks:
           /usr/local/bin/notary-client.py --key-name "server-3.4" --auth-token-file ${workdir}/src/signing_auth_token --comment "Evergreen Automatic Signing ${revision} - ${build_variant} - ${branch_name}" --notary-url http://notary-service.build.10gen.cc:5000 --skip-missing mongodb-${push_name}-${push_arch}-${suffix}.${ext|tgz} mongodb-shell-${push_name}-${push_arch}-${suffix}.${ext|tgz} mongodb-${push_name}-${push_arch}-debugsymbols-${suffix}.${ext|tgz} mongodb-win32-${push_arch}-${suffix}.msi mongodb-src-${src_suffix}.${ext|tar.gz}
 
           if [ "${has_packages|}" = "true" ]; then
-             CURATOR_RELEASE=${curator_release|"ea8d75dcc1a587111e7418e2428fb67e267af9fe"}
+             CURATOR_RELEASE=${curator_release|"37d930ea2eeb27acb3782f1aa4d69da1e9dac223"}
              curl -L -O http://boxes.10gen.com/build/curator/curator-dist-rhel70-$CURATOR_RELEASE.tar.gz
              tar -zxvf curator-dist-rhel70-$CURATOR_RELEASE.tar.gz
              ./curator repo --config ./etc/repo_config.yaml --distro ${packager_distro} --edition ${repo_edition} --version ${version} --arch ${packager_arch} --packages repo
@@ -4216,20 +4243,9 @@ buildvariants:
   - name: parallel_WT
   - name: parallel_compatibility_WT
   - name: concurrency_WT
-    distros:
-    # There is a known performance issue with the ubuntu1604-arm64-1.linaro.build.10gen.cc host
-    # that's part of the ubuntu1604-arm64-large pool. We run the concurrency tests only on the
-    # hosts from the ubuntu1604-arm64-small pool to work around this issue.
-    - ubuntu1604-arm64-small
   - name: concurrency_replication_WT
-    distros:
-    - ubuntu1604-arm64-small
   - name: concurrency_sharded_WT
-    distros:
-    - ubuntu1604-arm64-small
   - name: concurrency_simultaneous_WT
-    distros:
-    - ubuntu1604-arm64-small
   - name: replica_sets_WT
   - name: replica_sets_auth
   - name: replica_sets_jscore_passthrough_WT
@@ -7415,7 +7431,7 @@ buildvariants:
     test_flags: --storageEngine=ephemeralForTest
     compile_flags: -j$(grep -c ^processor /proc/cpuinfo) --dbg=off --opt=on CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
-    variant_excluded_flags: requires_persistence,requires_fsync,SERVER-21420,SERVER-21658,requires_journaling
+    variant_excluded_flags: requires_persistence,requires_fsync,SERVER-21420,SERVER-21658,requires_journaling,requires_document_locking
     use_scons_cache: true
     gorootvars: 'PATH="/opt/go1.8/go/bin:/opt/mongodbtoolchain/v2/bin/:$PATH" GOROOT=/opt/go1.8/go'
     tooltags: ""

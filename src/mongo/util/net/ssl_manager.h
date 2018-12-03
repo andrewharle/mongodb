@@ -38,6 +38,8 @@
 #include "mongo/base/disallow_copying.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
+#include "mongo/db/service_context.h"
+#include "mongo/platform/atomic_word.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/net/sock.h"
 #include "mongo/util/net/ssl_types.h"
@@ -72,18 +74,11 @@ public:
 };
 
 struct SSLConfiguration {
-    SSLConfiguration() : serverSubjectName(""), clientSubjectName("") {}
-    SSLConfiguration(const std::string& serverSubjectName,
-                     const std::string& clientSubjectName,
-                     const Date_t& serverCertificateExpirationDate)
-        : serverSubjectName(serverSubjectName),
-          clientSubjectName(clientSubjectName),
-          serverCertificateExpirationDate(serverCertificateExpirationDate) {}
-
     bool isClusterMember(StringData subjectName) const;
+    bool isClusterMember(const SSLX509Name& subjectName) const;
     BSONObj getServerStatusBSON() const;
-    std::string serverSubjectName;
-    std::string clientSubjectName;
+    SSLX509Name serverSubjectName;
+    SSLX509Name clientSubjectName;
     Date_t serverCertificateExpirationDate;
     bool hasCA = false;
 };
@@ -105,6 +100,17 @@ public:
 const ASN1OID mongodbRolesOID("1.3.6.1.4.1.34601.2.1.1",
                               "MongoRoles",
                               "Sequence of MongoDB Database Roles");
+
+/**
+ * Counts of negogtiated version used by TLS connections.
+ */
+struct TLSVersionCounts {
+    AtomicInt64 tls10;
+    AtomicInt64 tls11;
+    AtomicInt64 tls12;
+
+    static TLSVersionCounts& get();
+};
 
 class SSLManagerInterface : public Decorable<SSLManagerInterface> {
 public:

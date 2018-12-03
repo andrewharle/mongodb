@@ -58,6 +58,11 @@ functions:
           rm -rf ./dsi
           mkdir -p ./src
           git clone git@github.com:10gen/dsi.git
+    # get the mongo source, note the s3.get calls put the
+    # exe files in their respective make locations.
+    - command: git.get_project
+      params:
+        directory: src
   "start server":
     - command: shell.exec
       params:
@@ -135,9 +140,43 @@ functions:
         script: |
           set -e
           set -v
-          virtualenv ./venv
-          source ./venv/bin/activate
-          pip install -r ../dsi/requirements/analysis.txt
+          ../dsi/run-dsi setup
+    - command: shell.exec
+      params:
+        working_dir: src
+        script: |
+          cat > bootstrap.yml <<EOF
+          infrastructure_provisioning: ${cluster}
+          platform: ${platform}
+          mongodb_setup: ${setup}
+          storageEngine: ${storageEngine}
+          test_control: ${test}
+          production: true
+          EOF
+
+          cat > runtime.yml <<EOF
+          # evergreen default expansions
+          is_patch: ${is_patch}
+          task_id: ${task_id}
+          EOF
+
+          cp ../dsi/configurations/analysis/analysis.common.yml  analysis.yml
+    - command: shell.exec
+      params:
+        working_dir: src
+        silent: true
+        script: |
+          cat > runtime_secret.yml <<EOF
+          dsi_analysis_atlas_user: "${dsi_analysis_atlas_user}"
+          dsi_analysis_atlas_pw: "${dsi_analysis_atlas_pw}"
+          EOF
+          chmod 400 runtime_secret.yml
+    - command: shell.exec
+      params:
+        working_dir: src
+        script: |
+          set -v
+          ../dsi/run-dsi detect-changes
     - command: json.get_history
       params:
         task: ${task_name}
@@ -149,23 +188,6 @@ functions:
         task: ${task_name}
         file: "src/tags.json"
         name: "perf"
-    - command: shell.exec
-      # generate dashboard data
-      type : test
-      params:
-        working_dir: src
-        silent: true
-        script: |
-          set -o errexit
-          source ./venv/bin/activate
-          REFTAGS="3.4.13-Baseline 3.2.17-Baseline 3.0.15-Baseline" # These are project specific
-          # Project Opts are  project specific, but don't match expansion from elsewhere.
-          PROJECT_OPTS="--overrideFile ../dsi/analysis/${branch_name}/perf_override.json --project_id performance"
-          python -u ../dsi/analysis/dashboard_gen.py --rev ${revision} -f history.json -t tags.json --refTag $REFTAGS $PROJECT_OPTS --variant ${build_variant} --task ${task_name} --jira-user ${perf_jira_user} --jira-password ${perf_jira_pw} || true
-    - command: "json.send"
-      params:
-         name: "dashboard"
-         file: "src/dashboard.json"
     - command: shell.exec
       type : test
       params:
@@ -453,7 +475,17 @@ buildvariants:
     compile_flags: --ssl MONGO_DISTMOD=rhel62 -j$(grep -c ^processor /proc/cpuinfo) --release --variables-files=etc/scons/mongodbtoolchain_gcc.vars
     mongod_exec_wrapper: &exec_wrapper "numactl --physcpubind=4,5,6,7 -i 1"
     perf_exec_wrapper: &perf_wrapper "numactl --physcpubind=1,2,3 -i 0"
-    mongod_flags: "--storageEngine=inMemory --logpath ./mongod.log --fork --syncdelay 0 --setParameter ttlMonitorEnabled=false --setParameter diagnosticDataCollectionEnabled=false --inMemoryEngineConfigString 'eviction=(threads_min=1),' --inMemorySizeGB 60 --auth"
+    mongod_flags: >-
+      --auth
+      --fork
+      --inMemoryEngineConfigString 'eviction=(threads_min=1),'
+      --inMemorySizeGB 60
+      --logpath ./mongod.log
+      --setParameter diagnosticDataCollectionEnabled=false
+      --setParameter enableTestCommands=1
+      --setParameter ttlMonitorEnabled=false
+      --storageEngine inMemory
+      --syncdelay 0
     use_scons_cache: true
     project: &project perf-3.4
   run_on:
@@ -479,7 +511,16 @@ buildvariants:
   expansions:
     mongod_exec_wrapper: *exec_wrapper
     perf_exec_wrapper: *perf_wrapper
-    mongod_flags: "--storageEngine=mmapv1 --logpath ./mongod.log --fork --syncdelay 0 --nojournal --setParameter ttlMonitorEnabled=false --setParameter diagnosticDataCollectionEnabled=false --auth"
+    mongod_flags: >-
+      --auth
+      --fork
+      --logpath ./mongod.log
+      --nojournal
+      --setParameter diagnosticDataCollectionEnabled=false
+      --setParameter enableTestCommands=1
+      --setParameter ttlMonitorEnabled=false
+      --storageEngine mmapv1
+      --syncdelay 0
     project: *project
   run_on:
   - "centos6-perf"
@@ -501,7 +542,19 @@ buildvariants:
   expansions:
     mongod_exec_wrapper: *exec_wrapper
     perf_exec_wrapper: *perf_wrapper
-    mongod_flags: "--replSet=test --storageEngine=inMemory  --logpath ./mongod.log --fork --syncdelay 0 --setParameter ttlMonitorEnabled=false --setParameter diagnosticDataCollectionEnabled=false --inMemoryEngineConfigString 'eviction=(threads_min=1),' --inMemorySizeGB 60 --auth --oplogSize 30000"
+    mongod_flags: >-
+      --auth
+      --fork
+      --inMemoryEngineConfigString 'eviction=(threads_min=1),'
+      --inMemorySizeGB 60
+      --logpath ./mongod.log
+      --oplogSize 30000
+      --replSet test
+      --setParameter diagnosticDataCollectionEnabled=false
+      --setParameter enableTestCommands=1
+      --setParameter ttlMonitorEnabled=false
+      --storageEngine inMemory
+      --syncdelay 0
     project: *project
   run_on:
   - "centos6-perf"
@@ -517,7 +570,18 @@ buildvariants:
   expansions:
     mongod_exec_wrapper: *exec_wrapper
     perf_exec_wrapper: *perf_wrapper
-    mongod_flags: "--replSet=test --storageEngine=mmapv1 --logpath ./mongod.log --fork --syncdelay 0 --nojournal --setParameter ttlMonitorEnabled=false --setParameter diagnosticDataCollectionEnabled=false --auth --oplogSize 100000"
+    mongod_flags: >-
+      --auth
+      --fork
+      --logpath ./mongod.log
+      --nojournal
+      --oplogSize 100000
+      --replSet test
+      --setParameter diagnosticDataCollectionEnabled=false
+      --setParameter enableTestCommands=1
+      --setParameter ttlMonitorEnabled=false
+      --storageEngine mmapv1
+      --syncdelay 0
     project: *project
   run_on:
   - "centos6-perf"

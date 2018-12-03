@@ -65,6 +65,8 @@ using std::endl;
 MONGO_FP_DECLARE(crashAfterStartingIndexBuild);
 MONGO_FP_DECLARE(hangAfterStartingIndexBuild);
 MONGO_FP_DECLARE(hangAfterStartingIndexBuildUnlocked);
+MONGO_FP_DECLARE(hangBeforeIndexBuildOf);
+MONGO_FP_DECLARE(hangAfterIndexBuildOf);
 
 std::atomic<std::int32_t> maxIndexBuildMemoryUsageMegabytes(500);  // NOLINT
 
@@ -282,6 +284,16 @@ StatusWith<std::vector<BSONObj>> MultiIndexBlock::init(const std::vector<BSONObj
     return indexInfoObjs;
 }
 
+void failPointHangDuringBuild(FailPoint* fp, StringData where, const BSONObj& doc) {
+    MONGO_FAIL_POINT_BLOCK(*fp, data) {
+        int i = doc.getIntField("i");
+        if (data.getData()["i"].numberInt() == i) {
+            log() << "Hanging " << where << " index build of i=" << i;
+            MONGO_FAIL_POINT_PAUSE_WHILE_SET((*fp));
+        }
+    }
+}
+
 Status MultiIndexBlock::insertAllDocumentsInCollection(std::set<RecordId>* dupsOut) {
     const char* curopMessage = _buildInBackground ? "Index Build (background)" : "Index Build";
     const auto numRecords = _collection->numRecords(_txn);
@@ -307,10 +319,19 @@ Status MultiIndexBlock::insertAllDocumentsInCollection(std::set<RecordId>* dupsO
     PlanExecutor::ExecState state;
     int retries = 0;  // non-zero when retrying our last document.
     while (retries ||
-           (PlanExecutor::ADVANCED == (state = exec->getNextSnapshotted(&objToIndex, &loc)))) {
+           (PlanExecutor::ADVANCED == (state = exec->getNextSnapshotted(&objToIndex, &loc))) ||
+           MONGO_FAIL_POINT(hangAfterStartingIndexBuild)) {
         try {
             if (_allowInterruption)
                 _txn->checkForInterrupt();
+
+            if (!(retries || (PlanExecutor::ADVANCED == state))) {
+                // The only reason we are still in the loop is hangAfterStartingIndexBuild.
+                log() << "Hanging index build due to 'hangAfterStartingIndexBuild' failpoint";
+                invariant(_allowInterruption);
+                sleepmillis(1000);
+                continue;
+            }
 
             // Make sure we are working with the latest version of the document.
             if (objToIndex.snapshotId() != _txn->recoveryUnit()->getSnapshotId() &&
@@ -322,6 +343,8 @@ Status MultiIndexBlock::insertAllDocumentsInCollection(std::set<RecordId>* dupsO
 
             // Done before insert so we can retry document if it WCEs.
             progress->setTotalWhileRunning(_collection->numRecords(_txn));
+
+            failPointHangDuringBuild(&hangBeforeIndexBuildOf, "before", objToIndex.value());
 
             WriteUnitOfWork wunit(_txn);
             Status ret = insert(objToIndex.value(), loc);
@@ -339,6 +362,8 @@ Status MultiIndexBlock::insertAllDocumentsInCollection(std::set<RecordId>* dupsO
             }
             if (_buildInBackground)
                 exec->restoreState();  // Handles any WCEs internally.
+
+            failPointHangDuringBuild(&hangAfterIndexBuildOf, "after", objToIndex.value());
 
             // Go to the next document
             progress->hit();
@@ -361,18 +386,6 @@ Status MultiIndexBlock::insertAllDocumentsInCollection(std::set<RecordId>* dupsO
             "Unable to complete index build due to collection scan failure: " +
                 WorkingSetCommon::toStatusString(objToIndex.value()),
             state == PlanExecutor::IS_EOF);
-
-    if (MONGO_FAIL_POINT(hangAfterStartingIndexBuild)) {
-        // Need the index build to hang before the progress meter is marked as finished so we can
-        // reliably check that the index build has actually started in js tests.
-        while (MONGO_FAIL_POINT(hangAfterStartingIndexBuild)) {
-            log() << "Hanging index build due to 'hangAfterStartingIndexBuild' failpoint";
-            sleepmillis(1000);
-        }
-
-        // Check for interrupt to allow for killop prior to index build completion.
-        _txn->checkForInterrupt();
-    }
 
     if (MONGO_FAIL_POINT(hangAfterStartingIndexBuildUnlocked)) {
         // Unlock before hanging so replication recognizes we've completed.

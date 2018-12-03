@@ -167,8 +167,6 @@ if (typeof _threadInject != "undefined") {
             "mr_drop.js",
             "mr3.js",
             "indexh.js",
-            "evald.js",
-            "evalf.js",
             "run_program1.js",
             "notablescan.js",
             "dropdb_race.js",
@@ -191,6 +189,35 @@ if (typeof _threadInject != "undefined") {
 
             // Assumes that other tests are not creating cursors.
             "kill_cursors.js",
+
+            // Use eval command and potentially cause deadlock.
+            "constructors.js",
+            "error2.js",
+            "eval0.js",
+            "eval1.js",
+            "eval3.js",
+            "eval4.js",
+            "eval5.js",
+            "eval6.js",
+            "eval7.js",
+            "eval9.js",
+            "evala.js",
+            "evalb.js",
+            "evald.js",
+            "evale.js",
+            "evalg.js",
+            "evalh.js",
+            "evalj.js",
+            "eval_mr.js",
+            "eval_nolock.js",
+            "fsync.js",
+            "js3.js",
+            "js7.js",
+            "js9.js",
+            "recursion.js",
+            "remove8.js",
+            "rename4.js",
+            "storefunc.js",
         ]);
 
         var parallelFilesDir = "jstests/core";
@@ -267,6 +294,10 @@ if (typeof _threadInject != "undefined") {
         args.forEach(function(x) {
             print("         S" + suite + " Test : " + x + " ...");
             var time = Date.timeFunc(function() {
+                // Create a new connection to the db for each file. If tests share the same
+                // connection it can create difficult to debug issues.
+                db = new Mongo(db.getMongo().host).getDB(db.getName());
+                gc();
                 load(x);
             }, 1);
             print("         S" + suite + " Test : " + x + " " + time + "ms");
