@@ -1,0 +1,32 @@
+From fb645a7072959db77be0aa5f792ef5a6038ffb0e Mon Sep 17 00:00:00 2001
+From: Apollon Oikonomopoulos <apoikos@debian.org>
+Date: Mon, 3 Dec 2018 21:18:52 +0200
+Subject: [PATCH] Do not attempt to track TLS1.3
+
+Commit 5abce331 introduced support for tracking TLS versions, however
+the cherry-picked changes rely on TLS1.3 support which was not
+backported from master. This causes build failures on systems with
+OpenSSL 1.1.1, where TLS1_3_VERSION is defined but
+mongo::TLSVersionCounts lacks the tls13 field.
+
+Fix this by disabling TLS1.3 tracking altogether.
+---
+ src/mongo/util/net/ssl_manager.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/mongo/util/net/ssl_manager.cpp b/src/mongo/util/net/ssl_manager.cpp
+index dd6e73c3e0..7db9ae32ad 100644
+--- a/src/mongo/util/net/ssl_manager.cpp
++++ b/src/mongo/util/net/ssl_manager.cpp
+@@ -1401,7 +1401,7 @@ void recordTLSVersion(const SSL* conn) {
+         case TLS1_2_VERSION:
+             counts.tls12.addAndFetch(1);
+             break;
+-#ifdef TLS1_3_VERSION
++#if 0
+         case TLS1_3_VERSION:
+             counts.tls13.addAndFetch(1);
+             break;
+-- 
+2.18.0
+
