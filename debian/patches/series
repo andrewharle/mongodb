@@ -6,3 +6,4 @@ fix-ftbfs-with-gcc-7.patch
 asio-openssl-1.1-support.patch
 fix-ftbfs-with-openssl-1.1.1.patch
 fix-ftbfs-with-boost-1.66.patch
+strip-test-binaries.patch
