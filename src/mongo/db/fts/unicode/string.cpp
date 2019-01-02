@@ -274,7 +274,7 @@ bool String::substrMatch(const std::string& str,
 
     // Case sensitive and diacritic sensitive.
     return boost::algorithm::boyer_moore_search(
-               haystack.begin(), haystack.end(), needle.begin(), needle.end()) != haystack.end();
+               haystack.begin(), haystack.end(), needle.begin(), needle.end()) != std::make_pair(haystack.end(), haystack.end());
 }
 
 }  // namespace unicode

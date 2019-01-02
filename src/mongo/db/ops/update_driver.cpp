@@ -183,6 +183,13 @@ Status UpdateDriver::populateDocumentWithQueryFields(const BSONObj& query,
     return populateDocumentWithQueryFields(*cq, immutablePaths, doc);
 }
 
+namespace {
+
+const FieldRef idPath("_id");
+const vector<FieldRef*> emptyImmutablePaths;
+
+}  // namespace
+
 Status UpdateDriver::populateDocumentWithQueryFields(const CanonicalQuery& query,
                                                      const vector<FieldRef*>* immutablePathsPtr,
                                                      mutablebson::Document& doc) const {
@@ -192,13 +199,12 @@ Status UpdateDriver::populateDocumentWithQueryFields(const CanonicalQuery& query
     if (isDocReplacement()) {
         FieldRefSet pathsToExtract;
 
-        // TODO: Refactor update logic, make _id just another immutable field
-        static const FieldRef idPath("_id");
-        static const vector<FieldRef*> emptyImmutablePaths;
         const vector<FieldRef*>& immutablePaths =
             immutablePathsPtr ? *immutablePathsPtr : emptyImmutablePaths;
 
         pathsToExtract.fillFrom(immutablePaths);
+
+        // TODO: Refactor update logic, make _id just another immutable field
         pathsToExtract.insert(&idPath);
 
         // Extract only immutable fields from replacement-style
@@ -282,11 +288,21 @@ Status UpdateDriver::update(StringData matchedField,
             // is not a no-op and it is in a valid context -- then we switch back to a
             // non-in-place mode.
             //
-            // TODO: make mightBeIndexed and fieldRef like each other.
-            if (!_affectIndices && !execInfo.noOp && _indexedFields &&
-                _indexedFields->mightBeIndexed(execInfo.fieldRef[i]->dottedField())) {
-                _affectIndices = true;
-                doc->disableInPlaceUpdates();
+            // To determine if indexes are affected: If we did not create a new element in an array,
+            // check whether the full path affects indexes. If we did create a new element in an
+            // array, check whether the array itself might affect any indexes. This is necessary
+            // because if there is an index {"a.b": 1}, and we set "a.1.c" and implicitly create an
+            // array element in "a", then we may need to add a null key to the index {"a.b": 1},
+            // even though "a.1.c" does not appear to affect the index.
+            if (!_affectIndices && !execInfo.noOp && _indexedFields) {
+                auto pathLengthForIndexCheck = execInfo.indexOfArrayWithNewElement[i]
+                    ? *execInfo.indexOfArrayWithNewElement[i] + 1
+                    : execInfo.fieldRef[i]->numParts();
+                if (_indexedFields->mightBeIndexed(
+                        execInfo.fieldRef[i]->dottedSubstring(0, pathLengthForIndexCheck))) {
+                    _affectIndices = true;
+                    doc->disableInPlaceUpdates();
+                }
             }
         }
 

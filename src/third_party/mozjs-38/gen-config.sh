@@ -12,7 +12,8 @@ fi
 
 cd mozilla-release/js/src
 
-PYTHON=python ./configure --without-intl-api --enable-posix-nspr-emulation --disable-trace-logging
+PYTHON=/usr/bin/python CROSS_COMPILE=1 CC=arm-linux-gnueabihf-gcc CXX=arm-linux-gnueabihf-g++  ./configure --without-intl-api --enable-posix-nspr-emulation --target=arm --disable-trace-logging
+#PYTHON=python ./configure --without-intl-api --enable-posix-nspr-emulation --disable-trace-logging
 
 cd ../../..
 

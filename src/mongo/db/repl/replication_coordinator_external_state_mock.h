@@ -52,7 +52,8 @@ public:
 
     ReplicationCoordinatorExternalStateMock();
     virtual ~ReplicationCoordinatorExternalStateMock();
-    virtual void startThreads(const ReplSettings& settings) override;
+    virtual void startThreads(const ReplSettings& settings,
+                              ReplicationCoordinator* replCoord) override;
     virtual void startMasterSlave(OperationContext*);
     virtual void shutdown(OperationContext*);
     virtual Status initializeReplSetStorage(OperationContext* txn,
@@ -80,6 +81,7 @@ public:
     virtual void dropAllTempCollections(OperationContext* txn);
     virtual void dropAllSnapshots();
     virtual void updateCommittedSnapshot(SnapshotName newCommitPoint);
+    virtual void createSnapshot(OperationContext* txn, SnapshotName name);
     virtual void forceSnapshotCreation();
     virtual bool snapshotsEnabled() const;
     virtual void notifyOplogMetadataWaiters();

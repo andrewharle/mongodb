@@ -6,7 +6,6 @@ from __future__ import absolute_import
 
 import os
 import os.path
-import shutil
 import socket
 import time
 
@@ -93,8 +92,9 @@ class MongoDFixture(interface.Fixture):
             raise errors.TestFailure("%s did not exit cleanly" % (self))
 
     def setup(self):
-        if not self.preserve_dbpath:
-            shutil.rmtree(self._dbpath, ignore_errors=True)
+        """Set up the mongod."""
+        if not self.preserve_dbpath and os.path.lexists(self._dbpath):
+            utils.rmtree(self._dbpath, ignore_errors=False)
 
         try:
             os.makedirs(self._dbpath)
@@ -127,9 +127,10 @@ class MongoDFixture(interface.Fixture):
         # be established.
         while True:
             # Check whether the mongod exited for some reason.
-            if self.mongod.poll() is not None:
+            exit_code = self.mongod.poll()
+            if exit_code is not None:
                 raise errors.ServerFailure("Could not connect to mongod on port %d, process ended"
-                                           " unexpectedly." % (self.port))
+                                           " unexpectedly with code %d." % (self.port, exit_code))
 
             try:
                 # Use a shorter connection timeout to more closely satisfy the requested deadline.
@@ -177,8 +178,11 @@ class MongoDFixture(interface.Fixture):
     def is_running(self):
         return self.mongod is not None and self.mongod.poll() is None
 
-    def get_connection_string(self):
+    def get_internal_connection_string(self):
         if self.mongod is None:
-            raise ValueError("Must call setup() before calling get_connection_string()")
+            raise ValueError("Must call setup() before calling get_internal_connection_string()")
 
         return "%s:%d" % (socket.gethostname(), self.port)
+
+    def get_driver_connection_url(self):
+        return "mongodb://" + self.get_internal_connection_string()

@@ -58,7 +58,8 @@ ReplicationCoordinatorExternalStateMock::ReplicationCoordinatorExternalStateMock
 
 ReplicationCoordinatorExternalStateMock::~ReplicationCoordinatorExternalStateMock() {}
 
-void ReplicationCoordinatorExternalStateMock::startThreads(const ReplSettings& settings) {
+void ReplicationCoordinatorExternalStateMock::startThreads(const ReplSettings& settings,
+                                                           ReplicationCoordinator* replCoord) {
     _threadsStarted = true;
 }
 
@@ -215,6 +216,9 @@ void ReplicationCoordinatorExternalStateMock::dropAllSnapshots() {}
 
 void ReplicationCoordinatorExternalStateMock::updateCommittedSnapshot(SnapshotName newCommitPoint) {
 }
+
+void ReplicationCoordinatorExternalStateMock::createSnapshot(OperationContext* txn,
+                                                             SnapshotName name) {}
 
 void ReplicationCoordinatorExternalStateMock::forceSnapshotCreation() {}
 

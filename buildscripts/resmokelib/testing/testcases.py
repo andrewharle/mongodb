@@ -6,7 +6,6 @@ from __future__ import absolute_import
 
 import os
 import os.path
-import shutil
 import unittest
 
 from .. import config
@@ -173,7 +172,7 @@ class CPPIntegrationTestCase(TestCase):
     def configure(self, fixture):
         TestCase.configure(self, fixture)
 
-        self.program_options["connectionString"] = self.fixture.get_connection_string()
+        self.program_options["connectionString"] = self.fixture.get_internal_connection_string()
 
     def run_test(self):
         try:
@@ -222,7 +221,7 @@ class DBTestCase(TestCase):
         dbpath = os.path.join(dbpath_prefix, "job%d" % (self.fixture.job_num), "unittest")
         self.dbtest_options["dbpath"] = dbpath
 
-        shutil.rmtree(dbpath, ignore_errors=True)
+        utils.rmtree(dbpath, ignore_errors=True)
 
         try:
             os.makedirs(dbpath)
@@ -279,6 +278,7 @@ class JSTestCase(TestCase):
                  js_filename,
                  shell_executable=None,
                  shell_options=None,
+                 use_connection_string=False,
                  test_kind="JSTest"):
         "Initializes the JSTestCase with the JS file to run."
 
@@ -289,6 +289,7 @@ class JSTestCase(TestCase):
 
         self.js_filename = js_filename
         self.shell_options = utils.default_if_none(shell_options, {}).copy()
+        self.use_connection_string = use_connection_string
 
     def configure(self, fixture):
         TestCase.configure(self, fixture)
@@ -316,7 +317,7 @@ class JSTestCase(TestCase):
         global_vars["TestData"] = test_data
         self.shell_options["global_vars"] = global_vars
 
-        shutil.rmtree(data_dir, ignore_errors=True)
+        utils.rmtree(data_dir, ignore_errors=True)
 
         try:
             os.makedirs(data_dir)
@@ -349,10 +350,16 @@ class JSTestCase(TestCase):
             raise
 
     def _make_process(self):
-        return core.programs.mongo_shell_program(self.logger,
-                                                 executable=self.shell_executable,
-                                                 filename=self.js_filename,
-                                                 **self.shell_options)
+        connection_string = None
+        if self.use_connection_string:
+            connection_string = self.fixture.get_driver_connection_url()
+
+        return core.programs.mongo_shell_program(
+            self.logger,
+            executable=self.shell_executable,
+            filename=self.js_filename,
+            connection_string=connection_string,
+            **self.shell_options)
 
 
 class MongosTestCase(TestCase):
