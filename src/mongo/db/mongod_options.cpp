@@ -44,9 +44,9 @@
 #include "mongo/db/server_options.h"
 #include "mongo/db/server_options_helpers.h"
 #include "mongo/db/storage/mmap_v1/mmap_v1_options.h"
-#include "mongo/s/catalog/catalog_manager.h"
 #include "mongo/logger/console_appender.h"
 #include "mongo/logger/message_event_utf8_encoder.h"
+#include "mongo/s/catalog/catalog_manager.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
 #include "mongo/util/net/ssl_options.h"
@@ -55,9 +55,9 @@
 
 namespace mongo {
 
-using std::cout;
 using std::endl;
 using std::string;
+
 
 MongodGlobalParams mongodGlobalParams;
 
@@ -332,12 +332,12 @@ Status addMongodOptions(moe::OptionSection* options) {
                                       "storage.mmapv1.journal.commitIntervalMs");
 
     // Deprecated option that we don't want people to use for performance reasons
-    storage_options.addOptionChaining("nopreallocj",
+    storage_options.addOptionChaining("storage.mmapv1.journal.nopreallocj",
                                       "nopreallocj",
                                       moe::Switch,
                                       "don't preallocate journal files")
         .hidden()
-        .setSources(moe::SourceAllLegacy);
+        .setSources(moe::SourceAll);
 
 #if defined(__linux__)
     general_options.addOptionChaining(
@@ -1032,8 +1032,8 @@ Status storeMongodOptions(const moe::Environment& params, const std::vector<std:
     if (params.count("storage.mmapv1.journal.debugFlags")) {
         mmapv1GlobalOptions.journalOptions = params["storage.mmapv1.journal.debugFlags"].as<int>();
     }
-    if (params.count("nopreallocj")) {
-        mmapv1GlobalOptions.preallocj = !params["nopreallocj"].as<bool>();
+    if (params.count("storage.mmapv1.journal.nopreallocj")) {
+        mmapv1GlobalOptions.preallocj = !params["storage.mmapv1.journal.nopreallocj"].as<bool>();
     }
 
     if (params.count("net.http.RESTInterfaceEnabled")) {
@@ -1047,7 +1047,7 @@ Status storeMongodOptions(const moe::Environment& params, const std::vector<std:
     }
     if (params.count("storage.mmapv1.preallocDataFiles")) {
         mmapv1GlobalOptions.prealloc = params["storage.mmapv1.preallocDataFiles"].as<bool>();
-        cout << "note: noprealloc may hurt performance in many applications" << endl;
+        log() << "note: noprealloc may hurt performance in many applications" << endl;
     }
     if (params.count("storage.mmapv1.smallFiles")) {
         mmapv1GlobalOptions.smallfiles = params["storage.mmapv1.smallFiles"].as<bool>();
@@ -1268,6 +1268,21 @@ Status storeMongodOptions(const moe::Environment& params, const std::vector<std:
         log() << endl;
     }
 
+    bool isClusterRoleShard = params.count("shardsvr");
+    bool isClusterRoleConfig = params.count("configsvr");
+    if (params.count("sharding.clusterRole")) {
+        auto clusterRole = params["sharding.clusterRole"].as<std::string>();
+        isClusterRoleShard = isClusterRoleShard || (clusterRole == "shardsvr");
+        isClusterRoleConfig = isClusterRoleConfig || (clusterRole == "configsvr");
+    }
+
+    if ((isClusterRoleShard || isClusterRoleConfig) && skipShardingConfigurationChecks) {
+        auto clusterRoleStr = isClusterRoleConfig ? "--configsvr" : "--shardsvr";
+        return Status(ErrorCodes::BadValue,
+                      str::stream() << "Can not specify " << clusterRoleStr
+                                    << " and set skipShardingConfigurationChecks=true");
+    }
+
 #ifdef _WIN32
     // If dbPath is a default value, prepend with drive name so log entries are explicit
     if (storageGlobalParams.dbpath == storageGlobalParams.kDefaultDbPath ||
@@ -1276,7 +1291,6 @@ Status storeMongodOptions(const moe::Environment& params, const std::vector<std:
         storageGlobalParams.dbpath = currentPath.root_name().string() + storageGlobalParams.dbpath;
     }
 #endif
-
     setGlobalReplSettings(replSettings);
     return Status::OK();
 }

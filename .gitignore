@@ -38,6 +38,8 @@
 *#
 .#*
 
+.pc/
+
 /src/mongo/*/*Debug*/
 /src/mongo/*/*/*Debug*/
 /src/mongo/*/*Release*/

@@ -8,7 +8,7 @@
 CC ?= gcc
 CXX ?= g++
 
-DEB_SCONS_OPTIONS :=
+DEB_SCONS_OPTIONS := 
 ifneq (,$(filter debug,$(DEB_BUILD_OPTIONS)))
 	DEB_SCONS_OPTIONS := --d=DEBUGBUILD
 endif
@@ -38,7 +38,7 @@ endif
 
 # Wiredtiger does not build on 32-bit systems
 ifeq (32, $(DEB_HOST_ARCH_BITS))
-COMMON_OPTIONS += --wiredtiger=off
+COMMON_OPTIONS += --wiredtiger=off --mmapv1=on
 endif
 
 override_dh_auto_clean:
@@ -51,10 +51,13 @@ override_dh_auto_clean:
 override_dh_auto_build:
 	scons $(COMMON_OPTIONS) core tools
 
-ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
+ifeq (,$(filter nocheckbuild,$(DEB_BUILD_OPTIONS)))
 override_dh_auto_test:
 	scons $(COMMON_OPTIONS) dbtest unittests
+
+ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
 	python ./buildscripts/resmoke.py --dbpathPrefix="$(CURDIR)/debian/tmp-test" --suites=dbtest,unittests
+endif
 .PHONY: override_dh_auto_test
 endif
 

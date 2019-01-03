@@ -1,0 +1,220 @@
+Author: Andrew Harle <46223597+andrewharle@users.noreply.github.com>
+Description: Remove the debian directory from the wiredtired source. It confuses uscan.
+Last-Update: 2019-01-03
+Forwarded: no
+
+--- mongodb-3.2.22.orig/src/third_party/wiredtiger/dist/package/debian/README.Debian
++++ /dev/null
+@@ -1,8 +0,0 @@
+-wiredtiger for Debian
+----------------------
+-
+-This is a package of the WiredTiger database library for Debian based
+-systems. For more information on WiredTiger please visit:
+-http://www.wiredtiger.com or contact us at info@wiredtiger.com
+-
+- -- Alex <alexg@wiredtiger.com>  Tue, 01 Apr 2014 15:50:02 +1100
+--- mongodb-3.2.22.orig/src/third_party/wiredtiger/dist/package/debian/README.source
++++ /dev/null
+@@ -1,9 +0,0 @@
+-wiredtiger for Debian
+----------------------
+-
+-<this file describes information about the source package, see Debian policy
+-manual section 4.14. You WILL either need to modify or delete this file>
+-
+-
+-
+-
+--- mongodb-3.2.22.orig/src/third_party/wiredtiger/dist/package/debian/changelog
++++ /dev/null
+@@ -1,5 +0,0 @@
+-wiredtiger (2.1.2-1) UNRELEASED; urgency=low
+-
+-  * Initial release of WiredTiger
+-
+- -- Alex <alexg@wiredtiger.com>  Tue, 01 Apr 2014 15:50:02 +1100
+--- mongodb-3.2.22.orig/src/third_party/wiredtiger/dist/package/debian/compat
++++ /dev/null
+@@ -1 +0,0 @@
+-8
+--- mongodb-3.2.22.orig/src/third_party/wiredtiger/dist/package/debian/control
++++ /dev/null
+@@ -1,36 +0,0 @@
+-Source: wiredtiger
+-Priority: extra
+-Maintainer: Alex Gorrod <alexg@wiredtiger.com>
+-Build-Depends: debhelper (>= 8.0.0), autotools-dev
+-Standards-Version: 3.9.4
+-Section: libs
+-Homepage: http://www.wiredtiger.com
+-#Vcs-Git: git://git.debian.org/collab-maint/wiredtiger.git
+-#Vcs-Browser: http://git.debian.org/?p=collab-maint/wiredtiger.git;a=summary
+-
+-Package: libwiredtiger-dev
+-Architecture: any
+-Section: libdevel
+-Priority: extra
+-Depends: ${misc:Depends}
+-Description: WiredTiger Database Libraries [development]
+- This is the development package which contains headers and static
+- libraries for the WiredTiger database library.
+-
+-Package: libwiredtiger
+-Architecture: any
+-Depends: ${shlibs:Depends},
+-	 ${misc:Depends}
+-Description: WiredTiger Database Libraries [runtime]
+- This is the runtime package for programs that use the WiredTiger
+- database library.
+-
+-Package: wiredtiger-util
+-Architecture: any
+-Section: database
+-Priority: extra
+-Depends: ${shlibs:Depends},
+-	 ${misc:Depends}
+-Description: WiredTiger Database Utilities
+- This package provides tools for manipulating WiredTiger databases
+-
+--- mongodb-3.2.22.orig/src/third_party/wiredtiger/dist/package/debian/copyright
++++ /dev/null
+@@ -1,26 +0,0 @@
+-Format: http://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+-Upstream-Name: wiredtiger
+-Source: <http://www.wiredtiger.com>
+-
+-Files: *
+-Copyright: (c) 2008-2014 WiredTiger, Inc.
+-License:
+- This program is free software: you can redistribute it and/or modify it under
+- the terms of either version 2 or version 3 of the GNU General Public License
+- as published by the Free Software Foundation.
+- .
+- On Debian GNU/Linux systems, the complete text of the GNU General
+- Public License can be found in `/usr/share/common-licenses/GPL-2' and
+- `/usr/share/common-licenses/GPL-3'.
+- .
+- This program is distributed in the hope that it will be useful, but WITHOUT
+- ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+- FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
+- details.
+- .
+- For a license to use the WiredTiger software under conditions other than those
+- described by the GNU General Public License, or for technical support for this
+- software, contact WiredTiger, Inc. at info@wiredtiger.com.
+- .
+- For further information, see the licensing section in the documentation.
+-
+--- mongodb-3.2.22.orig/src/third_party/wiredtiger/dist/package/debian/docs
++++ /dev/null
+@@ -1,2 +0,0 @@
+-NEWS
+-README
+--- mongodb-3.2.22.orig/src/third_party/wiredtiger/dist/package/debian/libwiredtiger-dev.dirs
++++ /dev/null
+@@ -1,2 +0,0 @@
+-usr/include
+-usr/lib
+--- mongodb-3.2.22.orig/src/third_party/wiredtiger/dist/package/debian/libwiredtiger-dev.install
++++ /dev/null
+@@ -1,2 +0,0 @@
+-usr/include/*
+-usr/lib/pkgconfig/*
+--- mongodb-3.2.22.orig/src/third_party/wiredtiger/dist/package/debian/libwiredtiger-dev.substvars
++++ /dev/null
+@@ -1 +0,0 @@
+-misc:Depends=
+--- mongodb-3.2.22.orig/src/third_party/wiredtiger/dist/package/debian/libwiredtiger.dirs
++++ /dev/null
+@@ -1 +0,0 @@
+-usr/lib
+--- mongodb-3.2.22.orig/src/third_party/wiredtiger/dist/package/debian/libwiredtiger.install
++++ /dev/null
+@@ -1,2 +0,0 @@
+-usr/lib/libwiredtiger*.a
+-usr/lib/libwiredtiger*.so
+--- mongodb-3.2.22.orig/src/third_party/wiredtiger/dist/package/debian/libwiredtiger.postinst.debhelper
++++ /dev/null
+@@ -1,5 +0,0 @@
+-# Automatically added by dh_makeshlibs
+-if [ "$1" = "configure" ]; then
+-	ldconfig
+-fi
+-# End automatically added section
+--- mongodb-3.2.22.orig/src/third_party/wiredtiger/dist/package/debian/libwiredtiger.postrm.debhelper
++++ /dev/null
+@@ -1,5 +0,0 @@
+-# Automatically added by dh_makeshlibs
+-if [ "$1" = "remove" ]; then
+-	ldconfig
+-fi
+-# End automatically added section
+--- mongodb-3.2.22.orig/src/third_party/wiredtiger/dist/package/debian/libwiredtiger.substvars
++++ /dev/null
+@@ -1,2 +0,0 @@
+-shlibs:Depends=libc6 (>= 2.14)
+-misc:Depends=
+--- mongodb-3.2.22.orig/src/third_party/wiredtiger/dist/package/debian/rules
++++ /dev/null
+@@ -1,13 +0,0 @@
+-#!/usr/bin/make -f
+-# -*- makefile -*-
+-# Sample debian/rules that uses debhelper.
+-# This file was originally written by Joey Hess and Craig Small.
+-# As a special exception, when this file is copied by dh-make into a
+-# dh-make output file, you may use that output file without restriction.
+-# This special exception was added by Craig Small in version 0.37 of dh-make.
+-
+-# Uncomment this to turn on verbose mode.
+-#export DH_VERBOSE=1
+-
+-%:
+-	dh $@  --with autotools-dev
+--- mongodb-3.2.22.orig/src/third_party/wiredtiger/dist/package/debian/shlibs.local
++++ /dev/null
+@@ -1 +0,0 @@
+-libwiredtiger 2.1.2 wiredtiger (>> 2.1.2-0), wiredtiger (<< 2.1.2-99)
+--- mongodb-3.2.22.orig/src/third_party/wiredtiger/dist/package/debian/source/format
++++ /dev/null
+@@ -1 +0,0 @@
+-3.0 (quilt)
+--- mongodb-3.2.22.orig/src/third_party/wiredtiger/dist/package/debian/watch
++++ /dev/null
+@@ -1,8 +0,0 @@
+-# Watch control file for uscan
+-# to check for upstream updates and more.
+-# See uscan(1) for format
+-
+-# Compulsory line, this is a version 3 file
+-version=3
+-
+-http://source.wiredtiger.com/releases/wiredtiger-(.*)\.tar\.bz2
+--- mongodb-3.2.22.orig/src/third_party/wiredtiger/dist/package/debian/wiredtiger-util.dirs
++++ /dev/null
+@@ -1 +0,0 @@
+-usr/bin
+--- mongodb-3.2.22.orig/src/third_party/wiredtiger/dist/package/debian/wiredtiger-util.install
++++ /dev/null
+@@ -1 +0,0 @@
+-usr/bin/*
+--- mongodb-3.2.22.orig/src/third_party/wiredtiger/dist/package/debian/wiredtiger-util.substvars
++++ /dev/null
+@@ -1,2 +0,0 @@
+-shlibs:Depends=libc6 (>= 2.14), wiredtiger (>> 2.1.2-0), wiredtiger (<< 2.1.2-99)
+-misc:Depends=
+--- mongodb-3.2.22.orig/src/third_party/wiredtiger/dist/package/debian/wiredtiger.doc-base
++++ /dev/null
+@@ -1,12 +0,0 @@
+-Document: wiredtiger
+-Title: Debian wiredtiger Manual
+-Author: WiredTiger, Inc.
+-Abstract: WiredTiger is a database storage engine library.
+-Section: library
+-
+-Format: postscript
+-Files: /usr/share/doc/wiredtiger/wiredtiger.ps.gz
+-
+-Format: HTML
+-Index: /usr/share/doc/wiredtiger/html/index.html
+-Files: /usr/share/doc/wiredtiger/html/*.html
