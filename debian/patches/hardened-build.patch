@@ -1,6 +1,17 @@
+From: Debian MongoDB Maintainers
+ <pkg-mongodb-maintainers@lists.alioth.debian.org>
+Date: Thu, 12 Sep 2019 01:29:31 +0200
+Subject: hardened-build
+
+---
+ SConstruct | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/SConstruct b/SConstruct
+index b2d2f53..a1c8dd7 100644
 --- a/SConstruct
 +++ b/SConstruct
-@@ -831,6 +831,11 @@
+@@ -846,6 +846,11 @@ envDict = dict(BUILD_ROOT=buildDir,
                 INSTALL_DIR=installDir,
                 CONFIG_HEADER_DEFINES={},
                 LIBDEPS_TAG_EXPANSIONS=[],

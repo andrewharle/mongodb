@@ -1,14 +1,20 @@
-Author: Zheng Xu <zheng.xu@linaro.org>
- Description: Manually mmap on arm64 to ensure high 17 bits are clear. r=ehoogeveen
- There might be 48-bit VA on arm64 depending on kernel configuration.
- Manually mmap heap memory to align with the assumption made by JS engine.
+From: Zheng Xu <zheng.xu@linaro.org>
+Date: Thu, 12 Sep 2019 01:29:32 +0200
+Subject: arm64-48bit-va-compat
+
 Comment: Obtained from https://hg.mozilla.org/mozilla-central/raw-rev/dfaafbaaa291
 Last-Update: 2017-09-25
 Forwarded: no
 Bug-Debian: https://bugs.debian.org/871906
+---
+ .../mozjs-38/extract/js/src/gc/Memory.cpp          | 37 +++++++++++++++++++++-
+ 1 file changed, 36 insertions(+), 1 deletion(-)
+
+diff --git a/src/third_party/mozjs-38/extract/js/src/gc/Memory.cpp b/src/third_party/mozjs-38/extract/js/src/gc/Memory.cpp
+index 8db2c68..db2063d 100644
 --- a/src/third_party/mozjs-38/extract/js/src/gc/Memory.cpp
 +++ b/src/third_party/mozjs-38/extract/js/src/gc/Memory.cpp
-@@ -379,7 +379,7 @@
+@@ -379,7 +379,7 @@ static inline void*
  MapMemoryAt(void* desired, size_t length, int prot = PROT_READ | PROT_WRITE,
              int flags = MAP_PRIVATE | MAP_ANON, int fd = -1, off_t offset = 0)
  {
@@ -17,7 +23,7 @@ Bug-Debian: https://bugs.debian.org/871906
      MOZ_ASSERT(0xffff800000000000ULL & (uintptr_t(desired) + length - 1) == 0);
  #endif
      void* region = mmap(desired, length, prot, flags, fd, offset);
-@@ -429,6 +429,41 @@
+@@ -429,6 +429,41 @@ MapMemory(size_t length, int prot = PROT_READ | PROT_WRITE,
          return nullptr;
      }
      return region;

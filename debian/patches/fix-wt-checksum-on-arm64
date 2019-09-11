@@ -1,15 +1,24 @@
-Author: Apollon Oikonomopoulos <apoikos@debian.org>
-Description: WT: fix ARM64_HOST detection
- Currently the ARM64 build is broken because checksum/crc32-arm64.c is not
- pulled in and __wt_checksum_init remains undefined.
- .
- Fix ARM64 detection by including both 'aarch64' and 'arm64' target
- architectures.
+From: Apollon Oikonomopoulos <apoikos@debian.org>
+Date: Thu, 12 Sep 2019 01:29:32 +0200
+Subject: WT: fix ARM64_HOST detection
+
 Last-Update: 2016-12-15
 Forwarded: no
+
+Currently the ARM64 build is broken because checksum/crc32-arm64.c is not
+pulled in and __wt_checksum_init remains undefined.
+
+Fix ARM64 detection by including both 'aarch64' and 'arm64' target
+architectures.
+---
+ src/third_party/wiredtiger/SConscript | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/third_party/wiredtiger/SConscript b/src/third_party/wiredtiger/SConscript
+index 62307e9..d5c892c 100644
 --- a/src/third_party/wiredtiger/SConscript
 +++ b/src/third_party/wiredtiger/SConscript
-@@ -133,7 +133,7 @@
+@@ -133,7 +133,7 @@ condition_map = {
      'POSIX_HOST'   : not env.TargetOSIs('windows'),
      'WINDOWS_HOST' : env.TargetOSIs('windows'),
  
@@ -18,7 +27,7 @@ Forwarded: no
      'POWERPC_HOST' : env['TARGET_ARCH'] == 'ppc64le',
      'X86_HOST'     : env['TARGET_ARCH'] == 'x86_64',
      'ZSERIES_HOST' : env['TARGET_ARCH'] == 's390x',
-@@ -165,7 +165,7 @@
+@@ -165,7 +165,7 @@ if useSnappy:
  # On zSeries we may disable because SLES 11 kernel doe not support the instructions.
  if not (env['TARGET_ARCH'] == 's390x' and get_option("use-s390x-crc32") == "off"):
      # Disable ARM hardware CRC for now - the extensions aren't always available

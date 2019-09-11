@@ -1,12 +1,22 @@
+From: Debian MongoDB Maintainers
+ <pkg-mongodb-maintainers@lists.alioth.debian.org>
+Date: Thu, 12 Sep 2019 01:29:31 +0200
+Subject: Fix FTBFS with boost 1.62
+
 Origin: http://cvsweb.netbsd.org/bsdweb.cgi/pkgsrc/databases/mongodb/patches/patch-src_mongo_db_fts_unicode_string.cpp?rev=1.1&content-type=text/x-cvsweb-markup
-Description: Fix FTBFS with boost 1.62
 Last-Update: 2016-12-14
 Forwarded: no
-Index: mongodb-3.2.11/src/mongo/db/fts/unicode/string.cpp
+
 ===================================================================
---- mongodb-3.2.11.orig/src/mongo/db/fts/unicode/string.cpp
-+++ mongodb-3.2.11/src/mongo/db/fts/unicode/string.cpp
-@@ -274,7 +274,7 @@ bool String::substrMatch(const std::stri
+---
+ src/mongo/db/fts/unicode/string.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/mongo/db/fts/unicode/string.cpp b/src/mongo/db/fts/unicode/string.cpp
+index 10737ac..377474c 100644
+--- a/src/mongo/db/fts/unicode/string.cpp
++++ b/src/mongo/db/fts/unicode/string.cpp
+@@ -274,7 +274,7 @@ bool String::substrMatch(const std::string& str,
  
      // Case sensitive and diacritic sensitive.
      return boost::algorithm::boyer_moore_search(

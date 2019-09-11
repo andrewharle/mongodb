@@ -1,11 +1,7 @@
-#0001-Create-kfreebsd-like-linux-in-most-respects.patch
-#0002-kfreebsd-has-dev-urandom.patch
-#0012-support-gnu.patch
 hardened-build.patch
 fix-gcc-6-ftbfs.patch
 fix-boost-1.60-build.patch
 fix-boost-1.62-build.patch
-CVE-2016-6494.patch
 use-mmapv1-on-i386
 fix-wt-checksum-on-arm64
 arm64-48bit-va-compat.patch

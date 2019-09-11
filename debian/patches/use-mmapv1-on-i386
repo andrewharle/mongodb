@@ -1,12 +1,22 @@
-Author: Apollon Oikonomopoulos <apoikos@debian.org>
-Description: Use MMAPv1 by default on i386
- Since wiredTiger does not build on i386, make sure mongod won't try to use it
- by default.
+From: Apollon Oikonomopoulos <apoikos@debian.org>
+Date: Thu, 12 Sep 2019 01:29:31 +0200
+Subject: Use MMAPv1 by default on i386
+
 Last-Update: 2016-12-15
 Forwarded: no
+
+Since wiredTiger does not build on i386, make sure mongod won't try to use it
+by default.
+---
+ src/mongo/db/storage/storage_options.h  | 4 ++++
+ src/mongo/dbtests/framework_options.cpp | 4 ++++
+ 2 files changed, 8 insertions(+)
+
+diff --git a/src/mongo/db/storage/storage_options.h b/src/mongo/db/storage/storage_options.h
+index 447fc83..7ac8d77 100644
 --- a/src/mongo/db/storage/storage_options.h
 +++ b/src/mongo/db/storage/storage_options.h
-@@ -51,7 +51,11 @@
+@@ -51,7 +51,11 @@ struct StorageGlobalParams {
      static const char* kDefaultConfigDbPath;
  
      StorageGlobalParams()
@@ -18,9 +28,11 @@ Forwarded: no
            engineSetByUser(false),
            dbpath(kDefaultDbPath),
            upgrade(false),
+diff --git a/src/mongo/dbtests/framework_options.cpp b/src/mongo/dbtests/framework_options.cpp
+index c357eda..c4503fc 100644
 --- a/src/mongo/dbtests/framework_options.cpp
 +++ b/src/mongo/dbtests/framework_options.cpp
-@@ -92,7 +92,11 @@
+@@ -92,7 +92,11 @@ Status addTestFrameworkOptions(moe::OptionSection* options) {
  
      options->addOptionChaining(
                   "storage.engine", "storageEngine", moe::String, "what storage engine to use")

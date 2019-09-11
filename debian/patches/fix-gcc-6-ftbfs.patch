@@ -1,17 +1,24 @@
-Author: Apollon Oikonomopoulos <apoikos@debian.org>
-Description: Fix FTBFS with GCC6
- Disable newly-introduced warnings in GCC6 (misleading-indentation,
- deprecated-declarations and nonnull-compare) to have mongodb build with GCC6.
- Also fix some C++11 pointer-to-bool casting errors by explicitly fetching the
- pointers (cherry-picked upstream from 3.2).
+From: Apollon Oikonomopoulos <apoikos@debian.org>
+Date: Thu, 12 Sep 2019 01:29:31 +0200
+Subject: Fix FTBFS with GCC6
+
 Last-Update: 2017-07-01
 Forwarded: no
 
-Index: mongodb-3.2.9/SConstruct
-===================================================================
---- mongodb-3.2.9.orig/SConstruct
-+++ mongodb-3.2.9/SConstruct
-@@ -1433,6 +1433,8 @@ if env.TargetOSIs('posix'):
+Disable newly-introduced warnings in GCC6 (misleading-indentation,
+deprecated-declarations and nonnull-compare) to have mongodb build with GCC6.
+Also fix some C++11 pointer-to-bool casting errors by explicitly fetching the
+pointers (cherry-picked upstream from 3.2).
+---
+ SConstruct                           | 2 ++
+ src/mongo/base/parse_number_test.cpp | 2 +-
+ 2 files changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/SConstruct b/SConstruct
+index a1c8dd7..8708aba 100644
+--- a/SConstruct
++++ b/SConstruct
+@@ -1468,6 +1468,8 @@ if env.TargetOSIs('posix'):
                           "-Wall",
                           "-Wsign-compare",
                           "-Wno-unknown-pragmas",
@@ -20,10 +27,10 @@ Index: mongodb-3.2.9/SConstruct
                           "-Winvalid-pch"] )
      # env.Append( " -Wconversion" ) TODO: this doesn't really work yet
      if env.TargetOSIs('linux', 'osx', 'solaris'):
-Index: mongodb-3.2.9/src/mongo/base/parse_number_test.cpp
-===================================================================
---- mongodb-3.2.9.orig/src/mongo/base/parse_number_test.cpp
-+++ mongodb-3.2.9/src/mongo/base/parse_number_test.cpp
+diff --git a/src/mongo/base/parse_number_test.cpp b/src/mongo/base/parse_number_test.cpp
+index 01522ad..67f8b7b 100644
+--- a/src/mongo/base/parse_number_test.cpp
++++ b/src/mongo/base/parse_number_test.cpp
 @@ -294,7 +294,7 @@ TEST(Double, TestParsingNormal) {
  
      ASSERT_PARSES(double, "0xff", 0xff);

@@ -1,18 +1,27 @@
-Author: Apollon Oikonomopoulos <apoikos@debian.org>
-Description: Fix mozjs-related segfaults when built with GCC >=6
- Apparently, mozjs 38 and up to 49 is prone to segfaults at GC time when built
- using GCC 6 or later. I've seen MongoDB crash a number of times with only
- mozjs GC operations in the stack trace. We're also currently having a segfault
- on ARM64 that is probably related (#871906).
- .
- According to https://trac.wildfiregames.com/ticket/4053 and
- https://gcc.gnu.org/bugzilla/show_bug.cgi?id=70526#c14, disabling a couple of
- optimizations should fix this.
+From: Apollon Oikonomopoulos <apoikos@debian.org>
+Date: Thu, 12 Sep 2019 01:29:32 +0200
+Subject: Fix mozjs-related segfaults when built with GCC >=6
+
 Last-Update: 2017-09-25
 Forwarded: no
+
+Apparently, mozjs 38 and up to 49 is prone to segfaults at GC time when built
+using GCC 6 or later. I've seen MongoDB crash a number of times with only
+mozjs GC operations in the stack trace. We're also currently having a segfault
+on ARM64 that is probably related (#871906).
+
+According to https://trac.wildfiregames.com/ticket/4053 and
+https://gcc.gnu.org/bugzilla/show_bug.cgi?id=70526#c14, disabling a couple of
+optimizations should fix this.
+---
+ src/third_party/mozjs-38/SConscript | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/src/third_party/mozjs-38/SConscript b/src/third_party/mozjs-38/SConscript
+index 6d073ea..dadeece 100644
 --- a/src/third_party/mozjs-38/SConscript
 +++ b/src/third_party/mozjs-38/SConscript
-@@ -92,6 +92,14 @@
+@@ -92,6 +92,14 @@ env.Prepend(CPPPATH=[
      'platform/' + env["TARGET_ARCH"] + "/" + env["TARGET_OS"] + "/include",
  ])
  
