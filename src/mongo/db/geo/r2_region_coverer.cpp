@@ -32,8 +32,8 @@
 
 #include "mongo/platform/basic.h"
 
-#include "mongo/db/geo/r2_region_coverer.h"
 #include "mongo/db/geo/shapes.h"
+#include "mongo/db/geo/r2_region_coverer.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
@@ -108,8 +108,7 @@ void R2RegionCoverer::getCovering(const R2Region& region, vector<GeoHash>* cover
     while (!_candidateQueue->empty()) {
         Candidate* candidate = _candidateQueue->top().second;  // Owned
         _candidateQueue->pop();
-        // REDACT?? I think this may have User info, but I'm not sure how to redact
-        LOG(3) << "Pop: " << redact(candidate->cell.toString());
+        LOG(3) << "Pop: " << candidate->cell;
 
         // Try to expand this cell into its children
         if (candidate->cell.getBits() < _minLevel || candidate->numChildren == 1 ||
@@ -185,8 +184,7 @@ void R2RegionCoverer::addCandidate(Candidate* candidate) {
         int priority = -(((((int)candidate->cell.getBits() << 4) + candidate->numChildren) << 4) +
                          numTerminals);
         _candidateQueue->push(make_pair(priority, candidate));  // queue owns candidate
-        // REDACT??
-        LOG(3) << "Push: " << redact(candidate->cell.toString()) << " (" << priority << ") ";
+        LOG(3) << "Push: " << candidate->cell << " (" << priority << ") ";
     }
 }
 

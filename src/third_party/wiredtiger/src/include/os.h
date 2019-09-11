@@ -34,11 +34,9 @@
 		(ret) = __wt_errno();					\
 } while (0)
 
-#define	WT_RETRY_MAX	10
-
 #define	WT_SYSCALL_RETRY(call, ret) do {				\
 	int __retry;							\
-	for (__retry = 0; __retry < WT_RETRY_MAX; ++__retry) {		\
+	for (__retry = 0; __retry < 10; ++__retry) {			\
 		WT_SYSCALL(call, ret);					\
 		switch (ret) {						\
 		case EAGAIN:						\

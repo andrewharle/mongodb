@@ -35,7 +35,7 @@
 namespace mongo {
 
 class Status;
-class Client;
+class ClientBasic;
 class BSONObj;
 
 namespace repl {
@@ -55,17 +55,13 @@ protected:
         return true;
     }
 
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    bool isWriteCommandForConfigServer() const override {
         return false;
     }
 
-    Status checkAuthForCommand(Client* client,
+    Status checkAuthForCommand(ClientBasic* client,
                                const std::string& dbname,
                                const BSONObj& cmdObj) override;
-
-    virtual ActionSet getAuthActionSet() const {
-        return ActionSet{ActionType::internal};
-    }
 };
 
 }  // namespace repl

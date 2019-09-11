@@ -54,7 +54,12 @@ bool LimitStage::isEOF() {
     return (0 == _numToReturn) || child()->isEOF();
 }
 
-PlanStage::StageState LimitStage::doWork(WorkingSetID* out) {
+PlanStage::StageState LimitStage::work(WorkingSetID* out) {
+    ++_commonStats.works;
+
+    // Adds the amount of time taken by work() to executionTimeMillis.
+    ScopedTimer timer(&_commonStats.executionTimeMillis);
+
     if (0 == _numToReturn) {
         // We've returned as many results as we're limited to.
         return PlanStage::IS_EOF;
@@ -66,6 +71,7 @@ PlanStage::StageState LimitStage::doWork(WorkingSetID* out) {
     if (PlanStage::ADVANCED == status) {
         *out = id;
         --_numToReturn;
+        ++_commonStats.advanced;
         return PlanStage::ADVANCED;
     } else if (PlanStage::FAILURE == status || PlanStage::DEAD == status) {
         *out = id;
@@ -79,7 +85,10 @@ PlanStage::StageState LimitStage::doWork(WorkingSetID* out) {
             *out = WorkingSetCommon::allocateStatusMember(_ws, status);
         }
         return status;
+    } else if (PlanStage::NEED_TIME == status) {
+        ++_commonStats.needTime;
     } else if (PlanStage::NEED_YIELD == status) {
+        ++_commonStats.needYield;
         *out = id;
     }
 

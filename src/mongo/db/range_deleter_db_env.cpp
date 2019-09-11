@@ -40,8 +40,9 @@
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/repl/replication_coordinator_global.h"
-#include "mongo/db/s/operation_sharding_state.h"
+#include "mongo/db/s/operation_shard_version.h"
 #include "mongo/db/write_concern_options.h"
+#include "mongo/s/d_state.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
@@ -61,7 +62,6 @@ using std::string;
 bool RangeDeleterDBEnv::deleteRange(OperationContext* txn,
                                     const RangeDeleteEntry& taskDetails,
                                     long long int* deletedDocs,
-                                    Milliseconds& replWaitDuration,
                                     std::string* errMsg) {
     const string ns(taskDetails.options.range.ns);
     const BSONObj inclusiveLower(taskDetails.options.range.minKey);
@@ -74,7 +74,7 @@ bool RangeDeleterDBEnv::deleteRange(OperationContext* txn,
     Client::initThreadIfNotAlready("RangeDeleter");
 
     *deletedDocs = 0;
-    OperationShardingState::IgnoreVersioningBlock forceVersion(txn, NamespaceString(ns));
+    OperationShardVersion::IgnoreVersioningBlock forceVersion(txn, NamespaceString(ns));
 
     Helpers::RemoveSaver removeSaver("moveChunk", ns, taskDetails.options.removeSaverReason);
     Helpers::RemoveSaver* removeSaverPtr = NULL;
@@ -84,16 +84,15 @@ bool RangeDeleterDBEnv::deleteRange(OperationContext* txn,
 
     // log the opId so the user can use it to cancel the delete using killOp.
     unsigned int opId = txn->getOpID();
-    log() << "Deleter starting delete for: " << ns << " from " << redact(inclusiveLower) << " -> "
-          << redact(exclusiveUpper) << ", with opId: " << opId;
+    log() << "Deleter starting delete for: " << ns << " from " << inclusiveLower << " -> "
+          << exclusiveUpper << ", with opId: " << opId;
 
     try {
         *deletedDocs =
             Helpers::removeRange(txn,
                                  KeyRange(ns, inclusiveLower, exclusiveUpper, keyPattern),
-                                 BoundInclusion::kIncludeStartKeyOnly,
+                                 false, /*maxInclusive*/
                                  writeConcern,
-                                 replWaitDuration,
                                  removeSaverPtr,
                                  fromMigrate,
                                  onlyRemoveOrphans);
@@ -106,7 +105,7 @@ bool RangeDeleterDBEnv::deleteRange(OperationContext* txn,
         }
 
         log() << "rangeDeleter deleted " << *deletedDocs << " documents for " << ns << " from "
-              << redact(inclusiveLower) << " -> " << redact(exclusiveUpper);
+              << inclusiveLower << " -> " << exclusiveUpper;
     } catch (const DBException& ex) {
         *errMsg = str::stream() << "Error encountered while deleting range: "
                                 << "ns" << ns << " from " << inclusiveLower << " -> "

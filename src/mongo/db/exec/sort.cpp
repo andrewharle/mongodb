@@ -33,12 +33,13 @@
 #include <algorithm>
 
 #include "mongo/db/catalog/collection.h"
+#include "mongo/db/index_names.h"
 #include "mongo/db/exec/scoped_timer.h"
 #include "mongo/db/exec/working_set_common.h"
 #include "mongo/db/exec/working_set_computed_data.h"
 #include "mongo/db/index/btree_key_generator.h"
-#include "mongo/db/index_names.h"
 #include "mongo/db/query/find_common.h"
+#include "mongo/db/query/lite_parsed_query.h"
 #include "mongo/db/query/query_knobs.h"
 #include "mongo/db/query/query_planner.h"
 #include "mongo/stdx/memory.h"
@@ -64,7 +65,7 @@ bool SortStage::WorkingSetComparator::operator()(const SortableDataItem& lhs,
         return result < 0;
     }
     // Indices use RecordId as an additional sort key so we must as well.
-    return lhs.recordId < rhs.recordId;
+    return lhs.loc < rhs.loc;
 }
 
 SortStage::SortStage(OperationContext* opCtx,
@@ -100,7 +101,12 @@ bool SortStage::isEOF() {
     return child()->isEOF() && _sorted && (_data.end() == _resultIterator);
 }
 
-PlanStage::StageState SortStage::doWork(WorkingSetID* out) {
+PlanStage::StageState SortStage::work(WorkingSetID* out) {
+    ++_commonStats.works;
+
+    // Adds the amount of time taken by work() to executionTimeMillis.
+    ScopedTimer timer(&_commonStats.executionTimeMillis);
+
     const size_t maxBytes = static_cast<size_t>(internalQueryExecMaxBlockingSortBytes);
     if (_memUsage > maxBytes) {
         mongoutils::str::stream ss;
@@ -130,8 +136,8 @@ PlanStage::StageState SortStage::doWork(WorkingSetID* out) {
             verify(member->hasObj());
 
             // We might be sorting something that was invalidated at some point.
-            if (member->hasRecordId()) {
-                _wsidByRecordId[member->recordId] = id;
+            if (member->hasLoc()) {
+                _wsidByDiskLoc[member->loc] = id;
             }
 
             SortableDataItem item;
@@ -143,13 +149,14 @@ PlanStage::StageState SortStage::doWork(WorkingSetID* out) {
                 static_cast<const SortKeyComputedData*>(member->getComputed(WSM_SORT_KEY));
             item.sortKey = sortKeyComputedData->getSortKey();
 
-            if (member->hasRecordId()) {
+            if (member->hasLoc()) {
                 // The RecordId breaks ties when sorting two WSMs with the same sort key.
-                item.recordId = member->recordId;
+                item.loc = member->loc;
             }
 
             addToBuffer(item);
 
+            ++_commonStats.needTime;
             return PlanStage::NEED_TIME;
         } else if (PlanStage::IS_EOF == code) {
             // TODO: We don't need the lock for this.  We could ask for a yield and do this work
@@ -157,6 +164,7 @@ PlanStage::StageState SortStage::doWork(WorkingSetID* out) {
             sortBuffer();
             _resultIterator = _data.begin();
             _sorted = true;
+            ++_commonStats.needTime;
             return PlanStage::NEED_TIME;
         } else if (PlanStage::FAILURE == code || PlanStage::DEAD == code) {
             *out = id;
@@ -170,7 +178,10 @@ PlanStage::StageState SortStage::doWork(WorkingSetID* out) {
                 *out = WorkingSetCommon::allocateStatusMember(_ws, status);
             }
             return code;
+        } else if (PlanStage::NEED_TIME == code) {
+            ++_commonStats.needTime;
         } else if (PlanStage::NEED_YIELD == code) {
+            ++_commonStats.needYield;
             *out = id;
         }
 
@@ -186,10 +197,11 @@ PlanStage::StageState SortStage::doWork(WorkingSetID* out) {
     // If we're returning something, take it out of our DL -> WSID map so that future
     // calls to invalidate don't cause us to take action for a DL we're done with.
     WorkingSetMember* member = _ws->get(*out);
-    if (member->hasRecordId()) {
-        _wsidByRecordId.erase(member->recordId);
+    if (member->hasLoc()) {
+        _wsidByDiskLoc.erase(member->loc);
     }
 
+    ++_commonStats.advanced;
     return PlanStage::ADVANCED;
 }
 
@@ -201,18 +213,18 @@ void SortStage::doInvalidate(OperationContext* txn, const RecordId& dl, Invalida
     // _data contains indices into the WorkingSet, not actual data.  If a WorkingSetMember in
     // the WorkingSet needs to change state as a result of a RecordId invalidation, it will still
     // be at the same spot in the WorkingSet.  As such, we don't need to modify _data.
-    DataMap::iterator it = _wsidByRecordId.find(dl);
+    DataMap::iterator it = _wsidByDiskLoc.find(dl);
 
     // If we're holding on to data that's got the RecordId we're invalidating...
-    if (_wsidByRecordId.end() != it) {
+    if (_wsidByDiskLoc.end() != it) {
         // Grab the WSM that we're nuking.
         WorkingSetMember* member = _ws->get(it->second);
-        verify(member->recordId == dl);
+        verify(member->loc == dl);
 
-        WorkingSetCommon::fetchAndInvalidateRecordId(txn, member, _collection);
+        WorkingSetCommon::fetchAndInvalidateLoc(txn, member, _collection);
 
         // Remove the RecordId from our set of active DLs.
-        _wsidByRecordId.erase(it);
+        _wsidByDiskLoc.erase(it);
         ++_specificStats.forcedFetches;
     }
 }
@@ -316,8 +328,8 @@ void SortStage::addToBuffer(const SortableDataItem& item) {
     // RecordId invalidation map and free from working set.
     if (wsidToFree != WorkingSet::INVALID_ID) {
         WorkingSetMember* member = _ws->get(wsidToFree);
-        if (member->hasRecordId()) {
-            _wsidByRecordId.erase(member->recordId);
+        if (member->hasLoc()) {
+            _wsidByDiskLoc.erase(member->loc);
         }
         _ws->free(wsidToFree);
     }

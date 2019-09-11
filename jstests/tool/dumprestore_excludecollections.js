@@ -23,35 +23,37 @@ ret = MongoRunner.runMongoTool("mongodump",
 assert.neq(ret, 0, "mongodump started successfully with --excludeCollection but no --db option");
 
 resetDbpath(dumpDir);
-ret = MongoRunner.runMongoTool("mongodump", {
-    out: dumpDir,
-    db: testBaseName,
-    collection: "foo",
-    excludeCollection: "test",
-    host: mongodSource.host
-});
+ret = MongoRunner.runMongoTool("mongodump",
+                               {
+                                 out: dumpDir,
+                                 db: testBaseName,
+                                 collection: "foo",
+                                 excludeCollection: "test",
+                                 host: mongodSource.host
+                               });
 assert.neq(ret, 0, "mongodump started successfully with --excludeCollection and --collection");
 
 resetDbpath(dumpDir);
 ret = MongoRunner.runMongoTool(
     "mongodump", {out: dumpDir, excludeCollectionsWithPrefix: "test", host: mongodSource.host});
-assert.neq(
-    ret,
-    0,
-    "mongodump started successfully with --excludeCollectionsWithPrefix but " + "no --db option");
+assert.neq(ret,
+           0,
+           "mongodump started successfully with --excludeCollectionsWithPrefix but " +
+               "no --db option");
 
 resetDbpath(dumpDir);
-ret = MongoRunner.runMongoTool("mongodump", {
-    out: dumpDir,
-    db: testBaseName,
-    collection: "foo",
-    excludeCollectionsWithPrefix: "test",
-    host: mongodSource.host
-});
-assert.neq(
-    ret,
-    0,
-    "mongodump started successfully with --excludeCollectionsWithPrefix and " + "--collection");
+ret = MongoRunner.runMongoTool("mongodump",
+                               {
+                                 out: dumpDir,
+                                 db: testBaseName,
+                                 collection: "foo",
+                                 excludeCollectionsWithPrefix: "test",
+                                 host: mongodSource.host
+                               });
+assert.neq(ret,
+           0,
+           "mongodump started successfully with --excludeCollectionsWithPrefix and " +
+               "--collection");
 
 jsTest.log("Testing proper behavior of collection exclusion");
 resetDbpath(dumpDir);
@@ -73,12 +75,13 @@ assert.eq(destDB.foo2.findOne().f, 2, "Wrong value in document");
 destDB.dropDatabase();
 
 resetDbpath(dumpDir);
-ret = MongoRunner.runMongoTool("mongodump", {
-    out: dumpDir,
-    db: testBaseName,
-    excludeCollectionsWithPrefix: "test",
-    host: mongodSource.host
-});
+ret = MongoRunner.runMongoTool("mongodump",
+                               {
+                                 out: dumpDir,
+                                 db: testBaseName,
+                                 excludeCollectionsWithPrefix: "test",
+                                 host: mongodSource.host
+                               });
 
 ret = MongoRunner.runMongoTool("mongorestore", {dir: dumpDir, host: mongodDest.host});
 assert.eq(ret, 0, "failed to run mongodump on expected successful call");
@@ -92,13 +95,14 @@ assert.eq(destDB.foo2.findOne().f, 2, "Wrong value in document");
 destDB.dropDatabase();
 
 resetDbpath(dumpDir);
-ret = MongoRunner.runMongoTool("mongodump", {
-    out: dumpDir,
-    db: testBaseName,
-    excludeCollection: "foo",
-    excludeCollectionsWithPrefix: "test",
-    host: mongodSource.host
-});
+ret = MongoRunner.runMongoTool("mongodump",
+                               {
+                                 out: dumpDir,
+                                 db: testBaseName,
+                                 excludeCollection: "foo",
+                                 excludeCollectionsWithPrefix: "test",
+                                 host: mongodSource.host
+                               });
 
 ret = MongoRunner.runMongoTool("mongorestore", {dir: dumpDir, host: mongodDest.host});
 assert.eq(ret, 0, "failed to run mongodump on expected successful call");

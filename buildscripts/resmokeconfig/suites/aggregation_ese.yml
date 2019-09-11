@@ -7,8 +7,6 @@ selector:
     roots:
     - jstests/aggregation/*.js
     - jstests/aggregation/bugs/*.js
-    - jstests/aggregation/expressions/*.js
-    - jstests/aggregation/sources/*/*.js
     - src/mongo/db/modules/*/jstests/aggregation/*.js
     exclude_files:
     # Skip any tests that run with auth explicitly.
@@ -16,9 +14,6 @@ selector:
 
 executor:
   js_test:
-    archive:
-      hooks:
-        - ValidateCollections
     config:
       shell_options:
         readMode: commands

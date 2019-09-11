@@ -40,10 +40,9 @@
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/ops/update.h"
 #include "mongo/db/ops/update_lifecycle_impl.h"
 #include "mongo/db/ops/update_request.h"
-#include "mongo/db/repl/bson_extract_optime.h"
+#include "mongo/db/ops/update.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/s/sharding_state.h"
@@ -58,10 +57,10 @@ namespace mongo {
 namespace {
 
 const char kRecoveryDocumentId[] = "minOpTimeRecovery";
+const char kConfigsvrConnString[] = "configsvrConnectionString";
+const char kShardName[] = "shardName";
 const char kMinOpTime[] = "minOpTime";
 const char kMinOpTimeUpdaters[] = "minOpTimeUpdaters";
-const char kConfigsvrConnString[] = "configsvrConnectionString";  // TODO(SERVER-25276): Remove
-const char kShardName[] = "shardName";                            // TODO(SERVER-25276): Remove
 
 const WriteConcernOptions kMajorityWriteConcern(WriteConcernOptions::kMajority,
                                                 WriteConcernOptions::SyncMode::UNSET,
@@ -71,13 +70,10 @@ const WriteConcernOptions kLocalWriteConcern(1,
                                              WriteConcernOptions::SyncMode::UNSET,
                                              Milliseconds(0));
 
+MONGO_EXPORT_STARTUP_SERVER_PARAMETER(recoverShardingState, bool, true);
+
 /**
  * Encapsulates the parsing and construction of the config server min opTime recovery document.
- * TODO(SERVER-25276): Currently this still parses the 'shardName' and
- * 'configsvrConnectionString' fields for backwards compatibility during 3.2->3.4 upgrade
- * when the 3.4 shard may have a minOpTimeRecovery document but no shardIdenity document.  After
- * 3.4 ships this should be removed so that the only fields in a minOpTimeRecovery document
- * are the _id, 'minOpTime', and 'minOpTimeUpdaters'
  */
 class RecoveryDocument {
 public:
@@ -179,7 +175,7 @@ private:
 
 /**
  * This method is the main entry point for updating the sharding state recovery document. The goal
- * it has is to always move the opTime forward for a currently running server. It achieves this by
+ * it has is to always move the opTime foward for a currently running server. It achieves this by
  * serializing the modify calls and reading the current opTime under X-lock on the admin database.
  */
 Status modifyRecoveryDocument(OperationContext* txn,
@@ -193,20 +189,21 @@ Status modifyRecoveryDocument(OperationContext* txn,
         BSONObj updateObj = RecoveryDocument::createChangeObj(
             grid.shardRegistry()->getConfigServerConnectionString(),
             ShardingState::get(txn)->getShardName(),
-            grid.configOpTime(),
+            grid.shardRegistry()->getConfigOpTime(),
             change);
 
-        LOG(1) << "Changing sharding recovery document " << redact(updateObj);
+        LOG(1) << "Changing sharding recovery document " << updateObj;
 
+        OpDebug opDebug;
         UpdateRequest updateReq(NamespaceString::kConfigCollectionNamespace);
         updateReq.setQuery(RecoveryDocument::getQuery());
         updateReq.setUpdates(updateObj);
         updateReq.setUpsert();
-        UpdateLifecycleImpl updateLifecycle(NamespaceString::kConfigCollectionNamespace);
+        UpdateLifecycleImpl updateLifecycle(true, NamespaceString::kConfigCollectionNamespace);
         updateReq.setLifecycle(&updateLifecycle);
 
-        UpdateResult result = update(txn, autoGetOrCreateDb->getDb(), updateReq);
-        invariant(result.numDocsModified == 1 || !result.upserted.isEmpty());
+        UpdateResult result = update(txn, autoGetOrCreateDb->getDb(), updateReq, &opDebug);
+        invariant(result.numDocsModified == 1);
         invariant(result.numMatched <= 1);
 
         // Wait until the majority write concern has been satisfied, but do it outside of lock
@@ -225,6 +222,10 @@ Status modifyRecoveryDocument(OperationContext* txn,
 }  // namespace
 
 Status ShardingStateRecovery::startMetadataOp(OperationContext* txn) {
+    if (grid.catalogManager(txn)->getMode() != CatalogManager::ConfigServerMode::CSRS) {
+        return Status::OK();
+    }
+
     Status upsertStatus =
         modifyRecoveryDocument(txn, RecoveryDocument::Increment, kMajorityWriteConcern);
 
@@ -239,14 +240,21 @@ Status ShardingStateRecovery::startMetadataOp(OperationContext* txn) {
 }
 
 void ShardingStateRecovery::endMetadataOp(OperationContext* txn) {
+    if (grid.catalogManager(txn)->getMode() != CatalogManager::ConfigServerMode::CSRS) {
+        return;
+    }
+
     Status status = modifyRecoveryDocument(txn, RecoveryDocument::Decrement, WriteConcernOptions());
     if (!status.isOK()) {
-        warning() << "Failed to decrement minOpTimeUpdaters due to " << redact(status);
+        warning() << "Failed to decrement minOpTimeUpdaters due to " << status;
     }
 }
 
 Status ShardingStateRecovery::recover(OperationContext* txn) {
-    if (serverGlobalParams.clusterRole != ClusterRole::ShardServer) {
+    if (!recoverShardingState) {
+        warning()
+            << "Not checking for ShardingState recovery document because the recoverShardingState "
+               "server parameter is set to false";
         return Status::OK();
     }
 
@@ -268,23 +276,17 @@ Status ShardingStateRecovery::recover(OperationContext* txn) {
 
     const auto recoveryDoc = std::move(recoveryDocStatus.getValue());
 
-    log() << "Sharding state recovery process found document " << redact(recoveryDoc.toBSON());
+    log() << "Sharding state recovery process found document " << recoveryDoc.toBSON();
 
     // Make sure the sharding state is initialized
     ShardingState* const shardingState = ShardingState::get(txn);
 
-    // For backwards compatibility. Shards added by v3.4 cluster should have been initialized by
-    // the shard identity document.
-    // TODO(SERER-25276): Remove this after 3.4 since 3.4 shards should always have ShardingState
-    // initialized by this point.
-    if (!shardingState->enabled()) {
-        shardingState->initializeFromConfigConnString(
-            txn, recoveryDoc.getConfigsvr().toString(), recoveryDoc.getShardName());
-    }
+    shardingState->initialize(txn, recoveryDoc.getConfigsvr().toString());
+    shardingState->setShardName(recoveryDoc.getShardName());
 
     if (!recoveryDoc.getMinOpTimeUpdaters()) {
         // Treat the minOpTime as up-to-date
-        grid.advanceConfigOpTime(recoveryDoc.getMinOpTime());
+        grid.shardRegistry()->advanceConfigOpTime(recoveryDoc.getMinOpTime());
         return Status::OK();
     }
 
@@ -295,20 +297,20 @@ Status ShardingStateRecovery::recover(OperationContext* txn) {
 
     // Need to fetch the latest uptime from the config server, so do a logging write
     Status status =
-        grid.catalogClient(txn)->logChange(txn,
-                                           "Sharding minOpTime recovery",
-                                           NamespaceString::kConfigCollectionNamespace.ns(),
-                                           recoveryDocBSON,
-                                           ShardingCatalogClient::kMajorityWriteConcern);
+        grid.catalogManager(txn)->logChange(txn,
+                                            "Sharding minOpTime recovery",
+                                            NamespaceString::kConfigCollectionNamespace.ns(),
+                                            recoveryDocBSON);
     if (!status.isOK())
         return status;
 
-    log() << "Sharding state recovered. New config server opTime is " << grid.configOpTime();
+    log() << "Sharding state recovered. New config server opTime is "
+          << grid.shardRegistry()->getConfigOpTime();
 
     // Finally, clear the recovery document so next time we don't need to recover
     status = modifyRecoveryDocument(txn, RecoveryDocument::Clear, kLocalWriteConcern);
     if (!status.isOK()) {
-        warning() << "Failed to reset sharding state recovery document due to " << redact(status);
+        warning() << "Failed to reset sharding state recovery document due to " << status;
     }
 
     return Status::OK();

@@ -33,19 +33,18 @@
 #include "mongo/util/signal_handlers.h"
 
 #include <signal.h>
-#include <time.h>
 
 #if !defined(_WIN32)
 #include <unistd.h>
 #endif
 
+#include "mongo/db/client.h"
 #include "mongo/db/log_process_details.h"
 #include "mongo/db/server_options.h"
 #include "mongo/platform/process_id.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/concurrency/idle_thread_block.h"
-#include "mongo/util/exit.h"
+#include "mongo/util/exit_code.h"
 #include "mongo/util/log.h"
 #include "mongo/util/quick_exit.h"
 #include "mongo/util/scopeguard.h"
@@ -90,8 +89,9 @@ namespace {
 
 #ifdef _WIN32
 void consoleTerminate(const char* controlCodeName) {
-    setThreadName("consoleTerminate");
-    log() << "got " << controlCodeName << ", will terminate after current cmd ends";
+    Client::initThread("consoleTerminate");
+
+    log() << "got " << controlCodeName << ", will terminate after current cmd ends" << endl;
     exitCleanly(EXIT_KILL);
 }
 
@@ -150,7 +150,7 @@ void eventProcessingThread() {
         }
     }
 
-    setThreadName("eventTerminate");
+    Client::initThread("eventTerminate");
 
     log() << "shutdown event signaled, will terminate after current cmd ends";
     exitCleanly(EXIT_CLEAN);
@@ -163,28 +163,15 @@ void eventProcessingThread() {
 // not need to be safe to call in signal context.
 sigset_t asyncSignals;
 void signalProcessingThread() {
-    setThreadName("signalProcessingThread");
-
-    time_t signalTimeSeconds = -1;
-    time_t lastSignalTimeSeconds = -1;
+    Client::initThread("signalProcessingThread");
 
     while (true) {
         int actualSignal = 0;
-        int status = [&] {
-            MONGO_IDLE_THREAD_BLOCK;
-            return sigwait(&asyncSignals, &actualSignal);
-        }();
+        int status = sigwait(&asyncSignals, &actualSignal);
         fassert(16781, status == 0);
         switch (actualSignal) {
             case SIGUSR1:
                 // log rotate signal
-                signalTimeSeconds = time(0);
-                if (signalTimeSeconds <= lastSignalTimeSeconds) {
-                    // ignore multiple signals in the same or earlier second.
-                    break;
-                }
-
-                lastSignalTimeSeconds = signalTimeSeconds;
                 fassert(16782, rotateLogs(serverGlobalParams.logRenameOnRotate));
                 logProcessDetailsForLogRotate();
                 break;

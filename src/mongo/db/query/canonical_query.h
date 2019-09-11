@@ -33,13 +33,10 @@
 #include "mongo/db/dbmessage.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/matcher/expression.h"
-#include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/query/lite_parsed_query.h"
 #include "mongo/db/query/parsed_projection.h"
-#include "mongo/db/query/query_request.h"
 
 namespace mongo {
-
-class OperationContext;
 
 class CanonicalQuery {
 public:
@@ -47,25 +44,22 @@ public:
      * If parsing succeeds, returns a std::unique_ptr<CanonicalQuery> representing the parsed
      * query (which will never be NULL).  If parsing fails, returns an error Status.
      *
-     * 'txn' must point to a valid OperationContext, but 'txn' does not need to outlive the returned
-     * CanonicalQuery.
-     *
      * Used for legacy find through the OP_QUERY message.
      */
     static StatusWith<std::unique_ptr<CanonicalQuery>> canonicalize(
-        OperationContext* txn,
         const QueryMessage& qm,
-        const ExtensionsCallback& extensionsCallback);
+        const ExtensionsCallback& extensionsCallback = ExtensionsCallback());
 
     /**
+     * Takes ownership of 'lpq'.
+     *
      * If parsing succeeds, returns a std::unique_ptr<CanonicalQuery> representing the parsed
      * query (which will never be NULL).  If parsing fails, returns an error Status.
      *
-     * 'txn' must point to a valid OperationContext, but 'txn' does not need to outlive the returned
-     *  CanonicalQuery.
+     * Used for finds using the find command path.
      */
     static StatusWith<std::unique_ptr<CanonicalQuery>> canonicalize(
-        OperationContext* txn, std::unique_ptr<QueryRequest> qr, const ExtensionsCallback&);
+        LiteParsedQuery* lpq, const ExtensionsCallback& extensionsCallback = ExtensionsCallback());
 
     /**
      * For testing or for internal clients to use.
@@ -79,10 +73,67 @@ public:
      * Does not take ownership of 'root'.
      */
     static StatusWith<std::unique_ptr<CanonicalQuery>> canonicalize(
-        OperationContext* txn,
         const CanonicalQuery& baseQuery,
         MatchExpression* root,
-        const ExtensionsCallback& extensionsCallback);
+        const ExtensionsCallback& extensionsCallback = ExtensionsCallback());
+
+    static StatusWith<std::unique_ptr<CanonicalQuery>> canonicalize(
+        NamespaceString nss,
+        const BSONObj& query,
+        const ExtensionsCallback& extensionsCallback = ExtensionsCallback());
+
+    static StatusWith<std::unique_ptr<CanonicalQuery>> canonicalize(
+        NamespaceString nss,
+        const BSONObj& query,
+        bool explain,
+        const ExtensionsCallback& extensionsCallback = ExtensionsCallback());
+
+    static StatusWith<std::unique_ptr<CanonicalQuery>> canonicalize(
+        NamespaceString nss,
+        const BSONObj& query,
+        long long skip,
+        long long limit,
+        const ExtensionsCallback& extensionsCallback = ExtensionsCallback());
+
+    static StatusWith<std::unique_ptr<CanonicalQuery>> canonicalize(
+        NamespaceString nss,
+        const BSONObj& query,
+        const BSONObj& sort,
+        const BSONObj& proj,
+        const ExtensionsCallback& extensionsCallback = ExtensionsCallback());
+
+    static StatusWith<std::unique_ptr<CanonicalQuery>> canonicalize(
+        NamespaceString nss,
+        const BSONObj& query,
+        const BSONObj& sort,
+        const BSONObj& proj,
+        long long skip,
+        long long limit,
+        const ExtensionsCallback& extensionsCallback = ExtensionsCallback());
+
+    static StatusWith<std::unique_ptr<CanonicalQuery>> canonicalize(
+        NamespaceString nss,
+        const BSONObj& query,
+        const BSONObj& sort,
+        const BSONObj& proj,
+        long long skip,
+        long long limit,
+        const BSONObj& hint,
+        const ExtensionsCallback& extensionsCallback = ExtensionsCallback());
+
+    static StatusWith<std::unique_ptr<CanonicalQuery>> canonicalize(
+        NamespaceString nss,
+        const BSONObj& query,
+        const BSONObj& sort,
+        const BSONObj& proj,
+        long long skip,
+        long long limit,
+        const BSONObj& hint,
+        const BSONObj& minObj,
+        const BSONObj& maxObj,
+        bool snapshot,
+        bool explain,
+        const ExtensionsCallback& extensionsCallback = ExtensionsCallback());
 
     /**
      * Returns true if "query" describes an exact-match query on _id, possibly with
@@ -91,10 +142,10 @@ public:
     static bool isSimpleIdQuery(const BSONObj& query);
 
     const NamespaceString& nss() const {
-        return _qr->nss();
+        return _pq->nss();
     }
     const std::string& ns() const {
-        return _qr->nss().ns();
+        return _pq->nss().ns();
     }
 
     //
@@ -104,26 +155,14 @@ public:
         return _root.get();
     }
     BSONObj getQueryObj() const {
-        return _qr->getFilter();
+        return _pq->getFilter();
     }
-    const QueryRequest& getQueryRequest() const {
-        return *_qr;
+    const LiteParsedQuery& getParsed() const {
+        return *_pq;
     }
     const ParsedProjection* getProj() const {
         return _proj.get();
     }
-    const CollatorInterface* getCollator() const {
-        return _collator.get();
-    }
-
-    /**
-     * Sets this CanonicalQuery's collator, and sets the collator on this CanonicalQuery's match
-     * expression tree.
-     *
-     * This setter can be used to override the collator that was created from the query request
-     * during CanonicalQuery construction.
-     */
-    void setCollator(std::unique_ptr<CollatorInterface> collator);
 
     // Debugging
     std::string toString() const;
@@ -132,13 +171,13 @@ public:
     /**
      * Validates match expression, checking for certain
      * combinations of operators in match expression and
-     * query options in QueryRequest.
-     * Since 'root' is derived from 'filter' in QueryRequest,
+     * query options in LiteParsedQuery.
+     * Since 'root' is derived from 'filter' in LiteParsedQuery,
      * 'filter' is not validated.
      *
      * TODO: Move this to query_validator.cpp
      */
-    static Status isValid(MatchExpression* root, const QueryRequest& parsed);
+    static Status isValid(MatchExpression* root, const LiteParsedQuery& parsed);
 
     /**
      * Returns the normalized version of the subtree rooted at 'root'.
@@ -158,46 +197,23 @@ public:
      */
     static size_t countNodes(const MatchExpression* root, MatchExpression::MatchType type);
 
-    /**
-     * Returns true if this canonical query converted extensions such as $where and $text into
-     * no-ops during parsing.
-     *
-     * Queries with a no-op extension context are special because they can be parsed and planned,
-     * but they cannot be executed.
-     */
-    bool hasNoopExtensions() const {
-        return _hasNoopExtensions;
-    }
-
-    /**
-     * Returns true if the query this CanonicalQuery was parsed from included a $isolated/$atomic
-     * operator.
-     */
-    bool isIsolated() const {
-        return _isIsolated;
-    }
-
 private:
     // You must go through canonicalize to create a CanonicalQuery.
     CanonicalQuery() {}
 
-    Status init(std::unique_ptr<QueryRequest> qr,
+    /**
+     * Takes ownership of 'root' and 'lpq'.
+     */
+    Status init(LiteParsedQuery* lpq,
                 const ExtensionsCallback& extensionsCallback,
-                MatchExpression* root,
-                std::unique_ptr<CollatorInterface> collator);
+                MatchExpression* root);
 
-    std::unique_ptr<QueryRequest> _qr;
+    std::unique_ptr<LiteParsedQuery> _pq;
 
-    // _root points into _qr->getFilter()
+    // _root points into _pq->getFilter()
     std::unique_ptr<MatchExpression> _root;
 
     std::unique_ptr<ParsedProjection> _proj;
-
-    std::unique_ptr<CollatorInterface> _collator;
-
-    bool _hasNoopExtensions = false;
-
-    bool _isIsolated;
 };
 
 }  // namespace mongo

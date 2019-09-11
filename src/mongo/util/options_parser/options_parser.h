@@ -32,7 +32,6 @@
 #include <vector>
 
 #include "mongo/base/status.h"
-#include "mongo/stdx/functional.h"
 
 namespace mongo {
 namespace optionenvironment {
@@ -85,13 +84,6 @@ class Value;
  */
 class OptionsParser {
 public:
-    /** Indicates if unknown config options are allowed or not.
-     *
-     *  true - unknown config options will generate an error during parsing.
-     *  false - unknow config options will be ignored during parsing.
-     */
-    static stdx::function<bool()> useStrict;
-
     OptionsParser() {}
     virtual ~OptionsParser() {}
 

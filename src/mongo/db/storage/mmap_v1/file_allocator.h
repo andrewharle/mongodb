@@ -27,12 +27,12 @@
  *    then also delete it in the license file.
  */
 
-#include <boost/filesystem/path.hpp>
+#include "mongo/platform/basic.h"
+
 #include <list>
-#include <map>
+#include <boost/filesystem/path.hpp>
 
 #include "mongo/stdx/condition_variable.h"
-#include "mongo/stdx/mutex.h"
 #include "mongo/util/concurrency/mutex.h"
 
 namespace mongo {
@@ -100,6 +100,8 @@ private:
     static unsigned long long _uniqueNumber;
 
     bool _failed;
+
+    static FileAllocator* _instance;
 };
 
 }  // namespace mongo

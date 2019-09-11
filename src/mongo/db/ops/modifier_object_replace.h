@@ -79,8 +79,6 @@ public:
      */
     virtual Status log(LogBuilder* logBuilder) const;
 
-    virtual void setCollator(const CollatorInterface* collator){};
-
 private:
     // Object to replace with.
     BSONObj _val;

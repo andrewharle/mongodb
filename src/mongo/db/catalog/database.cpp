@@ -36,7 +36,6 @@
 
 #include <algorithm>
 #include <boost/filesystem/operations.hpp>
-#include <memory>
 
 #include "mongo/db/audit.h"
 #include "mongo/db/auth/auth_index_d.h"
@@ -53,10 +52,8 @@
 #include "mongo/db/instance.h"
 #include "mongo/db/introspect.h"
 #include "mongo/db/op_observer.h"
-#include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/replication_coordinator_global.h"
-#include "mongo/db/server_options.h"
 #include "mongo/db/server_parameters.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_context_d.h"
@@ -64,8 +61,6 @@
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/storage/storage_options.h"
-#include "mongo/db/views/view_catalog.h"
-#include "mongo/util/assert_util.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
@@ -146,7 +141,7 @@ void Database::close(OperationContext* txn) {
     repl::oplogCheckCloseDatabase(txn, this);
 
     if (BackgroundOperation::inProgForDb(_name)) {
-        log() << "warning: bg op in prog during close db? " << _name;
+        log() << "warning: bg op in prog during close db? " << _name << endl;
     }
 }
 
@@ -203,13 +198,10 @@ Database::Database(OperationContext* txn, StringData name, DatabaseCatalogEntry*
     : _name(name.toString()),
       _dbEntry(dbEntry),
       _profileName(_name + ".system.profile"),
-      _indexesName(_name + ".system.indexes"),
-      _viewsName(_name + "." + DurableViewCatalog::viewsCollectionName().toString()),
-      _durableViews(DurableViewCatalogImpl(this)),
-      _views(&_durableViews) {
+      _indexesName(_name + ".system.indexes") {
     Status status = validateDBName(_name);
     if (!status.isOK()) {
-        warning() << "tried to open invalid db: " << _name;
+        warning() << "tried to open invalid db: " << _name << endl;
         uasserted(10028, status.toString());
     }
 
@@ -220,17 +212,6 @@ Database::Database(OperationContext* txn, StringData name, DatabaseCatalogEntry*
     for (list<string>::const_iterator it = collections.begin(); it != collections.end(); ++it) {
         const string ns = *it;
         _collections[ns] = _getOrCreateCollectionInstance(txn, ns);
-    }
-    // At construction time of the viewCatalog, the _collections map wasn't initialized yet, so no
-    // system.views collection would be found. Now we're sufficiently initialized, signal a version
-    // change. Also force a reload, so if there are problems with the catalog contents as might be
-    // caused by incorrect mongod versions or similar, they are found right away.
-    _views.invalidate();
-    Status reloadStatus = _views.reloadIfNeeded(txn);
-    if (!reloadStatus.isOK()) {
-        warning() << "Unable to parse views: " << redact(reloadStatus)
-                  << "; remove any invalid views from the " << _viewsName
-                  << " collection to restore server functionality." << startupWarningsLog;
     }
 }
 
@@ -253,7 +234,7 @@ void Database::clearTmpCollections(OperationContext* txn) {
             WriteUnitOfWork wunit(txn);
             Status status = dropCollection(txn, ns);
             if (!status.isOK()) {
-                warning() << "could not drop temp collection '" << ns << "': " << redact(status);
+                warning() << "could not drop temp collection '" << ns << "': " << status;
                 continue;
             }
 
@@ -294,8 +275,7 @@ void Database::getStats(OperationContext* opCtx, BSONObjBuilder* output, double 
     list<string> collections;
     _dbEntry->getCollectionNamespaces(&collections);
 
-    long long nCollections = 0;
-    long long nViews = 0;
+    long long ncollections = 0;
     long long objects = 0;
     long long size = 0;
     long long storageSize = 0;
@@ -310,7 +290,7 @@ void Database::getStats(OperationContext* opCtx, BSONObjBuilder* output, double 
         if (!collection)
             continue;
 
-        nCollections += 1;
+        ncollections += 1;
         objects += collection->numRecords(opCtx);
         size += collection->dataSize(opCtx);
 
@@ -322,10 +302,7 @@ void Database::getStats(OperationContext* opCtx, BSONObjBuilder* output, double 
         indexSize += collection->getIndexSize(opCtx);
     }
 
-    getViewCatalog()->iterate(opCtx, [&](const ViewDefinition& view) { nViews += 1; });
-
-    output->appendNumber("collections", nCollections);
-    output->appendNumber("views", nViews);
+    output->appendNumber("collections", ncollections);
     output->appendNumber("objects", objects);
     output->append("avgObjSize", objects == 0 ? 0 : double(size) / double(objects));
     output->appendNumber("dataSize", size / scale);
@@ -335,12 +312,6 @@ void Database::getStats(OperationContext* opCtx, BSONObjBuilder* output, double 
     output->appendNumber("indexSize", indexSize / scale);
 
     _dbEntry->appendExtraStats(opCtx, output, scale);
-}
-
-Status Database::dropView(OperationContext* txn, StringData fullns) {
-    Status status = _views.dropView(txn, NamespaceString(fullns));
-    Top::get(txn->getClient()->getServiceContext()).collectionDropped(fullns);
-    return status;
 }
 
 Status Database::dropCollection(OperationContext* txn, StringData fullns) {
@@ -358,9 +329,8 @@ Status Database::dropCollection(OperationContext* txn, StringData fullns) {
                 if (_profile != 0)
                     return Status(ErrorCodes::IllegalOperation,
                                   "turn off profiling before dropping system.profile collection");
-            } else if (!nss.isSystemDotViews()) {
-                return Status(ErrorCodes::IllegalOperation,
-                              str::stream() << "can't drop system collection " << fullns);
+            } else {
+                return Status(ErrorCodes::IllegalOperation, "can't drop system ns");
             }
         }
     }
@@ -387,12 +357,12 @@ Status Database::dropCollectionEvenIfSystem(OperationContext* txn, const Namespa
     Status s = collection->getIndexCatalog()->dropAllIndexes(txn, true);
     if (!s.isOK()) {
         warning() << "could not drop collection, trying to drop indexes" << fullns << " because of "
-                  << redact(s.toString());
+                  << s.toString();
         return s;
     }
 
     verify(collection->_details->getTotalIndexCount(txn) == 0);
-    LOG(1) << "\t dropIndexes done";
+    LOG(1) << "\t dropIndexes done" << endl;
 
     Top::get(txn->getClient()->getServiceContext()).collectionDropped(fullns.toString());
 
@@ -418,7 +388,6 @@ Status Database::dropCollectionEvenIfSystem(OperationContext* txn, const Namespa
     }
 
     getGlobalServiceContext()->getOpObserver()->onDropCollection(txn, fullns);
-
     return Status::OK();
 }
 
@@ -446,6 +415,7 @@ Collection* Database::getCollection(StringData ns) const {
 
     return NULL;
 }
+
 
 Status Database::renameCollection(OperationContext* txn,
                                   StringData fromNS,
@@ -489,56 +459,31 @@ Collection* Database::getOrCreateCollection(OperationContext* txn, StringData ns
     return c;
 }
 
-void Database::_checkCanCreateCollection(const NamespaceString& nss,
-                                         const CollectionOptions& options) {
-    massert(17399, "collection already exists", getCollection(nss.ns()) == nullptr);
-    massertNamespaceNotIndex(nss.ns(), "createCollection");
-
-    uassert(14037,
-            "can't create user databases on a --configsvr instance",
-            serverGlobalParams.clusterRole != ClusterRole::ConfigServer || nss.isOnInternalDb());
-
-    // This check only applies for actual collections, not indexes or other types of ns.
-    uassert(17381,
-            str::stream() << "fully qualified namespace " << nss.ns() << " is too long "
-                          << "(max is "
-                          << NamespaceString::MaxNsCollectionLen
-                          << " bytes)",
-            !nss.isNormal() || nss.size() <= NamespaceString::MaxNsCollectionLen);
-
-    uassert(17316, "cannot create a blank collection", nss.coll() > 0);
-    uassert(28838, "cannot create a non-capped oplog collection", options.capped || !nss.isOplog());
-}
-
-Status Database::createView(OperationContext* txn,
-                            StringData ns,
-                            const CollectionOptions& options) {
-    invariant(txn->lockState()->isDbLockedForMode(name(), MODE_X));
-    invariant(options.isView());
-
-    NamespaceString nss(ns);
-    NamespaceString viewOnNss(nss.db(), options.viewOn);
-    _checkCanCreateCollection(nss, options);
-    audit::logCreateCollection(&cc(), ns);
-
-    if (nss.isOplog())
-        return Status(ErrorCodes::InvalidNamespace,
-                      str::stream() << "invalid namespace name for a view: " + nss.toString());
-
-    return _views.createView(txn, nss, viewOnNss, BSONArray(options.pipeline), options.collation);
-}
-
-
 Collection* Database::createCollection(OperationContext* txn,
                                        StringData ns,
                                        const CollectionOptions& options,
-                                       bool createIdIndex,
-                                       const BSONObj& idIndex) {
+                                       bool createIdIndex) {
+    massert(17399, "collection already exists", getCollection(ns) == NULL);
+    massertNamespaceNotIndex(ns, "createCollection");
     invariant(txn->lockState()->isDbLockedForMode(name(), MODE_X));
-    invariant(!options.isView());
+
+    if (serverGlobalParams.configsvr &&
+        !(ns.startsWith("config.") || ns.startsWith("local.") || ns.startsWith("admin."))) {
+        uasserted(14037, "can't create user databases on a --configsvr instance");
+    }
+
+    if (NamespaceString::normal(ns)) {
+        // This check only applies for actual collections, not indexes or other types of ns.
+        uassert(17381,
+                str::stream() << "fully qualified namespace " << ns << " is too long "
+                              << "(max is " << NamespaceString::MaxNsCollectionLen << " bytes)",
+                ns.size() <= NamespaceString::MaxNsCollectionLen);
+    }
 
     NamespaceString nss(ns);
-    _checkCanCreateCollection(nss, options);
+    uassert(17316, "cannot create a blank collection", nss.coll() > 0);
+    uassert(28838, "cannot create a non-capped oplog collection", options.capped || !nss.isOplog());
+
     audit::logCreateCollection(&cc(), ns);
 
     Status status = _dbEntry->createCollection(txn, ns, options, true /*allocateDefaultSpace*/);
@@ -549,41 +494,22 @@ Collection* Database::createCollection(OperationContext* txn,
     invariant(collection);
     _collections[ns] = collection;
 
-    BSONObj fullIdIndexSpec;
-
     if (createIdIndex) {
         if (collection->requiresIdIndex()) {
             if (options.autoIndexId == CollectionOptions::YES ||
                 options.autoIndexId == CollectionOptions::DEFAULT) {
-                const auto featureCompatibilityVersion =
-                    serverGlobalParams.featureCompatibility.version.load();
                 IndexCatalog* ic = collection->getIndexCatalog();
-                fullIdIndexSpec = uassertStatusOK(ic->createIndexOnEmptyCollection(
-                    txn,
-                    !idIndex.isEmpty() ? idIndex
-                                       : ic->getDefaultIdIndexSpec(featureCompatibilityVersion)));
+                uassertStatusOK(ic->createIndexOnEmptyCollection(txn, ic->getDefaultIdIndexSpec()));
             }
         }
-    }
 
-    getGlobalServiceContext()->getOpObserver()->onCreateCollection(
-        txn, nss, options, fullIdIndexSpec);
-
-    // It is necessary to create the system index *after* running the onCreateCollection so that
-    // the oplog timestamp for the index creation is after the oplog timestamp for the
-    // collection creation. This way both primary and any secondaries will see the index created
-    // after the collection is created.
-    if (createIdIndex && nss.isSystem()) {
-        // We only want to create the indexes here on the primary.  On secondaries, they will
-        // be created by the normal oplog application process.
-        auto coordinator = repl::ReplicationCoordinator::get(txn);
-        const bool canAcceptWrites =
-            (coordinator->getReplicationMode() != repl::ReplicationCoordinator::modeReplSet) ||
-            coordinator->canAcceptWritesForDatabase(nss.db()) || nss.isSystemDotProfile();
-        if (canAcceptWrites) {
+        if (nss.isSystem()) {
             authindex::createSystemIndexes(txn, collection);
         }
     }
+
+    getGlobalServiceContext()->getOpObserver()->onCreateCollection(txn, nss, options);
+
     return collection;
 }
 
@@ -601,7 +527,7 @@ void dropAllDatabasesExceptLocal(OperationContext* txn) {
 
     if (n.size() == 0)
         return;
-    log() << "dropAllDatabasesExceptLocal " << n.size();
+    log() << "dropAllDatabasesExceptLocal " << n.size() << endl;
 
     repl::getGlobalReplicationCoordinator()->dropAllSnapshots();
     for (vector<string>::iterator i = n.begin(); i != n.end(); i++) {
@@ -613,7 +539,7 @@ void dropAllDatabasesExceptLocal(OperationContext* txn) {
                 if (db == nullptr) {
                     log() << "database disappeared after listDatabases but before drop: " << *i;
                 } else {
-                    Database::dropDatabase(txn, db);
+                    dropDatabase(txn, db);
                 }
             }
             MONGO_WRITE_CONFLICT_RETRY_LOOP_END(txn, "dropAllDatabasesExceptLocal", *i);
@@ -621,38 +547,34 @@ void dropAllDatabasesExceptLocal(OperationContext* txn) {
     }
 }
 
-void Database::dropDatabase(OperationContext* txn, Database* db) {
+void dropDatabase(OperationContext* txn, Database* db) {
     invariant(db);
 
     // Store the name so we have if for after the db object is deleted
     const string name = db->name();
-    LOG(1) << "dropDatabase " << name;
+    LOG(1) << "dropDatabase " << name << endl;
 
     invariant(txn->lockState()->isDbLockedForMode(name, MODE_X));
 
-    BackgroundOperation::assertNoBgOpInProgForDb(name);
+    BackgroundOperation::assertNoBgOpInProgForDb(name.c_str());
 
-    audit::logDropDatabase(txn->getClient(), name);
-
-    for (auto&& coll : *db) {
-        Top::get(txn->getClient()->getServiceContext()).collectionDropped(coll->ns().ns(), true);
-    }
+    audit::logDropDatabase(&cc(), name);
 
     dbHolder().close(txn, name);
     db = NULL;  // d is now deleted
 
-    MONGO_WRITE_CONFLICT_RETRY_LOOP_BEGIN {
-        getGlobalServiceContext()->getGlobalStorageEngine()->dropDatabase(txn, name);
-    }
-    MONGO_WRITE_CONFLICT_RETRY_LOOP_END(txn, "dropDatabase", name);
+    getGlobalServiceContext()->getGlobalStorageEngine()->dropDatabase(txn, name);
 }
 
+/** { ..., capped: true, size: ..., max: ... }
+ * @param createDefaultIndexes - if false, defers id (and other) index creation.
+ * @return true if successful
+*/
 Status userCreateNS(OperationContext* txn,
                     Database* db,
                     StringData ns,
                     BSONObj options,
-                    bool createDefaultIndexes,
-                    const BSONObj& idIndex) {
+                    bool createDefaultIndexes) {
     invariant(db);
 
     LOG(1) << "create collection " << ns << ' ' << options;
@@ -663,37 +585,12 @@ Status userCreateNS(OperationContext* txn,
     Collection* collection = db->getCollection(ns);
 
     if (collection)
-        return Status(ErrorCodes::NamespaceExists,
-                      str::stream() << "a collection '" << ns.toString() << "' already exists");
-
-    if (db->getViewCatalog()->lookup(txn, ns))
-        return Status(ErrorCodes::NamespaceExists,
-                      str::stream() << "a view '" << ns.toString() << "' already exists");
+        return Status(ErrorCodes::NamespaceExists, "collection already exists");
 
     CollectionOptions collectionOptions;
     Status status = collectionOptions.parse(options);
     if (!status.isOK())
         return status;
-
-    // Validate the collation, if there is one.
-    if (!collectionOptions.collation.isEmpty()) {
-        auto collator = CollatorFactoryInterface::get(txn->getServiceContext())
-                            ->makeFromBSON(collectionOptions.collation);
-        if (!collator.isOK()) {
-            return collator.getStatus();
-        }
-
-        // If the collator factory returned a non-null collator, set the collation option to the
-        // result of serializing the collator's spec back into BSON. We do this in order to fill in
-        // all options that the user omitted.
-        //
-        // If the collator factory returned a null collator (representing the "simple" collation),
-        // we simply unset the "collation" from the collection options. This ensures that
-        // collections created on versions which do not support the collation feature have the same
-        // format for representing the simple collation as collections created on this version.
-        collectionOptions.collation =
-            collator.getValue() ? collator.getValue()->getSpec().toBSON() : BSONObj();
-    }
 
     status =
         validateStorageOptions(collectionOptions.storageEngine,
@@ -714,11 +611,7 @@ Status userCreateNS(OperationContext* txn,
         }
     }
 
-    if (collectionOptions.isView()) {
-        uassertStatusOK(db->createView(txn, ns, collectionOptions));
-    } else {
-        invariant(db->createCollection(txn, ns, collectionOptions, createDefaultIndexes, idIndex));
-    }
+    invariant(db->createCollection(txn, ns, collectionOptions, createDefaultIndexes));
 
     return Status::OK();
 }

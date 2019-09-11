@@ -32,8 +32,6 @@
 
 #include "mongo/util/base64.h"
 
-#include <sstream>
-
 namespace mongo {
 
 using std::string;

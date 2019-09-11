@@ -35,8 +35,6 @@
 #include "mongo/db/repl/repl_set_request_votes_args.h"
 #include "mongo/db/repl/replication_coordinator_global.h"
 #include "mongo/executor/network_interface.h"
-#include "mongo/transport/session.h"
-#include "mongo/transport/transport_layer.h"
 #include "mongo/util/scopeguard.h"
 
 namespace mongo {
@@ -66,27 +64,24 @@ private:
 
         // We want to keep request vote connection open when relinquishing primary.
         // Tag it here.
-        transport::Session::TagMask originalTag = 0;
-        auto session = txn->getClient()->session();
-        if (session) {
-            originalTag = session->getTags();
-            session->replaceTags(originalTag | transport::Session::kKeepOpen);
+        unsigned originalTag = 0;
+        AbstractMessagingPort* mp = txn->getClient()->port();
+        if (mp) {
+            originalTag = mp->tag;
+            mp->tag |= executor::NetworkInterface::kMessagingPortKeepOpen;
         }
-
         // Untag the connection on exit.
-        ON_BLOCK_EXIT([session, originalTag]() {
-            if (session) {
-                session->replaceTags(originalTag);
+        ON_BLOCK_EXIT([mp, originalTag]() {
+            if (mp) {
+                mp->tag = originalTag;
             }
         });
 
         ReplSetRequestVotesResponse response;
         status = getGlobalReplicationCoordinator()->processReplSetRequestVotes(
             txn, parsedArgs, &response);
-        uassertStatusOK(status);
-
         response.addToBSON(&result);
-        return true;
+        return appendCommandStatus(result, status);
     }
 } cmdReplSetRequestVotes;
 

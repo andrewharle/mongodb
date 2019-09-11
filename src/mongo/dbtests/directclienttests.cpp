@@ -38,6 +38,7 @@
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/json.h"
 #include "mongo/db/lasterror.h"
+#include "mongo/db/operation_context_impl.h"
 #include "mongo/dbtests/dbtests.h"
 #include "mongo/util/timer.h"
 
@@ -61,8 +62,7 @@ const char* ns = "a.b";
 class Capped : public ClientBase {
 public:
     virtual void run() {
-        const ServiceContext::UniqueOperationContext txnPtr = cc().makeOperationContext();
-        OperationContext& txn = *txnPtr;
+        OperationContextImpl txn;
         DBDirectClient client(&txn);
         for (int pass = 0; pass < 3; pass++) {
             client.createCollection(ns, 1024 * 1024, true, 999);
@@ -74,10 +74,7 @@ public:
                 BSONObj info;
                 BSONObj cmd = BSON("captrunc"
                                    << "b"
-                                   << "n"
-                                   << 1
-                                   << "inc"
-                                   << true);
+                                   << "n" << 1 << "inc" << true);
                 // cout << cmd.toString() << endl;
                 bool ok = client.runCommand("a", cmd, info);
                 // cout << info.toString() << endl;
@@ -92,8 +89,7 @@ public:
 class InsertMany : ClientBase {
 public:
     virtual void run() {
-        const ServiceContext::UniqueOperationContext txnPtr = cc().makeOperationContext();
-        OperationContext& txn = *txnPtr;
+        OperationContextImpl txn;
         DBDirectClient client(&txn);
 
         vector<BSONObj> objs;
@@ -117,8 +113,7 @@ public:
 class BadNSCmd : ClientBase {
 public:
     virtual void run() {
-        const ServiceContext::UniqueOperationContext txnPtr = cc().makeOperationContext();
-        OperationContext& txn = *txnPtr;
+        OperationContextImpl txn;
         DBDirectClient client(&txn);
 
         BSONObj result;
@@ -131,38 +126,35 @@ public:
 class BadNSQuery : ClientBase {
 public:
     virtual void run() {
-        const ServiceContext::UniqueOperationContext txnPtr = cc().makeOperationContext();
-        OperationContext& txn = *txnPtr;
+        OperationContextImpl txn;
         DBDirectClient client(&txn);
 
         unique_ptr<DBClientCursor> cursor = client.query("", Query(), 1);
         ASSERT(cursor->more());
         BSONObj result = cursor->next().getOwned();
         ASSERT(result.hasField("$err"));
-        ASSERT_EQUALS(result["code"].Int(), ErrorCodes::InvalidNamespace);
+        ASSERT_EQUALS(result["code"].Int(), 16256);
     }
 };
 
 class BadNSGetMore : ClientBase {
 public:
     virtual void run() {
-        const ServiceContext::UniqueOperationContext txnPtr = cc().makeOperationContext();
-        OperationContext& txn = *txnPtr;
+        OperationContextImpl txn;
         DBDirectClient client(&txn);
 
         unique_ptr<DBClientCursor> cursor = client.getMore("", 1, 1);
         ASSERT(cursor->more());
         BSONObj result = cursor->next().getOwned();
         ASSERT(result.hasField("$err"));
-        ASSERT_EQUALS(result["code"].Int(), ErrorCodes::InvalidNamespace);
+        ASSERT_EQUALS(result["code"].Int(), 16258);
     }
 };
 
 class BadNSInsert : ClientBase {
 public:
     virtual void run() {
-        const ServiceContext::UniqueOperationContext txnPtr = cc().makeOperationContext();
-        OperationContext& txn = *txnPtr;
+        OperationContextImpl txn;
         DBDirectClient client(&txn);
 
         client.insert("", BSONObj(), 0);
@@ -173,8 +165,7 @@ public:
 class BadNSUpdate : ClientBase {
 public:
     virtual void run() {
-        const ServiceContext::UniqueOperationContext txnPtr = cc().makeOperationContext();
-        OperationContext& txn = *txnPtr;
+        OperationContextImpl txn;
         DBDirectClient client(&txn);
 
         client.update("", Query(), BSON("$set" << BSON("x" << 1)));
@@ -185,8 +176,7 @@ public:
 class BadNSRemove : ClientBase {
 public:
     virtual void run() {
-        const ServiceContext::UniqueOperationContext txnPtr = cc().makeOperationContext();
-        OperationContext& txn = *txnPtr;
+        OperationContextImpl txn;
         DBDirectClient client(&txn);
 
         client.remove("", Query());

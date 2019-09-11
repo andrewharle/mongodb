@@ -28,13 +28,11 @@
 
 #pragma once
 
-#include <map>
 #include <string>
+#include <map>
 #include <vector>
 
-#include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/s/chunk_version.h"
 
 namespace mongo {
 
@@ -104,32 +102,13 @@ int compareRanges(const BSONObj& rangeMin1,
                   const BSONObj& rangeMax2);
 
 /**
- * Represents a cached chunk information on the shard.
- */
-class CachedChunkInfo {
-public:
-    CachedChunkInfo(BSONObj maxKey, ChunkVersion version);
-
-    const BSONObj& getMaxKey() const {
-        return _maxKey;
-    }
-
-    const ChunkVersion& getVersion() const {
-        return _version;
-    }
-
-private:
-    BSONObj _maxKey;
-    ChunkVersion _version;
-};
-
-/**
- * A RangeMap is a mapping of an inclusive lower BSON key to an upper key and chunk version, using
- * standard BSON woCompare. The upper bound is exclusive.
+ * A RangeMap is a mapping of a BSON range from lower->upper (lower maps to upper), using
+ * standard BSON woCompare.  Upper bound is exclusive.
  *
- * NOTE: For overlap testing to work correctly, there may be no overlaps present in the map itself.
+ * NOTE: For overlap testing to work correctly, there may be no overlaps present in the map
+ * itself.
  */
-typedef BSONObjIndexedMap<CachedChunkInfo> RangeMap;
+typedef std::map<BSONObj, BSONObj, BSONObjCmp> RangeMap;
 
 /**
  * A RangeVector is a list of [lower,upper) ranges.
@@ -170,5 +149,4 @@ std::string rangeToString(const BSONObj& inclusiveLower, const BSONObj& exclusiv
  * std::string representation of overlapping ranges as a list "[range1),[range2),..."
  */
 std::string overlapToString(RangeVector overlap);
-
-}  // namespace mongo
+}

@@ -45,7 +45,7 @@ public:
     virtual bool slaveOk() const {
         return true;
     }
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    virtual bool isWriteCommandForConfigServer() const {
         return false;
     }
     virtual bool adminOnly() const {
@@ -53,7 +53,7 @@ public:
     }
 
     // No auth needed because it only works when enabled via command line.
-    virtual Status checkAuthForCommand(Client* client,
+    virtual Status checkAuthForCommand(ClientBasic* client,
                                        const std::string& dbname,
                                        const BSONObj& cmdObj) {
         return Status::OK();
@@ -95,7 +95,7 @@ public:
     virtual bool slaveOk() const {
         return true;
     }
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    virtual bool isWriteCommandForConfigServer() const {
         return false;
     }
     virtual bool adminOnly() const {
@@ -103,7 +103,7 @@ public:
     }
 
     // No auth needed because it only works when enabled via command line.
-    virtual Status checkAuthForCommand(Client* client,
+    virtual Status checkAuthForCommand(ClientBasic* client,
                                        const std::string& dbname,
                                        const BSONObj& cmdObj) {
         return Status::OK();

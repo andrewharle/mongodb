@@ -55,7 +55,12 @@ bool EnsureSortedStage::isEOF() {
     return child()->isEOF();
 }
 
-PlanStage::StageState EnsureSortedStage::doWork(WorkingSetID* out) {
+PlanStage::StageState EnsureSortedStage::work(WorkingSetID* out) {
+    ++_commonStats.works;
+
+    // Adds the amount of time taken by work() to executionTimeMillis.
+    ScopedTimer timer(&_commonStats.executionTimeMillis);
+
     StageState stageState = child()->work(out);
 
     if (PlanStage::ADVANCED == stageState) {
@@ -71,12 +76,20 @@ PlanStage::StageState EnsureSortedStage::doWork(WorkingSetID* out) {
             // 'member' is out of order. Drop it from the result set.
             _ws->free(*out);
             ++_specificStats.nDropped;
+            ++_commonStats.needTime;
             return PlanStage::NEED_TIME;
         }
 
         invariant(curSortKey.isOwned());
         _prevSortKey = curSortKey;
+        ++_commonStats.advanced;
         return PlanStage::ADVANCED;
+    }
+
+    if (PlanStage::NEED_TIME == stageState) {
+        ++_commonStats.needTime;
+    } else if (PlanStage::NEED_YIELD == stageState) {
+        ++_commonStats.needYield;
     }
 
     return stageState;
@@ -95,8 +108,6 @@ const SpecificStats* EnsureSortedStage::getSpecificStats() const {
 }
 
 bool EnsureSortedStage::isInOrder(const BSONObj& lhsSortKey, const BSONObj& rhsSortKey) const {
-    // No need to compare with a collator, since the sort keys were extracted by the
-    // SortKeyGenerator, which has already mapped strings to their comparison keys.
     return lhsSortKey.woCompare(rhsSortKey, _pattern, /*considerFieldName*/ false) <= 0;
 }
 

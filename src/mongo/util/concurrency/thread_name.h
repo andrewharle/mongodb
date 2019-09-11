@@ -34,15 +34,14 @@
 namespace mongo {
 
 /**
- * Sets the name of the current thread.
+ * Sets the name of the current thread to "name".
  */
 void setThreadName(StringData name);
 
 /**
- * Retrieves the name of the current thread, as previously set, or "thread#" if no name was
- * previously set. The returned StringData is always null terminated so it is safe to pass to APIs
- * that expect c-strings.
+ * Retrieves the name of the current thread, as previously set, or "" if no name was previously
+ * set.
  */
-StringData getThreadName();
+const std::string& getThreadName();
 
 }  // namespace mongo

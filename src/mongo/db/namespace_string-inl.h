@@ -41,7 +41,9 @@ inline StringData NamespaceString::coll() const {
 }
 
 inline bool NamespaceString::normal(StringData ns) {
-    return !virtualized(ns);
+    if (ns.find('$') == std::string::npos)
+        return true;
+    return oplog(ns);
 }
 
 inline bool NamespaceString::oplog(StringData ns) {
@@ -52,12 +54,8 @@ inline bool NamespaceString::special(StringData ns) {
     return !normal(ns) || ns.substr(ns.find('.')).startsWith(".system.");
 }
 
-inline bool NamespaceString::virtualized(StringData ns) {
-    return ns.find('$') != std::string::npos && ns != "local.oplog.$main";
-}
-
-inline bool NamespaceString::validDBName(StringData db, DollarInDbNameBehavior behavior) {
-    if (db.size() == 0 || db.size() >= 64)
+inline bool NamespaceString::validDBName(StringData db) {
+    if (db.size() == 0 || db.size() > 64)
         return false;
 
     for (StringData::const_iterator iter = db.begin(), end = db.end(); iter != end; ++iter) {
@@ -69,10 +67,6 @@ inline bool NamespaceString::validDBName(StringData db, DollarInDbNameBehavior b
             case ' ':
             case '"':
                 return false;
-            case '$':
-                if (behavior == DollarInDbNameBehavior::Disallow)
-                    return false;
-                continue;
 #ifdef _WIN32
             // We prohibit all FAT32-disallowed characters on Windows
             case '*':
@@ -155,6 +149,37 @@ inline int nsDBHash(const std::string& ns) {
     return hash;
 }
 
+inline bool nsDBEquals(const std::string& a, const std::string& b) {
+    for (size_t i = 0; i < a.size(); i++) {
+        if (a[i] == '.') {
+            // b has to either be done or a '.'
+
+            if (b.size() == i)
+                return true;
+
+            if (b[i] == '.')
+                return true;
+
+            return false;
+        }
+
+        // a is another character
+        if (b.size() == i)
+            return false;
+
+        if (b[i] != a[i])
+            return false;
+    }
+
+    // a is done
+    // make sure b is done
+    if (b.size() == a.size() || b[a.size()] == '.')
+        return true;
+
+    return false;
+}
+
+/* future : this doesn't need to be an inline. */
 inline std::string NamespaceString::getSisterNS(StringData local) const {
     verify(local.size() && local[0] != '.');
     return db().toString() + "." + local.toString();
@@ -167,5 +192,4 @@ inline std::string NamespaceString::getSystemIndexesCollection() const {
 inline std::string NamespaceString::getCommandNS() const {
     return db().toString() + ".$cmd";
 }
-
-}  // namespace mongo
+}

@@ -26,8 +26,6 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
 #include "mongo/base/status.h"
 #include "mongo/bson/mutable/document.h"
 #include "mongo/bson/mutable/element.h"
@@ -87,9 +85,7 @@ Status checkIdMatchesRoleName(const BSONElement& idElement, const RoleName& role
         return Status(ErrorCodes::FailedToParse,
                       mongoutils::str::stream()
                           << "Role document _id fields must be encoded as the string "
-                             "dbname.rolename.  Found "
-                          << idField
-                          << " for "
+                             "dbname.rolename.  Found " << idField << " for "
                           << roleName.getFullName());
     }
     return Status::OK();
@@ -164,8 +160,7 @@ Status handleOplogInsert(RoleGraph* roleGraph, const BSONObj& insertedObj) {
  *
  * Treats all updates as upserts.
  */
-Status handleOplogUpdate(OperationContext* txn,
-                         RoleGraph* roleGraph,
+Status handleOplogUpdate(RoleGraph* roleGraph,
                          const BSONObj& updatePattern,
                          const BSONObj& queryPattern) {
     RoleName roleToUpdate;
@@ -183,7 +178,7 @@ Status handleOplogUpdate(OperationContext* txn,
     status = AuthorizationManager::getBSONForRole(roleGraph, roleToUpdate, roleDocument.root());
     if (status == ErrorCodes::RoleNotFound) {
         // The query pattern will only contain _id, no other immutable fields are present
-        status = driver.populateDocumentWithQueryFields(txn, queryPattern, NULL, roleDocument);
+        status = driver.populateDocumentWithQueryFields(queryPattern, NULL, roleDocument);
     }
     if (!status.isOK())
         return status;
@@ -278,12 +273,11 @@ Status RoleGraph::addRoleFromDocument(const BSONObj& doc) {
     return status;
 }
 
-Status RoleGraph::handleLogOp(OperationContext* txn,
-                              const char* op,
+Status RoleGraph::handleLogOp(const char* op,
                               const NamespaceString& ns,
                               const BSONObj& o,
                               const BSONObj* o2) {
-    if (op == "db"_sd)
+    if (op == StringData("db", StringData::LiteralTag()))
         return Status::OK();
     if (op[0] == '\0' || op[1] != '\0') {
         return Status(ErrorCodes::BadValue,
@@ -313,7 +307,7 @@ Status RoleGraph::handleLogOp(OperationContext* txn,
                 return Status(ErrorCodes::InternalError,
                               "Missing query pattern in update oplog entry.");
             }
-            return handleOplogUpdate(txn, this, o, *o2);
+            return handleOplogUpdate(this, o, *o2);
         case 'd':
             return handleOplogDelete(this, o);
         case 'n':

@@ -36,22 +36,34 @@ namespace mongo {
 
 int getGtLtOp(const BSONElement& e);
 
-class BSONElementCmpWithoutField {
-public:
-    /**
-     * If 'stringComparator' is null, the default binary comparator will be used for comparing
-     * string elements.  A custom string comparator may be provided, but it must outlive the
-     * constructed BSONElementCmpWithoutField.
-     */
-    BSONElementCmpWithoutField(const StringData::ComparatorInterface* stringComparator = nullptr)
-        : _stringComparator(stringComparator) {}
-
+struct BSONElementCmpWithoutField {
     bool operator()(const BSONElement& l, const BSONElement& r) const {
-        return l.woCompare(r, false, _stringComparator) < 0;
+        return l.woCompare(r, false) < 0;
+    }
+};
+
+class BSONObjCmp {
+public:
+    BSONObjCmp(const BSONObj& order = BSONObj()) : _order(order) {}
+    bool operator()(const BSONObj& l, const BSONObj& r) const {
+        return l.woCompare(r, _order) < 0;
+    }
+    BSONObj order() const {
+        return _order;
     }
 
 private:
-    const StringData::ComparatorInterface* _stringComparator;
+    BSONObj _order;
+};
+
+typedef std::set<BSONObj, BSONObjCmp> BSONObjSet;
+
+enum FieldCompareResult {
+    LEFT_SUBFIELD = -2,
+    LEFT_BEFORE = -1,
+    SAME = 0,
+    RIGHT_BEFORE = 1,
+    RIGHT_SUBFIELD = 2
 };
 
 /** Use BSON macro to build a BSONObj from a stream

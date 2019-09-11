@@ -44,8 +44,7 @@ class CmdShardingResetError : public Command {
 public:
     CmdShardingResetError() : Command("resetError", false, "reseterror") {}
 
-
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    virtual bool isWriteCommandForConfigServer() const {
         return false;
     }
 

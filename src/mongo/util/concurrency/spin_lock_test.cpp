@@ -26,8 +26,6 @@
  *    then also delete it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
 #include "mongo/stdx/functional.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/unittest/unittest.h"

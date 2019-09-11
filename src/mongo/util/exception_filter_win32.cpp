@@ -32,8 +32,8 @@
 
 #include "mongo/platform/basic.h"
 
-#include <DbgHelp.h>
 #include <ostream>
+#include <DbgHelp.h>
 
 #include "mongo/config.h"
 #include "mongo/util/assert_util.h"
@@ -83,7 +83,7 @@ void doMinidumpWithException(struct _EXCEPTION_POINTERS* exceptionInfo) {
     if (INVALID_HANDLE_VALUE == hFile) {
         DWORD lasterr = GetLastError();
         log() << "failed to open minidump file " << toUtf8String(dumpName.c_str()) << " : "
-              << errnoWithDescription(lasterr);
+              << errnoWithDescription(lasterr) << std::endl;
         return;
     }
 
@@ -99,7 +99,7 @@ void doMinidumpWithException(struct _EXCEPTION_POINTERS* exceptionInfo) {
         static_cast<MINIDUMP_TYPE>(MiniDumpNormal | MiniDumpWithIndirectlyReferencedMemory |
                                    MiniDumpWithProcessThreadData);
 #endif
-    log() << "writing minidump diagnostic file " << toUtf8String(dumpName.c_str());
+    log() << "writing minidump diagnostic file " << toUtf8String(dumpName.c_str()) << std::endl;
 
     BOOL bstatus = MiniDumpWriteDump(GetCurrentProcess(),
                                      GetCurrentProcessId(),
@@ -110,7 +110,7 @@ void doMinidumpWithException(struct _EXCEPTION_POINTERS* exceptionInfo) {
                                      NULL);
     if (FALSE == bstatus) {
         DWORD lasterr = GetLastError();
-        log() << "failed to create minidump : " << errnoWithDescription(lasterr);
+        log() << "failed to create minidump : " << errnoWithDescription(lasterr) << std::endl;
     }
 
     CloseHandle(hFile);
@@ -130,7 +130,7 @@ LONG WINAPI exceptionFilter(struct _EXCEPTION_POINTERS* excPointers) {
               "0x%p",
               excPointers->ExceptionRecord->ExceptionAddress);
     severe() << "*** unhandled exception " << exceptionString << " at " << addressString
-             << ", terminating";
+             << ", terminating" << std::endl;
     if (excPointers->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
         ULONG acType = excPointers->ExceptionRecord->ExceptionInformation[0];
         const char* acTypeString;
@@ -152,10 +152,10 @@ LONG WINAPI exceptionFilter(struct _EXCEPTION_POINTERS* excPointers) {
                   sizeof(addressString),
                   " 0x%p",
                   excPointers->ExceptionRecord->ExceptionInformation[1]);
-        severe() << "*** access violation was a " << acTypeString << addressString;
+        severe() << "*** access violation was a " << acTypeString << addressString << std::endl;
     }
 
-    severe() << "*** stack trace for unhandled exception:";
+    severe() << "*** stack trace for unhandled exception:" << std::endl;
 
     // Create a copy of context record because printWindowsStackTrace will mutate it.
     CONTEXT contextCopy(*(excPointers->ContextRecord));
@@ -165,13 +165,16 @@ LONG WINAPI exceptionFilter(struct _EXCEPTION_POINTERS* excPointers) {
     doMinidumpWithException(excPointers);
 
     // Don't go through normal shutdown procedure. It may make things worse.
-    // Do not go through _exit or ExitProcess(), terminate immediately
-    severe() << "*** immediate exit due to unhandled exception";
-    TerminateProcess(GetCurrentProcess(), EXIT_ABRUPT);
+    severe() << "*** immediate exit due to unhandled exception" << std::endl;
+    quickExit(EXIT_ABRUPT);
 
     // We won't reach here
     return EXCEPTION_EXECUTE_HANDLER;
 }
+}
+
+void doMinidump() {
+    doMinidumpWithException(NULL);
 }
 
 LPTOP_LEVEL_EXCEPTION_FILTER filtLast = 0;

@@ -45,7 +45,6 @@ static bool _isPasswordArgument(const char* argumentName) {
         "net.ssl.clusterPassword",
         "processManagement.windowsService.servicePassword",
         "security.kmip.clientCertificatePassword",
-        "security.ldap.bind.queryPassword",
         NULL  // Last entry sentinel.
     };
     for (const char* const* current = passwordArguments; *current; ++current) {
@@ -61,7 +60,6 @@ static bool _isPasswordSwitch(const char* switchName) {
         "sslClusterPassword",
         "servicePassword",
         "kmipClientCertificatePassword",
-        "ldapQueryPassword",
         NULL  // Last entry sentinel.
     };
 

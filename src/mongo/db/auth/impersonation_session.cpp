@@ -41,7 +41,6 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/rpc/metadata/audit_metadata.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/destructor_guard.h"
 
 namespace mongo {
 

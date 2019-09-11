@@ -54,7 +54,7 @@ public:
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
                                        std::vector<Privilege>* out);
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    virtual bool isWriteCommandForConfigServer() const {
         return false;
     }
 

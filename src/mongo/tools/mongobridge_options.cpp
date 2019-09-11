@@ -59,8 +59,7 @@ Status addMongoBridgeOptions(moe::OptionSection* options) {
 
 void printMongoBridgeHelp(std::ostream* out) {
     *out << "Usage: mongobridge --port <port> --dest <dest> [ --seed <seed> ] [ --verbose <vvv> ]"
-            " [ --help ]"
-         << std::endl;
+            " [ --help ]" << std::endl;
     *out << moe::startupOptions.helpString();
     *out << std::flush;
 }

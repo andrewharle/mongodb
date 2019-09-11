@@ -30,8 +30,6 @@
 
 #include "mongo/db/matcher/expression_where_base.h"
 
-#include "mongo/bson/simple_bsonobj_comparator.h"
-
 namespace mongo {
 
 WhereMatchExpressionBase::WhereMatchExpressionBase(WhereParams params)
@@ -48,7 +46,7 @@ void WhereMatchExpressionBase::debugString(StringBuilder& debug, int level) cons
     debug << "scope: " << getScope() << "\n";
 }
 
-void WhereMatchExpressionBase::serialize(BSONObjBuilder* out) const {
+void WhereMatchExpressionBase::toBSON(BSONObjBuilder* out) const {
     out->appendCodeWScope("$where", getCode(), getScope());
 }
 
@@ -57,8 +55,7 @@ bool WhereMatchExpressionBase::equivalent(const MatchExpression* other) const {
         return false;
     }
     const WhereMatchExpressionBase* realOther = static_cast<const WhereMatchExpressionBase*>(other);
-    return getCode() == realOther->getCode() &&
-        SimpleBSONObjComparator::kInstance.evaluate(getScope() == realOther->getScope());
+    return getCode() == realOther->getCode() && getScope() == realOther->getScope();
 }
 
 }  // namespace mongo

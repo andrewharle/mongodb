@@ -60,7 +60,6 @@ public:
         kFTDC,
         kASIO,
         kBridge,
-        kTracking,
         kNumLogComponents
     };
 

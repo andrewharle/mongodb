@@ -59,10 +59,24 @@ void setInternalUserAuthParams(const BSONObj& authParamsIn) {
     }
     stdx::lock_guard<stdx::mutex> lk(authParamMutex);
 
-    authParams = authParamsIn.copy();
+    if (authParamsIn["mechanism"].String() != "SCRAM-SHA-1") {
+        authParams = authParamsIn.copy();
+        return;
+    }
+
+    // Create authParams for legacy MONGODB-CR authentication for 2.6/3.0 mixed
+    // mode if applicable.
+    mmb::Document fallback(authParamsIn);
+    fallback.root().findFirstChildNamed("mechanism").setValueString("MONGODB-CR");
+
+    mmb::Document doc(authParamsIn);
+    mmb::Element fallbackEl = doc.makeElementObject("fallbackParams");
+    fallbackEl.setValueObject(fallback.getObject());
+    doc.root().pushBack(fallbackEl);
+    authParams = doc.getObject().copy();
 }
 
-BSONObj getInternalUserAuthParams() {
+BSONObj getInternalUserAuthParamsWithFallback() {
     if (!authParamsSet) {
         return BSONObj();
     }

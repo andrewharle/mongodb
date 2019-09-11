@@ -6,7 +6,9 @@ load('jstests/libs/command_line/test_parsed_options.js');
 
 // Object Check
 jsTest.log("Testing \"objcheck\" command line option");
-var expectedResult = {"parsed": {"net": {"wireObjectCheck": true}}};
+var expectedResult = {
+    "parsed": {"net": {"wireObjectCheck": true}}
+};
 testGetCmdLineOptsMongod({objcheck: ""}, expectedResult);
 
 jsTest.log("Testing \"noobjcheck\" command line option");
@@ -33,7 +35,9 @@ testGetCmdLineOptsMongod({}, expectedResult);
 
 // HTTP Interface
 jsTest.log("Testing \"httpinterface\" command line option");
-var expectedResult = {"parsed": {"net": {"http": {"enabled": true}}}};
+var expectedResult = {
+    "parsed": {"net": {"http": {"enabled": true}}}
+};
 testGetCmdLineOptsMongod({httpinterface: ""}, expectedResult);
 
 jsTest.log("Testing \"nohttpinterface\" command line option");
@@ -73,7 +77,9 @@ testGetCmdLineOptsMongod({}, expectedResult);
 // Unix Socket
 if (!_isWindows()) {
     jsTest.log("Testing \"nounixsocket\" command line option");
-    expectedResult = {"parsed": {"net": {"unixDomainSocket": {"enabled": false}}}};
+    expectedResult = {
+        "parsed": {"net": {"unixDomainSocket": {"enabled": false}}}
+    };
     testGetCmdLineOptsMongod({nounixsocket: ""}, expectedResult);
 
     jsTest.log("Testing \"net.wireObjectCheck\" config file option");
@@ -87,7 +93,9 @@ if (!_isWindows()) {
                              expectedResult);
 
     jsTest.log("Testing with no explicit network option setting");
-    expectedResult = {"parsed": {"net": {}}};
+    expectedResult = {
+        "parsed": {"net": {}}
+    };
     testGetCmdLineOptsMongod({}, expectedResult);
 }
 

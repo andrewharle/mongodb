@@ -34,10 +34,9 @@
 
 #pragma once
 
-#include <cmath>
-#include <cstdint>
-#include <limits>
 #include <map>
+#include <cmath>
+#include <limits>
 
 #include "mongo/base/data_view.h"
 #include "mongo/base/parse_number.h"
@@ -46,7 +45,6 @@
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/platform/decimal128.h"
-#include "mongo/stdx/type_traits.h"
 #include "mongo/util/itoa.h"
 
 namespace mongo {
@@ -65,8 +63,15 @@ class BSONObjBuilder {
 public:
     /** @param initsize this is just a hint as to the final size of the object */
     BSONObjBuilder(int initsize = 512)
-        : _b(_buf), _buf(initsize), _offset(0), _s(this), _tracker(0), _doneCalled(false) {
-        // Skip over space for the object length. The length is filled in by _done.
+        : _b(_buf),
+          _buf(sizeof(BSONObj::Holder) + initsize),
+          _offset(sizeof(BSONObj::Holder)),
+          _s(this),
+          _tracker(0),
+          _doneCalled(false) {
+        // Skip over space for a holder object at the beginning of the buffer, followed by
+        // space for the object length. The length is filled in by _done.
+        _b.skip(sizeof(BSONObj::Holder));
         _b.skip(sizeof(int));
 
         // Reserve space for the EOO byte. This means _done() can't fail.
@@ -112,12 +117,13 @@ public:
 
     BSONObjBuilder(const BSONSizeTracker& tracker)
         : _b(_buf),
-          _buf(tracker.getSize()),
-          _offset(0),
+          _buf(sizeof(BSONObj::Holder) + tracker.getSize()),
+          _offset(sizeof(BSONObj::Holder)),
           _s(this),
           _tracker(const_cast<BSONSizeTracker*>(&tracker)),
           _doneCalled(false) {
         // See the comments in the first constructor for details.
+        _b.skip(sizeof(BSONObj::Holder));
         _b.skip(sizeof(int));
 
         // Reserve space for the EOO byte. This means _done() can't fail.
@@ -252,26 +258,12 @@ public:
     BSONObjBuilder& append(StringData fieldName, Decimal128 n) {
         _b.appendNum(static_cast<char>(NumberDecimal));
         _b.appendStr(fieldName);
-        // Make sure we write data in a Little Endian conforming manner
         _b.appendNum(n);
         return *this;
     }
 
     /** Append a NumberLong */
     BSONObjBuilder& append(StringData fieldName, long long n) {
-        _b.appendNum((char)NumberLong);
-        _b.appendStr(fieldName);
-        _b.appendNum(n);
-        return *this;
-    }
-
-    /**
-     * Append a NumberLong (if int64_t isn't the same as long long)
-     */
-    template <typename Int64_t,
-              typename = stdx::enable_if_t<std::is_same<Int64_t, int64_t>::value &&
-                                           !std::is_same<int64_t, long long>::value>>
-    BSONObjBuilder& append(StringData fieldName, Int64_t n) {
         _b.appendNum((char)NumberLong);
         _b.appendStr(fieldName);
         _b.appendNum(n);
@@ -428,7 +420,7 @@ public:
         return appendCode(fieldName, code.code);
     }
 
-    /** Append a string element.
+    /** Append a std::string element.
         @param sz size includes terminating null character */
     BSONObjBuilder& append(StringData fieldName, const char* str, int sz) {
         _b.appendNum((char)String);
@@ -437,11 +429,15 @@ public:
         _b.appendBuf(str, sz);
         return *this;
     }
-    /** Append a string element */
+    /** Append a std::string element */
     BSONObjBuilder& append(StringData fieldName, const char* str) {
         return append(fieldName, str, (int)strlen(str) + 1);
     }
-    /** Append a string element */
+    /** Append a std::string element */
+    BSONObjBuilder& append(StringData fieldName, const std::string& str) {
+        return append(fieldName, str.c_str(), (int)str.size() + 1);
+    }
+    /** Append a std::string element */
     BSONObjBuilder& append(StringData fieldName, StringData str) {
         _b.appendNum((char)String);
         _b.appendStr(fieldName);
@@ -627,7 +623,9 @@ public:
     BSONObj obj() {
         massert(10335, "builder does not own memory", owned());
         doneFast();
-        return BSONObj(_b.release());
+        char* buf = _b.buf();
+        decouple();
+        return BSONObj::takeOwnership(buf);
     }
 
     /** Fetch the object we have built.
@@ -665,6 +663,10 @@ public:
      */
     void abandon() {
         _doneCalled = true;
+    }
+
+    void decouple() {
+        _b.decouple();  // post done() call version.  be sure jsobj frees...
     }
 
     void appendKeys(const BSONObj& keyPattern, const BSONObj& values);

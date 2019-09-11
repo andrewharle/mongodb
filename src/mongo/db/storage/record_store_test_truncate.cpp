@@ -28,8 +28,6 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/storage/record_store_test_harness.h"
 
 
@@ -48,12 +46,12 @@ TEST(RecordStoreTestHarness, TruncateEmpty) {
     unique_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
 
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(0, rs->numRecords(opCtx.get()));
     }
 
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             ASSERT_OK(rs->truncate(opCtx.get()));
@@ -62,7 +60,7 @@ TEST(RecordStoreTestHarness, TruncateEmpty) {
     }
 
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(0, rs->numRecords(opCtx.get()));
     }
 }
@@ -74,13 +72,13 @@ TEST(RecordStoreTestHarness, TruncateNonEmpty) {
     unique_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
 
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(0, rs->numRecords(opCtx.get()));
     }
 
     int nToInsert = 10;
     for (int i = 0; i < nToInsert; i++) {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             stringstream ss;
             ss << "record " << i;
@@ -95,12 +93,12 @@ TEST(RecordStoreTestHarness, TruncateNonEmpty) {
     }
 
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(nToInsert, rs->numRecords(opCtx.get()));
     }
 
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             ASSERT_OK(rs->truncate(opCtx.get()));
@@ -109,7 +107,7 @@ TEST(RecordStoreTestHarness, TruncateNonEmpty) {
     }
 
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(0, rs->numRecords(opCtx.get()));
     }
 }

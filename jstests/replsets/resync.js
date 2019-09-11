@@ -8,7 +8,6 @@
 // @tags: [requires_persistence]
 (function() {
     "use strict";
-
     var replTest = new ReplSetTest({name: 'resync', nodes: 3, oplogSize: 1});
     var nodes = replTest.nodeList();
 

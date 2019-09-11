@@ -50,8 +50,7 @@ class ClusterGetMoreCmd final : public Command {
 public:
     ClusterGetMoreCmd() : Command("getMore") {}
 
-
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    bool isWriteCommandForConfigServer() const final {
         return false;
     }
 
@@ -78,7 +77,7 @@ public:
         help << "retrieve more documents for a cursor id";
     }
 
-    Status checkAuthForCommand(Client* client,
+    Status checkAuthForCommand(ClientBasic* client,
                                const std::string& dbname,
                                const BSONObj& cmdObj) final {
         StatusWith<GetMoreRequest> parseStatus = GetMoreRequest::parseFromBSON(dbname, cmdObj);
@@ -87,8 +86,8 @@ public:
         }
         const GetMoreRequest& request = parseStatus.getValue();
 
-        return AuthorizationSession::get(client)->checkAuthForGetMore(
-            request.nss, request.cursorid, request.term.is_initialized());
+        return AuthorizationSession::get(client)
+            ->checkAuthForGetMore(request.nss, request.cursorid, request.term.is_initialized());
     }
 
     bool run(OperationContext* txn,

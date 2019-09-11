@@ -32,7 +32,9 @@ var doTest = function(signal) {
     var isPV1 = (replTest.getReplSetConfigFromNode().protocolVersion == 1);
     if (isPV1) {
         // Ensure the primary logs an n-op to the oplog upon transitioning to primary.
-        assert.gt(master.getDB("local").oplog.rs.count({op: 'n', o: {msg: 'new primary'}}), 0);
+        var oplog_entry = master.getDB("local").oplog.rs.find().sort({$natural: -1})[0];
+        assert.eq("new primary", oplog_entry["o"]["msg"]);
+        assert.eq("n", oplog_entry["op"]);
     }
     // Calling getPrimary also makes available the liveNodes structure,
     // which looks like this:

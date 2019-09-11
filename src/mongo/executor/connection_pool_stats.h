@@ -28,7 +28,8 @@
 
 #pragma once
 
-#include "mongo/stdx/unordered_map.h"
+#include <unordered_map>
+
 #include "mongo/util/net/hostandport.h"
 
 namespace mongo {
@@ -66,9 +67,9 @@ struct ConnectionPoolStats {
     size_t totalCreated = 0u;
     size_t totalRefreshing = 0u;
 
-    stdx::unordered_map<std::string, ConnectionStatsPer> statsByPool;
-    stdx::unordered_map<HostAndPort, ConnectionStatsPer> statsByHost;
-    stdx::unordered_map<std::string, stdx::unordered_map<HostAndPort, ConnectionStatsPer>>
+    std::unordered_map<std::string, ConnectionStatsPer> statsByPool;
+    std::unordered_map<HostAndPort, ConnectionStatsPer> statsByHost;
+    std::unordered_map<std::string, std::unordered_map<HostAndPort, ConnectionStatsPer>>
         statsByPoolHost;
 };
 

@@ -37,10 +37,10 @@
 
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/index_create.h"
-#include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/db.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/exec/working_set_common.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/index/btree_access_method.h"
 #include "mongo/db/json.h"
 #include "mongo/db/keypattern.h"
@@ -57,19 +57,16 @@
 #include "mongo/db/range_arithmetic.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/replication_coordinator_global.h"
-#include "mongo/db/s/collection_metadata.h"
-#include "mongo/db/s/collection_sharding_state.h"
-#include "mongo/db/s/sharding_state.h"
-#include "mongo/db/server_parameters.h"
-#include "mongo/db/service_context.h"
 #include "mongo/db/storage/data_protector.h"
-#include "mongo/db/storage/encryption_hooks.h"
 #include "mongo/db/storage/storage_options.h"
+#include "mongo/db/storage/wiredtiger/wiredtiger_customization_hooks.h"
 #include "mongo/db/write_concern.h"
 #include "mongo/db/write_concern_options.h"
+#include "mongo/db/s/collection_metadata.h"
+#include "mongo/db/s/sharding_state.h"
 #include "mongo/s/shard_key_pattern.h"
-#include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
+#include "mongo/util/log.h"
 #include "mongo/util/scopeguard.h"
 
 namespace mongo {
@@ -83,6 +80,32 @@ using std::string;
 using std::stringstream;
 
 using logger::LogComponent;
+
+void Helpers::ensureIndex(OperationContext* txn,
+                          Collection* collection,
+                          BSONObj keyPattern,
+                          bool unique,
+                          const char* name) {
+    BSONObjBuilder b;
+    b.append("name", name);
+    b.append("ns", collection->ns().ns());
+    b.append("key", keyPattern);
+    b.appendBool("unique", unique);
+    BSONObj o = b.done();
+
+    MultiIndexBlock indexer(txn, collection);
+
+    Status status = indexer.init(o);
+    if (status.code() == ErrorCodes::IndexAlreadyExists)
+        return;
+    uassertStatusOK(status);
+
+    uassertStatusOK(indexer.insertAllDocumentsInCollection());
+
+    WriteUnitOfWork wunit(txn);
+    indexer.commit();
+    wunit.commit();
+}
 
 /* fetch a single object from collection ns that matches query
    set your db SavedContext first
@@ -111,10 +134,7 @@ RecordId Helpers::findOne(OperationContext* txn,
 
     const ExtensionsCallbackReal extensionsCallback(txn, &collection->ns());
 
-    auto qr = stdx::make_unique<QueryRequest>(collection->ns());
-    qr->setFilter(query);
-
-    auto statusWithCQ = CanonicalQuery::canonicalize(txn, std::move(qr), extensionsCallback);
+    auto statusWithCQ = CanonicalQuery::canonicalize(collection->ns(), query, extensionsCallback);
     massert(17244, "Could not canonicalize " + query.toString(), statusWithCQ.isOK());
     unique_ptr<CanonicalQuery> cq = std::move(statusWithCQ.getValue());
 
@@ -127,14 +147,10 @@ RecordId Helpers::findOne(OperationContext* txn,
 
     unique_ptr<PlanExecutor> exec = std::move(statusWithPlanExecutor.getValue());
     PlanExecutor::ExecState state;
-    BSONObj obj;
     RecordId loc;
-    if (PlanExecutor::ADVANCED == (state = exec->getNext(&obj, &loc))) {
+    if (PlanExecutor::ADVANCED == (state = exec->getNext(NULL, &loc))) {
         return loc;
     }
-    massert(34427,
-            "Plan executor error: " + WorkingSetCommon::toStatusString(obj),
-            PlanExecutor::IS_EOF == state);
     return RecordId();
 }
 
@@ -187,14 +203,10 @@ bool Helpers::getSingleton(OperationContext* txn, const char* ns, BSONObj& resul
 
     CurOp::get(txn)->done();
 
-    // Non-yielding collection scans from InternalPlanner will never error.
-    invariant(PlanExecutor::ADVANCED == state || PlanExecutor::IS_EOF == state);
-
     if (PlanExecutor::ADVANCED == state) {
         result = result.getOwned();
         return true;
     }
-
     return false;
 }
 
@@ -204,14 +216,10 @@ bool Helpers::getLast(OperationContext* txn, const char* ns, BSONObj& result) {
         txn, ns, autoColl.getCollection(), PlanExecutor::YIELD_MANUAL, InternalPlanner::BACKWARD));
     PlanExecutor::ExecState state = exec->getNext(&result, NULL);
 
-    // Non-yielding collection scans from InternalPlanner will never error.
-    invariant(PlanExecutor::ADVANCED == state || PlanExecutor::IS_EOF == state);
-
     if (PlanExecutor::ADVANCED == state) {
         result = result.getOwned();
         return true;
     }
-
     return false;
 }
 
@@ -220,6 +228,7 @@ void Helpers::upsert(OperationContext* txn, const string& ns, const BSONObj& o, 
     verify(e.type());
     BSONObj id = e.wrap();
 
+    OpDebug debug;
     OldClientContext context(txn, ns);
 
     const NamespaceString requestNs(ns);
@@ -229,13 +238,14 @@ void Helpers::upsert(OperationContext* txn, const string& ns, const BSONObj& o, 
     request.setUpdates(o);
     request.setUpsert();
     request.setFromMigration(fromMigrate);
-    UpdateLifecycleImpl updateLifecycle(requestNs);
+    UpdateLifecycleImpl updateLifecycle(true, requestNs);
     request.setLifecycle(&updateLifecycle);
 
-    update(txn, context.db(), request);
+    update(txn, context.db(), request, &debug);
 }
 
 void Helpers::putSingleton(OperationContext* txn, const char* ns, BSONObj obj) {
+    OpDebug debug;
     OldClientContext context(txn, ns);
 
     const NamespaceString requestNs(ns);
@@ -243,10 +253,10 @@ void Helpers::putSingleton(OperationContext* txn, const char* ns, BSONObj obj) {
 
     request.setUpdates(obj);
     request.setUpsert();
-    UpdateLifecycleImpl updateLifecycle(requestNs);
+    UpdateLifecycleImpl updateLifecycle(true, requestNs);
     request.setLifecycle(&updateLifecycle);
 
-    update(txn, context.db(), request);
+    update(txn, context.db(), request, &debug);
 
     CurOp::get(txn)->done();
 }
@@ -267,15 +277,34 @@ BSONObj Helpers::inferKeyPattern(const BSONObj& o) {
     return kpBuilder.obj();
 }
 
-// After completing internalQueryExecYieldIterations document deletions, the time in millis to wait
-// before continuing deletions.
-MONGO_EXPORT_SERVER_PARAMETER(rangeDeleterBatchDelayMS, int, 20);
+static bool findShardKeyIndexPattern(OperationContext* txn,
+                                     const string& ns,
+                                     const BSONObj& shardKeyPattern,
+                                     BSONObj* indexPattern) {
+    AutoGetCollectionForRead ctx(txn, ns);
+    Collection* collection = ctx.getCollection();
+    if (!collection) {
+        return false;
+    }
+
+    // Allow multiKey based on the invariant that shard keys must be single-valued.
+    // Therefore, any multi-key index prefixed by shard key cannot be multikey over
+    // the shard key fields.
+    const IndexDescriptor* idx =
+        collection->getIndexCatalog()->findShardKeyPrefixedIndex(txn,
+                                                                 shardKeyPattern,
+                                                                 false);  // requireSingleKey
+
+    if (idx == NULL)
+        return false;
+    *indexPattern = idx->keyPattern().getOwned();
+    return true;
+}
 
 long long Helpers::removeRange(OperationContext* txn,
                                const KeyRange& range,
-                               BoundInclusion boundInclusion,
+                               bool maxInclusive,
                                const WriteConcernOptions& writeConcern,
-                               Milliseconds& replWaitDuration,
                                RemoveSaver* callback,
                                bool fromMigrate,
                                bool onlyRemoveOrphanedDocs) {
@@ -284,77 +313,48 @@ long long Helpers::removeRange(OperationContext* txn,
 
     // The IndexChunk has a keyPattern that may apply to more than one index - we need to
     // select the index and get the full index keyPattern here.
-    std::string indexName;
-    BSONObj min;
-    BSONObj max;
-
-    {
-        ScopedTransaction scopedXact(txn, MODE_IS);
-        AutoGetCollectionForRead ctx(txn, ns);
-        Collection* collection = ctx.getCollection();
-        if (!collection) {
-            warning(LogComponent::kSharding)
-                << "collection deleted before cleaning data over range of type " << range.keyPattern
-                << " in " << ns << endl;
-            return -1;
-        }
-
-        // Allow multiKey based on the invariant that shard keys must be single-valued.
-        // Therefore, any multi-key index prefixed by shard key cannot be multikey over
-        // the shard key fields.
-        const IndexDescriptor* idx =
-            collection->getIndexCatalog()->findShardKeyPrefixedIndex(txn,
-                                                                     range.keyPattern,
-                                                                     false);  // requireSingleKey
-        if (!idx) {
-            warning(LogComponent::kSharding) << "no index found to clean data over range of type "
-                                             << range.keyPattern << " in " << ns << endl;
-            return -1;
-        }
-
-        indexName = idx->indexName();
-        KeyPattern indexKeyPattern(idx->keyPattern());
-
-        // Extend bounds to match the index we found
-
-        invariant(IndexBounds::isStartIncludedInBound(boundInclusion));
-        // Extend min to get (min, MinKey, MinKey, ....)
-        min = Helpers::toKeyFormat(indexKeyPattern.extendRangeBound(range.minKey, false));
-        // If upper bound is included, extend max to get (max, MaxKey, MaxKey, ...)
-        // If not included, extend max to get (max, MinKey, MinKey, ....)
-        const bool maxInclusive = IndexBounds::isEndIncludedInBound(boundInclusion);
-        max = Helpers::toKeyFormat(indexKeyPattern.extendRangeBound(range.maxKey, maxInclusive));
+    BSONObj indexKeyPatternDoc;
+    if (!findShardKeyIndexPattern(txn, ns, range.keyPattern, &indexKeyPatternDoc)) {
+        warning(LogComponent::kSharding) << "no index found to clean data over range of type "
+                                         << range.keyPattern << " in " << ns << endl;
+        return -1;
     }
 
+    KeyPattern indexKeyPattern(indexKeyPatternDoc);
+
+    // Extend bounds to match the index we found
+
+    // Extend min to get (min, MinKey, MinKey, ....)
+    const BSONObj& min =
+        Helpers::toKeyFormat(indexKeyPattern.extendRangeBound(range.minKey, false));
+    // If upper bound is included, extend max to get (max, MaxKey, MaxKey, ...)
+    // If not included, extend max to get (max, MinKey, MinKey, ....)
+    const BSONObj& max =
+        Helpers::toKeyFormat(indexKeyPattern.extendRangeBound(range.maxKey, maxInclusive));
 
     MONGO_LOG_COMPONENT(1, LogComponent::kSharding)
-        << "begin removal of " << redact(min) << " to " << redact(max) << " in " << ns
+        << "begin removal of " << min << " to " << max << " in " << ns
         << " with write concern: " << writeConcern.toBSON() << endl;
 
     long long numDeleted = 0;
 
-    replWaitDuration = Milliseconds::zero();
+    Milliseconds millisWaitingForReplication{0};
 
     while (1) {
-        long long numDeletedPreviously = numDeleted;
-        long long iterationsBetweenSleeps = internalQueryExecYieldIterations.load();
-        long long batchSize = writeConcern.shouldWaitForOtherNodes() ? 1 : iterationsBetweenSleeps;
-
         // Scoping for write lock.
         {
-            ScopedTransaction scopedXact(txn, MODE_IX);
-            AutoGetCollection ctx(txn, NamespaceString(ns), MODE_IX, MODE_IX);
+            AutoGetCollection ctx(txn, NamespaceString(ns), MODE_IX);
             Collection* collection = ctx.getCollection();
-            if (!collection) {
+            if (!collection)
                 break;
-            }
 
-            IndexDescriptor* desc = collection->getIndexCatalog()->findIndexByName(txn, indexName);
+            IndexDescriptor* desc =
+                collection->getIndexCatalog()->findIndexByKeyPattern(txn, indexKeyPattern.toBSON());
 
             if (!desc) {
-                warning(LogComponent::kSharding) << "shard key index '" << indexName << "' on '"
-                                                 << ns << "' was dropped";
-                break;
+                warning(LogComponent::kSharding) << "shard key index " << indexKeyPattern.toBSON()
+                                                 << " on '" << ns << "' was dropped";
+                return -1;
             }
 
             unique_ptr<PlanExecutor> exec(
@@ -363,166 +363,109 @@ long long Helpers::removeRange(OperationContext* txn,
                                            desc,
                                            min,
                                            max,
-                                           boundInclusion,
+                                           maxInclusive,
                                            PlanExecutor::YIELD_MANUAL,
                                            InternalPlanner::FORWARD,
                                            InternalPlanner::IXSCAN_FETCH));
+            exec->setYieldPolicy(PlanExecutor::YIELD_AUTO);
 
-            bool errorOccurred = false;
-
-            while (numDeleted - numDeletedPreviously < batchSize) {
-
-                RecordId rloc;
-                BSONObj obj;
-                PlanExecutor::ExecState state;
-                // This may yield so we cannot touch nsd after this.
-                state = exec->getNext(&obj, &rloc);
-                if (PlanExecutor::IS_EOF == state) {
-                    errorOccurred = true;
-                    break;
-                }
-
-                if (PlanExecutor::FAILURE == state || PlanExecutor::DEAD == state) {
-                    warning(LogComponent::kSharding)
-                        << PlanExecutor::statestr(state)
-                        << " - cursor error while trying to delete " << redact(min) << " to "
-                        << redact(max) << " in " << ns << ": "
-                        << redact(WorkingSetCommon::toStatusString(obj))
-                        << ", stats: " << Explain::getWinningPlanStats(exec.get()) << endl;
-                    errorOccurred = true;
-                    break;
-                }
-
-                verify(PlanExecutor::ADVANCED == state);
-
-                if (onlyRemoveOrphanedDocs) {
-                    // Do a final check in the write lock to make absolutely sure that our
-                    // collection hasn't been modified in a way that invalidates our migration
-                    // cleanup.
-
-                    // We should never be able to turn off the sharding state once enabled, but
-                    // in the future we might want to.
-                    verify(ShardingState::get(txn)->enabled());
-
-                    bool docIsOrphan;
-
-                    // In write lock, so will be the most up-to-date version
-                    auto metadataNow = CollectionShardingState::get(txn, ns)->getMetadata();
-                    if (metadataNow) {
-                        ShardKeyPattern kp(metadataNow->getKeyPattern());
-                        BSONObj key = kp.extractShardKeyFromDoc(obj);
-                        docIsOrphan =
-                            !metadataNow->keyBelongsToMe(key) && !metadataNow->keyIsPending(key);
-                    } else {
-                        docIsOrphan = false;
-                    }
-
-                    if (!docIsOrphan) {
-                        warning(LogComponent::kSharding)
-                            << "aborting migration cleanup for chunk " << redact(min) << " to "
-                            << redact(max)
-                            << (metadataNow ? (string) " at document " + redact(obj.toString())
-                                            : "")
-                            << ", collection " << ns << " has changed " << endl;
-                        // No chance of success with a new plan, so fully abort.
-                        errorOccurred = true;
-                        break;
-                    }
-                }
-
-                exec->saveState();
-
-                MONGO_WRITE_CONFLICT_RETRY_LOOP_BEGIN {
-                    WriteUnitOfWork wuow(txn);
-                    NamespaceString nss(ns);
-                    if (!repl::getGlobalReplicationCoordinator()->canAcceptWritesFor(nss)) {
-                        warning() << "stepped down from primary while deleting chunk; "
-                                  << "orphaning data in " << ns << " in range [" << redact(min)
-                                  << ", " << redact(max) << ")";
-                        // No chance of success with a new plan, so fully abort.
-                        errorOccurred = true;
-                        break;
-                    }
-
-                    if (callback)
-                        callback->goingToDelete(obj);
-
-                    OpDebug* const nullOpDebug = nullptr;
-                    collection->deleteDocument(txn, rloc, nullOpDebug, fromMigrate);
-                    wuow.commit();
-                }
-                MONGO_WRITE_CONFLICT_RETRY_LOOP_END(txn, "delete range", ns);
-
-                if (!exec->restoreState()) {
-                    MONGO_LOG_COMPONENT(1, LogComponent::kSharding)
-                        << "unable to restore cursor state while trying to delete " << redact(min)
-                        << " to " << redact(max) << " in " << ns
-                        << ", stats: " << Explain::getWinningPlanStats(exec.get())
-                        << ", replanning";
-                    // Try again with a new plan.
-                    break;
-                }
-
-                numDeleted++;
-            }
-
-            if (errorOccurred) {
+            RecordId rloc;
+            BSONObj obj;
+            PlanExecutor::ExecState state;
+            // This may yield so we cannot touch nsd after this.
+            state = exec->getNext(&obj, &rloc);
+            if (PlanExecutor::IS_EOF == state) {
                 break;
             }
 
-        }  // End scope for write lock.
+            if (PlanExecutor::FAILURE == state || PlanExecutor::DEAD == state) {
+                warning(LogComponent::kSharding)
+                    << PlanExecutor::statestr(state) << " - cursor error while trying to delete "
+                    << min << " to " << max << " in " << ns << ": "
+                    << WorkingSetCommon::toStatusString(obj)
+                    << ", stats: " << Explain::getWinningPlanStats(exec.get()) << endl;
+                break;
+            }
 
-        if (numDeleted > 0) {
-            if (writeConcern.shouldWaitForOtherNodes()) {
-                repl::ReplicationCoordinator::StatusAndDuration replStatus =
-                    repl::getGlobalReplicationCoordinator()->awaitReplication(
-                        txn,
-                        repl::ReplClientInfo::forClient(txn->getClient()).getLastOp(),
-                        writeConcern);
-                if (replStatus.status.code() == ErrorCodes::ExceededTimeLimit ||
-                    replStatus.status.code() == ErrorCodes::WriteConcernFailed) {
-                    warning(LogComponent::kSharding)
-                        << "replication to secondaries for removeRange at "
-                           "least 60 seconds behind";
+            verify(PlanExecutor::ADVANCED == state);
+
+            WriteUnitOfWork wuow(txn);
+
+            if (onlyRemoveOrphanedDocs) {
+                // Do a final check in the write lock to make absolutely sure that our
+                // collection hasn't been modified in a way that invalidates our migration
+                // cleanup.
+
+                // We should never be able to turn off the sharding state once enabled, but
+                // in the future we might want to.
+                verify(ShardingState::get(txn)->enabled());
+
+                bool docIsOrphan;
+
+                // In write lock, so will be the most up-to-date version
+                std::shared_ptr<CollectionMetadata> metadataNow =
+                    ShardingState::get(txn)->getCollectionMetadata(ns);
+                if (metadataNow) {
+                    ShardKeyPattern kp(metadataNow->getKeyPattern());
+                    BSONObj key = kp.extractShardKeyFromDoc(obj);
+                    docIsOrphan =
+                        !metadataNow->keyBelongsToMe(key) && !metadataNow->keyIsPending(key);
                 } else {
-                    uassertStatusOK(replStatus.status);
+                    docIsOrphan = false;
                 }
-                replWaitDuration += replStatus.duration;
+
+                if (!docIsOrphan) {
+                    warning(LogComponent::kSharding)
+                        << "aborting migration cleanup for chunk " << min << " to " << max
+                        << (metadataNow ? (string) " at document " + obj.toString() : "")
+                        << ", collection " << ns << " has changed " << endl;
+                    break;
+                }
             }
 
-            // The `rangeDeleterBatchDelayMS` parameter is defined as a delay every
-            // `internalQueryExecYieldIterations` (aka `batchSize`) document deletions.
-            //
-            // In v3.6+, this applies regardless of waiting for replication (aka
-            // _secondaryThrottle), because in those versions the replication waits and query
-            // replanning also happen after each batch of `batchSize` deletions.
-            //
-            // However, here in v3.4, when _secondaryThrottle is on it's necessary to preserve the
-            // semantics of waiting for replication after each document deletion.  But it's also
-            // necessary for `rangeDeleterBatchDelayMS` - which is the only wait when
-            // _secondaryThrottle is off - to behave as it does in other versions (despite query
-            // planning still occuring every document deletion in v3.4 when _secondaryThrottle is
-            // on).
-            //
-            // Therefore, we sleep for `rangeDeleterBatchDelayMS` here (every `batchSize`
-            // iterations), even if we have also waited for replication above.  This approach also
-            // makes the RangeDeleter behavior more consistent when enabling/disabling
-            // _secondaryThrottle.
-            if (batchSize != 1 || numDeleted % iterationsBetweenSleeps == 0) {
-                sleepmillis(rangeDeleterBatchDelayMS.load());
+            NamespaceString nss(ns);
+            if (!repl::getGlobalReplicationCoordinator()->canAcceptWritesFor(nss)) {
+                warning() << "stepped down from primary while deleting chunk; "
+                          << "orphaning data in " << ns << " in range [" << min << ", " << max
+                          << ")";
+                return numDeleted;
             }
+
+            if (callback)
+                callback->goingToDelete(obj);
+
+            collection->deleteDocument(txn, rloc, fromMigrate);
+            wuow.commit();
+            numDeleted++;
         }
 
-        // Loop back to get a new plan and go again.
+        // TODO remove once the yielding below that references this timer has been removed
+        Timer secondaryThrottleTime;
+
+        if (writeConcern.shouldWaitForOtherNodes() && numDeleted > 0) {
+            repl::ReplicationCoordinator::StatusAndDuration replStatus =
+                repl::getGlobalReplicationCoordinator()->awaitReplication(
+                    txn,
+                    repl::ReplClientInfo::forClient(txn->getClient()).getLastOp(),
+                    writeConcern);
+            if (replStatus.status.code() == ErrorCodes::ExceededTimeLimit ||
+                replStatus.status.code() == ErrorCodes::WriteConcernFailed) {
+                warning(LogComponent::kSharding) << "replication to secondaries for removeRange at "
+                                                    "least 60 seconds behind";
+            } else {
+                uassertStatusOK(replStatus.status);
+            }
+            millisWaitingForReplication += replStatus.duration;
+        }
     }
 
     if (writeConcern.shouldWaitForOtherNodes())
         log(LogComponent::kSharding)
             << "Helpers::removeRangeUnlocked time spent waiting for replication: "
-            << durationCount<Milliseconds>(replWaitDuration) << "ms" << endl;
+            << durationCount<Milliseconds>(millisWaitingForReplication) << "ms" << endl;
 
-    MONGO_LOG_COMPONENT(1, LogComponent::kSharding) << "end removal of " << redact(min) << " to "
-                                                    << redact(max) << " in " << ns << " (took "
+    MONGO_LOG_COMPONENT(1, LogComponent::kSharding) << "end removal of " << min << " to " << max
+                                                    << " in " << ns << " (took "
                                                     << rangeRemoveTimer.millis() << "ms)" << endl;
 
     return numDeleted;
@@ -553,33 +496,33 @@ Helpers::RemoveSaver::RemoveSaver(const string& a, const string& b, const string
     ss << why << "." << terseCurrentTime(false) << "." << NUM++ << ".bson";
     _file /= ss.str();
 
-    auto encryptionHooks = EncryptionHooks::get(getGlobalServiceContext());
-    if (encryptionHooks->enabled()) {
-        _protector = encryptionHooks->getDataProtector();
-        _file += encryptionHooks->getProtectedPathSuffix();
+    auto hooks = WiredTigerCustomizationHooks::get(getGlobalServiceContext());
+    if (hooks->enabled()) {
+        _protector = hooks->getDataProtector();
+        _file += hooks->getProtectedPathSuffix();
     }
 }
 
 Helpers::RemoveSaver::~RemoveSaver() {
     if (_protector && _out) {
-        auto encryptionHooks = EncryptionHooks::get(getGlobalServiceContext());
-        invariant(encryptionHooks->enabled());
+        auto hooks = WiredTigerCustomizationHooks::get(getGlobalServiceContext());
+        invariant(hooks->enabled());
 
-        size_t protectedSizeMax = encryptionHooks->additionalBytesForProtectedBuffer();
+        size_t protectedSizeMax = hooks->additionalBytesForProtectedBuffer();
         std::unique_ptr<uint8_t[]> protectedBuffer(new uint8_t[protectedSizeMax]);
 
         size_t resultLen;
         Status status = _protector->finalize(protectedBuffer.get(), protectedSizeMax, &resultLen);
         if (!status.isOK()) {
             severe() << "Unable to finalize DataProtector while closing RemoveSaver: "
-                     << redact(status);
+                     << status.reason();
             fassertFailed(34350);
         }
 
         _out->write(reinterpret_cast<const char*>(protectedBuffer.get()), resultLen);
         if (_out->fail()) {
             severe() << "Couldn't write finalized DataProtector data to: " << _file.string()
-                     << " for remove saving: " << redact(errnoWithDescription());
+                     << " for remove saving: " << errnoWithDescription();
             fassertFailed(34351);
         }
 
@@ -587,7 +530,7 @@ Helpers::RemoveSaver::~RemoveSaver() {
         status = _protector->finalizeTag(protectedBuffer.get(), protectedSizeMax, &resultLen);
         if (!status.isOK()) {
             severe() << "Unable to get finalizeTag from DataProtector while closing RemoveSaver: "
-                     << redact(status);
+                     << status.reason();
             fassertFailed(34352);
         }
         if (resultLen != _protector->getNumberOfBytesReservedForTag()) {
@@ -600,7 +543,7 @@ Helpers::RemoveSaver::~RemoveSaver() {
         _out->write(reinterpret_cast<const char*>(protectedBuffer.get()), resultLen);
         if (_out->fail()) {
             severe() << "Couldn't write finalizeTag from DataProtector to: " << _file.string()
-                     << " for remove saving: " << redact(errnoWithDescription());
+                     << " for remove saving: " << errnoWithDescription();
             fassertFailed(34354);
         }
     }
@@ -608,14 +551,11 @@ Helpers::RemoveSaver::~RemoveSaver() {
 
 Status Helpers::RemoveSaver::goingToDelete(const BSONObj& o) {
     if (!_out) {
-        // We don't expect to ever pass "" to create_directories below, but catch
-        // this anyway as per SERVER-26412.
-        invariant(!_root.empty());
         boost::filesystem::create_directories(_root);
         _out.reset(new ofstream(_file.string().c_str(), ios_base::out | ios_base::binary));
         if (_out->fail()) {
             string msg = str::stream() << "couldn't create file: " << _file.string()
-                                       << " for remove saving: " << redact(errnoWithDescription());
+                                       << " for remove saving: " << errnoWithDescription();
             error() << msg;
             _out.reset();
             _out = 0;
@@ -628,10 +568,10 @@ Status Helpers::RemoveSaver::goingToDelete(const BSONObj& o) {
 
     std::unique_ptr<uint8_t[]> protectedBuffer;
     if (_protector) {
-        auto encryptionHooks = EncryptionHooks::get(getGlobalServiceContext());
-        invariant(encryptionHooks->enabled());
+        auto hooks = WiredTigerCustomizationHooks::get(getGlobalServiceContext());
+        invariant(hooks->enabled());
 
-        size_t protectedSizeMax = dataSize + encryptionHooks->additionalBytesForProtectedBuffer();
+        size_t protectedSizeMax = dataSize + hooks->additionalBytesForProtectedBuffer();
         protectedBuffer.reset(new uint8_t[protectedSizeMax]);
 
         size_t resultLen;
@@ -648,7 +588,7 @@ Status Helpers::RemoveSaver::goingToDelete(const BSONObj& o) {
     _out->write(reinterpret_cast<const char*>(data), dataSize);
     if (_out->fail()) {
         string msg = str::stream() << "couldn't write document to file: " << _file.string()
-                                   << " for remove saving: " << redact(errnoWithDescription());
+                                   << " for remove saving: " << errnoWithDescription();
         error() << msg;
         return Status(ErrorCodes::OperationFailed, msg);
     }

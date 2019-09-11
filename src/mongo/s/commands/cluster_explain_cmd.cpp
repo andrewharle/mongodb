@@ -31,6 +31,7 @@
 #include "mongo/client/dbclientinterface.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/query/explain.h"
+#include "mongo/db/query/lite_parsed_query.h"
 #include "mongo/rpc/metadata/server_selection_metadata.h"
 #include "mongo/s/query/cluster_find.h"
 
@@ -55,7 +56,7 @@ class ClusterExplainCmd : public Command {
 public:
     ClusterExplainCmd() : Command("explain") {}
 
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    virtual bool isWriteCommandForConfigServer() const {
         return false;
     }
 
@@ -65,7 +66,6 @@ public:
     virtual bool slaveOk() const {
         return false;
     }
-
     virtual bool slaveOverrideOk() const {
         return true;
     }
@@ -123,11 +123,11 @@ public:
 
         const std::string cmdName = explainObj.firstElementFieldName();
         Command* commToExplain = Command::findCommand(cmdName);
-        if (!commToExplain) {
-            return appendCommandStatus(
-                result,
-                Status{ErrorCodes::CommandNotFound,
-                       str::stream() << "Explain failed due to unknown command: " << cmdName});
+        if (NULL == commToExplain) {
+            mongoutils::str::stream ss;
+            ss << "Explain failed due to unknown command: " << cmdName;
+            Status explainStatus(ErrorCodes::CommandNotFound, ss);
+            return appendCommandStatus(result, explainStatus);
         }
 
         auto readPref =

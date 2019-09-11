@@ -1,8 +1,8 @@
-load("jstests/replsets/libs/tags.js");
-
 (function() {
     'use strict';
 
-    let nodes = [{}, {}, {}, {}, {}];
+    load("jstests/replsets/libs/tags.js");
+
+    var nodes = [{}, {}, {}, {}, {}];
     new TagsTest({nodes: nodes}).run();
 }());

@@ -1,8 +1,7 @@
 // Tests whether new sharding is detected on insert by mongos
 (function() {
-    'use strict';
 
-    var st = new ShardingTest({shards: 10, mongos: 3});
+    var st = new ShardingTest({name: "test", shards: 10, mongos: 3});
 
     var mongosA = st.s0;
     var mongosB = st.s1;
@@ -15,45 +14,29 @@
     var collB = mongosB.getCollection("" + collA);
     var collC = mongosB.getCollection("" + collA);
 
-    var shards = [
-        st.shard0,
-        st.shard1,
-        st.shard2,
-        st.shard3,
-        st.shard4,
-        st.shard5,
-        st.shard6,
-        st.shard7,
-        st.shard8,
-        st.shard9
-    ];
+    admin.runCommand({enableSharding: "" + collA.getDB()});
+    st.ensurePrimaryShard(collA.getDB().getName(), 'shard0001');
+    admin.runCommand({shardCollection: "" + collA, key: {_id: 1}});
 
-    assert.commandWorked(admin.runCommand({enableSharding: "" + collA.getDB()}));
-    st.ensurePrimaryShard(collA.getDB().getName(), st.shard1.shardName);
-    assert.commandWorked(admin.runCommand({shardCollection: "" + collA, key: {_id: 1}}));
+    var shards = config.shards.find().sort({_id: 1}).toArray();
 
     jsTestLog("Splitting up the collection...");
 
     // Split up the collection
     for (var i = 0; i < shards.length; i++) {
-        assert.commandWorked(admin.runCommand({split: "" + collA, middle: {_id: i}}));
-        assert.commandWorked(
-            admin.runCommand({moveChunk: "" + collA, find: {_id: i}, to: shards[i].shardName}));
+        printjson(admin.runCommand({split: "" + collA, middle: {_id: i}}));
+        printjson(admin.runCommand({moveChunk: "" + collA, find: {_id: i}, to: shards[i]._id}));
     }
 
     mongosB.getDB("admin").runCommand({flushRouterConfig: 1});
     mongosC.getDB("admin").runCommand({flushRouterConfig: 1});
-
     printjson(collB.count());
     printjson(collC.count());
 
     // Change up all the versions...
     for (var i = 0; i < shards.length; i++) {
-        assert.commandWorked(admin.runCommand({
-            moveChunk: "" + collA,
-            find: {_id: i},
-            to: shards[(i + 1) % shards.length].shardName
-        }));
+        printjson(admin.runCommand(
+            {moveChunk: "" + collA, find: {_id: i}, to: shards[(i + 1) % shards.length]._id}));
     }
 
     // Make sure mongos A is up-to-date

@@ -50,12 +50,9 @@ public:
     class FeatureTracker;
 
     /**
-     * @param rs - does NOT take ownership. The RecordStore must be thread-safe, in particular
-     * with concurrent calls to RecordStore::find, updateRecord, insertRecord, deleteRecord and
-     * dataFor. The KVCatalog does not utilize Cursors and those methods may omit further
-     * protection.
+     * @param rs - does NOT take ownership
      */
-    KVCatalog(RecordStore* rs, bool directoryPerDb, bool directoryForIndexes);
+    KVCatalog(RecordStore* rs, bool isRsThreadSafe, bool directoryPerDb, bool directoryForIndexes);
     ~KVCatalog();
 
     void init(OperationContext* opCtx);
@@ -93,6 +90,13 @@ public:
         return _featureTracker.get();
     }
 
+    /**
+     * Deletes the feature document managed by '_featureTracker' if it exists.
+     *
+     * It is invalid to call getFeatureTracker() after calling this function.
+     */
+    void destroyFeatureTracker(OperationContext* opCtx);
+
 private:
     class AddIdentChange;
     class RemoveIdentChange;
@@ -111,6 +115,7 @@ private:
     bool _hasEntryCollidingWithRand() const;
 
     RecordStore* _rs;  // not owned
+    const bool _isRsThreadSafe;
     const bool _directoryPerDb;
     const bool _directoryForIndexes;
 

@@ -24,7 +24,10 @@ var $config = (function() {
         }
     };
 
-    var transitions = {init: {createAndDrop: 1}, createAndDrop: {createAndDrop: 1}};
+    var transitions = {
+        init: {createAndDrop: 1},
+        createAndDrop: {createAndDrop: 1}
+    };
 
     return {
         threadCount: 10,

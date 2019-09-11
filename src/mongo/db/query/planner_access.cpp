@@ -36,14 +36,12 @@
 #include <vector>
 
 #include "mongo/base/owned_pointer_vector.h"
-#include "mongo/bson/simple_bsonobj_comparator.h"
-#include "mongo/db/bson/dotted_path_support.h"
 #include "mongo/db/matcher/expression_array.h"
 #include "mongo/db/matcher/expression_geo.h"
 #include "mongo/db/matcher/expression_text.h"
+#include "mongo/db/query/indexability.h"
 #include "mongo/db/query/index_bounds_builder.h"
 #include "mongo/db/query/index_tag.h"
-#include "mongo/db/query/indexability.h"
 #include "mongo/db/query/query_knobs.h"
 #include "mongo/db/query/query_planner.h"
 #include "mongo/db/query/query_planner_common.h"
@@ -53,8 +51,6 @@
 namespace {
 
 using namespace mongo;
-
-namespace dps = ::mongo::dotted_path_support;
 
 /**
  * Text node functors.
@@ -108,30 +104,6 @@ bool scansAreEquivalent(const QuerySolutionNode* lhs, const QuerySolutionNode* r
     return *leftIxscan == *rightIxscan;
 }
 
-/**
- * If all nodes can provide the requested sort, returns a vector expressing which nodes must have
- * their index scans reversed to provide the sort. Otherwise, returns an empty vector.
- * 'nodes' must not be empty.
- */
-std::vector<bool> canProvideSortWithMergeSort(const std::vector<QuerySolutionNode*>& nodes,
-                                              const BSONObj& requestedSort) {
-    invariant(!nodes.empty());
-    std::vector<bool> shouldReverseScan;
-    const auto reverseSort = QueryPlannerCommon::reverseSortObj(requestedSort);
-    for (auto&& node : nodes) {
-        node->computeProperties();
-        auto sorts = node->getSort();
-        if (sorts.find(requestedSort) != sorts.end()) {
-            shouldReverseScan.push_back(false);
-        } else if (sorts.find(reverseSort) != sorts.end()) {
-            shouldReverseScan.push_back(true);
-        } else {
-            return {};
-        }
-    }
-    return shouldReverseScan;
-}
-
 }  // namespace
 
 namespace mongo {
@@ -149,12 +121,11 @@ QuerySolutionNode* QueryPlannerAccess::makeCollectionScan(const CanonicalQuery& 
     csn->name = query.ns();
     csn->filter = query.root()->shallowClone();
     csn->tailable = tailable;
-    csn->maxScan = query.getQueryRequest().getMaxScan();
+    csn->maxScan = query.getParsed().getMaxScan();
 
     // If the hint is {$natural: +-1} this changes the direction of the collection scan.
-    if (!query.getQueryRequest().getHint().isEmpty()) {
-        BSONElement natural =
-            dps::extractElementAtPath(query.getQueryRequest().getHint(), "$natural");
+    if (!query.getParsed().getHint().isEmpty()) {
+        BSONElement natural = query.getParsed().getHint().getFieldDotted("$natural");
         if (!natural.eoo()) {
             csn->direction = natural.numberInt() >= 0 ? 1 : -1;
         }
@@ -162,9 +133,9 @@ QuerySolutionNode* QueryPlannerAccess::makeCollectionScan(const CanonicalQuery& 
 
     // The sort can specify $natural as well. The sort direction should override the hint
     // direction if both are specified.
-    const BSONObj& sortObj = query.getQueryRequest().getSort();
+    const BSONObj& sortObj = query.getParsed().getSort();
     if (!sortObj.isEmpty()) {
-        BSONElement natural = dps::extractElementAtPath(sortObj, "$natural");
+        BSONElement natural = sortObj.getFieldDotted("$natural");
         if (!natural.eoo()) {
             csn->direction = natural.numberInt() >= 0 ? 1 : -1;
         }
@@ -199,7 +170,8 @@ QuerySolutionNode* QueryPlannerAccess::makeLeafNode(
         bool indexIs2D = (String == elt.type() && "2d" == elt.String());
 
         if (indexIs2D) {
-            GeoNear2DNode* ret = new GeoNear2DNode(index);
+            GeoNear2DNode* ret = new GeoNear2DNode();
+            ret->indexKeyPattern = index.keyPattern;
             ret->nq = &nearExpr->getData();
             ret->baseBounds.fields.resize(index.keyPattern.nFields());
             if (NULL != query.getProj()) {
@@ -209,7 +181,8 @@ QuerySolutionNode* QueryPlannerAccess::makeLeafNode(
 
             return ret;
         } else {
-            GeoNear2DSphereNode* ret = new GeoNear2DSphereNode(index);
+            GeoNear2DSphereNode* ret = new GeoNear2DSphereNode();
+            ret->indexKeyPattern = index.keyPattern;
             ret->nq = &nearExpr->getData();
             ret->baseBounds.fields.resize(index.keyPattern.nFields());
             if (NULL != query.getProj()) {
@@ -222,28 +195,19 @@ QuerySolutionNode* QueryPlannerAccess::makeLeafNode(
         // We must not keep the expression node around.
         *tightnessOut = IndexBoundsBuilder::EXACT;
         TextMatchExpressionBase* textExpr = static_cast<TextMatchExpressionBase*>(expr);
-        TextNode* ret = new TextNode(index);
+        TextNode* ret = new TextNode();
+        ret->indexKeyPattern = index.keyPattern;
         ret->ftsQuery = textExpr->getFTSQuery().clone();
-
-        // Count the number of prefix fields before the "text" field.
-        for (auto&& keyPatternElt : ret->index.keyPattern) {
-            // We know that the only key pattern with a type of String is the _fts field
-            // which is immediately after all prefix fields.
-            if (BSONType::String == keyPatternElt.type()) {
-                break;
-            }
-            ++(ret->numPrefixFields);
-        }
-
         return ret;
     } else {
         // Note that indexKeyPattern.firstElement().fieldName() may not equal expr->path()
         // because expr might be inside an array operator that provides a path prefix.
-        IndexScanNode* isn = new IndexScanNode(index);
+        IndexScanNode* isn = new IndexScanNode();
+        isn->indexKeyPattern = index.keyPattern;
+        isn->indexIsMultiKey = index.multikey;
         isn->bounds.fields.resize(index.keyPattern.nFields());
-        isn->maxScan = query.getQueryRequest().getMaxScan();
-        isn->addKeyMetadata = query.getQueryRequest().returnKey();
-        isn->queryCollator = query.getCollator();
+        isn->maxScan = query.getParsed().getMaxScan();
+        isn->addKeyMetadata = query.getParsed().returnKey();
 
         // Get the ixtag->pos-th element of the index key pattern.
         // TODO: cache this instead/with ixtag->pos?
@@ -314,21 +278,14 @@ bool QueryPlannerAccess::shouldMergeWithLeaf(const MatchExpression* expr,
     const IndexBounds* boundsToFillOut = &scan->bounds;
 
     if (boundsToFillOut->fields[pos].name.empty()) {
-        // Bounds have yet to be assigned for the 'pos' position in the index. The plan enumerator
-        // should have told us that it is safe to compound bounds in this case.
-        invariant(scanState.ixtag->canCombineBounds);
+        // The bounds will be compounded. This is OK because the
+        // plan enumerator told us that it is OK.
         return true;
     } else {
-        // Bounds have already been assigned for the 'pos' position in the index.
         if (MatchExpression::AND == mergeType) {
-            // The bounds on the 'pos' position in the index would be intersected if we merged these
-            // two leaf expressions.
-            if (!scanState.ixtag->canCombineBounds) {
-                // If the plan enumerator told us that it isn't safe to intersect bounds in this
-                // case, then it must be because we're using a multikey index.
-                invariant(index.multikey);
-            }
-            return scanState.ixtag->canCombineBounds;
+            // The bounds will be intersected. This is OK provided
+            // that the index is NOT multikey.
+            return !index.multikey;
         } else {
             // The bounds will be unionized.
             return true;
@@ -346,24 +303,10 @@ void QueryPlannerAccess::mergeWithLeafNode(MatchExpression* expr, ScanBuildingSt
 
     const StageType type = node->getType();
 
+    // Text data is covered, but not exactly.  Text covering is unlike any other covering
+    // so we deal with it in addFilterToSolutionNode.
     if (STAGE_TEXT == type) {
-        auto textNode = static_cast<TextNode*>(node);
-
-        if (pos < textNode->numPrefixFields) {
-            // This predicate is assigned to one of the prefix fields of the text index. Such
-            // predicates must always be equalities and must always be attached to the TEXT node. In
-            // order to ensure this happens, we assign INEXACT_COVERED tightness.
-            scanState->tightness = IndexBoundsBuilder::INEXACT_COVERED;
-        } else {
-            // The predicate is assigned to one of the trailing fields of the text index. We
-            // currently don't generate bounds for predicates assigned to trailing fields of a text
-            // index, but rather attempt to attach a covered filter. However, certain predicates can
-            // never be correctly covered (e.g. $exists), so we assign the tightness accordingly.
-            scanState->tightness = IndexBoundsBuilder::canUseCoveredMatching(expr, index)
-                ? IndexBoundsBuilder::INEXACT_COVERED
-                : IndexBoundsBuilder::INEXACT_FETCH;
-        }
-
+        scanState->tightness = IndexBoundsBuilder::INEXACT_COVERED;
         return;
     }
 
@@ -372,23 +315,20 @@ void QueryPlannerAccess::mergeWithLeafNode(MatchExpression* expr, ScanBuildingSt
     if (STAGE_GEO_NEAR_2D == type) {
         invariant(INDEX_2D == index.type);
 
-        // 2D indexes have a special format - the "2d" field stores a normally-indexed BinData
-        // field, but additional array fields are *not* exploded into multi-keys - they are stored
-        // directly as arrays in the index.  Also, no matter what the index expression, the "2d"
-        // field is always first.
-        //
-        // This means that we can only generically accumulate bounds for 2D indexes over the first
-        // "2d" field (pos == 0) - MatchExpressions over other fields in the 2D index may be covered
-        // (can be evaluated using only the 2D index key).  The additional fields must not affect
-        // the index scan bounds, since they are not stored in an IndexScan-compatible format.
+        // 2D indexes are weird - the "2d" field stores a normally-indexed BinData field, but
+        // additional array fields are *not* exploded into multi-keys - they are stored directly
+        // as arrays in the index.  Also, no matter what the index expression, the "2d" field is
+        // always first.
+        // This means that we can only generically accumulate bounds for 2D indexes over the
+        // first "2d" field (pos == 0) - MatchExpressions over other fields in the 2D index may
+        // be covered (can be evaluated using only the 2D index key).  The additional fields
+        // must not affect the index scan bounds, since they are not stored in an
+        // IndexScan-compatible format.
 
         if (pos > 0) {
-            // The predicate is over a trailing field of the "2d" index. If possible, we assign it
-            // as a covered filter (the INEXACT_COVERED case). Otherwise, the filter must be
-            // evaluated after fetching the full documents.
-            scanState->tightness = IndexBoundsBuilder::canUseCoveredMatching(expr, index)
-                ? IndexBoundsBuilder::INEXACT_COVERED
-                : IndexBoundsBuilder::INEXACT_FETCH;
+            // Marking this field as covered allows the planner to accumulate a MatchExpression
+            // over the returned 2D index keys instead of adding to the index bounds.
+            scanState->tightness = IndexBoundsBuilder::INEXACT_COVERED;
             return;
         }
 
@@ -402,15 +342,10 @@ void QueryPlannerAccess::mergeWithLeafNode(MatchExpression* expr, ScanBuildingSt
         verify(type == STAGE_IXSCAN);
         IndexScanNode* scan = static_cast<IndexScanNode*>(node);
 
-        // See STAGE_GEO_NEAR_2D above - 2D indexes can only accumulate scan bounds over the first
-        // "2d" field (pos == 0).
+        // See STAGE_GEO_NEAR_2D above - 2D indexes can only accumulate scan bounds over the
+        // first "2d" field (pos == 0)
         if (INDEX_2D == index.type && pos > 0) {
-            // The predicate is over a trailing field of the "2d" index. If possible, we assign it
-            // as a covered filter (the INEXACT_COVERED case). Otherwise, the filter must be
-            // evaluated after fetching the full documents.
-            scanState->tightness = IndexBoundsBuilder::canUseCoveredMatching(expr, index)
-                ? IndexBoundsBuilder::INEXACT_COVERED
-                : IndexBoundsBuilder::INEXACT_FETCH;
+            scanState->tightness = IndexBoundsBuilder::INEXACT_COVERED;
             return;
         }
 
@@ -449,9 +384,25 @@ void QueryPlannerAccess::mergeWithLeafNode(MatchExpression* expr, ScanBuildingSt
 void QueryPlannerAccess::finishTextNode(QuerySolutionNode* node, const IndexEntry& index) {
     TextNode* tn = static_cast<TextNode*>(node);
 
+    // Figure out what positions are prefix positions.  We build an index key prefix from
+    // the predicates over the text index prefix keys.
+    // For example, say keyPattern = { a: 1, _fts: "text", _ftsx: 1, b: 1 }
+    // prefixEnd should be 1.
+    size_t prefixEnd = 0;
+    BSONObjIterator it(tn->indexKeyPattern);
+    // Count how many prefix terms we have.
+    while (it.more()) {
+        // We know that the only key pattern with a type of String is the _fts field
+        // which is immediately after all prefix fields.
+        if (String == it.next().type()) {
+            break;
+        }
+        ++prefixEnd;
+    }
+
     // If there's no prefix, the filter is already on the node and the index prefix is null.
     // We can just return.
-    if (!tn->numPrefixFields) {
+    if (!prefixEnd) {
         return;
     }
 
@@ -465,7 +416,7 @@ void QueryPlannerAccess::finishTextNode(QuerySolutionNode* node, const IndexEntr
 
     if (MatchExpression::AND != textFilterMe->matchType()) {
         // Only one prefix term.
-        invariant(1u == tn->numPrefixFields);
+        invariant(1 == prefixEnd);
         // Sanity check: must be an EQ.
         invariant(MatchExpression::EQ == textFilterMe->matchType());
 
@@ -477,10 +428,10 @@ void QueryPlannerAccess::finishTextNode(QuerySolutionNode* node, const IndexEntr
 
         // Indexed by the keyPattern position index assignment.  We want to add
         // prefixes in order but we must order them first.
-        vector<MatchExpression*> prefixExprs(tn->numPrefixFields, nullptr);
+        vector<MatchExpression*> prefixExprs(prefixEnd, NULL);
 
         AndMatchExpression* amExpr = static_cast<AndMatchExpression*>(textFilterMe);
-        invariant(amExpr->numChildren() >= tn->numPrefixFields);
+        invariant(amExpr->numChildren() >= prefixEnd);
 
         // Look through the AND children.  The prefix children we want to
         // stash in prefixExprs.
@@ -491,7 +442,7 @@ void QueryPlannerAccess::finishTextNode(QuerySolutionNode* node, const IndexEntr
             invariant(NULL != ixtag);
             // Skip this child if it's not part of a prefix, or if we've already assigned a
             // predicate to this prefix position.
-            if (ixtag->pos >= tn->numPrefixFields || prefixExprs[ixtag->pos] != NULL) {
+            if (ixtag->pos >= prefixEnd || prefixExprs[ixtag->pos] != NULL) {
                 ++curChild;
                 continue;
             }
@@ -1023,7 +974,7 @@ QuerySolutionNode* QueryPlannerAccess::buildIndexedAnd(const CanonicalQuery& que
             for (size_t i = 0; i < ahn->children.size(); ++i) {
                 ahn->children[i]->computeProperties();
                 const BSONObjSet& sorts = ahn->children[i]->getSort();
-                if (sorts.end() != sorts.find(query.getQueryRequest().getSort())) {
+                if (sorts.end() != sorts.find(query.getParsed().getSort())) {
                     std::swap(ahn->children[i], ahn->children.back());
                     break;
                 }
@@ -1122,27 +1073,41 @@ QuerySolutionNode* QueryPlannerAccess::buildIndexedOr(const CanonicalQuery& quer
     if (1 == ixscanNodes.size()) {
         orResult = ixscanNodes[0];
     } else {
-        std::vector<bool> shouldReverseScan;
+        bool shouldMergeSort = false;
 
-        if (!query.getQueryRequest().getSort().isEmpty()) {
-            // If all ixscanNodes can provide the sort, shouldReverseScan is populated with which
-            // scans to reverse.
-            shouldReverseScan =
-                canProvideSortWithMergeSort(ixscanNodes, query.getQueryRequest().getSort());
-        }
+        if (!query.getParsed().getSort().isEmpty()) {
+            const BSONObj& desiredSort = query.getParsed().getSort();
 
-        if (!shouldReverseScan.empty()) {
-            // Each node can provide either the requested sort, or the reverse of the requested
-            // sort.
-            invariant(ixscanNodes.size() == shouldReverseScan.size());
-            for (size_t i = 0; i < ixscanNodes.size(); ++i) {
-                if (shouldReverseScan[i]) {
-                    QueryPlannerCommon::reverseScans(ixscanNodes[i]);
+            // If there exists a sort order that is present in each child, we can merge them and
+            // maintain that sort order / those sort orders.
+            ixscanNodes[0]->computeProperties();
+            BSONObjSet sharedSortOrders = ixscanNodes[0]->getSort();
+
+            if (!sharedSortOrders.empty()) {
+                for (size_t i = 1; i < ixscanNodes.size(); ++i) {
+                    ixscanNodes[i]->computeProperties();
+                    BSONObjSet isect;
+                    set_intersection(sharedSortOrders.begin(),
+                                     sharedSortOrders.end(),
+                                     ixscanNodes[i]->getSort().begin(),
+                                     ixscanNodes[i]->getSort().end(),
+                                     std::inserter(isect, isect.end()),
+                                     BSONObjCmp());
+                    sharedSortOrders = isect;
+                    if (sharedSortOrders.empty()) {
+                        break;
+                    }
                 }
             }
 
+            // TODO: If we're looking for the reverse of one of these sort orders we could
+            // possibly reverse the ixscan nodes.
+            shouldMergeSort = (sharedSortOrders.end() != sharedSortOrders.find(desiredSort));
+        }
+
+        if (shouldMergeSort) {
             MergeSortNode* msn = new MergeSortNode();
-            msn->sort = query.getQueryRequest().getSort();
+            msn->sort = query.getParsed().getSort();
             msn->children.swap(ixscanNodes);
             orResult = msn;
         } else {
@@ -1268,10 +1233,11 @@ QuerySolutionNode* QueryPlannerAccess::scanWholeIndex(const IndexEntry& index,
     QuerySolutionNode* solnRoot = NULL;
 
     // Build an ixscan over the id index, use it, and return it.
-    unique_ptr<IndexScanNode> isn = make_unique<IndexScanNode>(index);
-    isn->maxScan = query.getQueryRequest().getMaxScan();
-    isn->addKeyMetadata = query.getQueryRequest().returnKey();
-    isn->queryCollator = query.getCollator();
+    unique_ptr<IndexScanNode> isn = make_unique<IndexScanNode>();
+    isn->indexKeyPattern = index.keyPattern;
+    isn->indexIsMultiKey = index.multikey;
+    isn->maxScan = query.getParsed().getMaxScan();
+    isn->addKeyMetadata = query.getParsed().returnKey();
 
     IndexBoundsBuilder::allValuesBounds(index.keyPattern, &isn->bounds);
 
@@ -1403,15 +1369,16 @@ QuerySolutionNode* QueryPlannerAccess::makeIndexScan(const IndexEntry& index,
     QuerySolutionNode* solnRoot = NULL;
 
     // Build an ixscan over the id index, use it, and return it.
-    IndexScanNode* isn = new IndexScanNode(index);
+    IndexScanNode* isn = new IndexScanNode();
+    isn->indexKeyPattern = index.keyPattern;
+    isn->indexIsMultiKey = index.multikey;
     isn->direction = 1;
-    isn->maxScan = query.getQueryRequest().getMaxScan();
-    isn->addKeyMetadata = query.getQueryRequest().returnKey();
+    isn->maxScan = query.getParsed().getMaxScan();
+    isn->addKeyMetadata = query.getParsed().returnKey();
     isn->bounds.isSimpleRange = true;
     isn->bounds.startKey = startKey;
     isn->bounds.endKey = endKey;
-    isn->bounds.boundInclusion = BoundInclusion::kIncludeStartKeyOnly;
-    isn->queryCollator = query.getCollator();
+    isn->bounds.endKeyInclusive = false;
 
     unique_ptr<MatchExpression> filter = query.root()->shallowClone();
 

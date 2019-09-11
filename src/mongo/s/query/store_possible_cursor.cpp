@@ -41,7 +41,6 @@ namespace mongo {
 
 StatusWith<BSONObj> storePossibleCursor(const HostAndPort& server,
                                         const BSONObj& cmdResult,
-                                        const NamespaceString& requestedNss,
                                         executor::TaskExecutor* executor,
                                         ClusterCursorManager* cursorManager) {
     if (!cmdResult["ok"].trueValue() || !cmdResult.hasField("cursor")) {
@@ -60,20 +59,19 @@ StatusWith<BSONObj> storePossibleCursor(const HostAndPort& server,
     ClusterClientCursorParams params(incomingCursorResponse.getValue().getNSS());
     params.remotes.emplace_back(server, incomingCursorResponse.getValue().getCursorId());
 
-
     auto ccc = ClusterClientCursorImpl::make(executor, std::move(params));
-
     auto clusterCursorId =
         cursorManager->registerCursor(ccc.releaseCursor(),
-                                      requestedNss,
+                                      incomingCursorResponse.getValue().getNSS(),
                                       ClusterCursorManager::CursorType::NamespaceNotSharded,
                                       ClusterCursorManager::CursorLifetime::Mortal);
     if (!clusterCursorId.isOK()) {
         return clusterCursorId.getStatus();
     }
 
-    CursorResponse outgoingCursorResponse(
-        requestedNss, clusterCursorId.getValue(), incomingCursorResponse.getValue().getBatch());
+    CursorResponse outgoingCursorResponse(incomingCursorResponse.getValue().getNSS(),
+                                          clusterCursorId.getValue(),
+                                          incomingCursorResponse.getValue().getBatch());
     return outgoingCursorResponse.toBSON(CursorResponse::ResponseType::InitialResponse);
 }
 

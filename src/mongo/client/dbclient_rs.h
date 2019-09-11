@@ -32,7 +32,6 @@
 #include <utility>
 
 #include "mongo/client/dbclientinterface.h"
-#include "mongo/client/mongo_uri.h"
 #include "mongo/util/net/hostandport.h"
 
 namespace mongo {
@@ -60,9 +59,7 @@ public:
      * connections. */
     DBClientReplicaSet(const std::string& name,
                        const std::vector<HostAndPort>& servers,
-                       StringData applicationName,
-                       double so_timeout = 0,
-                       MongoURI uri = {});
+                       double so_timeout = 0);
     virtual ~DBClientReplicaSet();
 
     /**
@@ -191,12 +188,6 @@ public:
                                             const BSONObj& metadata,
                                             const BSONObj& commandArgs) final;
 
-    std::tuple<rpc::UniqueReply, DBClientWithCommands*> runCommandWithMetadataAndTarget(
-        StringData database,
-        StringData command,
-        const BSONObj& metadata,
-        const BSONObj& commandArgs) final;
-
     void setRequestMetadataWriter(rpc::RequestMetadataWriter writer) final;
 
     void setReplyMetadataReader(rpc::ReplyMetadataReader reader) final;
@@ -296,11 +287,9 @@ private:
     static bool _authPooledSecondaryConn;
 
     // Throws a DBException if the monitor doesn't exist and there isn't a cached seed to use.
-    ReplicaSetMonitorPtr _getMonitor();
+    ReplicaSetMonitorPtr _getMonitor() const;
 
     std::string _setName;
-    std::string _applicationName;
-    std::shared_ptr<ReplicaSetMonitor> _rsm;
 
     HostAndPort _masterHost;
     std::unique_ptr<DBClientConnection> _master;
@@ -321,8 +310,6 @@ private:
     // this could be a security issue, as the password is stored in memory
     // not sure if/how we should handle
     std::map<std::string, BSONObj> _auths;  // dbName -> auth parameters
-
-    MongoURI _uri;
 
 protected:
     /**

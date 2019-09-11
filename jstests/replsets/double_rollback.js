@@ -12,6 +12,7 @@
 
 (function() {
     'use strict';
+    load("jstests/libs/check_log.js");
 
     load("jstests/libs/check_log.js");
     load("jstests/replsets/rslib.js");
@@ -34,13 +35,22 @@
     var nodes = rst.startSet();
     rst.initiate();
 
-    // SERVER-20844 ReplSetTest starts up a single node replica set then reconfigures to the correct
-    // size for faster startup, so nodes[0] is always the first primary.
+    var timeout = 5 * 60 * 1000;
+
+    function waitForState(node, state) {
+        assert.soonNoExcept(function() {
+            assert.commandWorked(node.adminCommand(
+                {replSetTest: 1, waitForMemberState: state, timeoutMillis: timeout}));
+            return true;
+        });
+    }
+
     jsTestLog("Make sure node 0 is primary.");
+    rst.stepUp(nodes[0]);
     assert.eq(nodes[0], rst.getPrimary());
     // Wait for all data bearing nodes to get up to date.
     assert.writeOK(nodes[0].getDB(dbName).getCollection(collName).insert(
-        {a: 1}, {writeConcern: {w: 3, wtimeout: 5 * 60 * 1000}}));
+        {a: 1}, {writeConcern: {w: 3, wtimeout: timeout}}));
 
     jsTestLog("Create two partitions: [1] and [0,2,3,4].");
     nodes[1].disconnect(nodes[0]);
@@ -49,9 +59,10 @@
     nodes[1].disconnect(nodes[4]);
 
     jsTestLog("Do a write that is replicated to [0,2,3,4].");
-    assert.writeOK(nodes[0].getDB(dbName).getCollection(collName + "2").insert({a: 2}, {
-        writeConcern: {w: 2, wtimeout: 5 * 60 * 1000}
-    }));
+    assert.writeOK(nodes[0]
+                       .getDB(dbName)
+                       .getCollection(collName + "2")
+                       .insert({a: 2}, {writeConcern: {w: 2, wtimeout: timeout}}));
 
     jsTestLog("Repartition to: [0,2] and [1,3,4].");
     nodes[1].reconnect(nodes[3]);
@@ -82,7 +93,7 @@
     jsTestLog("Wait for node 2 to go into ROLLBACK and start syncing from node 1.");
     // Since nodes 1 and 2 have now diverged, node 2 should go into rollback.
     waitForState(nodes[2], ReplSetTest.State.ROLLBACK);
-    rst.awaitSyncSource(nodes[2], nodes[1]);
+    rst.awaitSyncSource(nodes[2], nodes[1], timeout);
 
     jsTestLog("Wait for failpoint on node 2 to pause rollback before it finishes");
     // Wait for fail point message to be logged.
@@ -120,7 +131,7 @@
     jsTestLog("Wait for nodes 0 to roll back and both node 0 and 2 to catch up to node 1");
     waitForState(nodes[0], ReplSetTest.State.SECONDARY);
     waitForState(nodes[2], ReplSetTest.State.SECONDARY);
-    rst.awaitReplication();
+    rst.awaitReplication(timeout);
 
     // Check that rollback happened on node 0, but not on node 2 since it had already rolled back
     // and just needed to finish applying ops to reach minValid.
@@ -128,8 +139,9 @@
     assert.eq(node1RBID, nodes[1].adminCommand('replSetGetRBID').rbid);
 
     // Node 1 should still be primary, and should now be able to satisfy majority writes again.
-    assert.writeOK(nodes[1].getDB(dbName).getCollection(collName + "4").insert({a: 4}, {
-        writeConcern: {w: 3, wtimeout: 5 * 60 * 1000}
-    }));
+    assert.writeOK(nodes[1]
+                       .getDB(dbName)
+                       .getCollection(collName + "4")
+                       .insert({a: 4}, {writeConcern: {w: 3, wtimeout: timeout}}));
 
 }());

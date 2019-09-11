@@ -48,9 +48,10 @@ namespace executor {
 namespace {
 
 MONGO_INITIALIZER(ThreadPoolExecutorCommonTests)(InitializerContext*) {
-    addTestsForExecutor("ThreadPoolExecutorCommon", [](std::unique_ptr<NetworkInterfaceMock>* net) {
-        return makeThreadPoolTestExecutor(std::move(*net));
-    });
+    addTestsForExecutor("ThreadPoolExecutorCommon",
+                        [](std::unique_ptr<NetworkInterfaceMock>* net) {
+                            return makeThreadPoolTestExecutor(std::move(*net));
+                        });
     return Status::OK();
 }
 
@@ -79,52 +80,6 @@ TEST_F(ThreadPoolExecutorTest, TimelyCancelationOfScheduleWorkAt) {
     joinExecutorThread();
 }
 
-bool sharedCallbackStateDestroyed = false;
-class SharedCallbackState {
-    MONGO_DISALLOW_COPYING(SharedCallbackState);
-
-public:
-    SharedCallbackState() {}
-    ~SharedCallbackState() {
-        sharedCallbackStateDestroyed = true;
-    }
-};
-
-TEST_F(ThreadPoolExecutorTest,
-       ExecutorResetsCallbackFunctionInCallbackStateUponReturnFromCallbackFunction) {
-    auto net = getNet();
-    auto& executor = getExecutor();
-    launchExecutorThread();
-
-    auto sharedCallbackData = std::make_shared<SharedCallbackState>();
-    auto callbackInvoked = false;
-
-    const auto when = net->now() + Milliseconds(5000);
-    const auto cb1 = unittest::assertGet(executor.scheduleWorkAt(
-        when, [&callbackInvoked, sharedCallbackData](const executor::TaskExecutor::CallbackArgs&) {
-            callbackInvoked = true;
-        }));
-
-    sharedCallbackData.reset();
-    ASSERT_FALSE(sharedCallbackStateDestroyed);
-
-    net->enterNetwork();
-    ASSERT_EQUALS(when, net->runUntil(when));
-    net->exitNetwork();
-
-    executor.wait(cb1);
-
-    // Task executor should reset CallbackState::callback after running callback function.
-    // This ensures that we release resources associated with 'CallbackState::callback' without
-    // having to destroy every outstanding callback handle (which contains a shared pointer
-    // to ThreadPoolTaskExecutor::CallbackState).
-    ASSERT_TRUE(callbackInvoked);
-    ASSERT_TRUE(sharedCallbackStateDestroyed);
-
-    executor.shutdown();
-    joinExecutorThread();
-}
-
 TEST_F(ThreadPoolExecutorTest, ShutdownAndScheduleRaceDoesNotCrash) {
     // This is a regression test for SERVER-23686. It works by scheduling a work item in the
     // ThreadPoolTaskExecutor that blocks waiting to be signaled by this thread. Once that work item
@@ -145,16 +100,14 @@ TEST_F(ThreadPoolExecutorTest, ShutdownAndScheduleRaceDoesNotCrash) {
     auto& executor = getExecutor();
     launchExecutorThread();
 
-    ASSERT_OK(executor
-                  .scheduleWork([&](const TaskExecutor::CallbackArgs& cbData) {
-                      status1 = cbData.status;
-                      if (!status1.isOK())
-                          return;
-                      barrier.countDownAndWait();
-                      cb2 = cbData.executor->scheduleWork([&status2](
-                          const TaskExecutor::CallbackArgs& cbData) { status2 = cbData.status; });
-                  })
-                  .getStatus());
+    ASSERT_OK(executor.scheduleWork([&](const TaskExecutor::CallbackArgs& cbData) {
+        status1 = cbData.status;
+        if (!status1.isOK())
+            return;
+        barrier.countDownAndWait();
+        cb2 = cbData.executor->scheduleWork(
+            [&status2](const TaskExecutor::CallbackArgs& cbData) { status2 = cbData.status; });
+    }).getStatus());
 
     auto fpTPTE1 =
         getGlobalFailPointRegistry()->getFailPoint("scheduleIntoPoolSpinsUntilThreadPoolShutsDown");

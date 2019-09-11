@@ -39,9 +39,9 @@ RouterStageLimit::RouterStageLimit(std::unique_ptr<RouterExecStage> child, long 
     invariant(limit > 0);
 }
 
-StatusWith<ClusterQueryResult> RouterStageLimit::next() {
+StatusWith<boost::optional<BSONObj>> RouterStageLimit::next() {
     if (_returnedSoFar >= _limit) {
-        return {ClusterQueryResult()};
+        return {boost::none};
     }
 
     auto childResult = getChildStage()->next();
@@ -49,7 +49,7 @@ StatusWith<ClusterQueryResult> RouterStageLimit::next() {
         return childResult;
     }
 
-    if (!childResult.getValue().isEOF()) {
+    if (childResult.getValue()) {
         ++_returnedSoFar;
     }
     return childResult;
@@ -65,10 +65,6 @@ bool RouterStageLimit::remotesExhausted() {
 
 Status RouterStageLimit::setAwaitDataTimeout(Milliseconds awaitDataTimeout) {
     return getChildStage()->setAwaitDataTimeout(awaitDataTimeout);
-}
-
-void RouterStageLimit::setOperationContext(OperationContext* txn) {
-    return getChildStage()->setOperationContext(txn);
 }
 
 }  // namespace mongo

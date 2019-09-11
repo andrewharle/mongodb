@@ -38,7 +38,6 @@
 
 namespace mongo {
 
-class CollatorInterface;
 class LogBuilder;
 
 class ModifierCompare : public ModifierInterface {
@@ -83,11 +82,6 @@ public:
      */
     virtual Status log(LogBuilder* logBuilder) const;
 
-    virtual void setCollator(const CollatorInterface* collator) {
-        invariant(!_collator);
-        _collator = collator;
-    }
-
 private:
     // Compare mode: min/max
     const ModifierCompareMode _mode;
@@ -106,8 +100,6 @@ private:
     // being prepared against must be live throughout all the calls.
     struct PreparedState;
     std::unique_ptr<PreparedState> _preparedState;
-
-    const CollatorInterface* _collator = nullptr;
 };
 
 }  // namespace mongo

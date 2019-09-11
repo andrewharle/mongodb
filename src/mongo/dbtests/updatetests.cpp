@@ -35,13 +35,12 @@
 
 #include "mongo/bson/mutable/mutable_bson_test_utils.h"
 #include "mongo/client/dbclientcursor.h"
-#include "mongo/db/bson/dotted_path_support.h"
-#include "mongo/db/client.h"
 #include "mongo/db/db.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/json.h"
 #include "mongo/db/lasterror.h"
 #include "mongo/db/ops/update.h"
+#include "mongo/db/operation_context_impl.h"
 #include "mongo/dbtests/dbtests.h"
 
 namespace UpdateTests {
@@ -51,8 +50,6 @@ using std::numeric_limits;
 using std::string;
 using std::stringstream;
 using std::vector;
-
-namespace dps = ::mongo::dotted_path_support;
 
 class ClientBase {
 public:
@@ -74,8 +71,7 @@ protected:
         return !_client.getPrevError().getField("err").isNull();
     }
 
-    const ServiceContext::UniqueOperationContext _txnPtr = cc().makeOperationContext();
-    OperationContext& _txn = *_txnPtr;
+    OperationContextImpl _txn;
     DBDirectClient _client;
 };
 
@@ -193,11 +189,9 @@ public:
                             << "b"),
                        BSON("$set" << BSON("a"
                                            << "c")));
-        ASSERT(!_client
-                    .findOne(ns(),
-                             BSON("a"
-                                  << "c"))
-                    .isEmpty());
+        ASSERT(!_client.findOne(ns(),
+                                BSON("a"
+                                     << "c")).isEmpty());
     }
 };
 
@@ -212,11 +206,9 @@ public:
                             << "b"),
                        BSON("$set" << BSON("a"
                                            << "cd")));
-        ASSERT(!_client
-                    .findOne(ns(),
-                             BSON("a"
-                                  << "cd"))
-                    .isEmpty());
+        ASSERT(!_client.findOne(ns(),
+                                BSON("a"
+                                     << "cd")).isEmpty());
     }
 };
 
@@ -347,7 +339,7 @@ public:
         _client.insert(ns(), initial);
         _client.update(
             ns(), initial, BSON("$setOnInsert" << BSON("a.b" << 1) << "$set" << BSON("d" << 1)));
-        ASSERT_BSONOBJ_EQ(_client.findOne(ns(), initial), final);
+        ASSERT_EQUALS(_client.findOne(ns(), initial), final);
     }
 };
 
@@ -370,11 +362,9 @@ public:
                        Query(),
                        BSON("$set" << BSON("a.b"
                                            << "llll")));
-        ASSERT(!_client
-                    .findOne(ns(),
-                             BSON("a.b"
-                                  << "llll"))
-                    .isEmpty());
+        ASSERT(!_client.findOne(ns(),
+                                BSON("a.b"
+                                     << "llll")).isEmpty());
     }
 };
 
@@ -386,11 +376,10 @@ public:
                        Query(),
                        BSON("$set" << BSON("a.b"
                                            << "lllll")));
-        ASSERT(_client
-                   .findOne(ns(),
-                            BSON("a.b"
-                                 << "lllll"))
-                   .woCompare(fromjson("{'_id':0,a:{b:'lllll'}}")) == 0);
+        ASSERT(_client.findOne(ns(),
+                               BSON("a.b"
+                                    << "lllll")).woCompare(fromjson("{'_id':0,a:{b:'lllll'}}")) ==
+               0);
     }
 };
 
@@ -402,11 +391,10 @@ public:
                        BSONObj(),
                        BSON("$set" << BSON("a.b"
                                            << "lllll")));
-        ASSERT(_client
-                   .findOne(ns(),
-                            BSON("a.b"
-                                 << "lllll"))
-                   .woCompare(fromjson("{'_id':0,a:{b:'lllll'}}")) == 0);
+        ASSERT(_client.findOne(ns(),
+                               BSON("a.b"
+                                    << "lllll")).woCompare(fromjson("{'_id':0,a:{b:'lllll'}}")) ==
+               0);
     }
 };
 
@@ -497,7 +485,7 @@ public:
                        Query(),
                        BSON("$set" << BSON("z.0"
                                            << "a")));
-        ASSERT_BSONOBJ_EQ(_client.findOne(ns(), Query()), fromjson("{'_id':0,z:['a','b']}"));
+        ASSERT_EQUALS(_client.findOne(ns(), Query()), fromjson("{'_id':0,z:['a','b']}"));
     }
 };
 
@@ -515,7 +503,7 @@ public:
     void run() {
         _client.insert(ns(), fromjson("{'_id':0}"));
         _client.update(ns(), Query(), BSON("$set" << BSON("a" << 2 << "a.b" << 1)));
-        ASSERT_BSONOBJ_EQ(_client.findOne(ns(), Query()), fromjson("{'_id':0}"));
+        ASSERT_EQUALS(_client.findOne(ns(), Query()), fromjson("{'_id':0}"));
     }
 };
 
@@ -557,7 +545,7 @@ public:
     void run() {
         _client.insert(ns(), fromjson("{'_id':0,a:[1]}"));
         _client.update(ns(), Query(), BSON("$push" << BSON("a" << 5)));
-        ASSERT_BSONOBJ_EQ(_client.findOne(ns(), Query()), fromjson("{'_id':0,a:[1,5]}"));
+        ASSERT_EQUALS(_client.findOne(ns(), Query()), fromjson("{'_id':0,a:[1,5]}"));
     }
 };
 
@@ -584,7 +572,7 @@ public:
     void run() {
         _client.insert(ns(), fromjson("{'_id':0}"));
         _client.update(ns(), Query(), BSON("$push" << BSON("a" << 5)));
-        ASSERT_BSONOBJ_EQ(_client.findOne(ns(), Query()), fromjson("{'_id':0,a:[5]}"));
+        ASSERT_EQUALS(_client.findOne(ns(), Query()), fromjson("{'_id':0,a:[5]}"));
     }
 };
 
@@ -650,7 +638,7 @@ public:
         // { $push : { a : { $each : [ 2, 3 ] } } }
         BSONObj pushObj = BSON("$each" << BSON_ARRAY(2 << 3));
         _client.update(ns(), Query(), BSON("$push" << BSON("a" << pushObj)));
-        ASSERT_BSONOBJ_EQ(_client.findOne(ns(), Query()), fromjson("{'_id':0,a:[1,2,3]}"));
+        ASSERT_EQUALS(_client.findOne(ns(), Query()), fromjson("{'_id':0,a:[1,2,3]}"));
     }
 };
 
@@ -661,7 +649,7 @@ public:
         // { $push : { a : { $each : [ 1, 2, 3 ] } } }
         BSONObj pushObj = BSON("$each" << BSON_ARRAY(1 << 2 << 3));
         _client.update(ns(), Query(), BSON("$push" << BSON("a" << pushObj)));
-        ASSERT_BSONOBJ_EQ(_client.findOne(ns(), Query()), fromjson("{'_id':0,a:[1,2,3]}"));
+        ASSERT_EQUALS(_client.findOne(ns(), Query()), fromjson("{'_id':0,a:[1,2,3]}"));
     }
 };
 
@@ -672,7 +660,7 @@ public:
         // { $push : { a : { $each : [ 2 ] , $slice : -3 } } }
         BSONObj pushObj = BSON("$each" << BSON_ARRAY(2) << "$slice" << -3);
         _client.update(ns(), Query(), BSON("$push" << BSON("a" << pushObj)));
-        ASSERT_BSONOBJ_EQ(_client.findOne(ns(), Query()), fromjson("{'_id':0,a:[1,2]}"));
+        ASSERT_EQUALS(_client.findOne(ns(), Query()), fromjson("{'_id':0,a:[1,2]}"));
     }
 };
 
@@ -683,7 +671,7 @@ public:
         // { $push : { a : { $each : [ 2 ] , $slice : -2 } } }
         BSONObj pushObj = BSON("$each" << BSON_ARRAY(2) << "$slice" << -2);
         _client.update(ns(), Query(), BSON("$push" << BSON("a" << pushObj)));
-        ASSERT_BSONOBJ_EQ(_client.findOne(ns(), Query()), fromjson("{'_id':0,a:[1,2]}"));
+        ASSERT_EQUALS(_client.findOne(ns(), Query()), fromjson("{'_id':0,a:[1,2]}"));
     }
 };
 
@@ -694,7 +682,7 @@ public:
         // { $push : { a : { $each : [ 2 , 3 ] , $slice : -2 } } }
         BSONObj pushObj = BSON("$each" << BSON_ARRAY(2 << 3) << "$slice" << -2);
         _client.update(ns(), Query(), BSON("$push" << BSON("a" << pushObj)));
-        ASSERT_BSONOBJ_EQ(_client.findOne(ns(), Query()), fromjson("{'_id':0,a:[2,3]}"));
+        ASSERT_EQUALS(_client.findOne(ns(), Query()), fromjson("{'_id':0,a:[2,3]}"));
     }
 };
 
@@ -705,7 +693,7 @@ public:
         // { $push : { a : { $each : [ 3 ] , $slice : -2 } } }
         BSONObj pushObj = BSON("$each" << BSON_ARRAY(3) << "$slice" << -2);
         _client.update(ns(), Query(), BSON("$push" << BSON("a" << pushObj)));
-        ASSERT_BSONOBJ_EQ(_client.findOne(ns(), Query()), fromjson("{'_id':0,a:[2,3]}"));
+        ASSERT_EQUALS(_client.findOne(ns(), Query()), fromjson("{'_id':0,a:[2,3]}"));
     }
 };
 
@@ -716,7 +704,7 @@ public:
         // { $push : { a : { $each : [ 3 ] , $slice : 0 } } }
         BSONObj pushObj = BSON("$each" << BSON_ARRAY(3) << "$slice" << 0);
         _client.update(ns(), Query(), BSON("$push" << BSON("a" << pushObj)));
-        ASSERT_BSONOBJ_EQ(_client.findOne(ns(), Query()), fromjson("{'_id':0,a:[]}"));
+        ASSERT_EQUALS(_client.findOne(ns(), Query()), fromjson("{'_id':0,a:[]}"));
     }
 };
 
@@ -727,7 +715,7 @@ public:
         // { $push : { a : { $each : [ 3 ] , $slice : 0 } } }
         BSONObj pushObj = BSON("$each" << BSON_ARRAY(3) << "$slice" << 0);
         _client.update(ns(), Query(), BSON("$push" << BSON("a" << pushObj)));
-        ASSERT_BSONOBJ_EQ(_client.findOne(ns(), Query()), fromjson("{'_id':0,a:[]}"));
+        ASSERT_EQUALS(_client.findOne(ns(), Query()), fromjson("{'_id':0,a:[]}"));
     }
 };
 
@@ -738,7 +726,7 @@ public:
         // { $push : { a : { $each : [ 1 , 2 ] , $slice : -3 } } }
         BSONObj pushObj = BSON("$each" << BSON_ARRAY(1 << 2) << "$slice" << -3);
         _client.update(ns(), Query(), BSON("$push" << BSON("a" << pushObj)));
-        ASSERT_BSONOBJ_EQ(_client.findOne(ns(), Query()), fromjson("{'_id':0,a:[1,2]}"));
+        ASSERT_EQUALS(_client.findOne(ns(), Query()), fromjson("{'_id':0,a:[1,2]}"));
     }
 };
 
@@ -749,7 +737,7 @@ public:
         // { $push : { a : { $each : [ 1 , 2 , 3 ] , $slice : -2 } } }
         BSONObj pushObj = BSON("$each" << BSON_ARRAY(1 << 2 << 3) << "$slice" << -2);
         _client.update(ns(), Query(), BSON("$push" << BSON("a" << pushObj)));
-        ASSERT_BSONOBJ_EQ(_client.findOne(ns(), Query()), fromjson("{'_id':0,a:[2,3]}"));
+        ASSERT_EQUALS(_client.findOne(ns(), Query()), fromjson("{'_id':0,a:[2,3]}"));
     }
 };
 
@@ -760,7 +748,7 @@ public:
         // { $push : { a : { $each : [ 1 ] , $slice : -3 } } }
         BSONObj pushObj = BSON("$each" << BSON_ARRAY(1) << "$slice" << -3);
         _client.update(ns(), Query(), BSON("$push" << BSON("a" << pushObj)));
-        ASSERT_BSONOBJ_EQ(_client.findOne(ns(), Query()), fromjson("{'_id':0,a:[1]}"));
+        ASSERT_EQUALS(_client.findOne(ns(), Query()), fromjson("{'_id':0,a:[1]}"));
     }
 };
 
@@ -771,7 +759,7 @@ public:
         // { $push : { a : { $each : [ 1 , 2 , 3 ] , $slice : -2 } } }
         BSONObj pushObj = BSON("$each" << BSON_ARRAY(1 << 2 << 3) << "$slice" << -2);
         _client.update(ns(), Query(), BSON("$push" << BSON("a" << pushObj)));
-        ASSERT_BSONOBJ_EQ(_client.findOne(ns(), Query()), fromjson("{'_id':0,a:[2,3]}"));
+        ASSERT_EQUALS(_client.findOne(ns(), Query()), fromjson("{'_id':0,a:[2,3]}"));
     }
 };
 
@@ -783,7 +771,7 @@ public:
         BSONObj objA = BSON("$each" << BSON_ARRAY(5) << "$slice" << -2);
         BSONObj objB = BSON("$each" << BSON_ARRAY(6) << "$slice" << -1);
         _client.update(ns(), Query(), BSON("$push" << BSON("a" << objA << "b" << objB)));
-        ASSERT_BSONOBJ_EQ(_client.findOne(ns(), Query()), fromjson("{'_id':0,a:[2,5],b:[6]}"));
+        ASSERT_EQUALS(_client.findOne(ns(), Query()), fromjson("{'_id':0,a:[2,5],b:[6]}"));
     }
 };
 
@@ -794,7 +782,7 @@ public:
         // { $push : { a : { $each : [ 5 ] , $slice : -2 } , { b : 4 } }
         BSONObj objA = BSON("$each" << BSON_ARRAY(5) << "$slice" << -2);
         _client.update(ns(), Query(), BSON("$push" << BSON("a" << objA << "b" << 4)));
-        ASSERT_BSONOBJ_EQ(_client.findOne(ns(), Query()), fromjson("{'_id':0,a:[2,5],b:[3,4]}"));
+        ASSERT_EQUALS(_client.findOne(ns(), Query()), fromjson("{'_id':0,a:[2,5],b:[3,4]}"));
     }
 };
 
@@ -873,7 +861,7 @@ public:
         // { $push : { a : { $each : [ 3 ], $slice : -2.0 } } }
         BSONObj pushObj = BSON("$each" << BSON_ARRAY(3) << "$slice" << -2.0);
         _client.update(ns(), Query(), BSON("$push" << BSON("a" << pushObj)));
-        ASSERT_BSONOBJ_EQ(_client.findOne(ns(), Query()), fromjson("{'_id':0,a:[2,3]}"));
+        ASSERT_EQUALS(_client.findOne(ns(), Query()), fromjson("{'_id':0,a:[2,3]}"));
     }
 };
 
@@ -1014,7 +1002,7 @@ public:
                     _client.update(ns(), Query(), getUpdate(i));
                     result = _client.findOne(ns(), Query());
                     expected = fromjson("{'_id':0,x:[{a:1,b:1},{a:2,b:2}]}");
-                    ASSERT_BSONOBJ_EQ(result, expected);
+                    ASSERT_EQUALS(result, expected);
                     break;
 
                 case TOPK_DESC:
@@ -1022,7 +1010,7 @@ public:
                     _client.update(ns(), Query(), getUpdate(i));
                     result = _client.findOne(ns(), Query());
                     expected = fromjson("{'_id':0,x:[{a:2,b:2},{a:1,b:1}]}");
-                    ASSERT_BSONOBJ_EQ(result, expected);
+                    ASSERT_EQUALS(result, expected);
                     break;
             }
         }
@@ -1059,7 +1047,7 @@ public:
                     _client.update(ns(), Query(), getUpdate(i));
                     result = _client.findOne(ns(), Query());
                     expected = fromjson("{'_id':0,x:[{a:1,b:1},{a:2,b:2}]}");
-                    ASSERT_BSONOBJ_EQ(result, expected);
+                    ASSERT_EQUALS(result, expected);
                     break;
 
                 case TOPK_DESC:
@@ -1067,7 +1055,7 @@ public:
                     _client.update(ns(), Query(), getUpdate(i));
                     result = _client.findOne(ns(), Query());
                     expected = fromjson("{'_id':0,x:[{a:2,b:2},{a:1,b:1}]}");
-                    ASSERT_BSONOBJ_EQ(result, expected);
+                    ASSERT_EQUALS(result, expected);
                     break;
             }
         }
@@ -1103,14 +1091,14 @@ public:
                     _client.update(ns(), Query(), getUpdate(i));
                     result = _client.findOne(ns(), Query());
                     expected = fromjson("{'_id':0,x:[{a:2,b:2},{a:3,b:3}]}");
-                    ASSERT_BSONOBJ_EQ(result, expected);
+                    ASSERT_EQUALS(result, expected);
                     break;
 
                 case TOPK_DESC:
                     _client.update(ns(), Query(), getUpdate(i));
                     result = _client.findOne(ns(), Query());
                     expected = fromjson("{'_id':0,x:[{a:2,b:2},{a:1,b:1}]}");
-                    ASSERT_BSONOBJ_EQ(result, expected);
+                    ASSERT_EQUALS(result, expected);
                     break;
 
                 case BOTTOMK_ASC:
@@ -1150,7 +1138,7 @@ public:
             _client.update(ns(), Query(), getUpdate(i));
             result = _client.findOne(ns(), Query());
             expected = fromjson("{'_id':0,x:[]}");
-            ASSERT_BSONOBJ_EQ(result, expected);
+            ASSERT_EQUALS(result, expected);
         }
     }
 };
@@ -1183,7 +1171,7 @@ public:
             _client.update(ns(), Query(), getUpdate(i));
             result = _client.findOne(ns(), Query());
             expected = fromjson("{'_id':0,x:[]}");
-            ASSERT_BSONOBJ_EQ(result, expected);
+            ASSERT_EQUALS(result, expected);
         }
     }
 };
@@ -1220,7 +1208,7 @@ public:
                     _client.update(ns(), Query(), getUpdate(i));
                     result = _client.findOne(ns(), Query());
                     expected = fromjson("{'_id':0,x:[{a:1,b:1},{a:2,b:2}]}");
-                    ASSERT_BSONOBJ_EQ(result, expected);
+                    ASSERT_EQUALS(result, expected);
                     break;
 
                 case TOPK_DESC:
@@ -1228,7 +1216,7 @@ public:
                     _client.update(ns(), Query(), getUpdate(i));
                     result = _client.findOne(ns(), Query());
                     expected = fromjson("{'_id':0,x:[{a:2,b:2},{a:1,b:1}]}");
-                    ASSERT_BSONOBJ_EQ(result, expected);
+                    ASSERT_EQUALS(result, expected);
                     break;
             }
         }
@@ -1265,14 +1253,14 @@ public:
                     _client.update(ns(), Query(), getUpdate(i));
                     result = _client.findOne(ns(), Query());
                     expected = fromjson("{'_id':0,x:[{a:2,b:2},{a:3,b:3}]}");
-                    ASSERT_BSONOBJ_EQ(result, expected);
+                    ASSERT_EQUALS(result, expected);
                     break;
 
                 case TOPK_DESC:
                     _client.update(ns(), Query(), getUpdate(i));
                     result = _client.findOne(ns(), Query());
                     expected = fromjson("{'_id':0,x:[{a:2,b:2},{a:1,b:1}]}");
-                    ASSERT_BSONOBJ_EQ(result, expected);
+                    ASSERT_EQUALS(result, expected);
                     break;
 
                 case BOTTOMK_ASC:
@@ -1315,7 +1303,7 @@ public:
                     _client.update(ns(), Query(), getUpdate(i));
                     result = _client.findOne(ns(), Query());
                     expected = fromjson("{'_id':0,x:[{a:1,b:1},{a:2,b:2}]}");
-                    ASSERT_BSONOBJ_EQ(result, expected);
+                    ASSERT_EQUALS(result, expected);
                     break;
 
                 case TOPK_DESC:
@@ -1323,7 +1311,7 @@ public:
                     _client.update(ns(), Query(), getUpdate(i));
                     result = _client.findOne(ns(), Query());
                     expected = fromjson("{'_id':0,x:[{a:2,b:2},{a:1,b:1}]}");
-                    ASSERT_BSONOBJ_EQ(result, expected);
+                    ASSERT_EQUALS(result, expected);
                     break;
             }
         }
@@ -1360,14 +1348,14 @@ public:
                     _client.update(ns(), Query(), getUpdate(i));
                     result = _client.findOne(ns(), Query());
                     expected = fromjson("{'_id':0,x:[{a:2,b:2},{a:3,b:3}]}");
-                    ASSERT_BSONOBJ_EQ(result, expected);
+                    ASSERT_EQUALS(result, expected);
                     break;
 
                 case TOPK_DESC:
                     _client.update(ns(), Query(), getUpdate(i));
                     result = _client.findOne(ns(), Query());
                     expected = fromjson("{'_id':0,x:[{a:2,b:2},{a:1,b:1}]}");
-                    ASSERT_BSONOBJ_EQ(result, expected);
+                    ASSERT_EQUALS(result, expected);
                     break;
 
                 case BOTTOMK_ASC:
@@ -1394,8 +1382,8 @@ struct ProjectKeyCmp {
     ProjectKeyCmp(BSONObj pattern) : sortPattern(pattern) {}
 
     int operator()(const BSONObj& left, const BSONObj& right) const {
-        BSONObj keyLeft = dps::extractElementsBasedOnTemplate(left, sortPattern, true);
-        BSONObj keyRight = dps::extractElementsBasedOnTemplate(right, sortPattern, true);
+        BSONObj keyLeft = left.extractFields(sortPattern, true);
+        BSONObj keyRight = right.extractFields(sortPattern, true);
         return keyLeft.woCompare(keyRight, sortPattern) < 0;
     }
 };
@@ -1417,9 +1405,9 @@ public:
 
         sort(workArea.begin(), workArea.end(), ProjectKeyCmp(BSON("b" << 1 << "a" << -1)));
 
-        ASSERT_BSONOBJ_EQ(workArea[0], objs[1]);
-        ASSERT_BSONOBJ_EQ(workArea[1], objs[0]);
-        ASSERT_BSONOBJ_EQ(workArea[2], objs[2]);
+        ASSERT_EQUALS(workArea[0], objs[1]);
+        ASSERT_EQUALS(workArea[1], objs[0]);
+        ASSERT_EQUALS(workArea[2], objs[2]);
     }
 };
 
@@ -1438,9 +1426,9 @@ public:
 
         sort(workArea.begin(), workArea.end(), ProjectKeyCmp(BSON("a" << 1 << "b" << 1)));
 
-        ASSERT_BSONOBJ_EQ(workArea[0], objs[0]);
-        ASSERT_BSONOBJ_EQ(workArea[1], objs[2]);
-        ASSERT_BSONOBJ_EQ(workArea[2], objs[1]);
+        ASSERT_EQUALS(workArea[0], objs[0]);
+        ASSERT_EQUALS(workArea[1], objs[2]);
+        ASSERT_EQUALS(workArea[2], objs[1]);
     }
 };
 
@@ -1459,9 +1447,9 @@ public:
 
         sort(workArea.begin(), workArea.end(), ProjectKeyCmp(BSON("a" << 1 << "b" << 1)));
 
-        ASSERT_BSONOBJ_EQ(workArea[0], objs[0]);
-        ASSERT_BSONOBJ_EQ(workArea[1], objs[2]);
-        ASSERT_BSONOBJ_EQ(workArea[2], objs[1]);
+        ASSERT_EQUALS(workArea[0], objs[0]);
+        ASSERT_EQUALS(workArea[1], objs[2]);
+        ASSERT_EQUALS(workArea[2], objs[1]);
     }
 };
 
@@ -1480,9 +1468,9 @@ public:
 
         sort(workArea.begin(), workArea.end(), ProjectKeyCmp(BSON("b" << 1 << "c" << 1)));
 
-        ASSERT_BSONOBJ_EQ(workArea[0], objs[1]);
-        ASSERT_BSONOBJ_EQ(workArea[1], objs[0]);
-        ASSERT_BSONOBJ_EQ(workArea[2], objs[2]);
+        ASSERT_EQUALS(workArea[0], objs[1]);
+        ASSERT_EQUALS(workArea[1], objs[0]);
+        ASSERT_EQUALS(workArea[2], objs[2]);
     }
 };
 
@@ -1501,15 +1489,15 @@ public:
 
         sort(workArea.begin(), workArea.end(), ProjectKeyCmp(fromjson("{'a.b.d':-1}")));
 
-        ASSERT_BSONOBJ_EQ(workArea[0], objs[1]);
-        ASSERT_BSONOBJ_EQ(workArea[1], objs[2]);
-        ASSERT_BSONOBJ_EQ(workArea[2], objs[0]);
+        ASSERT_EQUALS(workArea[0], objs[1]);
+        ASSERT_EQUALS(workArea[1], objs[2]);
+        ASSERT_EQUALS(workArea[2], objs[0]);
 
         sort(workArea.begin(), workArea.end(), ProjectKeyCmp(fromjson("{'a.b':1}")));
 
-        ASSERT_BSONOBJ_EQ(workArea[0], objs[1]);
-        ASSERT_BSONOBJ_EQ(workArea[1], objs[0]);
-        ASSERT_BSONOBJ_EQ(workArea[2], objs[2]);
+        ASSERT_EQUALS(workArea[0], objs[1]);
+        ASSERT_EQUALS(workArea[1], objs[0]);
+        ASSERT_EQUALS(workArea[2], objs[2]);
     }
 };
 
@@ -1527,7 +1515,7 @@ public:
                                        << BSON("a..d" << 1));
         _client.update(ns(), Query(), BSON("$push" << BSON("x" << pushObj)));
         BSONObj result = _client.findOne(ns(), Query());
-        ASSERT_BSONOBJ_EQ(result, expected);
+        ASSERT_EQUALS(result, expected);
 
 
         // { $push : { x : { $each : [ {a:3} ], $slice:-2, $sort : {a.:1} } } }
@@ -1535,28 +1523,28 @@ public:
                                << BSON("a." << 1));
         _client.update(ns(), Query(), BSON("$push" << BSON("x" << pushObj)));
         result = _client.findOne(ns(), Query());
-        ASSERT_BSONOBJ_EQ(result, expected);
+        ASSERT_EQUALS(result, expected);
 
         // { $push : { x : { $each : [ {a:3} ], $slice:-2, $sort : {.b:1} } } }
         pushObj = BSON("$each" << BSON_ARRAY(BSON("a" << 3)) << "$slice" << -2 << "$sort"
                                << BSON(".b" << 1));
         _client.update(ns(), Query(), BSON("$push" << BSON("x" << pushObj)));
         result = _client.findOne(ns(), Query());
-        ASSERT_BSONOBJ_EQ(result, expected);
+        ASSERT_EQUALS(result, expected);
 
         // { $push : { x : { $each : [ {a:3} ], $slice:-2, $sort : {.:1} } } }
         pushObj = BSON("$each" << BSON_ARRAY(BSON("a" << 3)) << "$slice" << -2 << "$sort"
                                << BSON("." << 1));
         _client.update(ns(), Query(), BSON("$push" << BSON("x" << pushObj)));
         result = _client.findOne(ns(), Query());
-        ASSERT_BSONOBJ_EQ(result, expected);
+        ASSERT_EQUALS(result, expected);
 
         // { $push : { x : { $each : [ {a:3} ], $slice:-2, $sort : {'':1} } } }
         pushObj = BSON("$each" << BSON_ARRAY(BSON("a" << 3)) << "$slice" << -2 << "$sort"
                                << BSON("" << 1));
         _client.update(ns(), Query(), BSON("$push" << BSON("x" << pushObj)));
         result = _client.findOne(ns(), Query());
-        ASSERT_BSONOBJ_EQ(result, expected);
+        ASSERT_EQUALS(result, expected);
     }
 };
 
@@ -1570,7 +1558,7 @@ public:
             BSON("$each" << BSON_ARRAY(3) << "$slice" << -2 << "$sort" << BSON("a" << 1));
         _client.update(ns(), Query(), BSON("$push" << BSON("x" << pushObj)));
         BSONObj result = _client.findOne(ns(), Query());
-        ASSERT_BSONOBJ_EQ(result, expected);
+        ASSERT_EQUALS(result, expected);
     }
 };
 
@@ -1584,7 +1572,7 @@ public:
             BSON("$each" << BSON_ARRAY(BSON("a" << 3)) << "$slice" << -2 << "$sort" << 2);
         _client.update(ns(), Query(), BSON("$push" << BSON("x" << pushObj)));
         BSONObj result = _client.findOne(ns(), Query());
-        ASSERT_BSONOBJ_EQ(result, expected);
+        ASSERT_EQUALS(result, expected);
     }
 };
 
@@ -1598,7 +1586,7 @@ public:
                                        << BSON("a" << 1));
         _client.update(ns(), Query(), BSON("$push" << BSON("x" << pushObj)));
         BSONObj result = _client.findOne(ns(), Query());
-        ASSERT_BSONOBJ_EQ(result, expected);
+        ASSERT_EQUALS(result, expected);
     }
 };
 
@@ -1612,7 +1600,7 @@ public:
                                        << BSON("a" << 1));
         _client.update(ns(), Query(), BSON("$push" << BSON("x" << pushObj)));
         BSONObj result = _client.findOne(ns(), Query());
-        ASSERT_BSONOBJ_EQ(result, expected);
+        ASSERT_EQUALS(result, expected);
     }
 };
 
@@ -1626,7 +1614,7 @@ public:
         _client.update(ns(), Query(), BSON("$push" << BSON("x" << pushObj)));
         BSONObj expected = fromjson("{'_id':0,x:[{a:2},{a:3}]}");
         BSONObj result = _client.findOne(ns(), Query());
-        ASSERT_BSONOBJ_EQ(result, expected);
+        ASSERT_EQUALS(result, expected);
     }
 };
 
@@ -1640,7 +1628,7 @@ public:
                                        << BSON_ARRAY(2 << 1));
         _client.update(ns(), Query(), BSON("$push" << BSON("x" << pushObj)));
         BSONObj result = _client.findOne(ns(), Query());
-        ASSERT_BSONOBJ_EQ(result, expected);
+        ASSERT_EQUALS(result, expected);
     }
 };
 
@@ -1654,7 +1642,7 @@ public:
                                        << BSON("a" << 10));
         _client.update(ns(), Query(), BSON("$push" << BSON("x" << pushObj)));
         BSONObj result = _client.findOne(ns(), Query());
-        ASSERT_BSONOBJ_EQ(result, expected);
+        ASSERT_EQUALS(result, expected);
     }
 };
 
@@ -1663,12 +1651,12 @@ public:
     void run() {
         _client.insert(ns(), fromjson("{'_id':0,x:[{a:1},{a:3}]}"));
         // { $push : { x : { $each : [ {a:2} ], $sort: {a:1}, $slice:-2 } } }
-        BSONObj pushObj = BSON(
-            "$each" << BSON_ARRAY(BSON("a" << 2)) << "$sort" << BSON("a" << 1) << "$slice" << -2.0);
+        BSONObj pushObj = BSON("$each" << BSON_ARRAY(BSON("a" << 2)) << "$sort" << BSON("a" << 1)
+                                       << "$slice" << -2.0);
         _client.update(ns(), Query(), BSON("$push" << BSON("x" << pushObj)));
         BSONObj expected = fromjson("{'_id':0,x:[{a:2},{a:3}]}");
         BSONObj result = _client.findOne(ns(), Query());
-        ASSERT_BSONOBJ_EQ(result, expected);
+        ASSERT_EQUALS(result, expected);
     }
 };
 
@@ -1678,12 +1666,11 @@ public:
         BSONObj expected = fromjson("{'_id':0,x:[{a:1},{a:3}]}");
         _client.insert(ns(), expected);
         // { $push : { x : { $each : [ {a:2} ], $sort : {a:1}, $sort: {a:1} } } }
-        BSONObj pushObj =
-            BSON("$each" << BSON_ARRAY(BSON("a" << 2)) << "$sort" << BSON("a" << 1) << "$sort"
-                         << BSON("a" << 1));
+        BSONObj pushObj = BSON("$each" << BSON_ARRAY(BSON("a" << 2)) << "$sort" << BSON("a" << 1)
+                                       << "$sort" << BSON("a" << 1));
         _client.update(ns(), Query(), BSON("$push" << BSON("x" << pushObj)));
         BSONObj result = _client.findOne(ns(), Query());
-        ASSERT_BSONOBJ_EQ(result, expected);
+        ASSERT_EQUALS(result, expected);
     }
 };
 
@@ -1720,10 +1707,9 @@ public:
         ASSERT_OK(dbtests::createIndex(&_txn, ns(), BSON("a" << 1)));
         _client.insert(ns(), fromjson("{'_id':0}"));
         _client.update(ns(), Query(), fromjson("{$set:{'a.b':4}}"));
-        ASSERT_BSONOBJ_EQ(fromjson("{'_id':0,a:{b:4}}"), _client.findOne(ns(), Query()));
-        ASSERT_BSONOBJ_EQ(
-            fromjson("{'_id':0,a:{b:4}}"),
-            _client.findOne(ns(), fromjson("{'a.b':4}")));  // make sure the index works
+        ASSERT_EQUALS(fromjson("{'_id':0,a:{b:4}}"), _client.findOne(ns(), Query()));
+        ASSERT_EQUALS(fromjson("{'_id':0,a:{b:4}}"),
+                      _client.findOne(ns(), fromjson("{'a.b':4}")));  // make sure the index works
     }
 };
 
@@ -1760,11 +1746,9 @@ public:
         _client.insert(
             ns(), BSON("_id" << 0 << "a" << 1 << "x" << BSONObj() << "x" << BSONObj() << "z" << 5));
         _client.update(ns(), BSONObj(), BSON("$set" << BSON("x.b" << 1 << "x.c" << 1)));
-        ASSERT_BSONOBJ_EQ(BSON("_id" << 0 << "a" << 1 << "x" << BSON("b" << 1 << "c" << 1) << "x"
-                                     << BSONObj()
-                                     << "z"
-                                     << 5),
-                          _client.findOne(ns(), BSONObj()));
+        ASSERT_EQUALS(BSON("_id" << 0 << "a" << 1 << "x" << BSON("b" << 1 << "c" << 1) << "x"
+                                 << BSONObj() << "z" << 5),
+                      _client.findOne(ns(), BSONObj()));
     }
 };
 
@@ -1776,11 +1760,9 @@ public:
             ns(), BSON("_id" << 0 << "x" << BSONObj() << "x" << BSONObj() << "x" << BSONObj()));
         _client.update(
             ns(), BSONObj(), BSON("$set" << BSON("x.b" << 1 << "x.c" << 1 << "x.d" << 1)));
-        ASSERT_BSONOBJ_EQ(BSON("_id" << 0 << "x" << BSON("b" << 1 << "c" << 1 << "d" << 1) << "x"
-                                     << BSONObj()
-                                     << "x"
-                                     << BSONObj()),
-                          _client.findOne(ns(), BSONObj()));
+        ASSERT_EQUALS(BSON("_id" << 0 << "x" << BSON("b" << 1 << "c" << 1 << "d" << 1) << "x"
+                                 << BSONObj() << "x" << BSONObj()),
+                      _client.findOne(ns(), BSONObj()));
     }
 };
 
@@ -1821,7 +1803,7 @@ protected:
         _client.dropCollection(ns());
         insert(initial);
         update(mod);
-        ASSERT_BSONOBJ_EQ(after, findOne());
+        ASSERT_EQUALS(after, findOne());
         _client.dropCollection(ns());
     }
 

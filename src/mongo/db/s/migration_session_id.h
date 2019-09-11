@@ -56,12 +56,13 @@ public:
 
     /**
      * Extracts the session id from BSON. If the session id is missing from the BSON contents,
-     * returns a NoSuchKey error.
+     * returns an empty MigrationSessionId.
      */
     static StatusWith<MigrationSessionId> extractFromBSON(const BSONObj& obj);
 
     /**
-     * Compares two session identifiers. Two idendifiers match only if they are the same.
+     * Compares two session identifiers. Two idendifiers match if either both are empty (_sessionId
+     * is not set) or if the session ids match.
      */
     bool matches(const MigrationSessionId& other) const;
 
@@ -72,10 +73,13 @@ public:
 
     std::string toString() const;
 
+    bool isEmpty() const;
+
 private:
+    MigrationSessionId();
     explicit MigrationSessionId(std::string sessionId);
 
-    std::string _sessionId;
+    boost::optional<std::string> _sessionId{boost::none};
 };
 
 }  // namespace mongo

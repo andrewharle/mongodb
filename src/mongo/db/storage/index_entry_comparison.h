@@ -32,7 +32,6 @@
 #include <tuple>
 #include <vector>
 
-#include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/record_id.h"
 
@@ -52,11 +51,11 @@ struct IndexKeyEntry {
 std::ostream& operator<<(std::ostream& stream, const IndexKeyEntry& entry);
 
 inline bool operator==(const IndexKeyEntry& lhs, const IndexKeyEntry& rhs) {
-    return SimpleBSONObjComparator::kInstance.evaluate(lhs.key == rhs.key) && (lhs.loc == rhs.loc);
+    return std::tie(lhs.key, lhs.loc) == std::tie(rhs.key, rhs.loc);
 }
 
 inline bool operator!=(const IndexKeyEntry& lhs, const IndexKeyEntry& rhs) {
-    return !(lhs == rhs);
+    return std::tie(lhs.key, lhs.loc) != std::tie(rhs.key, rhs.loc);
 }
 
 /**

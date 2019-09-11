@@ -28,7 +28,6 @@
 
 #pragma once
 
-#include "mongo/base/data_cursor.h"
 #include "mongo/platform/basic.h"
 
 namespace mongo {
@@ -43,16 +42,18 @@ struct Checksum {
     void gen(const void* buf, unsigned len) {
         wassert(((size_t)buf) % 8 == 0);  // performance warning
         unsigned n = len / 8 / 2;
-        ConstDataCursor cdc(static_cast<const char*>(buf));
-        uint64_t a = 0;
+        const unsigned long long* p = (const unsigned long long*)buf;
+        unsigned long long a = 0;
         for (unsigned i = 0; i < n; i++) {
-            a += (cdc.readAndAdvance<LittleEndian<uint64_t>>() ^ i);
+            a += (*p ^ i);
+            p++;
         }
-        uint64_t b = 0;
+        unsigned long long b = 0;
         for (unsigned i = 0; i < n; i++) {
-            b += (cdc.readAndAdvance<LittleEndian<uint64_t>>() ^ i);
+            b += (*p ^ i);
+            p++;
         }
-        uint64_t c = 0;
+        unsigned long long c = 0;
         for (unsigned i = n * 2 * 8; i < len; i++) {  // 0-7 bytes left
             c = (c << 8) | ((const signed char*)buf)[i];
         }

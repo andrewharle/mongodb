@@ -28,8 +28,8 @@
 
 #pragma once
 
-#include <map>
 #include <string>
+#include <map>
 #include <vector>
 
 #include "mongo/base/disallow_copying.h"

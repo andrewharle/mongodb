@@ -34,6 +34,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include "mongo/base/string_data.h"
@@ -45,7 +46,6 @@
 #include "mongo/dbtests/mock/mock_conn_registry.h"
 #include "mongo/dbtests/mock/mock_replica_set.h"
 #include "mongo/rpc/metadata/server_selection_metadata.h"
-#include "mongo/stdx/unordered_set.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 
@@ -77,6 +77,9 @@ protected:
     void setUp() {
         ReplicaSetMonitor::cleanup();
 
+        // Set the number of consecutive failed checks to 2 so the test doesn't run too long
+        ReplicaSetMonitor::maxConsecutiveFailedChecks = 2;
+
         _replSet.reset(new MockReplicaSet("test", 2));
         ConnectionString::setConnectionHook(mongo::MockConnRegistry::get()->getConnStrHook());
     }
@@ -99,14 +102,14 @@ private:
 void assertOneOfNodesSelected(MockReplicaSet* replSet,
                               ReadPreference rp,
                               const std::vector<std::string> hostNames) {
-    DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts(), StringData());
+    DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts());
     ReplicaSetMonitor::get(replSet->getSetName())->startOrContinueRefresh().refreshAll();
     bool secondaryOk = (rp != ReadPreference::PrimaryOnly);
     auto tagSet = secondaryOk ? TagSet() : TagSet::primaryOnly();
     // We need the command to be a "SecOk command"
     auto res = replConn.runCommandWithMetadata(
         "foo", "dbStats", makeMetadata(rp, tagSet, secondaryOk), BSON("dbStats" << 1));
-    stdx::unordered_set<HostAndPort> hostSet;
+    std::unordered_set<HostAndPort> hostSet;
     for (const auto& hostName : hostNames) {
         hostSet.emplace(hostName);
     }
@@ -119,7 +122,7 @@ void assertNodeSelected(MockReplicaSet* replSet, ReadPreference rp, StringData h
 
 TEST_F(BasicRS, QueryPrimary) {
     MockReplicaSet* replSet = getReplSet();
-    DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts(), StringData());
+    DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts());
 
     Query query;
     query.readPref(mongo::ReadPreference::PrimaryOnly, BSONArray());
@@ -136,7 +139,7 @@ TEST_F(BasicRS, CommandPrimary) {
 
 TEST_F(BasicRS, QuerySecondaryOnly) {
     MockReplicaSet* replSet = getReplSet();
-    DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts(), StringData());
+    DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts());
 
     Query query;
     query.readPref(mongo::ReadPreference::SecondaryOnly, BSONArray());
@@ -154,7 +157,7 @@ TEST_F(BasicRS, CommandSecondaryOnly) {
 
 TEST_F(BasicRS, QueryPrimaryPreferred) {
     MockReplicaSet* replSet = getReplSet();
-    DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts(), StringData());
+    DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts());
 
     // Need up-to-date view, since either host is valid if view is stale.
     ReplicaSetMonitor::get(replSet->getSetName())->startOrContinueRefresh().refreshAll();
@@ -174,7 +177,7 @@ TEST_F(BasicRS, CommandPrimaryPreferred) {
 
 TEST_F(BasicRS, QuerySecondaryPreferred) {
     MockReplicaSet* replSet = getReplSet();
-    DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts(), StringData());
+    DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts());
 
     // Need up-to-date view, since either host is valid if view is stale.
     ReplicaSetMonitor::get(replSet->getSetName())->startOrContinueRefresh().refreshAll();
@@ -200,6 +203,9 @@ class AllNodesDown : public unittest::Test {
 protected:
     void setUp() {
         ReplicaSetMonitor::cleanup();
+
+        // Set the number of consecutive failed checks to 2 so the test doesn't run too long
+        ReplicaSetMonitor::maxConsecutiveFailedChecks = 2;
 
         _replSet.reset(new MockReplicaSet("test", 2));
         ConnectionString::setConnectionHook(mongo::MockConnRegistry::get()->getConnStrHook());
@@ -232,7 +238,7 @@ void assertRunCommandWithReadPrefThrows(MockReplicaSet* replSet, ReadPreference 
     bool secondaryOk = !isPrimaryOnly;
     TagSet ts = isPrimaryOnly ? TagSet::primaryOnly() : TagSet();
 
-    DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts(), StringData());
+    DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts());
     ASSERT_THROWS(replConn.runCommandWithMetadata(
                       "foo", "whoami", makeMetadata(rp, ts, secondaryOk), BSON("dbStats" << 1)),
                   AssertionException);
@@ -240,7 +246,7 @@ void assertRunCommandWithReadPrefThrows(MockReplicaSet* replSet, ReadPreference 
 
 TEST_F(AllNodesDown, QueryPrimary) {
     MockReplicaSet* replSet = getReplSet();
-    DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts(), StringData());
+    DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts());
 
     Query query;
     query.readPref(mongo::ReadPreference::PrimaryOnly, BSONArray());
@@ -253,7 +259,7 @@ TEST_F(AllNodesDown, CommandPrimary) {
 
 TEST_F(AllNodesDown, QuerySecondaryOnly) {
     MockReplicaSet* replSet = getReplSet();
-    DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts(), StringData());
+    DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts());
 
     Query query;
     query.readPref(mongo::ReadPreference::SecondaryOnly, BSONArray());
@@ -266,7 +272,7 @@ TEST_F(AllNodesDown, CommandSecondaryOnly) {
 
 TEST_F(AllNodesDown, QueryPrimaryPreferred) {
     MockReplicaSet* replSet = getReplSet();
-    DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts(), StringData());
+    DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts());
 
     Query query;
     query.readPref(mongo::ReadPreference::PrimaryPreferred, BSONArray());
@@ -279,7 +285,7 @@ TEST_F(AllNodesDown, CommandPrimaryPreferred) {
 
 TEST_F(AllNodesDown, QuerySecondaryPreferred) {
     MockReplicaSet* replSet = getReplSet();
-    DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts(), StringData());
+    DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts());
 
     Query query;
     query.readPref(mongo::ReadPreference::SecondaryPreferred, BSONArray());
@@ -292,7 +298,7 @@ TEST_F(AllNodesDown, CommandSecondaryPreferred) {
 
 TEST_F(AllNodesDown, QueryNearest) {
     MockReplicaSet* replSet = getReplSet();
-    DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts(), StringData());
+    DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts());
 
     Query query;
     query.readPref(mongo::ReadPreference::Nearest, BSONArray());
@@ -310,6 +316,9 @@ class PrimaryDown : public unittest::Test {
 protected:
     void setUp() {
         ReplicaSetMonitor::cleanup();
+
+        // Set the number of consecutive failed checks to 2 so the test doesn't run too long
+        ReplicaSetMonitor::maxConsecutiveFailedChecks = 2;
 
         _replSet.reset(new MockReplicaSet("test", 2));
         ConnectionString::setConnectionHook(mongo::MockConnRegistry::get()->getConnStrHook());
@@ -333,7 +342,7 @@ private:
 
 TEST_F(PrimaryDown, QueryPrimary) {
     MockReplicaSet* replSet = getReplSet();
-    DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts(), StringData());
+    DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts());
 
     Query query;
     query.readPref(mongo::ReadPreference::PrimaryOnly, BSONArray());
@@ -346,7 +355,7 @@ TEST_F(PrimaryDown, CommandPrimary) {
 
 TEST_F(PrimaryDown, QuerySecondaryOnly) {
     MockReplicaSet* replSet = getReplSet();
-    DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts(), StringData());
+    DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts());
 
     Query query;
     query.readPref(mongo::ReadPreference::SecondaryOnly, BSONArray());
@@ -364,7 +373,7 @@ TEST_F(PrimaryDown, CommandSecondaryOnly) {
 
 TEST_F(PrimaryDown, QueryPrimaryPreferred) {
     MockReplicaSet* replSet = getReplSet();
-    DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts(), StringData());
+    DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts());
 
     Query query;
     query.readPref(mongo::ReadPreference::PrimaryPreferred, BSONArray());
@@ -382,7 +391,7 @@ TEST_F(PrimaryDown, CommandPrimaryPreferred) {
 
 TEST_F(PrimaryDown, QuerySecondaryPreferred) {
     MockReplicaSet* replSet = getReplSet();
-    DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts(), StringData());
+    DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts());
 
     Query query;
     query.readPref(mongo::ReadPreference::SecondaryPreferred, BSONArray());
@@ -400,7 +409,7 @@ TEST_F(PrimaryDown, CommandSecondaryPreferred) {
 
 TEST_F(PrimaryDown, Nearest) {
     MockReplicaSet* replSet = getReplSet();
-    DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts(), StringData());
+    DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts());
 
     Query query;
     query.readPref(mongo::ReadPreference::Nearest, BSONArray());
@@ -416,6 +425,9 @@ class SecondaryDown : public unittest::Test {
 protected:
     void setUp() {
         ReplicaSetMonitor::cleanup();
+
+        // Set the number of consecutive failed checks to 2 so the test doesn't run too long
+        ReplicaSetMonitor::maxConsecutiveFailedChecks = 2;
 
         _replSet.reset(new MockReplicaSet("test", 2));
         ConnectionString::setConnectionHook(mongo::MockConnRegistry::get()->getConnStrHook());
@@ -440,7 +452,7 @@ private:
 
 TEST_F(SecondaryDown, QueryPrimary) {
     MockReplicaSet* replSet = getReplSet();
-    DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts(), StringData());
+    DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts());
 
     Query query;
     query.readPref(mongo::ReadPreference::PrimaryOnly, BSONArray());
@@ -457,7 +469,7 @@ TEST_F(SecondaryDown, CommandPrimary) {
 
 TEST_F(SecondaryDown, QuerySecondaryOnly) {
     MockReplicaSet* replSet = getReplSet();
-    DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts(), StringData());
+    DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts());
 
     Query query;
     query.readPref(mongo::ReadPreference::SecondaryOnly, BSONArray());
@@ -470,7 +482,7 @@ TEST_F(SecondaryDown, CommandSecondaryOnly) {
 
 TEST_F(SecondaryDown, QueryPrimaryPreferred) {
     MockReplicaSet* replSet = getReplSet();
-    DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts(), StringData());
+    DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts());
 
     Query query;
     query.readPref(mongo::ReadPreference::PrimaryPreferred, BSONArray());
@@ -487,7 +499,7 @@ TEST_F(SecondaryDown, CommandPrimaryPreferred) {
 
 TEST_F(SecondaryDown, QuerySecondaryPreferred) {
     MockReplicaSet* replSet = getReplSet();
-    DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts(), StringData());
+    DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts());
 
     Query query;
     query.readPref(mongo::ReadPreference::SecondaryPreferred, BSONArray());
@@ -504,7 +516,7 @@ TEST_F(SecondaryDown, CommandSecondaryPreferred) {
 
 TEST_F(SecondaryDown, QueryNearest) {
     MockReplicaSet* replSet = getReplSet();
-    DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts(), StringData());
+    DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts());
 
     Query query;
     query.readPref(mongo::ReadPreference::Nearest, BSONArray());
@@ -533,12 +545,15 @@ protected:
         // tests depend on controlling when the RSMs are updated.
         ReplicaSetMonitor::cleanup();
 
+        // Set the number of consecutive failed checks to 2 so the test doesn't run too long
+        ReplicaSetMonitor::maxConsecutiveFailedChecks = 2;
+
         _replSet.reset(new MockReplicaSet("test", 5));
         _originalConnectionHook = ConnectionString::getConnectionHook();
         ConnectionString::setConnectionHook(mongo::MockConnRegistry::get()->getConnStrHook());
 
         {
-            mongo::repl::ReplSetConfig oldConfig = _replSet->getReplConfig();
+            mongo::repl::ReplicaSetConfig oldConfig = _replSet->getReplConfig();
 
             mongo::BSONObjBuilder newConfigBuilder;
             newConfigBuilder.append("_id", oldConfig.getReplSetName());
@@ -616,7 +631,7 @@ protected:
             }
 
             membersBuilder.done();
-            mongo::repl::ReplSetConfig newConfig;
+            mongo::repl::ReplicaSetConfig newConfig;
             fassert(28569, newConfig.initialize(newConfigBuilder.done()));
             fassert(28568, newConfig.validate());
             _replSet->setConfig(newConfig);
@@ -647,7 +662,7 @@ TEST_F(TaggedFiveMemberRS, ConnShouldPinIfSameSettings) {
     vector<HostAndPort> seedList;
     seedList.push_back(HostAndPort(replSet->getPrimary()));
 
-    DBClientReplicaSet replConn(replSet->getSetName(), seedList, StringData());
+    DBClientReplicaSet replConn(replSet->getSetName(), seedList);
 
     string dest;
     {
@@ -675,7 +690,7 @@ TEST_F(TaggedFiveMemberRS, ConnShouldNotPinIfHostMarkedAsFailed) {
     vector<HostAndPort> seedList;
     seedList.push_back(HostAndPort(replSet->getPrimary()));
 
-    DBClientReplicaSet replConn(replSet->getSetName(), seedList, StringData());
+    DBClientReplicaSet replConn(replSet->getSetName(), seedList);
 
     string dest;
     {
@@ -709,7 +724,7 @@ TEST_F(TaggedFiveMemberRS, ConnShouldNotPinIfDiffMode) {
     vector<HostAndPort> seedList;
     seedList.push_back(HostAndPort(replSet->getPrimary()));
 
-    DBClientReplicaSet replConn(replSet->getSetName(), seedList, StringData());
+    DBClientReplicaSet replConn(replSet->getSetName(), seedList);
 
     // Need up-to-date view to ensure there are multiple valid choices.
     ReplicaSetMonitor::get(replSet->getSetName())->startOrContinueRefresh().refreshAll();
@@ -741,7 +756,7 @@ TEST_F(TaggedFiveMemberRS, ConnShouldNotPinIfDiffTag) {
     vector<HostAndPort> seedList;
     seedList.push_back(HostAndPort(replSet->getPrimary()));
 
-    DBClientReplicaSet replConn(replSet->getSetName(), seedList, StringData());
+    DBClientReplicaSet replConn(replSet->getSetName(), seedList);
 
     // Need up-to-date view to ensure there are multiple valid choices.
     ReplicaSetMonitor::get(replSet->getSetName())->startOrContinueRefresh().refreshAll();
@@ -777,7 +792,7 @@ TEST_F(TaggedFiveMemberRS, SlaveConnReturnsSecConn) {
     vector<HostAndPort> seedList;
     seedList.push_back(HostAndPort(replSet->getPrimary()));
 
-    DBClientReplicaSet replConn(replSet->getSetName(), seedList, StringData());
+    DBClientReplicaSet replConn(replSet->getSetName(), seedList);
 
     // Need up-to-date view since slaveConn() uses SecondaryPreferred, and this test assumes it
     // knows about at least one secondary.

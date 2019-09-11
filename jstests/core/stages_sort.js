@@ -18,7 +18,6 @@ if (false) {
                 keyPattern: {foo: 1},
                 startKey: {"": 20},
                 endKey: {},
-                startKeyInclusive: true,
                 endKeyInclusive: true,
                 direction: -1
             }
@@ -26,7 +25,9 @@ if (false) {
     };
 
     // Sort with foo ascending.
-    sort1 = {sort: {args: {node: ixscan1, pattern: {foo: 1}}}};
+    sort1 = {
+        sort: {args: {node: ixscan1, pattern: {foo: 1}}}
+    };
     res = db.runCommand({stageDebug: sort1});
     assert.eq(res.ok, 1);
     assert.eq(res.results.length, 21);

@@ -36,11 +36,11 @@
 #include "mongo/client/connpool.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/s/catalog/sharding_catalog_client.h"
+#include "mongo/s/catalog/catalog_manager.h"
 #include "mongo/s/catalog/type_chunk.h"
-#include "mongo/s/client/shard.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/grid.h"
+#include "mongo/s/client/shard.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
@@ -62,8 +62,7 @@ public:
         return true;
     }
 
-
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    virtual bool isWriteCommandForConfigServer() const {
         return false;
     }
 
@@ -87,24 +86,23 @@ public:
                      BSONObjBuilder& result) {
         const string target = cmdObj.firstElement().valuestrsafe();
 
-        const auto shardStatus = grid.shardRegistry()->getShard(txn, ShardId(target));
-        if (!shardStatus.isOK()) {
+        const auto s = grid.shardRegistry()->getShard(txn, target);
+        if (!s) {
             string msg(str::stream() << "Could not drop shard '" << target
                                      << "' because it does not exist");
             log() << msg;
             return appendCommandStatus(result, Status(ErrorCodes::ShardNotFound, msg));
         }
-        const auto s = shardStatus.getValue();
 
-        auto catalogClient = grid.catalogClient(txn);
+        auto catalogManager = grid.catalogManager(txn);
         StatusWith<ShardDrainingStatus> removeShardResult =
-            catalogClient->removeShard(txn, s->getId());
+            catalogManager->removeShard(txn, s->getId());
         if (!removeShardResult.isOK()) {
             return appendCommandStatus(result, removeShardResult.getStatus());
         }
 
         vector<string> databases;
-        Status status = catalogClient->getDatabasesForShard(txn, s->getId(), &databases);
+        Status status = catalogManager->getDatabasesForShard(txn, s->getId(), &databases);
         if (!status.isOK()) {
             return appendCommandStatus(result, status);
         }
@@ -132,19 +130,17 @@ public:
             case ShardDrainingStatus::STARTED:
                 result.append("msg", "draining started successfully");
                 result.append("state", "started");
-                result.append("shard", s->getId().toString());
+                result.append("shard", s->getId());
                 result.appendElements(dbInfo);
                 break;
             case ShardDrainingStatus::ONGOING: {
                 vector<ChunkType> chunks;
-                Status status =
-                    catalogClient->getChunks(txn,
-                                             BSON(ChunkType::shard(s->getId().toString())),
-                                             BSONObj(),
-                                             boost::none,  // return all
-                                             &chunks,
-                                             nullptr,
-                                             repl::ReadConcernLevel::kMajorityReadConcern);
+                Status status = catalogManager->getChunks(txn,
+                                                          BSON(ChunkType::shard(s->getId())),
+                                                          BSONObj(),
+                                                          boost::none,  // return all
+                                                          &chunks,
+                                                          nullptr);
                 if (!status.isOK()) {
                     return appendCommandStatus(result, status);
                 }
@@ -164,7 +160,7 @@ public:
             case ShardDrainingStatus::COMPLETED:
                 result.append("msg", "removeshard completed successfully");
                 result.append("state", "completed");
-                result.append("shard", s->getId().toString());
+                result.append("shard", s->getId());
         }
 
         return true;

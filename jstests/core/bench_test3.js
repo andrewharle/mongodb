@@ -10,14 +10,14 @@ benchArgs = {
         update: {$inc: {x: 1}}
     }],
     parallel: 2,
-    seconds: 10,
+    seconds: 5,
     host: db.getMongo().host
 };
 
 if (jsTest.options().auth) {
     benchArgs['db'] = 'admin';
-    benchArgs['username'] = jsTest.options().authUser;
-    benchArgs['password'] = jsTest.options().authPassword;
+    benchArgs['username'] = jsTest.options().adminUser;
+    benchArgs['password'] = jsTest.options().adminPassword;
 }
 
 res = benchRun(benchArgs);

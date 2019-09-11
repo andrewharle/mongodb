@@ -33,8 +33,6 @@
 #include <vector>
 
 #include "mongo/db/jsobj.h"
-#include "mongo/s/shard_id.h"
-#include "mongo/s/write_ops/batched_update_request.h"
 
 namespace mongo {
 
@@ -51,11 +49,6 @@ class StatusWith;
  */
 class ShardType {
 public:
-    enum class ShardState : int {
-        kNotShardAware = 0,
-        kShardAware,
-    };
-
     // Name of the shards collection in the config server.
     static const std::string ConfigNS;
 
@@ -65,7 +58,6 @@ public:
     static const BSONField<bool> draining;
     static const BSONField<long long> maxSizeMB;
     static const BSONField<BSONArray> tags;
-    static const BSONField<ShardState> state;
 
 
     /**
@@ -110,15 +102,10 @@ public:
     }
     void setMaxSizeMB(const long long maxSizeMB);
 
-    std::vector<std::string> getTags() const {
+    const std::vector<std::string> getTags() const {
         return _tags.value_or(std::vector<std::string>());
     }
     void setTags(const std::vector<std::string>& tags);
-
-    ShardState getState() const {
-        return _state.value_or(ShardState::kNotShardAware);
-    }
-    void setState(const ShardState state);
 
 private:
     // Convention: (M)andatory, (O)ptional, (S)pecial rule.
@@ -133,8 +120,6 @@ private:
     boost::optional<long long> _maxSizeMB;
     // (O) shard tags
     boost::optional<std::vector<std::string>> _tags;
-    // (O) shard state
-    boost::optional<ShardState> _state;
 };
 
 }  // namespace mongo

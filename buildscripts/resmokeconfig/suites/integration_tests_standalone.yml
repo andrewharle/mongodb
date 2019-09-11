@@ -4,9 +4,6 @@ selector:
 
 executor:
   cpp_integration_test:
-    archive:
-      hooks:
-        - ValidateCollections
     config: {}
     hooks:
     - class: ValidateCollections

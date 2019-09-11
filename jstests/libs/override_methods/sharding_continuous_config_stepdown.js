@@ -7,31 +7,6 @@
 load('jstests/libs/parallelTester.js');
 load("jstests/replsets/rslib.js");
 
-/**
- * Executes the specified function and if it fails due to exception, which is related to network
- * error retries the call once. If the second attempt also fails, simply throws the last
- * exception.
- *
- * Returns the return value of the input call.
- */
-function retryOnNetworkError(func) {
-    var networkErrorRetriesLeft = 1;
-
-    while (true) {
-        try {
-            return func();
-        } catch (e) {
-            if (e.toString().indexOf("network error") > -1 && networkErrorRetriesLeft > 0) {
-                print("Network error occurred and the call will be retried: " +
-                      tojson({error: e.toString(), stack: e.stack}));
-                networkErrorRetriesLeft--;
-            } else {
-                throw e;
-            }
-        }
-    }
-}
-
 (function() {
     'use strict';
 
@@ -40,14 +15,8 @@ function retryOnNetworkError(func) {
     var originalReplSetTest = ReplSetTest;
     var originalShardingTest = ShardingTest;
 
-    const stepdownDelaySeconds = 10;
-    const verbositySetting =
-        "{ verbosity: 0, command: {verbosity: 1}, network: {verbosity: 1, asio: {verbosity: 2}}, \
-tracking: {verbosity: 1} }";
-
     /**
-     * Overrides the ReplSetTest constructor to start the continuous config server stepdown
-     * thread.
+     * Overrides the ReplSetTest constructor to start the continuous config server stepdown thread.
      */
     ReplSetTest = function ReplSetTestWithContinuousPrimaryStepdown() {
         // Construct the original object
@@ -55,46 +24,66 @@ tracking: {verbosity: 1} }";
 
         /**
          * This function is intended to be called in a separate thread and it continuously steps
-         * down the current primary for a number of attempts.
+         *down
+         * the current primary for a number of attempts.
          *
          * @param {string} seedNode The connection string of a node from which to discover the
-         *      primary of the replica set.
+         *primary
+         *                          of the replica set.
          * @param {CountDownLatch} stopCounter Object, which can be used to stop the thread.
-         *
-         * @param {integer} stepdownDelaySeconds The number of seconds after stepping down the
-         *      primary for which the node is not re-electable.
          *
          * @return Object with the following fields:
          *      ok {integer}: 0 if it failed, 1 if it succeeded.
          *      error {string}: Only present if ok == 0. Contains the cause for the error.
          *      stack {string}: Only present if ok == 0. Contains the stack at the time of the
-         *          error.
+         *error.
          */
-        function _continuousPrimaryStepdownFn(seedNode, stopCounter, stepdownDelaySeconds) {
+        function _continuousPrimaryStepdownFn(seedNode, stopCounter) {
             'use strict';
 
-            load('jstests/libs/override_methods/sharding_continuous_config_stepdown.js');
+            var stepdownDelaySeconds = 10;
 
             print('*** Continuous stepdown thread running with seed node ' + seedNode);
 
-            try {
-                // The config primary may unexpectedly step down during startup if under heavy
-                // load and too slowly processing heartbeats. When it steps down, it closes all of
-                // its connections. This can happen during the call to new ReplSetTest, so in order
-                // to account for this and make the tests stable, retry discovery of the replica
-                // set's configuration once (SERVER-22794).
-                var replSet = retryOnNetworkError(function() {
-                    return new ReplSetTest(seedNode);
-                });
+            // The config primary may unexpectedly step down during startup if under heavy load and
+            // too slowly processing heartbeats. When it steps down, it closes all of its
+            // connections. This can happen during the call to new ReplSetTest, so in order to
+            // account for this and make the tests stable, retry discovery of the replica set's
+            // configuration once (SERVER-22794).
+            var replSet;
+            var networkErrorRetries = 1;
+            while (networkErrorRetries >= 0) {
+                try {
+                    replSet = new ReplSetTest(seedNode);
+                    break;
+                } catch (e) {
+                    if (((networkErrorRetries--) > 0) &&
+                        (e.toString().indexOf("network error") > -1)) {
+                        print("Error: " + e.toString() + "\nStacktrace: " + e.stack);
+                        print("Stepdown thread's config server connection was closed, retrying.");
+                    } else {
+                        print('*** Continuous stepdown thread failed to connect to the ' +
+                              'config server: ' + tojson(e));
+                        return {
+                            ok: 0,
+                            error: e.toString(),
+                            stack: e.stack
+                        };
+                    }
+                }
+            }
 
+            try {
                 var primary = replSet.getPrimary();
 
                 while (stopCounter.getCount() > 0) {
                     print('*** Stepping down ' + primary);
 
                     assert.throws(function() {
-                        var result = primary.adminCommand(
-                            {replSetStepDown: stepdownDelaySeconds, force: true});
+                        var result = primary.adminCommand({
+                            replSetStepDown: stepdownDelaySeconds,
+                            secondaryCatchUpPeriodSecs: stepdownDelaySeconds
+                        });
                         print('replSetStepDown command did not throw and returned: ' +
                               tojson(result));
 
@@ -103,7 +92,8 @@ tracking: {verbosity: 1} }";
                     });
 
                     // Wait for primary to get elected and allow the test to make some progress
-                    // before attempting another stepdown.
+                    // before
+                    // attempting another stepdown.
                     if (stopCounter.getCount() > 0)
                         primary = replSet.getPrimary();
 
@@ -112,21 +102,23 @@ tracking: {verbosity: 1} }";
                 }
 
                 print('*** Continuous stepdown thread completed successfully');
-                return {ok: 1};
+                return {
+                    ok: 1
+                };
             } catch (e) {
                 print('*** Continuous stepdown thread caught exception: ' + tojson(e));
-                return {ok: 0, error: e.toString(), stack: e.stack};
+                return {
+                    ok: 0,
+                    error: e.toString(),
+                    stack: e.stack
+                };
             }
         }
 
-        // Preserve the original stopSet method, because we are overriding it to stop the
-        // continuous
+        // Preserve the original stopSet method, because we are overriding it to stop the continuous
         // stepdown thread.
         var _originalStartSetFn = this.startSet;
         var _originalStopSetFn = this.stopSet;
-
-        // We override these methods to retry on network errors
-        var _originalAwaitLastOpCommitted = this.awaitLastOpCommitted;
 
         // These two manage the scoped failover thread
         var _scopedPrimaryStepdownThread;
@@ -139,11 +131,7 @@ tracking: {verbosity: 1} }";
             if (!options) {
                 options = {};
             }
-            if ('setParameter' in options) {
-                options.setParameter.logComponentVerbosity = verbositySetting;
-            } else {
-                options.setParameter = {logComponentVerbosity: verbositySetting};
-            }
+            options.verbose = 2;
             return _originalStartSetFn.call(this, options);
         };
 
@@ -156,13 +144,6 @@ tracking: {verbosity: 1} }";
         };
 
         /**
-         * Overrides the awaitLastOpCommitted to retry on network errors.
-         */
-        this.awaitLastOpCommitted = function() {
-            return retryOnNetworkError(_originalAwaitLastOpCommitted.bind(this));
-        };
-
-        /**
          * Spawns a thread to invoke continuousPrimaryStepdownFn. See its comments for more
          * information.
          */
@@ -171,32 +152,16 @@ tracking: {verbosity: 1} }";
                 throw new Error('Continuous failover thread is already active');
             }
 
-            // This suite will step down the config primary every 10 seconds, and
-            // electionTimeoutMillis defaults to 10 seconds. Set electionTimeoutMillis to 5 seconds,
-            // so config operations have some time to run before being interrupted by stepdown.
-            //
-            // Note: this is done after ShardingTest runs because ShardingTest operations are not
-            // resilient to stepdowns, which a shorter election timeout can cause to happen on
-            // slow machines.
-            var rsconfig = this.getReplSetConfigFromNode();
-            rsconfig.settings.electionTimeoutMillis = stepdownDelaySeconds * 1000 / 2;
-            rsconfig.version++;
-            reconfig(this, rsconfig);
-            assert.eq(this.getReplSetConfigFromNode().settings.electionTimeoutMillis,
-                      5000,
-                      "Failed to lower the electionTimeoutMillis to 5000 milliseconds.");
-
             _scopedPrimaryStepdownThreadStopCounter = new CountDownLatch(1);
-            _scopedPrimaryStepdownThread = new ScopedThread(_continuousPrimaryStepdownFn,
-                                                            this.nodes[0].host,
-                                                            _scopedPrimaryStepdownThreadStopCounter,
-                                                            stepdownDelaySeconds);
+            _scopedPrimaryStepdownThread =
+                new ScopedThread(_continuousPrimaryStepdownFn,
+                                 this.nodes[0].host,
+                                 _scopedPrimaryStepdownThreadStopCounter);
             _scopedPrimaryStepdownThread.start();
         };
 
         /**
-         * Blocking method, which tells the thread running continuousPrimaryStepdownFn to stop
-         * and
+         * Blocking method, which tells the thread running continuousPrimaryStepdownFn to stop and
          * waits
          * for it to terminate.
          */
@@ -226,16 +191,21 @@ tracking: {verbosity: 1} }";
         if (!arguments[0].other) {
             arguments[0].other = {};
         }
-        if ('configOptions' in arguments[0].other &&
-            'setParameter' in arguments[0].other.configOptions) {
-            arguments[0].other.configOptions.setParameter.logComponentVerbosity = verbositySetting;
-        }
+        arguments[0].verbose = 2;
 
-        if ('setParameter' in arguments[0].other) {
-            arguments[0].other.setParameter.logComponentVerbosity = verbositySetting;
-        } else {
-            arguments[0].other.setParameter = {logComponentVerbosity: verbositySetting};
+        if (!arguments[0].other.shardOptions) {
+            arguments[0].other.shardOptions = {};
         }
+        arguments[0].other.shardOptions.verbose = 2;
+
+        // Set electionTimeoutMillis to 5 seconds, from 10, so that chunk migrations don't
+        // time out because of the CSRS primary being down so often for so long.
+        arguments[0].configReplSetTestOptions = Object.merge(arguments[0].configReplSetTestOptions,
+                                                             {
+                                                               settings: {
+                                                                   electionTimeoutMillis: 5000,
+                                                               },
+                                                             });
 
         // Construct the original object
         originalShardingTest.apply(this, arguments);
@@ -251,6 +221,10 @@ tracking: {verbosity: 1} }";
         this.printShardingStatus = function() {
 
         };
+
+        assert.eq(this.configRS.getReplSetConfigFromNode().settings.electionTimeoutMillis,
+                  5000,
+                  "Failed to set the electionTimeoutMillis to 5000 milliseconds");
 
         // Start the continuous config server stepdown thread
         this.configRS.startContinuousFailover();

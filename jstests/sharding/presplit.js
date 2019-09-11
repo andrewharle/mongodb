@@ -23,7 +23,7 @@
 
     // Make sure that there's only one chunk holding all the data.
     s.printChunks();
-    primary = s.getPrimaryShard("test").getDB("test");
+    primary = s.getServer("test").getDB("test");
     assert.eq(0, s.config.chunks.count(), "single chunk assertion");
     assert.eq(num, primary.foo.count());
 

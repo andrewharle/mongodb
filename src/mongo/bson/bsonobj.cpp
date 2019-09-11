@@ -31,9 +31,10 @@
 
 #include "mongo/db/jsobj.h"
 
+#include <boost/functional/hash.hpp>
+
 #include "mongo/base/data_range.h"
 #include "mongo/bson/bson_validate.h"
-#include "mongo/bson/bsonelement_comparator_interface.h"
 #include "mongo/db/json.h"
 #include "mongo/util/allocator.h"
 #include "mongo/util/hex.h"
@@ -44,6 +45,21 @@
 namespace mongo {
 using namespace std;
 /* BSONObj ------------------------------------------------------------*/
+
+// deep (full) equality
+bool BSONObj::equal(const BSONObj& rhs) const {
+    BSONObjIterator i(*this);
+    BSONObjIterator j(rhs);
+    BSONElement l, r;
+    do {
+        // so far, equal...
+        l = i.next();
+        r = j.next();
+        if (l.eoo())
+            return r.eoo();
+    } while (l == r);
+    return false;
+}
 
 void BSONObj::_assertInvalid() const {
     StringBuilder ss;
@@ -60,9 +76,9 @@ void BSONObj::_assertInvalid() const {
 }
 
 BSONObj BSONObj::copy() const {
-    auto storage = SharedBuffer::allocate(objsize());
-    memcpy(storage.get(), objdata(), objsize());
-    return BSONObj(std::move(storage));
+    char* storage = static_cast<char*>(mongoMalloc(sizeof(Holder) + objsize()));
+    memcpy(storage + sizeof(Holder), objdata(), objsize());
+    return BSONObj::takeOwnership(storage);
 }
 
 BSONObj BSONObj::getOwned() const {
@@ -98,14 +114,11 @@ string BSONObj::jsonString(JsonStringFormat format, int pretty, bool isArray) co
     return s.str();
 }
 
-bool BSONObj::valid(BSONVersion version) const {
-    return validateBSON(objdata(), objsize(), version).isOK();
+bool BSONObj::valid() const {
+    return validateBSON(objdata(), objsize()).isOK();
 }
 
-int BSONObj::woCompare(const BSONObj& r,
-                       const Ordering& o,
-                       bool considerFieldName,
-                       const StringData::ComparatorInterface* comparator) const {
+int BSONObj::woCompare(const BSONObj& r, const Ordering& o, bool considerFieldName) const {
     if (isEmpty())
         return r.isEmpty() ? 0 : -1;
     if (r.isEmpty())
@@ -126,7 +139,7 @@ int BSONObj::woCompare(const BSONObj& r,
 
         int x;
         {
-            x = l.woCompare(r, considerFieldName, comparator);
+            x = l.woCompare(r, considerFieldName);
             if (o.descending(mask))
                 x = -x;
         }
@@ -138,10 +151,7 @@ int BSONObj::woCompare(const BSONObj& r,
 }
 
 /* well ordered compare */
-int BSONObj::woCompare(const BSONObj& r,
-                       const BSONObj& idxKey,
-                       bool considerFieldName,
-                       const StringData::ComparatorInterface* comparator) const {
+int BSONObj::woCompare(const BSONObj& r, const BSONObj& idxKey, bool considerFieldName) const {
     if (isEmpty())
         return r.isEmpty() ? 0 : -1;
     if (r.isEmpty())
@@ -173,7 +183,7 @@ int BSONObj::woCompare(const BSONObj& r,
                         x = _stricmp(l.valuestr(), r.valuestr());
                     }
                     else*/ {
-            x = l.woCompare(r, considerFieldName, comparator);
+            x = l.woCompare(r, considerFieldName);
             if (ordered && o.number() < 0)
                 x = -x;
         }
@@ -183,15 +193,62 @@ int BSONObj::woCompare(const BSONObj& r,
     return -1;
 }
 
-bool BSONObj::isPrefixOf(const BSONObj& otherObj,
-                         const BSONElement::ComparatorInterface& eltCmp) const {
+BSONObj staticNull = fromjson("{'':null}");
+BSONObj makeUndefined() {
+    BSONObjBuilder b;
+    b.appendUndefined("");
+    return b.obj();
+}
+BSONObj staticUndefined = makeUndefined();
+
+/* well ordered compare */
+int BSONObj::woSortOrder(const BSONObj& other, const BSONObj& sortKey, bool useDotted) const {
+    if (isEmpty())
+        return other.isEmpty() ? 0 : -1;
+    if (other.isEmpty())
+        return 1;
+
+    uassert(10060, "woSortOrder needs a non-empty sortKey", !sortKey.isEmpty());
+
+    BSONObjIterator i(sortKey);
+    while (1) {
+        BSONElement f = i.next();
+        if (f.eoo())
+            return 0;
+
+        BSONElement l = useDotted ? getFieldDotted(f.fieldName()) : getField(f.fieldName());
+        if (l.eoo())
+            l = staticNull.firstElement();
+        BSONElement r =
+            useDotted ? other.getFieldDotted(f.fieldName()) : other.getField(f.fieldName());
+        if (r.eoo())
+            r = staticNull.firstElement();
+
+        int x = l.woCompare(r, false);
+        if (f.number() < 0)
+            x = -x;
+        if (x != 0)
+            return x;
+    }
+    return -1;
+}
+
+size_t BSONObj::Hasher::operator()(const BSONObj& obj) const {
+    size_t hash = 0;
+    BSONForEach(elem, obj) {
+        boost::hash_combine(hash, BSONElement::Hasher()(elem));
+    }
+    return hash;
+}
+
+bool BSONObj::isPrefixOf(const BSONObj& otherObj) const {
     BSONObjIterator a(*this);
     BSONObjIterator b(otherObj);
 
     while (a.more() && b.more()) {
         BSONElement x = a.next();
         BSONElement y = b.next();
-        if (eltCmp.evaluate(x != y))
+        if (x != y)
             return false;
     }
 
@@ -213,6 +270,88 @@ bool BSONObj::isFieldNamePrefixOf(const BSONObj& otherObj) const {
     return !a.more();
 }
 
+template <typename BSONElementColl>
+void _getFieldsDotted(const BSONObj* obj,
+                      StringData name,
+                      BSONElementColl& ret,
+                      bool expandLastArray) {
+    BSONElement e = obj->getField(name);
+
+    if (e.eoo()) {
+        size_t idx = name.find('.');
+        if (idx != string::npos) {
+            StringData left = name.substr(0, idx);
+            StringData next = name.substr(idx + 1, name.size());
+
+            BSONElement e = obj->getField(left);
+
+            if (e.type() == Object) {
+                e.embeddedObject().getFieldsDotted(next, ret, expandLastArray);
+            } else if (e.type() == Array) {
+                bool allDigits = false;
+                if (next.size() > 0 && isdigit(next[0])) {
+                    unsigned temp = 1;
+                    while (temp < next.size() && isdigit(next[temp]))
+                        temp++;
+                    allDigits = temp == next.size() || next[temp] == '.';
+                }
+                if (allDigits) {
+                    e.embeddedObject().getFieldsDotted(next, ret, expandLastArray);
+                } else {
+                    BSONObjIterator i(e.embeddedObject());
+                    while (i.more()) {
+                        BSONElement e2 = i.next();
+                        if (e2.type() == Object || e2.type() == Array)
+                            e2.embeddedObject().getFieldsDotted(next, ret, expandLastArray);
+                    }
+                }
+            } else {
+                // do nothing: no match
+            }
+        }
+    } else {
+        if (e.type() == Array && expandLastArray) {
+            BSONObjIterator i(e.embeddedObject());
+            while (i.more())
+                ret.insert(i.next());
+        } else {
+            ret.insert(e);
+        }
+    }
+}
+
+void BSONObj::getFieldsDotted(StringData name, BSONElementSet& ret, bool expandLastArray) const {
+    _getFieldsDotted(this, name, ret, expandLastArray);
+}
+void BSONObj::getFieldsDotted(StringData name, BSONElementMSet& ret, bool expandLastArray) const {
+    _getFieldsDotted(this, name, ret, expandLastArray);
+}
+
+BSONElement eooElement;
+
+BSONElement BSONObj::getFieldDottedOrArray(const char*& name) const {
+    const char* p = strchr(name, '.');
+
+    BSONElement sub;
+
+    if (p) {
+        sub = getField(string(name, p - name));
+        name = p + 1;
+    } else {
+        sub = getField(name);
+        name = name + strlen(name);
+    }
+
+    if (sub.eoo())
+        return eooElement;
+    else if (sub.type() == Array || name[0] == '\0')
+        return sub;
+    else if (sub.type() == Object)
+        return sub.embeddedObject().getFieldDottedOrArray(name);
+    else
+        return eooElement;
+}
+
 BSONObj BSONObj::extractFieldsUnDotted(const BSONObj& pattern) const {
     BSONObjBuilder b;
     BSONObjIterator i(pattern);
@@ -223,6 +362,23 @@ BSONObj BSONObj::extractFieldsUnDotted(const BSONObj& pattern) const {
         BSONElement x = getField(e.fieldName());
         if (!x.eoo())
             b.appendAs(x, "");
+    }
+    return b.obj();
+}
+
+BSONObj BSONObj::extractFields(const BSONObj& pattern, bool fillWithNull) const {
+    BSONObjBuilder b(
+        32);  // scanandorder.h can make a zillion of these, so we start the allocation very small
+    BSONObjIterator i(pattern);
+    while (i.moreWithEOO()) {
+        BSONElement e = i.next();
+        if (e.eoo())
+            break;
+        BSONElement x = getFieldDotted(e.fieldName());
+        if (!x.eoo())
+            b.appendAs(x, e.fieldName());
+        else if (fillWithNull)
+            b.appendNull(e.fieldName());
     }
     return b.obj();
 }
@@ -464,6 +620,7 @@ void BSONObj::dump() const {
         builder << i << '\t' << (0xff & ((unsigned)*p));
         if (*p >= 'A' && *p <= 'z')
             builder << '\t' << *p;
+        builder << endl;
         p++;
     }
 }
@@ -561,6 +718,24 @@ void BSONObj::elems(std::list<BSONElement>& v) const {
         v.push_back(i.next());
 }
 
+/* return has eoo() true if no match
+   supports "." notation to reach into embedded objects
+*/
+BSONElement BSONObj::getFieldDotted(StringData name) const {
+    BSONElement e = getField(name);
+    if (e.eoo()) {
+        size_t dot_offset = name.find('.');
+        if (dot_offset != std::string::npos) {
+            StringData left = name.substr(0, dot_offset);
+            StringData right = name.substr(dot_offset + 1);
+            BSONObj sub = getObjectField(left);
+            return sub.isEmpty() ? BSONElement() : sub.getFieldDotted(right);
+        }
+    }
+
+    return e;
+}
+
 BSONObj BSONObj::getObjectField(StringData name) const {
     BSONElement e = getField(name);
     BSONType t = e.type();
@@ -579,15 +754,14 @@ int BSONObj::nFields() const {
     return n;
 }
 
-std::string BSONObj::toString(bool redactValues) const {
+std::string BSONObj::toString(bool isArray, bool full) const {
     if (isEmpty())
-        return "{}";
+        return (isArray ? "[]" : "{}");
     StringBuilder s;
-    toString(s, false, false, redactValues);
+    toString(s, isArray, full);
     return s.str();
 }
-void BSONObj::toString(
-    StringBuilder& s, bool isArray, bool full, bool redactValues, int depth) const {
+void BSONObj::toString(StringBuilder& s, bool isArray, bool full, int depth) const {
     if (isEmpty()) {
         s << (isArray ? "[]" : "{}");
         return;
@@ -612,7 +786,7 @@ void BSONObj::toString(
             first = false;
         else
             s << ", ";
-        e.toString(s, !isArray, full, redactValues, depth);
+        e.toString(s, !isArray, full, depth);
     }
     s << (isArray ? " ]" : " }");
 }
@@ -664,7 +838,7 @@ bool BSONIteratorSorted::ElementFieldCmp::operator()(const char* s1, const char*
 }
 
 BSONIteratorSorted::BSONIteratorSorted(const BSONObj& o, const ElementFieldCmp& cmp)
-    : _nfields(o.nFields()), _fields(new const char*[_nfields]) {
+    : _nfields(o.nFields()), _fields(new const char* [_nfields]) {
     int x = 0;
     BSONObjIterator i(o);
     while (i.more()) {

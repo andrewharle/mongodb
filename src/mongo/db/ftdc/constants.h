@@ -26,10 +26,6 @@
  * then also delete it in the license file.
  */
 
-#pragma once
-
-#include "mongo/base/string_data.h"
-
 namespace mongo {
 
 extern const char kFTDCInterimFile[];
@@ -45,7 +41,5 @@ extern const char kFTDCDocsField[];
 
 extern const char kFTDCCollectStartField[];
 extern const char kFTDCCollectEndField[];
-
-constexpr StringData kFTDCDefaultDirectory = "diagnostic.data"_sd;
 
 }  // namespace mongo

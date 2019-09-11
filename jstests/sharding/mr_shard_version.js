@@ -31,7 +31,11 @@
 
     jsTest.log("Starting migrations...");
 
-    var migrateOp = {op: "command", ns: "admin", command: {moveChunk: "" + coll}};
+    var migrateOp = {
+        op: "command",
+        ns: "admin",
+        command: {moveChunk: "" + coll}
+    };
 
     var checkMigrate = function() {
         print("Result of migrate : ");

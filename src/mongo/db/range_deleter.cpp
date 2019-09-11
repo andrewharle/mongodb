@@ -36,10 +36,10 @@
 #include <memory>
 
 #include "mongo/db/client.h"
-#include "mongo/db/repl/replication_coordinator_global.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/repl/replication_coordinator_global.h"
 #include "mongo/db/write_concern_options.h"
-#include "mongo/util/concurrency/idle_thread_block.h"
+#include "mongo/util/concurrency/synchronization.h"
 #include "mongo/util/exit.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
@@ -83,8 +83,8 @@ static void logCursorsWaiting(RangeDeleteEntry* entry) {
     // We always log the first cursors waiting message (so we have cursor ids in the logs).
     // After 15 minutes (the cursor timeout period), we start logging additional messages at
     // a 1 minute interval.
-    static const auto kLogCursorsThreshold = Minutes{15};
-    static const auto kLogCursorsInterval = Minutes{1};
+    static const auto kLogCursorsThreshold = stdx::chrono::minutes{15};
+    static const auto kLogCursorsInterval = stdx::chrono::minutes{1};
 
     Date_t currentTime = jsTime();
     Milliseconds elapsedMillisSinceQueued{0};
@@ -117,8 +117,7 @@ static void logCursorsWaiting(RangeDeleteEntry* entry) {
     }
 
     log() << "waiting for open cursors before removing range "
-          << "[" << redact(entry->options.range.minKey) << ", "
-          << redact(entry->options.range.maxKey) << ") "
+          << "[" << entry->options.range.minKey << ", " << entry->options.range.maxKey << ") "
           << "in " << entry->options.range.ns
           << (entry->lastLoggedTS == Date_t()
                   ? string("")
@@ -204,7 +203,7 @@ void RangeDeleter::stopWorkers() {
 
 bool RangeDeleter::queueDelete(OperationContext* txn,
                                const RangeDeleterOptions& options,
-                               Notification<void>* doneSignal,
+                               Notification* notifyDone,
                                std::string* errMsg) {
     string dummy;
     if (errMsg == NULL)
@@ -215,7 +214,7 @@ bool RangeDeleter::queueDelete(OperationContext* txn,
     const BSONObj& max(options.range.maxKey);
 
     unique_ptr<RangeDeleteEntry> toDelete(new RangeDeleteEntry(options));
-    toDelete->doneSignal = doneSignal;
+    toDelete->notifyDone = notifyDone;
 
     {
         stdx::lock_guard<stdx::mutex> sl(_queueMutex);
@@ -354,12 +353,15 @@ bool RangeDeleter::deleteNow(OperationContext* txn,
     taskDetails.stats.queueEndTS = jsTime();
 
     taskDetails.stats.deleteStartTS = jsTime();
-    bool result = _env->deleteRange(txn,
-                                    taskDetails,
-                                    &taskDetails.stats.deletedDocCount,
-                                    taskDetails.stats.waitForReplDurationMs,
-                                    errMsg);
+    bool result = _env->deleteRange(txn, taskDetails, &taskDetails.stats.deletedDocCount, errMsg);
+
     taskDetails.stats.deleteEndTS = jsTime();
+
+    if (result) {
+        taskDetails.stats.waitForReplStartTS = jsTime();
+        result = _waitForMajority(txn, errMsg);
+        taskDetails.stats.waitForReplEndTS = jsTime();
+    }
 
     {
         stdx::lock_guard<stdx::mutex> sl(_queueMutex);
@@ -421,11 +423,8 @@ void RangeDeleter::doWork() {
         {
             stdx::unique_lock<stdx::mutex> sl(_queueMutex);
             while (_taskQueue.empty()) {
-                {
-                    MONGO_IDLE_THREAD_BLOCK;
-                    _taskQueueNotEmptyCV.wait_for(
-                        sl, Milliseconds(kNotEmptyTimeoutMillis).toSystemDuration());
-                }
+                _taskQueueNotEmptyCV.wait_for(sl,
+                                              stdx::chrono::milliseconds(kNotEmptyTimeoutMillis));
 
                 if (stopRequested()) {
                     log() << "stopping range deleter worker" << endl;
@@ -482,11 +481,8 @@ void RangeDeleter::doWork() {
         {
             auto txn = client->makeOperationContext();
             nextTask->stats.deleteStartTS = jsTime();
-            bool delResult = _env->deleteRange(txn.get(),
-                                               *nextTask,
-                                               &nextTask->stats.deletedDocCount,
-                                               nextTask->stats.waitForReplDurationMs,
-                                               &errMsg);
+            bool delResult =
+                _env->deleteRange(txn.get(), *nextTask, &nextTask->stats.deletedDocCount, &errMsg);
             nextTask->stats.deleteEndTS = jsTime();
 
             if (delResult) {
@@ -498,7 +494,7 @@ void RangeDeleter::doWork() {
 
                 nextTask->stats.waitForReplEndTS = jsTime();
             } else {
-                warning() << "Error encountered while trying to delete range: " << redact(errMsg);
+                warning() << "Error encountered while trying to delete range: " << errMsg << endl;
             }
         }
 
@@ -511,8 +507,8 @@ void RangeDeleter::doWork() {
             deletePtrElement(&_deleteSet, &setEntry);
             _deletesInProgress--;
 
-            if (nextTask->doneSignal) {
-                nextTask->doneSignal->set();
+            if (nextTask->notifyDone) {
+                nextTask->notifyDone->notifyOne();
             }
         }
 
@@ -567,7 +563,7 @@ void RangeDeleter::recordDelStats(DeleteJobStats* newStat) {
 }
 
 RangeDeleteEntry::RangeDeleteEntry(const RangeDeleterOptions& options)
-    : options(options), doneSignal(nullptr) {}
+    : options(options), notifyDone(NULL) {}
 
 BSONObj RangeDeleteEntry::toBSON() const {
     BSONObjBuilder builder;

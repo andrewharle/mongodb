@@ -30,14 +30,13 @@
 #include "mongo/platform/process_id.h"
 
 #include <iostream>
-#include <limits>
 #include <sstream>
-
-#include "mongo/base/static_assert.h"
+#include <limits>
 
 namespace mongo {
 
-MONGO_STATIC_ASSERT(sizeof(NativeProcessId) == sizeof(uint32_t));
+static_assert(sizeof(NativeProcessId) == sizeof(uint32_t),
+              "sizeof(NativeProcessId) == sizeof(uint32_t)");
 
 namespace {
 #ifdef _WIN32

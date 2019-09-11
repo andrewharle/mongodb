@@ -29,7 +29,8 @@
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/commands.h"
-#include "mongo/s/catalog_cache.h"
+#include "mongo/s/catalog/catalog_cache.h"
+#include "mongo/s/config.h"
 #include "mongo/s/grid.h"
 
 namespace mongo {
@@ -47,8 +48,7 @@ public:
         return true;
     }
 
-
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    virtual bool isWriteCommandForConfigServer() const {
         return false;
     }
 
@@ -64,13 +64,13 @@ public:
         out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
     }
 
-    virtual bool run(OperationContext* opCtx,
+    virtual bool run(OperationContext* txn,
                      const std::string& dbname,
                      BSONObj& cmdObj,
                      int options,
                      std::string& errmsg,
                      BSONObjBuilder& result) {
-        Grid::get(opCtx)->catalogCache()->purgeAllDatabases();
+        grid.catalogCache()->invalidateAll();
 
         result.appendBool("flushed", true);
         return true;

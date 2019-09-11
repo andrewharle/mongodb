@@ -30,8 +30,8 @@
 
 #include "mongo/db/matcher/expression_tree.h"
 
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 
 namespace mongo {
@@ -56,7 +56,7 @@ void ListOfMatchExpression::_debugList(StringBuilder& debug, int level) const {
 void ListOfMatchExpression::_listToBSON(BSONArrayBuilder* out) const {
     for (unsigned i = 0; i < _expressions.size(); i++) {
         BSONObjBuilder childBob(out->subobjStart());
-        _expressions[i]->serialize(&childBob);
+        _expressions[i]->toBSON(&childBob);
     }
     out->doneFast();
 }
@@ -107,16 +107,9 @@ void AndMatchExpression::debugString(StringBuilder& debug, int level) const {
     _debugList(debug, level);
 }
 
-void AndMatchExpression::serialize(BSONObjBuilder* out) const {
-    if (!numChildren()) {
-        // It is possible for an AndMatchExpression to have no children, resulting in the serialized
-        // expression {$and: []}, which is not a valid query object.
-        return;
-    }
-
+void AndMatchExpression::toBSON(BSONObjBuilder* out) const {
     BSONArrayBuilder arrBob(out->subarrayStart("$and"));
     _listToBSON(&arrBob);
-    arrBob.doneFast();
 }
 
 // -----
@@ -146,7 +139,7 @@ void OrMatchExpression::debugString(StringBuilder& debug, int level) const {
     _debugList(debug, level);
 }
 
-void OrMatchExpression::serialize(BSONObjBuilder* out) const {
+void OrMatchExpression::toBSON(BSONObjBuilder* out) const {
     BSONArrayBuilder arrBob(out->subarrayStart("$or"));
     _listToBSON(&arrBob);
 }
@@ -177,7 +170,7 @@ void NorMatchExpression::debugString(StringBuilder& debug, int level) const {
     _debugList(debug, level);
 }
 
-void NorMatchExpression::serialize(BSONObjBuilder* out) const {
+void NorMatchExpression::toBSON(BSONObjBuilder* out) const {
     BSONArrayBuilder arrBob(out->subarrayStart("$nor"));
     _listToBSON(&arrBob);
 }
@@ -190,17 +183,10 @@ void NotMatchExpression::debugString(StringBuilder& debug, int level) const {
     _exp->debugString(debug, level + 1);
 }
 
-void NotMatchExpression::serialize(BSONObjBuilder* out) const {
-    BSONObjBuilder childBob;
-    _exp->serialize(&childBob);
-
-    BSONObj tempObj = childBob.obj();
-
-    // We don't know what the inner object is, and thus whether serializing to $not will result in a
-    // parseable MatchExpression. As a fix, we change it to $nor, which is always parseable.
-    BSONArrayBuilder tBob(out->subarrayStart("$nor"));
-    tBob.append(tempObj);
-    tBob.doneFast();
+void NotMatchExpression::toBSON(BSONObjBuilder* out) const {
+    BSONObjBuilder childBob(out->subobjStart("$not"));
+    _exp->toBSON(&childBob);
+    childBob.doneFast();
 }
 
 bool NotMatchExpression::equivalent(const MatchExpression* other) const {

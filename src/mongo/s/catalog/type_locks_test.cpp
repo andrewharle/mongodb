@@ -26,8 +26,6 @@
  *    then also delete it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
 #include "mongo/base/status_with.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/s/catalog/type_locks.h"
@@ -45,12 +43,12 @@ TEST(Validity, Empty) {
 
 TEST(Validity, UnlockedWithOptional) {
     OID testLockID = OID::gen();
-    BSONObj obj = BSON(LocksType::name("balancer")
-                       << LocksType::process("host.local:27017:1352918870:16807")
-                       << LocksType::state(LocksType::State::UNLOCKED)
-                       << LocksType::lockID(testLockID)
-                       << LocksType::who("host.local:27017:1352918870:16807:Balancer:282475249")
-                       << LocksType::why("doing balance round"));
+    BSONObj obj =
+        BSON(LocksType::name("balancer")
+             << LocksType::process("host.local:27017:1352918870:16807")
+             << LocksType::state(LocksType::State::UNLOCKED) << LocksType::lockID(testLockID)
+             << LocksType::who("host.local:27017:1352918870:16807:Balancer:282475249")
+             << LocksType::why("doing balance round"));
     auto locksResult = LocksType::fromBSON(obj);
     ASSERT_OK(locksResult.getStatus());
 
@@ -77,12 +75,12 @@ TEST(Validity, UnlockedWithoutOptional) {
 
 TEST(Validity, LockedValid) {
     OID testLockID = OID::gen();
-    BSONObj obj = BSON(LocksType::name("balancer")
-                       << LocksType::process("host.local:27017:1352918870:16807")
-                       << LocksType::state(LocksType::State::LOCKED)
-                       << LocksType::lockID(testLockID)
-                       << LocksType::who("host.local:27017:1352918870:16807:Balancer:282475249")
-                       << LocksType::why("doing balance round"));
+    BSONObj obj =
+        BSON(LocksType::name("balancer")
+             << LocksType::process("host.local:27017:1352918870:16807")
+             << LocksType::state(LocksType::State::LOCKED) << LocksType::lockID(testLockID)
+             << LocksType::who("host.local:27017:1352918870:16807:Balancer:282475249")
+             << LocksType::why("doing balance round"));
     auto locksResult = LocksType::fromBSON(obj);
     ASSERT_OK(locksResult.getStatus());
 
@@ -97,11 +95,11 @@ TEST(Validity, LockedValid) {
 }
 
 TEST(Validity, LockedMissingProcess) {
-    BSONObj obj = BSON(LocksType::name("balancer")
-                       << LocksType::state(LocksType::State::LOCKED)
-                       << LocksType::lockID(OID::gen())
-                       << LocksType::who("host.local:27017:1352918870:16807:Balancer:282475249")
-                       << LocksType::why("doing balance round"));
+    BSONObj obj =
+        BSON(LocksType::name("balancer")
+             << LocksType::state(LocksType::State::LOCKED) << LocksType::lockID(OID::gen())
+             << LocksType::who("host.local:27017:1352918870:16807:Balancer:282475249")
+             << LocksType::why("doing balance round"));
     auto locksResult = LocksType::fromBSON(obj);
     ASSERT_OK(locksResult.getStatus());
 
@@ -123,11 +121,10 @@ TEST(Validity, LockedMissingLockID) {
 }
 
 TEST(Validity, LockedMissingWho) {
-    BSONObj obj =
-        BSON(LocksType::name("balancer") << LocksType::process("host.local:27017:1352918870:16807")
-                                         << LocksType::state(LocksType::State::LOCKED)
-                                         << LocksType::lockID(OID::gen())
-                                         << LocksType::why("doing balance round"));
+    BSONObj obj = BSON(LocksType::name("balancer")
+                       << LocksType::process("host.local:27017:1352918870:16807")
+                       << LocksType::state(LocksType::State::LOCKED)
+                       << LocksType::lockID(OID::gen()) << LocksType::why("doing balance round"));
     auto locksResult = LocksType::fromBSON(obj);
     ASSERT_OK(locksResult.getStatus());
 
@@ -136,11 +133,11 @@ TEST(Validity, LockedMissingWho) {
 }
 
 TEST(Validity, LockedMissingWhy) {
-    BSONObj obj = BSON(LocksType::name("balancer")
-                       << LocksType::process("host.local:27017:1352918870:16807")
-                       << LocksType::state(LocksType::State::LOCKED)
-                       << LocksType::lockID(OID::gen())
-                       << LocksType::who("host.local:27017:1352918870:16807:Balancer:282475249"));
+    BSONObj obj =
+        BSON(LocksType::name("balancer")
+             << LocksType::process("host.local:27017:1352918870:16807")
+             << LocksType::state(LocksType::State::LOCKED) << LocksType::lockID(OID::gen())
+             << LocksType::who("host.local:27017:1352918870:16807:Balancer:282475249"));
     auto locksResult = LocksType::fromBSON(obj);
     ASSERT_OK(locksResult.getStatus());
 
@@ -149,12 +146,12 @@ TEST(Validity, LockedMissingWhy) {
 }
 
 TEST(Validity, ContestedValid) {
-    BSONObj obj = BSON(LocksType::name("balancer")
-                       << LocksType::process("host.local:27017:1352918870:16807")
-                       << LocksType::state(LocksType::State::LOCK_PREP)
-                       << LocksType::lockID(OID::gen())
-                       << LocksType::who("host.local:27017:1352918870:16807:Balancer:282475249")
-                       << LocksType::why("doing balance round"));
+    BSONObj obj =
+        BSON(LocksType::name("balancer")
+             << LocksType::process("host.local:27017:1352918870:16807")
+             << LocksType::state(LocksType::State::LOCK_PREP) << LocksType::lockID(OID::gen())
+             << LocksType::who("host.local:27017:1352918870:16807:Balancer:282475249")
+             << LocksType::why("doing balance round"));
     auto locksResult = LocksType::fromBSON(obj);
     ASSERT_OK(locksResult.getStatus());
 
@@ -163,11 +160,11 @@ TEST(Validity, ContestedValid) {
 }
 
 TEST(Validity, ContestedMissingProcess) {
-    BSONObj obj = BSON(LocksType::name("balancer")
-                       << LocksType::state(LocksType::State::LOCK_PREP)
-                       << LocksType::lockID(OID::gen())
-                       << LocksType::who("host.local:27017:1352918870:16807:Balancer:282475249")
-                       << LocksType::why("doing balance round"));
+    BSONObj obj =
+        BSON(LocksType::name("balancer")
+             << LocksType::state(LocksType::State::LOCK_PREP) << LocksType::lockID(OID::gen())
+             << LocksType::who("host.local:27017:1352918870:16807:Balancer:282475249")
+             << LocksType::why("doing balance round"));
     auto locksResult = LocksType::fromBSON(obj);
     ASSERT_OK(locksResult.getStatus());
 
@@ -189,11 +186,10 @@ TEST(Validity, ContestedMissingLockID) {
 }
 
 TEST(Validity, ContestedMissingWho) {
-    BSONObj obj =
-        BSON(LocksType::name("balancer") << LocksType::process("host.local:27017:1352918870:16807")
-                                         << LocksType::state(LocksType::State::LOCK_PREP)
-                                         << LocksType::lockID(OID::gen())
-                                         << LocksType::why("doing balance round"));
+    BSONObj obj = BSON(LocksType::name("balancer")
+                       << LocksType::process("host.local:27017:1352918870:16807")
+                       << LocksType::state(LocksType::State::LOCK_PREP)
+                       << LocksType::lockID(OID::gen()) << LocksType::why("doing balance round"));
     auto locksResult = LocksType::fromBSON(obj);
     ASSERT_OK(locksResult.getStatus());
 
@@ -202,11 +198,11 @@ TEST(Validity, ContestedMissingWho) {
 }
 
 TEST(Validity, ContestedMissingWhy) {
-    BSONObj obj = BSON(LocksType::name("balancer")
-                       << LocksType::process("host.local:27017:1352918870:16807")
-                       << LocksType::state(LocksType::State::LOCK_PREP)
-                       << LocksType::lockID(OID::gen())
-                       << LocksType::who("host.local:27017:1352918870:16807:Balancer:282475249"));
+    BSONObj obj =
+        BSON(LocksType::name("balancer")
+             << LocksType::process("host.local:27017:1352918870:16807")
+             << LocksType::state(LocksType::State::LOCK_PREP) << LocksType::lockID(OID::gen())
+             << LocksType::who("host.local:27017:1352918870:16807:Balancer:282475249"));
     auto locksResult = LocksType::fromBSON(obj);
     ASSERT_OK(locksResult.getStatus());
 

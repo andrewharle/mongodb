@@ -13,6 +13,7 @@
     assert.neq(null, conn, 'failed to start mongod');
 
     var test = conn.getDB("test");
+    var pid = test.serverStatus().pid;
 
     var name = 'jstests_slownightly_' + baseName;
     var t = test.getCollection(name);
@@ -44,8 +45,9 @@
 
     abortDuringIndexBuild();
 
-    assert.eq(waitProgram(conn.pid),
-              MongoRunner.EXIT_TEST,
+    var EXIT_TEST = 101;
+    assert.eq(waitProgram(pid),
+              EXIT_TEST,
               "mongod should have crashed due to the 'crashAfterStartingIndexBuild' " +
                   "failpoint being set.");
 
@@ -55,7 +57,7 @@
 
     assert.throws(function() {
         t.find({}, {_id: 0, a: 1}).hint({a: 1}).next();
-    }, [], 'index {a: 1} was rebuilt in spite of --noIndexBuildRetry');
+    }, null, 'index {a: 1} was rebuilt in spite of --noIndexBuildRetry');
 
     var indexes = t.getIndexes();
     assert.eq(1, indexes.length, 'unfinished indexes in listIndexes result: ' + tojson(indexes));

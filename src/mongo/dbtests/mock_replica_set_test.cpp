@@ -25,8 +25,6 @@
  *    then also delete it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
 #include "mongo/client/dbclientinterface.h"
 #include "mongo/dbtests/mock/mock_replica_set.h"
 #include "mongo/unittest/unittest.h"
@@ -43,7 +41,7 @@ using mongo::ConnectionString;
 using mongo::HostAndPort;
 using mongo::MockRemoteDBServer;
 using mongo::MockReplicaSet;
-using mongo::repl::ReplSetConfig;
+using mongo::repl::ReplicaSetConfig;
 
 using std::set;
 using std::string;
@@ -257,18 +255,18 @@ TEST(MockReplicaSetTest, ReplSetGetStatusNode2) {
 
 namespace {
 /**
- * Takes a ReplSetConfig and a node to remove and returns a new config with equivalent
+ * Takes a ReplicaSetConfig and a node to remove and returns a new config with equivalent
  * members minus the one specified to be removed.  NOTE: Does not copy over properties of the
  * members other than their id and host.
  */
-ReplSetConfig _getConfigWithMemberRemoved(const ReplSetConfig& oldConfig,
-                                          const HostAndPort& toRemove) {
+ReplicaSetConfig _getConfigWithMemberRemoved(const ReplicaSetConfig& oldConfig,
+                                             const HostAndPort& toRemove) {
     BSONObjBuilder newConfigBuilder;
     newConfigBuilder.append("_id", oldConfig.getReplSetName());
     newConfigBuilder.append("version", oldConfig.getConfigVersion());
 
     BSONArrayBuilder membersBuilder(newConfigBuilder.subarrayStart("members"));
-    for (ReplSetConfig::MemberIterator member = oldConfig.membersBegin();
+    for (ReplicaSetConfig::MemberIterator member = oldConfig.membersBegin();
          member != oldConfig.membersEnd();
          ++member) {
         if (member->getHostAndPort() == toRemove) {
@@ -280,7 +278,7 @@ ReplSetConfig _getConfigWithMemberRemoved(const ReplSetConfig& oldConfig,
     }
 
     membersBuilder.done();
-    ReplSetConfig newConfig;
+    ReplicaSetConfig newConfig;
     ASSERT_OK(newConfig.initialize(newConfigBuilder.obj()));
     ASSERT_OK(newConfig.validate());
     return newConfig;
@@ -290,9 +288,9 @@ ReplSetConfig _getConfigWithMemberRemoved(const ReplSetConfig& oldConfig,
 TEST(MockReplicaSetTest, IsMasterReconfigNodeRemoved) {
     MockReplicaSet replSet("n", 3);
 
-    ReplSetConfig oldConfig = replSet.getReplConfig();
+    ReplicaSetConfig oldConfig = replSet.getReplConfig();
     const string hostToRemove("$n1:27017");
-    ReplSetConfig newConfig = _getConfigWithMemberRemoved(oldConfig, HostAndPort(hostToRemove));
+    ReplicaSetConfig newConfig = _getConfigWithMemberRemoved(oldConfig, HostAndPort(hostToRemove));
     replSet.setConfig(newConfig);
 
     {
@@ -341,9 +339,9 @@ TEST(MockReplicaSetTest, IsMasterReconfigNodeRemoved) {
 TEST(MockReplicaSetTest, replSetGetStatusReconfigNodeRemoved) {
     MockReplicaSet replSet("n", 3);
 
-    ReplSetConfig oldConfig = replSet.getReplConfig();
+    ReplicaSetConfig oldConfig = replSet.getReplConfig();
     const string hostToRemove("$n1:27017");
-    ReplSetConfig newConfig = _getConfigWithMemberRemoved(oldConfig, HostAndPort(hostToRemove));
+    ReplicaSetConfig newConfig = _getConfigWithMemberRemoved(oldConfig, HostAndPort(hostToRemove));
     replSet.setConfig(newConfig);
 
     {

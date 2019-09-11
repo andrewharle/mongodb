@@ -34,7 +34,8 @@ load('./jstests/multiVersion/libs/multi_rs.js');
     rst.startSet({binVersion: oldVersion});
     rst.initiate();
     var n0 = rst.getPrimary();
-    assert.writeOK(getTestDbForNode(n0).source.insert({_id: 0}));
+    getTestDbForNode(n0).source.insert({_id: 0});
+    assert.gleOK(getTestDbForNode(n0).getLastErrorObj());
 
     jsTest.log("Performing aggregation to create target collection on " + n0.host);
     getTestDbForNode(n0).source.aggregate({$out: "target"});
@@ -44,7 +45,7 @@ load('./jstests/multiVersion/libs/multi_rs.js');
 
     jsTest.log("Stepping down " + n0.host);
     try {
-        n0.adminCommand({replSetStepDown: 1200, secondaryCatchUpPeriodSecs: 120});
+        n0.adminCommand({replSetStepDown: 1200});
     } catch (ex) {
         assert(tojson(ex).includes(
                    "network error while attempting to run command 'replSetStepDown' on host"),
@@ -77,7 +78,7 @@ load('./jstests/multiVersion/libs/multi_rs.js');
     jsTest.log("Confirming that target collection remained after switching primaries");
     jsTest.log("Stepping down " + n0.host);
     try {
-        n1.adminCommand({replSetStepDown: 1200, secondaryCatchUpPeriodSecs: 120});
+        n1.adminCommand({replSetStepDown: 1200});
     } catch (ex) {
         assert(tojson(ex).includes(
                    "network error while attempting to run command 'replSetStepDown' on host"),

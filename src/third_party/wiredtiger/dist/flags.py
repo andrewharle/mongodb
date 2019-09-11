@@ -110,7 +110,6 @@ flags = {
         'CONN_SERVER_LSM',
         'CONN_SERVER_STATISTICS',
         'CONN_SERVER_SWEEP',
-        'CONN_TABLE_CACHE',
         'CONN_WAS_BACKUP',
     ],
     'session' : [

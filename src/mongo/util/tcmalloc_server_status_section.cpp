@@ -39,11 +39,9 @@
 #include "mongo/base/init.h"
 #include "mongo/db/commands/server_status.h"
 #include "mongo/db/server_parameters.h"
-#include "mongo/db/service_context.h"
-#include "mongo/transport/transport_layer.h"
+#include "mongo/util/concurrency/synchronization.h"
 #include "mongo/util/log.h"
 #include "mongo/util/net/listen.h"
-#include "mongo/util/net/thread_idle_callback.h"
 
 namespace mongo {
 
@@ -67,8 +65,7 @@ void threadStateChange() {
         return;
     }
 
-    if (getGlobalServiceContext()->getTransportLayer()->sessionStats().numOpenSessions <=
-        kManyClients)
+    if (Listener::globalTicketHolder.used() <= kManyClients)
         return;
 
 #if MONGO_HAVE_GPERFTOOLS_GET_THREAD_CACHE_SIZE

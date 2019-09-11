@@ -44,8 +44,4 @@ SystemClockSource* SystemClockSource::get() {
     return globalSystemClockSource.get();
 }
 
-Milliseconds SystemClockSource::getPrecision() {
-    return Milliseconds(1);
-}
-
 }  // namespace mongo

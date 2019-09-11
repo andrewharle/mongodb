@@ -30,12 +30,9 @@ __schema_add_table(WT_SESSION_IMPL *session,
 	    session, name, namelen, ok_incomplete, &table));
 	WT_RET(ret);
 
-	if (!table->is_simple || F_ISSET(S2C(session), WT_CONN_TABLE_CACHE)) {
-		bucket = table->name_hash % WT_HASH_ARRAY_SIZE;
-		TAILQ_INSERT_HEAD(&session->tables, table, q);
-		TAILQ_INSERT_HEAD(&session->tablehash[bucket], table, hashq);
-	}
-
+	bucket = table->name_hash % WT_HASH_ARRAY_SIZE;
+	TAILQ_INSERT_HEAD(&session->tables, table, q);
+	TAILQ_INSERT_HEAD(&session->tablehash[bucket], table, hashq);
 	*tablep = table;
 
 	return (0);
@@ -115,14 +112,11 @@ __wt_schema_get_table(WT_SESSION_IMPL *session,
  * __wt_schema_release_table --
  *	Release a table handle.
  */
-int
+void
 __wt_schema_release_table(WT_SESSION_IMPL *session, WT_TABLE *table)
 {
 	WT_ASSERT(session, table->refcnt > 0);
-	if (--table->refcnt == 0 &&
-	    table->is_simple && !F_ISSET(S2C(session), WT_CONN_TABLE_CACHE))
-		WT_RET(__wt_schema_destroy_table(session, &table));
-	return (0);
+	--table->refcnt;
 }
 
 /*
@@ -235,11 +229,9 @@ __wt_schema_remove_table(WT_SESSION_IMPL *session, WT_TABLE *table)
 	uint64_t bucket;
 	WT_ASSERT(session, table->refcnt <= 1);
 
-	if (!table->is_simple || F_ISSET(S2C(session), WT_CONN_TABLE_CACHE)) {
-		bucket = table->name_hash % WT_HASH_ARRAY_SIZE;
-		TAILQ_REMOVE(&session->tables, table, q);
-		TAILQ_REMOVE(&session->tablehash[bucket], table, hashq);
-	}
+	bucket = table->name_hash % WT_HASH_ARRAY_SIZE;
+	TAILQ_REMOVE(&session->tables, table, q);
+	TAILQ_REMOVE(&session->tablehash[bucket], table, hashq);
 	return (__wt_schema_destroy_table(session, &table));
 }
 

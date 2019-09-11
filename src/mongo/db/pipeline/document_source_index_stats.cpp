@@ -28,25 +28,19 @@
 
 #include "mongo/platform/basic.h"
 
-#include "mongo/db/pipeline/document_source_index_stats.h"
-
-#include "mongo/db/pipeline/lite_parsed_document_source.h"
-#include "mongo/db/server_options.h"
-#include "mongo/util/net/sock.h"
+#include "mongo/db/pipeline/document_source.h"
 
 namespace mongo {
 
 using boost::intrusive_ptr;
 
-REGISTER_DOCUMENT_SOURCE(indexStats,
-                         LiteParsedDocumentSourceDefault::parse,
-                         DocumentSourceIndexStats::createFromBson);
+REGISTER_DOCUMENT_SOURCE(indexStats, DocumentSourceIndexStats::createFromBson);
 
 const char* DocumentSourceIndexStats::getSourceName() const {
     return "$indexStats";
 }
 
-DocumentSource::GetNextResult DocumentSourceIndexStats::getNext() {
+boost::optional<Document> DocumentSourceIndexStats::getNext() {
     pExpCtx->checkForInterrupt();
 
     if (_indexStatsMap.empty()) {
@@ -66,11 +60,11 @@ DocumentSource::GetNextResult DocumentSourceIndexStats::getNext() {
         return doc.freeze();
     }
 
-    return GetNextResult::makeEOF();
+    return boost::none;
 }
 
 DocumentSourceIndexStats::DocumentSourceIndexStats(const intrusive_ptr<ExpressionContext>& pExpCtx)
-    : DocumentSourceNeedsMongod(pExpCtx),
+    : DocumentSource(pExpCtx),
       _processName(str::stream() << getHostNameCached() << ":" << serverGlobalParams.port) {}
 
 intrusive_ptr<DocumentSource> DocumentSourceIndexStats::createFromBson(

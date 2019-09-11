@@ -3,7 +3,6 @@ load('jstests/replsets/rslib.js');
     "use strict";
 
     var st = new ShardingTest({
-        name: "zzz",
         shards: {
             rs0: {
                 nodes: {n0: {}, n1: {rsConfig: {priority: 0}}},
@@ -16,7 +15,7 @@ load('jstests/replsets/rslib.js');
     var config = replTest.getReplSetConfig();
     // Add a delay long enough so getLastError would actually 'wait' for write concern.
     config.members[1].slaveDelay = 3;
-    config.version = replTest.getReplSetConfigFromNode().version + 1;
+    config.version = 2;
 
     reconfig(replTest, config, true);
 

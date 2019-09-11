@@ -60,10 +60,9 @@ public:
                                               int len,
                                               bool enforceQuota);
 
-    virtual Status insertRecordsWithDocWriter(OperationContext* txn,
-                                              const DocWriter* const* docs,
-                                              size_t nDocs,
-                                              RecordId* idsOut);
+    virtual StatusWith<RecordId> insertRecord(OperationContext* txn,
+                                              const DocWriter* doc,
+                                              bool enforceQuota);
 
     virtual long long numRecords(OperationContext* txn) const {
         return _records.size();
@@ -75,12 +74,12 @@ public:
 
     // ------------------------------
 
-    virtual Status updateRecord(OperationContext* txn,
-                                const RecordId& oldLocation,
-                                const char* data,
-                                int len,
-                                bool enforceQuota,
-                                UpdateNotifier* notifier) {
+    virtual StatusWith<RecordId> updateRecord(OperationContext* txn,
+                                              const RecordId& oldLocation,
+                                              const char* data,
+                                              int len,
+                                              bool enforceQuota,
+                                              UpdateNotifier* notifier) {
         invariant(false);
     }
 
@@ -115,7 +114,8 @@ public:
     }
 
     virtual Status validate(OperationContext* txn,
-                            ValidateCmdLevel level,
+                            bool full,
+                            bool scanData,
                             ValidateAdaptor* adaptor,
                             ValidateResults* results,
                             BSONObjBuilder* output) {

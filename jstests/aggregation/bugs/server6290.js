@@ -8,7 +8,8 @@ t.drop();
 
 t.save({});
 
-var error = ErrorCodes.InvalidPipelineOperator;
+// code 15999: invalid operator
+var error = 15999;
 
 // $isoDate is an invalid operator.
 assertErrorCode(t, {$project: {a: {$isoDate: [{year: 1}]}}}, error);

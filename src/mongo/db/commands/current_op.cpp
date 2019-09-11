@@ -45,8 +45,6 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/stats/fill_locker_info.h"
-#include "mongo/rpc/metadata/client_metadata.h"
-#include "mongo/rpc/metadata/client_metadata_ismaster.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
@@ -55,8 +53,7 @@ class CurrentOpCommand : public Command {
 public:
     CurrentOpCommand() : Command("currentOp") {}
 
-
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    bool isWriteCommandForConfigServer() const final {
         return false;
     }
 
@@ -68,7 +65,7 @@ public:
         return true;
     }
 
-    Status checkAuthForCommand(Client* client,
+    Status checkAuthForCommand(ClientBasic* client,
                                const std::string& dbname,
                                const BSONObj& cmdObj) final {
         AuthorizationSession* authzSession = AuthorizationSession::get(client);
@@ -114,7 +111,13 @@ public:
             filter = b.obj();
         }
 
-        std::vector<BSONObj> inprogInfos;
+        // We use ExtensionsCallbackReal here instead of ExtensionsCallbackNoop in order to support
+        // the use case of having a $where filter with currentOp. However, since we don't have a
+        // collection, we pass in a fake collection name (and this is okay, because $where parsing
+        // only relies on the database part of the namespace).
+        const NamespaceString fakeNS(db, "$cmd");
+        const Matcher matcher(filter, ExtensionsCallbackReal(txn, &fakeNS));
+
         BSONArrayBuilder inprogBuilder(result.subarrayStart("inprog"));
 
         for (ServiceContext::LockedClientsCursor cursor(txn->getClient()->getServiceContext());
@@ -141,18 +144,6 @@ public:
             // The client information
             client->reportState(infoBuilder);
 
-            const auto& clientMetadata =
-                ClientMetadataIsMasterState::get(client).getClientMetadata();
-            if (clientMetadata) {
-                auto appName = clientMetadata.get().getApplicationName();
-                if (!appName.empty()) {
-                    infoBuilder.append("appName", appName);
-                }
-
-                auto clientMetadataDocument = clientMetadata.get().getDocument();
-                infoBuilder.append("clientMetadata", clientMetadataDocument);
-            }
-
             // Operation context specific information
             infoBuilder.appendBool("active", static_cast<bool>(opCtx));
             if (opCtx) {
@@ -169,31 +160,15 @@ public:
                 fillLockerInfo(lockerInfo, infoBuilder);
             }
 
-            // If we want to include all results or if the filter is empty, then we can append
-            // straight to the inprogBuilder, but otherwise we should run the filter Matcher
-            // outside this loop so we don't lock the ServiceContext while matching - in some cases
-            // this can cause deadlocks.
-            if (includeAll || filter.isEmpty()) {
-                inprogBuilder.append(infoBuilder.obj());
-            } else {
-                inprogInfos.emplace_back(infoBuilder.obj());
+            infoBuilder.done();
+
+            const BSONObj info = infoBuilder.obj();
+
+            if (includeAll || matcher.matches(info)) {
+                inprogBuilder.append(info);
             }
         }
 
-        if (!inprogInfos.empty()) {
-            // We use ExtensionsCallbackReal here instead of ExtensionsCallbackNoop in order to
-            // support the use case of having a $where filter with currentOp. However, since we
-            // don't have a collection, we pass in a fake collection name (and this is okay,
-            // because $where parsing only relies on the database part of the namespace).
-            const NamespaceString fakeNS(db, "$dummyNamespaceForCurrop");
-            const Matcher matcher(filter, ExtensionsCallbackReal(txn, &fakeNS), nullptr);
-
-            for (const auto& info : inprogInfos) {
-                if (matcher.matches(info)) {
-                    inprogBuilder.append(info);
-                }
-            }
-        }
         inprogBuilder.done();
 
         if (lockedForWriting()) {

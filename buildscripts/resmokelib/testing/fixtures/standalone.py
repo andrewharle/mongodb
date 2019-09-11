@@ -6,6 +6,7 @@ from __future__ import absolute_import
 
 import os
 import os.path
+import socket
 import time
 
 import pymongo
@@ -33,7 +34,7 @@ class MongoDFixture(interface.Fixture):
                  dbpath_prefix=None,
                  preserve_dbpath=False):
 
-        interface.Fixture.__init__(self, logger, job_num, dbpath_prefix=dbpath_prefix)
+        interface.Fixture.__init__(self, logger, job_num)
 
         if "dbpath" in mongod_options and dbpath_prefix is not None:
             raise ValueError("Cannot specify both mongod_options.dbpath and dbpath_prefix")
@@ -47,11 +48,48 @@ class MongoDFixture(interface.Fixture):
         # The dbpath in mongod_options takes precedence over other settings to make it easier for
         # users to specify a dbpath containing data to test against.
         if "dbpath" not in self.mongod_options:
-            self.mongod_options["dbpath"] = os.path.join(
-                self._dbpath_prefix, config.FIXTURE_SUBDIR)
+            # Command line options override the YAML configuration.
+            dbpath_prefix = utils.default_if_none(config.DBPATH_PREFIX, dbpath_prefix)
+            dbpath_prefix = utils.default_if_none(dbpath_prefix, config.DEFAULT_DBPATH_PREFIX)
+            self.mongod_options["dbpath"] = os.path.join(dbpath_prefix,
+                                                         "job%d" % (self.job_num),
+                                                         config.FIXTURE_SUBDIR)
         self._dbpath = self.mongod_options["dbpath"]
 
         self.mongod = None
+
+    def reconfigure(self, mongod_executable, mongod_options):
+        self.original_mongod_executable = self.mongod_executable
+        self.original_mongod_options = self.mongod_options
+        self.original_preserve_dbpath = self.preserve_dbpath
+
+        teardown_success = self.teardown()
+
+        self.mongod_executable = mongod_executable
+        self.mongod_options = mongod_options
+        self.preserve_dbpath = True 
+
+        self.setup()
+        self.await_ready()
+        
+        if not teardown_success:
+            raise errors.TestFailure("%s did not exit cleanly" % (self))
+
+    def reset_configuration(self):
+        teardown_success = self.teardown()
+
+        self.mongod_executable = self.original_mongod_executable
+        self.mongod_options = self.original_mongod_options
+
+        self.setup()
+        self.await_ready()
+
+        # Reset preserve_dbpath after calling setup(), since setup() should always preserve the
+        # dbpath.
+        self.preserve_dbpath = self.original_preserve_dbpath
+        
+        if not teardown_success:
+            raise errors.TestFailure("%s did not exit cleanly" % (self))
 
     def setup(self):
         """Set up the mongod."""
@@ -111,14 +149,13 @@ class MongoDFixture(interface.Fixture):
 
         self.logger.info("Successfully contacted the mongod on port %d.", self.port)
 
-    def _do_teardown(self):
+    def teardown(self):
         running_at_start = self.is_running()
         success = True  # Still a success even if nothing is running.
 
         if not running_at_start and self.port is not None:
-            self.logger.info(
-                "mongod on port %d was expected to be running in _do_teardown(), but wasn't.",
-                self.port)
+            self.logger.info("mongod on port %d was expected to be running in teardown(), but"
+                             " wasn't." % (self.port))
 
         if self.mongod is not None:
             if running_at_start:
@@ -141,15 +178,11 @@ class MongoDFixture(interface.Fixture):
     def is_running(self):
         return self.mongod is not None and self.mongod.poll() is None
 
-    def get_dbpath_prefix(self):
-        """ Returns the _dbpath, as this is the root of the data directory. """
-        return self._dbpath
-
     def get_internal_connection_string(self):
         if self.mongod is None:
             raise ValueError("Must call setup() before calling get_internal_connection_string()")
 
-        return "localhost:%d" % self.port
+        return "%s:%d" % (socket.gethostname(), self.port)
 
     def get_driver_connection_url(self):
         return "mongodb://" + self.get_internal_connection_string()

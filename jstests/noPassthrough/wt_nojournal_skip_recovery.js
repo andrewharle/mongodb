@@ -30,16 +30,16 @@
     // Execute unjournaled inserts, but periodically do a journaled insert. Triggers a checkpoint
     // prior to the mongod being terminated.
     var awaitShell = startParallelShell(function() {
-        for (let loopNum = 1; true; ++loopNum) {
+        for (var iter = 1; iter <= 1000; ++iter) {
             var bulk = db.nojournal.initializeUnorderedBulkOp();
             for (var i = 0; i < 100; ++i) {
                 bulk.insert({unjournaled: i});
             }
             assert.writeOK(bulk.execute({j: false}));
-            assert.writeOK(db.nojournal.insert({journaled: loopNum}, {writeConcern: {j: true}}));
+            assert.writeOK(db.nojournal.insert({journaled: iter}, {writeConcern: {j: true}}));
 
             // Create a checkpoint slightly before the mongod is terminated.
-            if (loopNum === 90) {
+            if (iter === 90) {
                 assert.commandWorked(db.adminCommand({fsync: 1}));
             }
         }

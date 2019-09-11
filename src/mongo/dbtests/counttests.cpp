@@ -1,3 +1,5 @@
+// counttests.cpp : count.{h,cpp} unit tests.
+
 /**
  *    Copyright (C) 2008 10gen Inc.
  *
@@ -26,23 +28,24 @@
  *    then also delete it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/catalog/collection.h"
-#include "mongo/db/client.h"
 #include "mongo/db/db.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/dbhelpers.h"
 #include "mongo/db/json.h"
-#include "mongo/dbtests/dbtests.h"
+#include "mongo/db/operation_context_impl.h"
 #include "mongo/stdx/thread.h"
+
+#include "mongo/dbtests/dbtests.h"
 
 namespace CountTests {
 
 class Base {
 public:
     Base()
-        : _scopedXact(&_txn, MODE_IX),
+        : _txn(),
+          _scopedXact(&_txn, MODE_IX),
           _lk(_txn.lockState(), nsToDatabaseSubstring(ns()), MODE_X),
           _context(&_txn, ns()),
           _client(&_txn) {
@@ -58,10 +61,8 @@ public:
             wunit.commit();
         }
 
-        DBDirectClient client(&_txn);
-        client.createIndex(ns(), IndexSpec().addKey("a").unique(false));
+        addIndex(fromjson("{\"a\":1}"));
     }
-
     ~Base() {
         try {
             WriteUnitOfWork wunit(&_txn);
@@ -77,10 +78,17 @@ protected:
         return "unittests.counttests";
     }
 
+    void addIndex(const BSONObj& key) {
+        Helpers::ensureIndex(&_txn,
+                             _collection,
+                             key,
+                             /*unique=*/false,
+                             /*name=*/key.firstElementFieldName());
+    }
+
     void insert(const char* s) {
         WriteUnitOfWork wunit(&_txn);
         const BSONObj o = fromjson(s);
-        OpDebug* const nullOpDebug = nullptr;
 
         if (o["_id"].eoo()) {
             BSONObjBuilder b;
@@ -88,15 +96,15 @@ protected:
             oid.init();
             b.appendOID("_id", &oid);
             b.appendElements(o);
-            _collection->insertDocument(&_txn, b.obj(), nullOpDebug, false);
+            _collection->insertDocument(&_txn, b.obj(), false);
         } else {
-            _collection->insertDocument(&_txn, o, nullOpDebug, false);
+            _collection->insertDocument(&_txn, o, false);
         }
         wunit.commit();
     }
 
-    const ServiceContext::UniqueOperationContext _txnPtr = cc().makeOperationContext();
-    OperationContext& _txn = *_txnPtr;
+
+    OperationContextImpl _txn;
     ScopedTransaction _scopedXact;
     Lock::DBLock _lk;
 
@@ -146,6 +154,7 @@ public:
         ASSERT_EQUALS(1ULL, _client.count(ns(), fromjson("{\"a\":/^b/}")));
     }
 };
+
 
 class All : public Suite {
 public:

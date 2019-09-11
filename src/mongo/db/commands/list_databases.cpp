@@ -33,17 +33,11 @@
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/matcher/expression.h"
-#include "mongo/db/matcher/extensions_callback_disallow_extensions.h"
-#include "mongo/db/operation_context.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/storage_engine.h"
 
 namespace mongo {
 namespace {
-static const StringData kFilterField{"filter"};
-static const StringData kNameField{"name"};
 static const StringData kNameOnlyField{"nameOnly"};
 }  // namespace
 
@@ -66,7 +60,7 @@ public:
     virtual bool adminOnly() const {
         return true;
     }
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    virtual bool isWriteCommandForConfigServer() const {
         return false;
     }
     virtual void help(stringstream& help) const {
@@ -89,39 +83,15 @@ public:
              int,
              string& errmsg,
              BSONObjBuilder& result) {
-        // Parse the filter.
-        std::unique_ptr<MatchExpression> filter;
-        if (auto filterElt = jsobj[kFilterField]) {
-            if (filterElt.type() != BSONType::Object) {
-                return appendCommandStatus(result,
-                                           {ErrorCodes::TypeMismatch,
-                                            str::stream() << "Field '" << kFilterField
-                                                          << "' must be of type Object in: "
-                                                          << jsobj});
-            }
-            // The collator is null because database metadata objects are compared using simple
-            // binary comparison.
-            const CollatorInterface* collator = nullptr;
-            auto statusWithMatcher = MatchExpressionParser::parse(
-                filterElt.Obj(), ExtensionsCallbackDisallowExtensions(), collator);
-            if (!statusWithMatcher.isOK()) {
-                return appendCommandStatus(result, statusWithMatcher.getStatus());
-            }
-            filter = std::move(statusWithMatcher.getValue());
-        }
         bool nameOnly = jsobj[kNameOnlyField].trueValue();
 
         vector<string> dbNames;
         StorageEngine* storageEngine = getGlobalServiceContext()->getGlobalStorageEngine();
-        {
-            ScopedTransaction transaction(txn, MODE_IS);
-            Lock::GlobalLock lk(txn->lockState(), MODE_IS, UINT_MAX);
-            storageEngine->listDatabases(&dbNames);
-        }
+        storageEngine->listDatabases(&dbNames);
 
         vector<BSONObj> dbInfos;
 
-        bool filterNameOnly = filter && filter->isLeaf() && filter->path() == kNameField;
+        set<string> seen;
         intmax_t totalSize = 0;
         for (vector<string>::iterator i = dbNames.begin(); i != dbNames.end(); ++i) {
             const string& dbname = *i;
@@ -129,12 +99,7 @@ public:
             BSONObjBuilder b;
             b.append("name", dbname);
 
-            int64_t size = 0;
             if (!nameOnly) {
-                // Filtering on name only should not require taking locks on filtered-out names.
-                if (filterNameOnly && !filter->matchesBSON(b.asTempObj()))
-                    continue;
-
                 ScopedTransaction transaction(txn, MODE_IS);
                 Lock::DBLock dbLock(txn->lockState(), dbname, MODE_IS);
 
@@ -145,17 +110,16 @@ public:
                 const DatabaseCatalogEntry* entry = db->getDatabaseCatalogEntry();
                 invariant(entry);
 
-                size = entry->sizeOnDisk(txn);
+                int64_t size = entry->sizeOnDisk(txn);
                 b.append("sizeOnDisk", static_cast<double>(size));
+                totalSize += size;
 
                 b.appendBool("empty", entry->isEmpty());
             }
-            BSONObj curDbObj = b.obj();
 
-            if (!filter || filter->matchesBSON(curDbObj)) {
-                totalSize += size;
-                dbInfos.push_back(curDbObj);
-            }
+            dbInfos.push_back(b.obj());
+
+            seen.insert(i->c_str());
         }
 
         result.append("databases", dbInfos);

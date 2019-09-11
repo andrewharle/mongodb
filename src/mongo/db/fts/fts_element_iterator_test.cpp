@@ -37,7 +37,6 @@ namespace mongo {
 namespace fts {
 
 using std::string;
-using unittest::assertGet;
 
 TEST(FTSElementIterator, Test1) {
     BSONObj obj = fromjson(
@@ -48,7 +47,7 @@ TEST(FTSElementIterator, Test1) {
 
     BSONObj indexSpec = fromjson("{ key : { a : \"text\" }, weights : { b : 10, d : 5 } }");
 
-    FTSSpec spec(assertGet(FTSSpec::fixSpec(indexSpec)));
+    FTSSpec spec(FTSSpec::fixSpec(indexSpec));
     Weights::const_iterator itt = spec.weights().begin();
     ASSERT(itt != spec.weights().end());
     ASSERT_EQUALS("a", itt->first);
@@ -93,7 +92,7 @@ TEST(FTSElementIterator, Test2) {
 
     BSONObj indexSpec = fromjson("{ key : { \"a.b.c\" : \"text\", d : \"text\" } }");
 
-    FTSSpec spec(assertGet(FTSSpec::fixSpec(indexSpec)));
+    FTSSpec spec(FTSSpec::fixSpec(indexSpec));
 
     FTSElementIterator it(spec, obj);
 
@@ -138,7 +137,7 @@ TEST(FTSElementIterator, Test3) {
     BSONObj indexSpec =
         fromjson("{ key : { a : \"text\", \"a.b.c\" : \"text\" }, weights : { \"a.b.c\" : 5 } }");
 
-    FTSSpec spec(assertGet(FTSSpec::fixSpec(indexSpec)));
+    FTSSpec spec(FTSSpec::fixSpec(indexSpec));
     Weights::const_iterator itt = spec.weights().begin();
     ASSERT(itt != spec.weights().end());
     ASSERT_EQUALS("a", itt->first);
@@ -184,7 +183,7 @@ TEST(FTSElementIterator, Test4) {
 
     BSONObj indexSpec = fromjson("{ key : { \"a.b.c\" : \"text\" }, weights : { \"a.b.c\" : 5 } }");
 
-    FTSSpec spec(assertGet(FTSSpec::fixSpec(indexSpec)));
+    FTSSpec spec(FTSSpec::fixSpec(indexSpec));
     FTSElementIterator it(spec, obj);
 
     ASSERT(it.more());
@@ -224,7 +223,7 @@ TEST(FTSElementIterator, Test5) {
     BSONObj indexSpec =
         fromjson("{ key : { a : \"text\" }, weights : { b : 20, c : 10, \"d.e.f\" : 5 } }");
 
-    FTSSpec spec(assertGet(FTSSpec::fixSpec(indexSpec)));
+    FTSSpec spec(FTSSpec::fixSpec(indexSpec));
     FTSElementIterator it(spec, obj);
 
     ASSERT(it.more());
@@ -270,7 +269,7 @@ TEST(FTSElementIterator, Test6) {
     BSONObj indexSpec =
         fromjson("{ key : { a : \"text\" }, weights : { b : 20, c : 10, \"d.e.f\" : 5 } }");
 
-    FTSSpec spec(assertGet(FTSSpec::fixSpec(indexSpec)));
+    FTSSpec spec(FTSSpec::fixSpec(indexSpec));
     FTSElementIterator it(spec, obj);
 
     ASSERT(it.more());
@@ -314,7 +313,7 @@ TEST(FTSElementIterator, LanguageOverrideV2) {
     BSONObj indexSpec =
         fromjson("{ key : { \"a.b.c\" : \"text\", d : \"text\" }, textIndexVersion: 2.0 }");
 
-    FTSSpec spec(assertGet(FTSSpec::fixSpec(indexSpec)));
+    FTSSpec spec(FTSSpec::fixSpec(indexSpec));
 
     FTSElementIterator it(spec, obj);
 
@@ -363,7 +362,7 @@ TEST(FTSElementIterator, LanguageOverrideV3) {
     BSONObj indexSpec =
         fromjson("{ key : { \"a.b.c\" : \"text\", d : \"text\" }, textIndexVersion: 3.0 }");
 
-    FTSSpec spec(assertGet(FTSSpec::fixSpec(indexSpec)));
+    FTSSpec spec(FTSSpec::fixSpec(indexSpec));
 
     FTSElementIterator it(spec, obj);
 

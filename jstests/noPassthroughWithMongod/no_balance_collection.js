@@ -6,8 +6,8 @@ var st = new ShardingTest({shards: 2, mongos: 1});
 assert.throws(sh.disableBalancing, [], "sh.disableBalancing requires a collection");
 assert.throws(sh.enableBalancing, [], "sh.enableBalancing requires a collection");
 
-var shardAName = st.shard0.shardName;
-var shardBName = st.shard1.shardName;
+var shardAName = st._shardNames[0];
+var shardBName = st._shardNames[1];
 
 var collA = st.s.getCollection(jsTest.name() + ".collA");
 var collB = st.s.getCollection(jsTest.name() + ".collB");
@@ -71,7 +71,7 @@ sh.disableBalancing(collB);
 // Wait for the balancer to fully finish the last migration and write the changelog
 // MUST set db var here, ugly but necessary
 db = st.s0.getDB("config");
-st.awaitBalancerRound();
+st.waitForBalancerRound();
 
 // Make sure auto-migrates on insert don't move chunks
 var lastMigration = sh._lastMigration(collB);

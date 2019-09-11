@@ -1,4 +1,4 @@
-// Waits for the balancer to run once, then stops it and checks that it is no longer running.
+// Simple test to make sure things get balanced
 
 (function() {
 
@@ -44,25 +44,21 @@
     var initialDiff = diff1();
     assert.soon(function() {
         return diff1() != initialDiff;
-    }, "Balancer did not kick in", 5 * 60 * 1000, 1000);
+    }, "Balancer did not kick in");
 
     print("* A");
     print("disabling the balancer");
-    s.stopBalancer();
+    s.config.settings.update({_id: "balancer"}, {$set: {stopped: true}}, true);
     s.config.settings.find().forEach(printjson);
     print("* B");
 
     print(diff1());
 
     var currDiff = diff1();
-    var waitTime = 0;
-    var startTime = Date.now();
-    while (waitTime < (1000 * 60)) {
-        // Wait for 60 seconds to ensure balancer did not run
-        assert.eq(currDiff, diff1(), "balance with stopped flag should not have happened");
-        sleep(5000);
-        waitTime = Date.now() - startTime;
-    }
+    assert.repeat(function() {
+        var d = diff1();
+        return d != currDiff;
+    }, "balance with stopped flag should not have happened", 1000 * 60, 5000);
 
     s.stop();
 

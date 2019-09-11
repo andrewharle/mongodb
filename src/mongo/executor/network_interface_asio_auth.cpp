@@ -38,18 +38,14 @@
 #include "mongo/db/auth/authorization_manager_global.h"
 #include "mongo/db/auth/internal_user_auth.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/commands/feature_compatibility_version_command_parser.h"
 #include "mongo/db/server_options.h"
-#include "mongo/db/wire_version.h"
 #include "mongo/rpc/factory.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/rpc/legacy_request_builder.h"
-#include "mongo/rpc/metadata/client_metadata.h"
 #include "mongo/rpc/reply_interface.h"
 #include "mongo/stdx/memory.h"
-#include "mongo/util/log.h"
+#include "mongo/util/net/sock.h"
 #include "mongo/util/net/ssl_manager.h"
-#include "mongo/util/version.h"
 
 namespace mongo {
 namespace executor {
@@ -65,10 +61,6 @@ void NetworkInterfaceASIO::_runIsMaster(AsyncOp* op) {
 
     BSONObjBuilder bob;
     bob.append("isMaster", 1);
-    bob.append("hangUpOnStepDown", false);
-
-    const auto versionString = VersionInfoInterface::instance().version();
-    ClientMetadata::serialize(_options.instanceName, versionString, &bob);
 
     if (Command::testCommandsEnabled) {
         // Only include the host:port of this process in the isMaster command request if test
@@ -79,17 +71,12 @@ void NetworkInterfaceASIO::_runIsMaster(AsyncOp* op) {
         bob.append("hostInfo", sb.str());
     }
 
-    op->connection().getCompressorManager().clientBegin(&bob);
-
-    if (WireSpec::instance().isInternalClient) {
-        WireSpec::appendInternalClientWireVersion(WireSpec::instance().outgoing, &bob);
-    }
-
     requestBuilder.setCommandArgs(bob.done());
     requestBuilder.setMetadata(rpc::makeEmptyMetadata());
 
     // Set current command to ismaster request and run
-    auto beginStatus = op->beginCommand(requestBuilder.done(), op->request().target);
+    auto beginStatus = op->beginCommand(
+        requestBuilder.done(), AsyncCommand::CommandType::kRPC, op->request().target);
     if (!beginStatus.isOK()) {
         return _completeOperation(op, beginStatus);
     }
@@ -97,12 +84,12 @@ void NetworkInterfaceASIO::_runIsMaster(AsyncOp* op) {
     // Callback to parse protocol information out of received ismaster response
     auto parseIsMaster = [this, op]() {
 
-        auto swCommandReply = op->command()->response(op, rpc::Protocol::kOpQuery, now());
+        auto swCommandReply = op->command()->response(rpc::Protocol::kOpQuery, now());
         if (!swCommandReply.isOK()) {
-            return _completeOperation(op, swCommandReply);
+            return _completeOperation(op, swCommandReply.getStatus());
         }
 
-        auto commandReply = std::move(swCommandReply);
+        auto commandReply = std::move(swCommandReply.getValue());
 
         // Ensure that the isMaster response is "ok:1".
         auto commandStatus = getStatusFromCommandResult(commandReply.data);
@@ -114,15 +101,7 @@ void NetworkInterfaceASIO::_runIsMaster(AsyncOp* op) {
         if (!protocolSet.isOK())
             return _completeOperation(op, protocolSet.getStatus());
 
-        auto validateStatus =
-            rpc::validateWireVersion(WireSpec::instance().outgoing, protocolSet.getValue().version);
-        if (!validateStatus.isOK()) {
-            warning() << "remote host has incompatible wire version: " << validateStatus;
-
-            return _completeOperation(op, validateStatus);
-        }
-
-        op->connection().setServerProtocols(protocolSet.getValue().protocolSet);
+        op->connection().setServerProtocols(protocolSet.getValue());
 
         invariant(op->connection().clientProtocols() != rpc::supports::kNone);
         // Set the operation protocol
@@ -130,26 +109,10 @@ void NetworkInterfaceASIO::_runIsMaster(AsyncOp* op) {
             rpc::negotiate(op->connection().serverProtocols(), op->connection().clientProtocols());
 
         if (!negotiatedProtocol.isOK()) {
-            // Add relatively verbose logging here, since this should not happen unless we are
-            // mongos and we try to connect to a node that doesn't support OP_COMMAND.
-            warning() << "failed to negotiate protocol with remote host: " << op->request().target;
-            warning() << "request was: " << redact(op->request().cmdObj);
-            warning() << "response was: " << redact(commandReply.data);
-
-            auto clientProtos = rpc::toString(op->connection().clientProtocols());
-            if (clientProtos.isOK()) {
-                warning() << "our (client) supported protocols: " << clientProtos.getValue();
-            }
-            auto serverProtos = rpc::toString(op->connection().serverProtocols());
-            if (serverProtos.isOK()) {
-                warning() << "remote server's supported protocols:" << serverProtos.getValue();
-            }
             return _completeOperation(op, negotiatedProtocol.getStatus());
         }
 
         op->setOperationProtocol(negotiatedProtocol.getValue());
-
-        op->connection().getCompressorManager().clientFinish(commandReply.data);
 
         if (_hook) {
             // Run the validation hook.
@@ -164,9 +127,10 @@ void NetworkInterfaceASIO::_runIsMaster(AsyncOp* op) {
 
     };
 
-    _asyncRunCommand(op, [this, op, parseIsMaster](std::error_code ec, size_t bytes) {
-        _validateAndRun(op, ec, std::move(parseIsMaster));
-    });
+    _asyncRunCommand(op,
+                     [this, op, parseIsMaster](std::error_code ec, size_t bytes) {
+                         _validateAndRun(op, ec, std::move(parseIsMaster));
+                     });
 }
 
 void NetworkInterfaceASIO::_authenticate(AsyncOp* op) {
@@ -184,7 +148,7 @@ void NetworkInterfaceASIO::_authenticate(AsyncOp* op) {
     std::string clientName;
 #ifdef MONGO_CONFIG_SSL
     if (getSSLManager()) {
-        clientName = getSSLManager()->getSSLConfiguration().clientSubjectName.toString();
+        clientName = getSSLManager()->getSSLConfiguration().clientSubjectName;
     }
 #endif
 
@@ -194,14 +158,13 @@ void NetworkInterfaceASIO::_authenticate(AsyncOp* op) {
 
         // SERVER-14170: Set the metadataHook to nullptr explicitly as we cannot write metadata
         // here.
-        auto beginStatus = op->beginCommand(request);
+        auto beginStatus = op->beginCommand(request, nullptr);
         if (!beginStatus.isOK()) {
             return handler(beginStatus);
         }
 
         auto callAuthCompletionHandler = [this, op, handler]() {
-            auto authResponse =
-                op->command()->response(op, op->operationProtocol(), now(), nullptr);
+            auto authResponse = op->command()->response(op->operationProtocol(), now(), nullptr);
             handler(authResponse);
         };
 
@@ -218,7 +181,7 @@ void NetworkInterfaceASIO::_authenticate(AsyncOp* op) {
         return _runConnectionHook(op);
     };
 
-    auto params = getInternalUserAuthParams();
+    auto params = getInternalUserAuthParamsWithFallback();
     auth::authenticateClient(params, op->request().target, clientName, runCommandHook, authHook);
 }
 

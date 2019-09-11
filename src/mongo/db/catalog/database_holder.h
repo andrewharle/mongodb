@@ -33,7 +33,6 @@
 
 #include "mongo/base/string_data.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/stdx/mutex.h"
 #include "mongo/util/concurrency/mutex.h"
 #include "mongo/util/string_map.h"
 
@@ -76,6 +75,18 @@ public:
      * @param force Force close even if something underway - use at shutdown
      */
     bool closeAll(OperationContext* txn, BSONObjBuilder& result, bool force);
+
+    /**
+     * Retrieves the names of all currently opened databases. Does not require locking, but it
+     * is not guaranteed that the returned set of names will be still valid unless a global
+     * lock is held, which would prevent database from disappearing or being created.
+     */
+    void getAllShortNames(std::set<std::string>& all) const {
+        stdx::lock_guard<SimpleMutex> lk(_m);
+        for (DBs::const_iterator j = _dbs.begin(); j != _dbs.end(); ++j) {
+            all.insert(j->first);
+        }
+    }
 
     /**
      * Returns the set of existing database names that differ only in casing.

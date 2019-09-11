@@ -29,30 +29,25 @@
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kStorage
 
-#if defined(__linux__)
-#include <sys/vfs.h>
-#endif
-
 #include "mongo/platform/basic.h"
 
 #include "mongo/base/init.h"
 #include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/jsobj.h"
-#include "mongo/db/service_context.h"
 #include "mongo/db/service_context_d.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/jsobj.h"
 #include "mongo/db/storage/kv/kv_storage_engine.h"
 #include "mongo/db/storage/storage_engine_lock_file.h"
 #include "mongo/db/storage/storage_engine_metadata.h"
-#include "mongo/db/storage/storage_options.h"
+#include "mongo/db/storage/wiredtiger/wiredtiger_kv_engine.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_global_options.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_index.h"
-#include "mongo/db/storage/wiredtiger/wiredtiger_kv_engine.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_parameters.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_record_store.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_server_status.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_util.h"
+#include "mongo/db/storage/storage_options.h"
 #include "mongo/util/log.h"
-#include "mongo/util/processinfo.h"
 
 namespace mongo {
 
@@ -61,56 +56,33 @@ class WiredTigerFactory : public StorageEngine::Factory {
 public:
     virtual ~WiredTigerFactory() {}
     virtual StorageEngine* create(const StorageGlobalParams& params,
-                                  const StorageEngineLockFile* lockFile) const {
-        if (lockFile && lockFile->createdByUncleanShutdown()) {
+                                  const StorageEngineLockFile& lockFile) const {
+        if (lockFile.createdByUncleanShutdown()) {
             warning() << "Recovering data from the last clean checkpoint.";
         }
 
-#if defined(__linux__)
-// This is from <linux/magic.h> but that isn't available on all systems.
-// Note that the magic number for ext4 is the same as ext2 and ext3.
-#define EXT4_SUPER_MAGIC 0xEF53
-        {
-            struct statfs fs_stats;
-            int ret = statfs(params.dbpath.c_str(), &fs_stats);
-
-            if (ret == 0 && fs_stats.f_type == EXT4_SUPER_MAGIC) {
-                log() << startupWarningsLog;
-                log() << "** WARNING: Using the XFS filesystem is strongly recommended with the "
-                         "WiredTiger storage engine"
-                      << startupWarningsLog;
-                log() << "**          See "
-                         "http://dochub.mongodb.org/core/prodnotes-filesystem"
-                      << startupWarningsLog;
-            }
-        }
-#endif
-
-        size_t cacheMB = WiredTigerUtil::getCacheSizeMB(wiredTigerGlobalOptions.cacheSizeGB);
-        const double memoryThresholdPercentage = 0.8;
-        ProcessInfo p;
-        if (p.supported()) {
-            if (cacheMB > memoryThresholdPercentage * p.getMemSizeMB()) {
-                log() << startupWarningsLog;
-                log() << "** WARNING: The configured WiredTiger cache size is more than "
-                      << memoryThresholdPercentage * 100 << "% of available RAM."
-                      << startupWarningsLog;
-                log() << "**          See "
-                         "http://dochub.mongodb.org/core/faq-memory-diagnostics-wt"
-                      << startupWarningsLog;
+        size_t cacheSizeGB = wiredTigerGlobalOptions.cacheSizeGB;
+        if (cacheSizeGB == 0) {
+            // Since the user didn't provide a cache size, choose a reasonable default value.
+            // We want to reserve 1GB for the system and binaries, but it's not bad to
+            // leave a fair amount left over for pagecache since that's compressed storage.
+            ProcessInfo pi;
+            double memSizeMB = pi.getMemSizeMB();
+            if (memSizeMB > 0) {
+                double cacheMB = (memSizeMB - 1024) * 0.6;
+                cacheSizeGB = static_cast<size_t>(cacheMB / 1024);
+                if (cacheSizeGB < 1)
+                    cacheSizeGB = 1;
             }
         }
         const bool ephemeral = false;
-        WiredTigerKVEngine* kv =
-            new WiredTigerKVEngine(getCanonicalName().toString(),
-                                   params.dbpath,
-                                   getGlobalServiceContext()->getFastClockSource(),
-                                   wiredTigerGlobalOptions.engineConfig,
-                                   cacheMB,
-                                   params.dur,
-                                   ephemeral,
-                                   params.repair,
-                                   params.readOnly);
+        WiredTigerKVEngine* kv = new WiredTigerKVEngine(getCanonicalName().toString(),
+                                                        params.dbpath,
+                                                        wiredTigerGlobalOptions.engineConfig,
+                                                        cacheSizeGB,
+                                                        params.dur,
+                                                        ephemeral,
+                                                        params.repair);
         kv->setRecordStoreExtraOptions(wiredTigerGlobalOptions.collectionConfig);
         kv->setSortedDataInterfaceExtraOptions(wiredTigerGlobalOptions.indexConfig);
         // Intentionally leaked.
@@ -158,10 +130,6 @@ public:
         builder.appendBool("directoryPerDB", params.directoryperdb);
         builder.appendBool("directoryForIndexes", wiredTigerGlobalOptions.directoryForIndexes);
         return builder.obj();
-    }
-
-    bool supportsReadOnly() const final {
-        return true;
     }
 };
 }  // namespace

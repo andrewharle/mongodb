@@ -1,5 +1,5 @@
 (function() {
-    "use strict";
+    'use strict';
 
     var st =
         new ShardingTest({name: 'migrateBig_balancer', shards: 2, other: {enableBalancer: true}});
@@ -38,6 +38,19 @@
         5, mongos.getDB("config").chunks.find({ns: "test.stuff"}).count(), "not enough chunks");
 
     assert.soon(function() {
+        // On *extremely* slow or variable systems, we've seen migrations fail in the critical
+        // section and kill the server. Do an explicit check for this. SERVER-8781
+        //
+        // TODO: Remove once we can better specify what systems to run what tests on.
+        try {
+            assert.commandWorked(st.shard0.getDB("admin").runCommand({ping: 1}));
+            assert.commandWorked(st.shard1.getDB("admin").runCommand({ping: 1}));
+        } catch (e) {
+            print("An error occurred contacting a shard during balancing," +
+                  " this may be due to slow disk I/O, aborting test.");
+            throw e;
+        }
+
         var res = mongos.getDB("config").chunks.group({
             cond: {ns: "test.stuff"},
             key: {shard: 1},

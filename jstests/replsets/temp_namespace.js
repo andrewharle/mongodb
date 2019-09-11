@@ -88,6 +88,8 @@ try {
 }
 
 assert.soon(function() {
+    printjson(secondDB.adminCommand("replSetGetStatus"));
+    printjson(secondDB.isMaster());
     return secondDB.isMaster().ismaster;
 }, '', 75 * 1000);  // must wait for secondary to be willing to promote self
 

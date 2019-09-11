@@ -28,77 +28,29 @@
 
 #pragma once
 
-#include <boost/intrusive_ptr.hpp>
-#include <memory>
 #include <string>
-#include <vector>
 
-#include "mongo/bson/bsonobj.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/pipeline/aggregation_request.h"
-#include "mongo/db/pipeline/document_comparator.h"
-#include "mongo/db/pipeline/value_comparator.h"
-#include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/util/intrusive_counter.h"
-#include "mongo/util/string_map.h"
 
 namespace mongo {
 
-class ExpressionContext : public RefCountable {
+struct ExpressionContext : public IntrusiveCounterUnsigned {
 public:
-    struct ResolvedNamespace {
-        ResolvedNamespace() = default;
-        ResolvedNamespace(NamespaceString ns, std::vector<BSONObj> pipeline);
+    ExpressionContext(OperationContext* opCtx, const NamespaceString& ns) : ns(ns), opCtx(opCtx) {}
 
-        NamespaceString ns;
-        std::vector<BSONObj> pipeline;
-    };
-
-    /**
-     * Constructs an ExpressionContext to be used for Pipeline parsing and evaluation.
-     * 'resolvedNamespaces' maps collection names (not full namespaces) to ResolvedNamespaces.
+    /** Used by a pipeline to check for interrupts so that killOp() works.
+     *  @throws if the operation has been interrupted
      */
-    ExpressionContext(OperationContext* opCtx,
-                      const AggregationRequest& request,
-                      std::unique_ptr<CollatorInterface> collator,
-                      StringMap<ExpressionContext::ResolvedNamespace> resolvedNamespaces);
-
-    /**
-     * Used by a pipeline to check for interrupts so that killOp() works. Throws a UserAssertion if
-     * this aggregation pipeline has been interrupted.
-     */
-    void checkForInterrupt();
-
-    const CollatorInterface* getCollator() const {
-        return _collator.get();
+    void checkForInterrupt() {
+        if (opCtx && --interruptCounter == 0) {  // XXX SERVER-13931 for opCtx check
+            // The checkForInterrupt could be expensive, at least in relative terms.
+            opCtx->checkForInterrupt();
+            interruptCounter = kInterruptCheckPeriod;
+        }
     }
 
-    const DocumentComparator& getDocumentComparator() const {
-        return _documentComparator;
-    }
-
-    const ValueComparator& getValueComparator() const {
-        return _valueComparator;
-    }
-
-    /**
-     * Returns an ExpressionContext that is identical to 'this' that can be used to execute a
-     * separate aggregation pipeline on 'ns'.
-     */
-    boost::intrusive_ptr<ExpressionContext> copyWith(NamespaceString ns) const;
-
-    /**
-     * Returns the ResolvedNamespace corresponding to 'nss'. It is an error to call this method on a
-     * namespace not involved in the pipeline.
-     */
-    const ResolvedNamespace& getResolvedNamespace(const NamespaceString& nss) const {
-        auto it = _resolvedNamespaces.find(nss.coll());
-        invariant(it != _resolvedNamespaces.end());
-        return it->second;
-    };
-
-    bool isExplain = false;
     bool inShard = false;
     bool inRouter = false;
     bool extSortAllowed = false;
@@ -108,39 +60,7 @@ public:
     std::string tempDir;  // Defaults to empty to prevent external sorting in mongos.
 
     OperationContext* opCtx;
-
-    // Collation requested by the user for this pipeline. Empty if the user did not request a
-    // collation.
-    BSONObj collation;
-
-protected:
     static const int kInterruptCheckPeriod = 128;
-
-    /**
-     * Should only be used by 'ExpressionContextForTest'.
-     */
-    ExpressionContext() = default;
-
-    /**
-     * Sets '_collator' and resets '_documentComparator' and '_valueComparator'.
-     *
-     * Use with caution - it is illegal to change the collation once a Pipeline has been parsed with
-     * this ExpressionContext.
-     */
-    void setCollator(std::unique_ptr<CollatorInterface> collator);
-
-    // Collator used for comparisons.
-    std::unique_ptr<CollatorInterface> _collator;
-
-    // Used for all comparisons of Document/Value during execution of the aggregation operation.
-    // Must not be changed after parsing a Pipeline with this ExpressionContext.
-    DocumentComparator _documentComparator;
-    ValueComparator _valueComparator;
-
-    // A map from namespace to the resolved namespace, in case any views are involved.
-    StringMap<ResolvedNamespace> _resolvedNamespaces;
-
-    int _interruptCounter = kInterruptCheckPeriod;
+    int interruptCounter = kInterruptCheckPeriod;  // when 0, check interruptStatus
 };
-
-}  // namespace mongo
+}

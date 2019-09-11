@@ -28,15 +28,14 @@
 #pragma once
 
 #include <memory>
+#include <unordered_map>
 #include <queue>
 
 #include "mongo/base/disallow_copying.h"
 #include "mongo/stdx/chrono.h"
 #include "mongo/stdx/functional.h"
 #include "mongo/stdx/mutex.h"
-#include "mongo/stdx/unordered_map.h"
 #include "mongo/util/net/hostandport.h"
-#include "mongo/util/time_support.h"
 
 namespace mongo {
 
@@ -68,12 +67,12 @@ public:
 
     using GetConnectionCallback = stdx::function<void(StatusWith<ConnectionHandle>)>;
 
-    static constexpr Milliseconds kDefaultHostTimeout = Milliseconds(300000);  // 5mins
+    static const Milliseconds kDefaultHostTimeout;
     static const size_t kDefaultMaxConns;
     static const size_t kDefaultMinConns;
+    static const Milliseconds kDefaultRefreshRequirement;
+    static const Milliseconds kDefaultRefreshTimeout;
     static const size_t kDefaultMaxConnecting;
-    static constexpr Milliseconds kDefaultRefreshRequirement = Milliseconds(60000);  // 1min
-    static constexpr Milliseconds kDefaultRefreshTimeout = Milliseconds(20000);      // 20secs
 
     static const Status kConnectionStateUnknown;
 
@@ -146,7 +145,7 @@ private:
 
     // The global mutex for specific pool access and the generation counter
     mutable stdx::mutex _mutex;
-    stdx::unordered_map<HostAndPort, std::unique_ptr<SpecificPool>> _pools;
+    std::unordered_map<HostAndPort, std::unique_ptr<SpecificPool>> _pools;
 };
 
 class ConnectionPool::ConnectionHandleDeleter {

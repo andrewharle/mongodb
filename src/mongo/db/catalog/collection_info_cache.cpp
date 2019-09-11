@@ -42,7 +42,6 @@
 #include "mongo/db/query/plan_cache.h"
 #include "mongo/db/query/planner_ixselect.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/ttl_collection_cache.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/debug_util.h"
 #include "mongo/util/log.h"
@@ -54,15 +53,8 @@ CollectionInfoCache::CollectionInfoCache(Collection* collection)
       _keysComputed(false),
       _planCache(new PlanCache(collection->ns().ns())),
       _querySettings(new QuerySettings()),
-      _indexUsageTracker(getGlobalServiceContext()->getPreciseClockSource()) {}
+      _indexUsageTracker(getGlobalServiceContext()->getClockSource()) {}
 
-CollectionInfoCache::~CollectionInfoCache() {
-    // Necessary because the collection cache will not explicitly get updated upon database drop.
-    if (_hasTTLIndex) {
-        TTLCollectionCache& ttlCollectionCache = TTLCollectionCache::get(getGlobalServiceContext());
-        ttlCollectionCache.unregisterCollection(_collection->ns());
-    }
-}
 
 const UpdateIndexData& CollectionInfoCache::getIndexKeys(OperationContext* txn) const {
     // This requires "some" lock, and MODE_IS is an expression for that, for now.
@@ -74,19 +66,12 @@ const UpdateIndexData& CollectionInfoCache::getIndexKeys(OperationContext* txn) 
 void CollectionInfoCache::computeIndexKeys(OperationContext* txn) {
     _indexedPaths.clear();
 
-    bool hadTTLIndex = _hasTTLIndex;
-    _hasTTLIndex = false;
-
     IndexCatalog::IndexIterator i = _collection->getIndexCatalog()->getIndexIterator(txn, true);
     while (i.more()) {
         IndexDescriptor* descriptor = i.next();
 
         if (descriptor->getAccessMethodName() != IndexNames::TEXT) {
             BSONObj key = descriptor->keyPattern();
-            const BSONObj& infoObj = descriptor->infoObj();
-            if (infoObj.hasField("expireAfterSeconds")) {
-                _hasTTLIndex = true;
-            }
             BSONObjIterator j(key);
             while (j.more()) {
                 BSONElement e = j.next();
@@ -124,16 +109,6 @@ void CollectionInfoCache::computeIndexKeys(OperationContext* txn) {
             for (auto it = paths.begin(); it != paths.end(); ++it) {
                 _indexedPaths.addPath(*it);
             }
-        }
-    }
-
-    TTLCollectionCache& ttlCollectionCache = TTLCollectionCache::get(getGlobalServiceContext());
-
-    if (_hasTTLIndex != hadTTLIndex) {
-        if (_hasTTLIndex) {
-            ttlCollectionCache.registerCollection(_collection->ns());
-        } else {
-            ttlCollectionCache.unregisterCollection(_collection->ns());
         }
     }
 
@@ -181,13 +156,11 @@ void CollectionInfoCache::updatePlanCacheIndexEntries(OperationContext* txn) {
         indexEntries.emplace_back(desc->keyPattern(),
                                   desc->getAccessMethodName(),
                                   desc->isMultikey(txn),
-                                  ice->getMultikeyPaths(txn),
                                   desc->isSparse(),
                                   desc->unique(),
                                   desc->indexName(),
                                   ice->getFilterExpression(),
-                                  desc->infoObj(),
-                                  ice->getCollator());
+                                  desc->infoObj());
     }
 
     _planCache->notifyOfIndexEntries(indexEntries);

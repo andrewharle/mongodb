@@ -40,7 +40,6 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
-#include "mongo/util/stringutils.h"
 
 namespace mongo {
 
@@ -238,8 +237,7 @@ Status V2UserDocumentParser::checkValidUserDocument(const BSONObj& doc) const {
         return _badValue("User document needs 'db' field to be a non-empty string", 0);
     }
     StringData userDBStr = userDBElement.valueStringData();
-    if (!NamespaceString::validDBName(userDBStr, NamespaceString::DollarInDbNameBehavior::Allow) &&
-        userDBStr != "$external") {
+    if (!NamespaceString::validDBName(userDBStr) && userDBStr != "$external") {
         return _badValue(mongoutils::str::stream() << "'" << userDBStr
                                                    << "' is not a valid value for the db field.",
                          0);
@@ -504,24 +502,11 @@ Status V2UserDocumentParser::initializeUserPrivilegesFromUserDocument(const BSON
         }
         Privilege privilege;
         ParsedPrivilege pp;
-        if (!pp.parseBSON((*it).Obj(), &errmsg)) {
+        if (!pp.parseBSON((*it).Obj(), &errmsg) ||
+            !ParsedPrivilege::parsedPrivilegeToPrivilege(pp, &privilege, &errmsg)) {
             warning() << "Could not parse privilege element in user document for "
                       << user->getName() << ": " << errmsg;
             continue;
-        }
-        std::vector<std::string> unrecognizedActions;
-        Status status =
-            ParsedPrivilege::parsedPrivilegeToPrivilege(pp, &privilege, &unrecognizedActions);
-        if (!status.isOK()) {
-            warning() << "Could not parse privilege element in user document for "
-                      << user->getName() << causedBy(status);
-            continue;
-        }
-        if (unrecognizedActions.size()) {
-            std::string unrecognizedActionsString;
-            joinStringDelim(unrecognizedActions, &unrecognizedActionsString, ',');
-            warning() << "Encountered unrecognized actions \" " << unrecognizedActionsString
-                      << "\" while parsing user document for " << user->getName();
         }
         privileges.push_back(privilege);
     }

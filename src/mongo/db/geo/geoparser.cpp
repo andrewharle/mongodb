@@ -30,11 +30,10 @@
 
 #include "mongo/db/geo/geoparser.h"
 
-#include <cmath>
 #include <string>
 #include <vector>
+#include <cmath>
 
-#include "mongo/db/bson/dotted_path_support.h"
 #include "mongo/db/geo/shapes.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/util/log.h"
@@ -47,8 +46,6 @@ namespace mongo {
 
 using std::unique_ptr;
 using std::stringstream;
-
-namespace dps = ::mongo::dotted_path_support;
 
 // This field must be present, and...
 static const string GEOJSON_TYPE = "type";
@@ -230,8 +227,7 @@ static Status parseGeoJSONPolygonCoordinates(const BSONElement& elem,
                 "Secondary loops not contained by first exterior loop - "
                 "secondary loops must be holes: "
                 << coordinateElt.toString(false)
-                << " first loop: "
-                << elem.Obj().firstElement().toString(false));
+                << " first loop: " << elem.Obj().firstElement().toString(false));
         }
     }
 
@@ -528,7 +524,7 @@ Status GeoParser::parseMultiPoint(const BSONObj& obj, MultiPointWithCRS* out) {
         return status;
 
     out->points.clear();
-    BSONElement coordElt = dps::extractElementAtPath(obj, GEOJSON_COORDINATES);
+    BSONElement coordElt = obj.getFieldDotted(GEOJSON_COORDINATES);
     status = parseArrayOfCoordinates(coordElt, &out->points);
     if (!status.isOK())
         return status;
@@ -549,7 +545,7 @@ Status GeoParser::parseMultiLine(const BSONObj& obj, bool skipValidation, MultiL
     if (!status.isOK())
         return status;
 
-    BSONElement coordElt = dps::extractElementAtPath(obj, GEOJSON_COORDINATES);
+    BSONElement coordElt = obj.getFieldDotted(GEOJSON_COORDINATES);
     if (Array != coordElt.type())
         return BAD_VALUE("MultiLineString coordinates must be an array");
 
@@ -579,7 +575,7 @@ Status GeoParser::parseMultiPolygon(const BSONObj& obj,
     if (!status.isOK())
         return status;
 
-    BSONElement coordElt = dps::extractElementAtPath(obj, GEOJSON_COORDINATES);
+    BSONElement coordElt = obj.getFieldDotted(GEOJSON_COORDINATES);
     if (Array != coordElt.type())
         return BAD_VALUE("MultiPolygon coordinates must be an array");
 
@@ -671,7 +667,7 @@ Status GeoParser::parseCenterSphere(const BSONObj& obj, CapWithCRS* out) {
 Status GeoParser::parseGeometryCollection(const BSONObj& obj,
                                           bool skipValidation,
                                           GeometryCollection* out) {
-    BSONElement coordElt = dps::extractElementAtPath(obj, GEOJSON_GEOMETRIES);
+    BSONElement coordElt = obj.getFieldDotted(GEOJSON_GEOMETRIES);
     if (Array != coordElt.type())
         return BAD_VALUE("GeometryCollection geometries must be an array");
 
@@ -783,7 +779,7 @@ GeoParser::GeoSpecifier GeoParser::parseGeoSpecifier(const BSONElement& type) {
 }
 
 GeoParser::GeoJSONType GeoParser::parseGeoJSONType(const BSONObj& obj) {
-    BSONElement type = dps::extractElementAtPath(obj, GEOJSON_TYPE);
+    BSONElement type = obj.getFieldDotted(GEOJSON_TYPE);
     if (String != type.type()) {
         return GeoParser::GEOJSON_UNKNOWN;
     }

@@ -65,8 +65,7 @@ public:
     void run() {
         ASSERT_EQUALS("{ \"a\" : \"b\" }",
                       BSON("a"
-                           << "b")
-                          .jsonString(Strict));
+                           << "b").jsonString(Strict));
     }
 };
 
@@ -625,7 +624,7 @@ class Base {
 public:
     virtual ~Base() {}
     void run() {
-        ASSERT(fromjson(json()).valid(BSONVersion::kLatest));
+        ASSERT(fromjson(json()).valid());
         assertEquals(bson(), fromjson(json()), "mode: json-to-bson");
         assertEquals(bson(), fromjson(tojson(bson())), "mode: <default>");
         assertEquals(bson(), fromjson(tojson(bson(), Strict)), "mode: strict");
@@ -2474,8 +2473,7 @@ public:
 
     virtual BSONObj bson() const {
         return BSON("int" << 123 << "long" << 9223372036854775807ll  // 2**63 - 1
-                          << "double"
-                          << 3.14);
+                          << "double" << 3.14);
     }
     virtual string json() const {
         return "{ \"int\": 123, \"long\": 9223372036854775807, \"double\": 3.14 }";
@@ -2498,8 +2496,7 @@ public:
 
     virtual BSONObj bson() const {
         return BSON("int" << 123 << "long" << 9223372036854775807ll  // 2**63 - 1
-                          << "double"
-                          << 3.14);
+                          << "double" << 3.14);
     }
     virtual string json() const {
         return "{ 'int': NumberInt(123), "
@@ -2599,8 +2596,7 @@ public:
 
     virtual BSONObj bson() const {
         return BSON("int" << -123 << "long" << -9223372036854775807ll  // -1 * (2**63 - 1)
-                          << "double"
-                          << -3.14);
+                          << "double" << -3.14);
     }
     virtual string json() const {
         return "{ \"int\": -123, \"long\": -9223372036854775807, \"double\": -3.14 }";
@@ -2721,8 +2717,12 @@ public:
         add<JsonStringTests::NumberLongStrict>();
         add<JsonStringTests::NumberLongStrictLarge>();
         add<JsonStringTests::NumberLongStrictNegative>();
-        add<JsonStringTests::NumberDecimal>();
-        add<JsonStringTests::NumberDecimalStrict>();
+
+        if (Decimal128::enabled) {
+            add<JsonStringTests::NumberDecimal>();
+            add<JsonStringTests::NumberDecimalStrict>();
+        }
+
         add<JsonStringTests::NumberDoubleNaN>();
         add<JsonStringTests::NumberDoubleInfinity>();
         add<JsonStringTests::NumberDoubleNegativeInfinity>();

@@ -37,12 +37,15 @@
 
     // Force node 1 to sync directly from node 0.
     syncFrom(nodes[1], nodes[0], replTest);
+
     // Force node 4 to sync through node 1.
     syncFrom(nodes[4], nodes[1], replTest);
 
     // write that should reach all nodes
     var timeout = 60 * 1000;
-    var options = {writeConcern: {w: numNodes, wtimeout: timeout}};
+    var options = {
+        writeConcern: {w: numNodes, wtimeout: timeout}
+    };
     assert.writeOK(primary.getDB(name).foo.insert({x: 1}, options));
 
     // Re-enable 'maxSyncSourceLagSecs' checking on sync source.

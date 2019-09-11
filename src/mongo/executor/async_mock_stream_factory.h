@@ -30,8 +30,9 @@
 
 #include <asio.hpp>
 #include <cstdint>
-#include <memory>
 #include <queue>
+#include <memory>
+#include <unordered_map>
 
 #include "mongo/executor/async_stream_factory_interface.h"
 #include "mongo/executor/async_stream_interface.h"
@@ -41,7 +42,6 @@
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/functional.h"
 #include "mongo/stdx/mutex.h"
-#include "mongo/stdx/unordered_map.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/net/hostandport.h"
 
@@ -191,7 +191,7 @@ private:
     stdx::mutex _factoryMutex;
     stdx::condition_variable _factoryCv;
 
-    stdx::unordered_map<HostAndPort, MockStream*> _streams;
+    std::unordered_map<HostAndPort, MockStream*> _streams;
 };
 
 template <int EventType>

@@ -48,7 +48,7 @@ public:
     /**
      * Construct an empty request.
      */
-    CountRequest(NamespaceString nss, BSONObj query);
+    CountRequest(const std::string& fullNs, BSONObj query);
 
     const NamespaceString& getNs() const {
         return _nss;
@@ -80,20 +80,6 @@ public:
 
     void setHint(BSONObj hint);
 
-    const BSONObj getCollation() const {
-        return _collation.value_or(BSONObj());
-    }
-
-    void setCollation(BSONObj collation);
-
-    bool isExplain() const {
-        return _explain;
-    }
-
-    void setExplain(bool explain) {
-        _explain = explain;
-    }
-
     /**
      * Constructs a BSON representation of this request, which can be used for sending it in
      * commands.
@@ -101,17 +87,9 @@ public:
     BSONObj toBSON() const;
 
     /**
-     * Converts this CountRequest into an aggregation.
+     * Construct a CountRequest from the command specification and db name.
      */
-    StatusWith<BSONObj> asAggregationCommand() const;
-
-    /**
-     * Construct a CountRequest from the command specification and db name. Caller must indicate if
-     * this is an explained count via 'isExplain'.
-     */
-    static StatusWith<CountRequest> parseFromBSON(const std::string& dbname,
-                                                  const BSONObj& cmdObj,
-                                                  bool isExplain);
+    static StatusWith<CountRequest> parseFromBSON(const std::string& dbname, const BSONObj& cmdObj);
 
 private:
     // Namespace to operate on (e.g. "foo.bar").
@@ -129,12 +107,6 @@ private:
     // Optional. Indicates to the query planner that it should generate a count plan using a
     // particular index.
     boost::optional<BSONObj> _hint;
-
-    // Optional. The collation used to compare strings.
-    boost::optional<BSONObj> _collation;
-
-    // If true, generate an explain plan instead of the actual count.
-    bool _explain = false;
 };
 
 }  // namespace mongo

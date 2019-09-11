@@ -31,10 +31,10 @@
 #include "mongo/platform/basic.h"
 
 #ifdef _WIN32
-#include <crtdbg.h>
 #include <mmsystem.h>
-#include <stdio.h>
+#include <crtdbg.h>
 #include <stdlib.h>
+#include <stdio.h>
 #endif
 
 #include "mongo/base/init.h"

@@ -1,7 +1,7 @@
 // wiredtiger_session_cache.h
 
 /**
- *    Copyright (C) 2016 MongoDB Inc.
+ *    Copyright (C) 2014 MongoDB Inc.
  *
  *    This program is free software: you can redistribute it and/or  modify
  *    it under the terms of the GNU Affero General Public License, version 3,
@@ -46,7 +46,6 @@
 namespace mongo {
 
 class WiredTigerKVEngine;
-class WiredTigerSessionCache;
 
 class WiredTigerCachedCursor {
 public:
@@ -74,19 +73,6 @@ public:
      */
     WiredTigerSession(WT_CONNECTION* conn, uint64_t epoch = 0, uint64_t cursorEpoch = 0);
 
-    /**
-     * Creates a new WT session on the specified connection.
-     *
-     * @param conn WT connection
-     * @param cache The WiredTigerSessionCache that owns this session.
-     * @param epoch In which session cache cleanup epoch was this session instantiated.
-     * @param cursorEpoch In which cursor cache cleanup epoch was this session instantiated.
-     */
-    WiredTigerSession(WT_CONNECTION* conn,
-                      WiredTigerSessionCache* cache,
-                      uint64_t epoch = 0,
-                      uint64_t cursorEpoch = 0);
-
     ~WiredTigerSession();
 
     WT_SESSION* getSession() const {
@@ -97,7 +83,7 @@ public:
 
     void releaseCursor(uint64_t id, WT_CURSOR* cursor);
 
-    void closeCursorsForQueuedDrops(WiredTigerKVEngine* engine);
+    void closeCursorsForQueuedDrops(uint64_t cursorEpoch, WiredTigerKVEngine* engine);
 
     /**
      * Closes all cached cursors matching the uri.  If the uri is empty,
@@ -107,14 +93,6 @@ public:
 
     int cursorsOut() const {
         return _cursorsOut;
-    }
-
-    bool isDropQueuedIdentsAtSessionEndAllowed() const {
-        return _dropQueuedIdentsAtSessionEnd;
-    }
-
-    void dropQueuedIdentsAtSessionEndAllowed(bool dropQueuedIdentsAtSessionEnd) {
-        _dropQueuedIdentsAtSessionEnd = dropQueuedIdentsAtSessionEnd;
     }
 
     static uint64_t genTableId();
@@ -142,12 +120,10 @@ private:
 
     const uint64_t _epoch;
     uint64_t _cursorEpoch;
-    WiredTigerSessionCache* _cache;  // not owned
-    WT_SESSION* _session;            // owned
-    CursorCache _cursors;            // owned
+    WT_SESSION* _session;  // owned
+    CursorCache _cursors;  // owned
     uint64_t _cursorGen;
-    int _cursorsOut;
-    bool _dropQueuedIdentsAtSessionEnd = true;
+    int _cursorsCached, _cursorsOut;
 };
 
 /**
@@ -161,19 +137,17 @@ public:
     ~WiredTigerSessionCache();
 
     /**
-     * This deleter automatically releases WiredTigerSession objects when no longer needed.
-     */
-    class WiredTigerSessionDeleter {
-    public:
-        void operator()(WiredTigerSession* session) const;
-    };
-
-    /**
-     * Returns a smart pointer to a previously released session for reuse, or creates a new session.
+     * Returns a previously released session for reuse, or creates a new session.
      * This method must only be called while holding the global lock to avoid races with
      * shuttingDown, but otherwise is thread safe.
      */
-    std::unique_ptr<WiredTigerSession, WiredTigerSessionDeleter> getSession();
+    WiredTigerSession* getSession();
+
+    /**
+     * Returns a session to the cache for later reuse. If closeAll was called between getting this
+     * session and releasing it, the session is directly released. This method is thread safe.
+     */
+    void releaseSession(WiredTigerSession* session);
 
     /**
      * Free all cached sessions and ensures that previously acquired sessions will be freed on
@@ -220,10 +194,6 @@ public:
 
     void setJournalListener(JournalListener* jl);
 
-    uint64_t getCursorEpoch() const {
-        return _cursorEpoch.load();
-    }
-
 private:
     WiredTigerKVEngine* _engine;  // not owned, might be NULL
     WT_CONNECTION* _conn;         // not owned
@@ -253,18 +223,5 @@ private:
     JournalListener* _journalListener = &NoOpJournalListener::instance;
     // Protects _journalListener.
     stdx::mutex _journalListenerMutex;
-
-    /**
-     * Returns a session to the cache for later reuse. If closeAll was called between getting this
-     * session and releasing it, the session is directly released. This method is thread safe.
-     */
-    void releaseSession(WiredTigerSession* session);
 };
-
-/**
- * A unique handle type for WiredTigerSession pointers obtained from a WiredTigerSessionCache.
- */
-typedef std::unique_ptr<WiredTigerSession,
-                        typename WiredTigerSessionCache::WiredTigerSessionDeleter>
-    UniqueWiredTigerSession;
 }  // namespace

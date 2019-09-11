@@ -36,19 +36,18 @@
 #include "mongo/base/status.h"
 #include "mongo/db/server_options.h"
 #include "mongo/util/log.h"
-#include "mongo/util/options_parser/startup_options.h"
 #include "mongo/util/text.h"
+#include "mongo/util/options_parser/startup_options.h"
 
 namespace mongo {
 
 using std::string;
 
 Status addSSLServerOptions(moe::OptionSection* options) {
-    options
-        ->addOptionChaining("net.ssl.sslOnNormalPorts",
-                            "sslOnNormalPorts",
-                            moe::Switch,
-                            "use ssl on configured ports")
+    options->addOptionChaining("net.ssl.sslOnNormalPorts",
+                               "sslOnNormalPorts",
+                               moe::Switch,
+                               "use ssl on configured ports")
         .setSources(moe::SourceAllLegacy)
         .incompatibleWith("net.ssl.mode");
 
@@ -61,9 +60,8 @@ Status addSSLServerOptions(moe::OptionSection* options) {
     options->addOptionChaining(
         "net.ssl.PEMKeyFile", "sslPEMKeyFile", moe::String, "PEM file for ssl");
 
-    options
-        ->addOptionChaining(
-            "net.ssl.PEMKeyPassword", "sslPEMKeyPassword", moe::String, "PEM file password")
+    options->addOptionChaining(
+                 "net.ssl.PEMKeyPassword", "sslPEMKeyPassword", moe::String, "PEM file password")
         .setImplicit(moe::Value(std::string("")));
 
     options->addOptionChaining("net.ssl.clusterFile",
@@ -71,30 +69,22 @@ Status addSSLServerOptions(moe::OptionSection* options) {
                                moe::String,
                                "Key file for internal SSL authentication");
 
-    options
-        ->addOptionChaining("net.ssl.clusterPassword",
-                            "sslClusterPassword",
-                            moe::String,
-                            "Internal authentication key file password")
+    options->addOptionChaining("net.ssl.clusterPassword",
+                               "sslClusterPassword",
+                               moe::String,
+                               "Internal authentication key file password")
         .setImplicit(moe::Value(std::string("")));
 
     options->addOptionChaining(
         "net.ssl.CAFile", "sslCAFile", moe::String, "Certificate Authority file for SSL");
 
-    options->addOptionChaining("net.ssl.clusterCAFile",
-                               "sslClusterCAFile",
-                               moe::String,
-                               "CA used for verifying remotes during outbound connections");
-
     options->addOptionChaining(
         "net.ssl.CRLFile", "sslCRLFile", moe::String, "Certificate Revocation List file for SSL");
 
-    options
-        ->addOptionChaining("net.ssl.sslCipherConfig",
-                            "sslCipherConfig",
-                            moe::String,
-                            "OpenSSL cipher configuration string")
-        .hidden();
+    options->addOptionChaining("net.ssl.sslCipherConfig",
+                               "sslCipherConfig",
+                               moe::String,
+                               "OpenSSL cipher configuration string").hidden();
 
     options->addOptionChaining(
         "net.ssl.disabledProtocols",
@@ -133,54 +123,40 @@ Status addSSLServerOptions(moe::OptionSection* options) {
 Status addSSLClientOptions(moe::OptionSection* options) {
     options->addOptionChaining("ssl", "ssl", moe::Switch, "use SSL for all connections");
 
-    options
-        ->addOptionChaining(
-            "ssl.CAFile", "sslCAFile", moe::String, "Certificate Authority file for SSL")
+    options->addOptionChaining(
+                 "ssl.CAFile", "sslCAFile", moe::String, "Certificate Authority file for SSL")
         .requires("ssl");
 
-    options
-        ->addOptionChaining(
-            "ssl.PEMKeyFile", "sslPEMKeyFile", moe::String, "PEM certificate/key file for SSL")
+    options->addOptionChaining(
+                 "ssl.PEMKeyFile", "sslPEMKeyFile", moe::String, "PEM certificate/key file for SSL")
         .requires("ssl");
 
-    options
-        ->addOptionChaining("ssl.PEMKeyPassword",
-                            "sslPEMKeyPassword",
-                            moe::String,
-                            "password for key in PEM file for SSL")
-        .requires("ssl");
+    options->addOptionChaining("ssl.PEMKeyPassword",
+                               "sslPEMKeyPassword",
+                               moe::String,
+                               "password for key in PEM file for SSL").requires("ssl");
 
-    options
-        ->addOptionChaining(
-            "ssl.CRLFile", "sslCRLFile", moe::String, "Certificate Revocation List file for SSL")
+    options->addOptionChaining("ssl.CRLFile",
+                               "sslCRLFile",
+                               moe::String,
+                               "Certificate Revocation List file for SSL")
         .requires("ssl")
         .requires("ssl.CAFile");
 
-    options
-        ->addOptionChaining("net.ssl.allowInvalidHostnames",
-                            "sslAllowInvalidHostnames",
-                            moe::Switch,
-                            "allow connections to servers with non-matching hostnames")
+    options->addOptionChaining("net.ssl.allowInvalidHostnames",
+                               "sslAllowInvalidHostnames",
+                               moe::Switch,
+                               "allow connections to servers with non-matching hostnames")
         .requires("ssl");
 
-    options
-        ->addOptionChaining("ssl.allowInvalidCertificates",
-                            "sslAllowInvalidCertificates",
-                            moe::Switch,
-                            "allow connections to servers with invalid certificates")
+    options->addOptionChaining("ssl.allowInvalidCertificates",
+                               "sslAllowInvalidCertificates",
+                               moe::Switch,
+                               "allow connections to servers with invalid certificates")
         .requires("ssl");
 
     options->addOptionChaining(
         "ssl.FIPSMode", "sslFIPSMode", moe::Switch, "activate FIPS 140-2 mode at startup");
-
-    options
-        ->addOptionChaining(
-            "ssl.disabledProtocols",
-            "sslDisabledProtocols",
-            moe::String,
-            "Comma separated list of TLS protocols to disable [TLS1_0,TLS1_1,TLS1_2]")
-        .hidden();
-
 
     return Status::OK();
 }
@@ -233,64 +209,6 @@ Status canonicalizeSSLServerOptions(moe::Environment* params) {
     return Status::OK();
 }
 
-/**
- * Older versions of mongod/mongos accepted --sslDisabledProtocols values
- * in the form 'noTLS1_0,noTLS1_1'.  kAcceptNegativePrefix allows us to
- * continue accepting this format on mongod/mongos while only supporting
- * the "standard" TLS1_X format in the shell.
- */
-enum DisabledProtocolsMode {
-    kStandardFormat,
-    kAcceptNegativePrefix,
-};
-
-Status storeDisabledProtocols(const std::string& disabledProtocols,
-                              DisabledProtocolsMode mode = kStandardFormat) {
-    if (disabledProtocols == "none") {
-        // Allow overriding the default behavior below of implicitly disabling TLS 1.0.
-        return Status::OK();
-    }
-
-    // The disabledProtocols field is composed of a comma separated list of protocols to
-    // disable. First, tokenize the field.
-    const auto tokens = StringSplitter::split(disabledProtocols, ",");
-
-    // All universally accepted tokens, and their corresponding enum representation.
-    const std::map<std::string, SSLParams::Protocols> validConfigs{
-        {"TLS1_0", SSLParams::Protocols::TLS1_0},
-        {"TLS1_1", SSLParams::Protocols::TLS1_1},
-        {"TLS1_2", SSLParams::Protocols::TLS1_2},
-    };
-
-    // These noTLS* tokens exist for backwards compatibility.
-    const std::map<std::string, SSLParams::Protocols> validNoConfigs{
-        {"noTLS1_0", SSLParams::Protocols::TLS1_0},
-        {"noTLS1_1", SSLParams::Protocols::TLS1_1},
-        {"noTLS1_2", SSLParams::Protocols::TLS1_2},
-    };
-
-    // Map the tokens to their enum values, and push them onto the list of disabled protocols.
-    for (const std::string& token : tokens) {
-        auto mappedToken = validConfigs.find(token);
-        if (mappedToken != validConfigs.end()) {
-            sslGlobalParams.sslDisabledProtocols.push_back(mappedToken->second);
-            continue;
-        }
-
-        if (mode == DisabledProtocolsMode::kAcceptNegativePrefix) {
-            auto mappedNoToken = validNoConfigs.find(token);
-            if (mappedNoToken != validNoConfigs.end()) {
-                sslGlobalParams.sslDisabledProtocols.push_back(mappedNoToken->second);
-                continue;
-            }
-        }
-
-        return Status(ErrorCodes::BadValue, "Unrecognized disabledProtocols '" + token + "'");
-    }
-
-    return Status::OK();
-}
-
 Status storeSSLServerOptions(const moe::Environment& params) {
     if (params.count("net.ssl.mode")) {
         std::string sslModeParam = params["net.ssl.mode"].as<string>();
@@ -332,12 +250,6 @@ Status storeSSLServerOptions(const moe::Environment& params) {
                 .generic_string();
     }
 
-    if (params.count("net.ssl.clusterCAFile")) {
-        sslGlobalParams.sslClusterCAFile =
-            boost::filesystem::absolute(params["net.ssl.clusterCAFile"].as<std::string>())
-                .generic_string();
-    }
-
     if (params.count("net.ssl.CRLFile")) {
         sslGlobalParams.sslCRLFile =
             boost::filesystem::absolute(params["net.ssl.CRLFile"].as<std::string>())
@@ -356,10 +268,30 @@ Status storeSSLServerOptions(const moe::Environment& params) {
     }
 
     if (params.count("net.ssl.disabledProtocols")) {
-        const auto status = storeDisabledProtocols(params["net.ssl.disabledProtocols"].as<string>(),
-                                                   DisabledProtocolsMode::kAcceptNegativePrefix);
-        if (!status.isOK()) {
-            return status;
+        // The disabledProtocols field is composed of a comma separated list of protocols to
+        // disable. First, tokenize the field.
+        std::vector<std::string> tokens =
+            StringSplitter::split(params["net.ssl.disabledProtocols"].as<string>(), ",");
+
+        // All accepted tokens, and their corresponding enum representation. The noTLS* tokens
+        // exist for backwards compatibility.
+        const std::map<std::string, SSLParams::Protocols> validConfigs{
+            {"TLS1_0", SSLParams::Protocols::TLS1_0},
+            {"noTLS1_0", SSLParams::Protocols::TLS1_0},
+            {"TLS1_1", SSLParams::Protocols::TLS1_1},
+            {"noTLS1_1", SSLParams::Protocols::TLS1_1},
+            {"TLS1_2", SSLParams::Protocols::TLS1_2},
+            {"noTLS1_2", SSLParams::Protocols::TLS1_2}};
+
+        // Map the tokens to their enum values, and push them onto the list of disabled protocols.
+        for (const std::string& token : tokens) {
+            auto mappedToken = validConfigs.find(token);
+            if (mappedToken != validConfigs.end()) {
+                sslGlobalParams.sslDisabledProtocols.push_back(mappedToken->second);
+            } else {
+                return Status(ErrorCodes::BadValue,
+                              "Unrecognized disabledProtocols '" + token + "'");
+            }
         }
     }
 
@@ -395,9 +327,11 @@ Status storeSSLServerOptions(const moe::Environment& params) {
             " no CA file has been provided; please specify an"
             " sslCAFile parameter");
 
-        if (sslGlobalParams.sslCAFile.empty() &&
-            clusterAuthMode == ServerGlobalParams::ClusterAuthMode_x509) {
-            return Status(ErrorCodes::BadValue, sslCANotFoundError);
+        if (sslGlobalParams.sslCAFile.empty()) {
+            if (clusterAuthMode == ServerGlobalParams::ClusterAuthMode_x509) {
+                return Status(ErrorCodes::BadValue, sslCANotFoundError);
+            }
+            warning() << sslCANotFoundError;
         }
     } else if (sslGlobalParams.sslPEMKeyFile.size() || sslGlobalParams.sslPEMKeyPassword.size() ||
                sslGlobalParams.sslClusterFile.size() || sslGlobalParams.sslClusterPassword.size() ||
@@ -417,10 +351,8 @@ Status storeSSLServerOptions(const moe::Environment& params) {
         }
     }
     if (sslGlobalParams.sslMode.load() == SSLParams::SSLMode_allowSSL) {
-        // allowSSL and x509 is valid only when we are transitioning to auth.
         if (clusterAuthMode == ServerGlobalParams::ClusterAuthMode_sendX509 ||
-            (clusterAuthMode == ServerGlobalParams::ClusterAuthMode_x509 &&
-             !serverGlobalParams.transitionToAuth)) {
+            clusterAuthMode == ServerGlobalParams::ClusterAuthMode_x509) {
             return Status(ErrorCodes::BadValue,
                           "cannot have x.509 cluster authentication in allowSSL mode");
         }
@@ -454,14 +386,6 @@ Status storeSSLClientOptions(const moe::Environment& params) {
     if (params.count("ssl.FIPSMode")) {
         sslGlobalParams.sslFIPSMode = true;
     }
-    if (params.count("ssl.disabledProtocols")) {
-        const auto status =
-            storeDisabledProtocols(params["ssl.disabledProtocols"].as<std::string>());
-        if (!status.isOK()) {
-            return status;
-        }
-    }
-
     return Status::OK();
 }
 

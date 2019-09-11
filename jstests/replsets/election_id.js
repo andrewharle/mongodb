@@ -68,7 +68,7 @@ load("jstests/replsets/rslib.js");
     checkPV1ElectionId(newElectionId);
     oldElectionId = newElectionId;
 
-    // Downgrade protocol version
+    // Downgrade protocol veresion
     //
     conf = rst.getReplSetConfigFromNode();
     conf.protocolVersion = 0;

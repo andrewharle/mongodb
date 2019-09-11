@@ -37,10 +37,10 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
+#include "mongo/platform/atomic_word.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/storage/mmap_v1/file_allocator.h"
 #include "mongo/db/storage/mmap_v1/mmap.h"
-#include "mongo/platform/atomic_word.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
 #include "mongo/util/processinfo.h"
@@ -52,6 +52,9 @@ using std::vector;
 
 using namespace mongoutils;
 
+namespace {
+mongo::AtomicUInt64 mmfNextId(0);
+}
 
 namespace mongo {
 static size_t fetchMinOSPageSizeBytes() {
@@ -61,6 +64,13 @@ static size_t fetchMinOSPageSizeBytes() {
 }
 const size_t g_minOSPageSizeBytes = fetchMinOSPageSizeBytes();
 
+
+MemoryMappedFile::MemoryMappedFile() : _uniqueId(mmfNextId.fetchAndAdd(1)) {
+    fd = 0;
+    maphandle = 0;
+    len = 0;
+    created();
+}
 
 void MemoryMappedFile::close() {
     LockMongoFilesShared::assertExclusivelyLocked();
@@ -140,19 +150,16 @@ MAdvise::~MAdvise() {
 }
 #endif
 
-void* MemoryMappedFile::map(const char* filename, unsigned long long& length) {
+void* MemoryMappedFile::map(const char* filename, unsigned long long& length, int options) {
     // length may be updated by callee.
     setFilename(filename);
     FileAllocator::get()->allocateAsap(filename, length);
     len = length;
 
-    const bool readOnly = isOptionSet(READONLY);
-
     massert(
         10446, str::stream() << "mmap: can't map area of size 0 file: " << filename, length > 0);
 
-    const int posixOpenOpts = O_NOATIME | (readOnly ? O_RDONLY : O_RDWR);
-    fd = ::open(filename, posixOpenOpts);
+    fd = open(filename, O_RDWR | O_NOATIME);
     if (fd <= 0) {
         log() << "couldn't open " << filename << ' ' << errnoWithDescription() << endl;
         fd = 0;  // our sentinel for not opened
@@ -162,21 +169,18 @@ void* MemoryMappedFile::map(const char* filename, unsigned long long& length) {
     unsigned long long filelen = lseek(fd, 0, SEEK_END);
     uassert(10447,
             str::stream() << "map file alloc failed, wanted: " << length << " filelen: " << filelen
-                          << ' '
-                          << sizeof(size_t),
+                          << ' ' << sizeof(size_t),
             filelen == length);
     lseek(fd, 0, SEEK_SET);
 
-    const int mmapProtectionOpts = readOnly ? PROT_READ : (PROT_READ | PROT_WRITE);
-    void* view = mmap(NULL, length, mmapProtectionOpts, MAP_SHARED, fd, 0);
+    void* view = mmap(NULL, length, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (view == MAP_FAILED) {
         error() << "  mmap() failed for " << filename << " len:" << length << " "
                 << errnoWithDescription() << endl;
         if (errno == ENOMEM) {
             if (sizeof(void*) == 4)
                 error() << "mmap failed with out of memory. You are using a 32-bit build and "
-                           "probably need to upgrade to 64"
-                        << endl;
+                           "probably need to upgrade to 64" << endl;
             else
                 error() << "mmap failed with out of memory. (64 bit build)" << endl;
         }
@@ -185,7 +189,7 @@ void* MemoryMappedFile::map(const char* filename, unsigned long long& length) {
 
 
 #if !defined(__sun)
-    if (isOptionSet(SEQUENTIAL)) {
+    if (options & SEQUENTIAL) {
         if (madvise(view, length, MADV_SEQUENTIAL)) {
             warning() << "map: madvise failed for " << filename << ' ' << errnoWithDescription()
                       << endl;
@@ -198,14 +202,28 @@ void* MemoryMappedFile::map(const char* filename, unsigned long long& length) {
     return view;
 }
 
+void* MemoryMappedFile::createReadOnlyMap() {
+    void* x = mmap(/*start*/ 0, len, PROT_READ, MAP_SHARED, fd, 0);
+    if (x == MAP_FAILED) {
+        if (errno == ENOMEM) {
+            if (sizeof(void*) == 4)
+                error() << "mmap ro failed with out of memory. You are using a 32-bit build and "
+                           "probably need to upgrade to 64" << endl;
+            else
+                error() << "mmap ro failed with out of memory. (64 bit build)" << endl;
+        }
+        return 0;
+    }
+    return x;
+}
+
 void* MemoryMappedFile::createPrivateMap() {
     void* x = mmap(/*start*/ 0, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_NORESERVE, fd, 0);
     if (x == MAP_FAILED) {
         if (errno == ENOMEM) {
             if (sizeof(void*) == 4) {
                 error() << "mmap private failed with out of memory. You are using a 32-bit build "
-                           "and probably need to upgrade to 64"
-                        << endl;
+                           "and probably need to upgrade to 64" << endl;
             } else {
                 error() << "mmap private failed with out of memory. (64 bit build)" << endl;
             }
@@ -243,12 +261,12 @@ void* MemoryMappedFile::remapPrivateView(void* oldPrivateAddr) {
 }
 
 void MemoryMappedFile::flush(bool sync) {
-    if (views.empty() || fd == 0 || !sync)
+    if (views.empty() || fd == 0)
         return;
 
-    bool useFsync = !ProcessInfo::preferMsyncOverFSync();
+    bool useFsync = sync && !ProcessInfo::preferMsyncOverFSync();
 
-    if (useFsync ? fsync(fd) != 0 : msync(viewForFlushing(), len, MS_SYNC) != 0) {
+    if (useFsync ? fsync(fd) != 0 : msync(viewForFlushing(), len, sync ? MS_SYNC : MS_ASYNC)) {
         // msync failed, this is very bad
         log() << (useFsync ? "fsync failed: " : "msync failed: ") << errnoWithDescription()
               << " file: " << filename() << endl;

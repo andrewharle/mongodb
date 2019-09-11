@@ -33,6 +33,7 @@
 
 #include "mongo/base/string_data.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/s/bson_serializable.h"
 
 namespace mongo {
 
@@ -42,7 +43,7 @@ class Privilege;
  * This class is used to parse documents describing resources as they are represented as part
  * of privileges granted to roles in the role management commands.
  */
-class ParsedResource {
+class ParsedResource : BSONSerializable {
     MONGO_DISALLOW_COPYING(ParsedResource);
 
 public:
@@ -73,7 +74,7 @@ public:
     BSONObj toBSON() const;
     bool parseBSON(const BSONObj& source, std::string* errMsg);
     void clear();
-    std::string toString() const;
+    virtual std::string toString() const;
 
     //
     // individual field accessors
@@ -122,7 +123,7 @@ private:
 /**
  * This class is used to parse documents describing privileges in the role managment commands.
  */
-class ParsedPrivilege {
+class ParsedPrivilege : BSONSerializable {
     MONGO_DISALLOW_COPYING(ParsedPrivilege);
 
 public:
@@ -142,12 +143,10 @@ public:
 
     /**
      * Takes a parsedPrivilege and turns it into a true Privilege object.
-     * If the parsedPrivilege contains any unrecognized privileges it will add those to
-     * unrecognizedActions.
      */
-    static Status parsedPrivilegeToPrivilege(const ParsedPrivilege& parsedPrivilege,
-                                             Privilege* result,
-                                             std::vector<std::string>* unrecognizedActions);
+    static bool parsedPrivilegeToPrivilege(const ParsedPrivilege& parsedPrivilege,
+                                           Privilege* result,
+                                           std::string* errmsg);
     /**
      * Takes a Privilege object and turns it into a ParsedPrivilege.
      */

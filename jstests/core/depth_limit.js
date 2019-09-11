@@ -17,7 +17,9 @@ function test() {
     function objWithDepth(depth) {
         var out = 1;
         while (depth--) {
-            out = {o: out};
+            out = {
+                o: out
+            };
         }
         return out;
     }

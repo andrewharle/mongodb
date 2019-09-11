@@ -39,18 +39,14 @@ RouterStageSkip::RouterStageSkip(std::unique_ptr<RouterExecStage> child, long lo
     invariant(skip > 0);
 }
 
-StatusWith<ClusterQueryResult> RouterStageSkip::next() {
+StatusWith<boost::optional<BSONObj>> RouterStageSkip::next() {
     while (_skippedSoFar < _skip) {
         auto next = getChildStage()->next();
         if (!next.isOK()) {
             return next;
         }
 
-        if (next.getValue().isEOF()) {
-            return next;
-        }
-
-        if (next.getValue().getViewDefinition()) {
+        if (!next.getValue()) {
             return next;
         }
 
@@ -70,10 +66,6 @@ bool RouterStageSkip::remotesExhausted() {
 
 Status RouterStageSkip::setAwaitDataTimeout(Milliseconds awaitDataTimeout) {
     return getChildStage()->setAwaitDataTimeout(awaitDataTimeout);
-}
-
-void RouterStageSkip::setOperationContext(OperationContext* txn) {
-    return getChildStage()->setOperationContext(txn);
 }
 
 }  // namespace mongo

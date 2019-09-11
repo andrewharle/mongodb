@@ -30,8 +30,6 @@
 #include "mongo/base/disallow_copying.h"
 #include "mongo/logger/log_component.h"
 #include "mongo/logger/log_severity.h"
-#include "mongo/platform/atomic_word.h"
-#include "mongo/stdx/mutex.h"
 
 namespace mongo {
 namespace logger {
@@ -81,23 +79,17 @@ public:
     bool shouldLog(LogComponent component, LogSeverity severity) const;
 
 private:
-    void _setMinimumLoggedSeverityInLock(LogComponent component, LogSeverity severity);
-
-    // A mutex to synchronize writes to the severity arrays. This mutex is to synchronize changes to
-    // the entire array, and the atomics are to synchronize individual elements.
-    stdx::mutex _mtx;
-
     // True if a log severity is explicitly set for a component.
     // This differentiates between unconfigured components and components that happen to have
     // the same severity as kDefault.
     // This is also used to update the severities of unconfigured components when the severity
     // for kDefault is modified.
-    AtomicBool _hasMinimumLoggedSeverity[LogComponent::kNumLogComponents];
+    bool _hasMinimumLoggedSeverity[LogComponent::kNumLogComponents];
 
     // Log severities for components.
     // Store numerical values of severities to be cache-line friendly.
     // Set to kDefault minimum logged severity if _hasMinimumLoggedSeverity[i] is false.
-    AtomicInt32 _minimumLoggedSeverity[LogComponent::kNumLogComponents];
+    signed char _minimumLoggedSeverity[LogComponent::kNumLogComponents];
 };
 
 }  // namespace logger

@@ -28,6 +28,7 @@
 
 #pragma once
 
+#include <boost/config.hpp>
 #include <chrono>
 #include <ctime>
 #include <exception>
@@ -55,16 +56,19 @@ namespace stdx {
  * wrapping and to simplify the implementation.
  */
 class thread : private ::std::thread {  // NOLINT
+    using super = ::std::thread;        // NOLINT
+
 public:
     using ::std::thread::native_handle_type;  // NOLINT
     using ::std::thread::id;                  // NOLINT
 
-    thread() noexcept : ::std::thread::thread() {}  // NOLINT
+    thread() BOOST_NOEXCEPT : super() {}
 
     thread(const thread&) = delete;
 
-    thread(thread&& other) noexcept
-        : ::std::thread::thread(static_cast<::std::thread&&>(std::move(other))) {}  // NOLINT
+    thread(thread&& other) BOOST_NOEXCEPT
+        : super(static_cast<::std::thread&&>(std::move(other))) {  // NOLINT
+    }
 
     /**
      * As of C++14, the Function overload for std::thread requires that this constructor only
@@ -77,15 +81,15 @@ public:
         class... Args,
         typename std::enable_if<!std::is_same<thread, typename std::decay<Function>::type>::value,
                                 int>::type = 0>
-    explicit thread(Function&& f, Args&&... args) try:
-        ::std::thread::thread(std::forward<Function>(f), std::forward<Args>(args)...) {}  // NOLINT
-    catch (...) {
+    explicit thread(Function&& f, Args&&... args) try
+        : super(std::forward<Function>(f), std::forward<Args>(args)...) {
+    } catch (...) {
         std::terminate();
     }
 
     thread& operator=(const thread&) = delete;
 
-    thread& operator=(thread&& other) noexcept {
+    thread& operator=(thread&& other) BOOST_NOEXCEPT {
         return static_cast<thread&>(
             ::std::thread::operator=(static_cast<::std::thread&&>(std::move(other))));  // NOLINT
     };
@@ -98,12 +102,12 @@ public:
     using ::std::thread::join;    // NOLINT
     using ::std::thread::detach;  // NOLINT
 
-    void swap(thread& other) noexcept {
+    void swap(thread& other) BOOST_NOEXCEPT {
         ::std::thread::swap(static_cast<::std::thread&>(other));  // NOLINT
     }
 };
 
-inline void swap(thread& lhs, thread& rhs) noexcept {
+inline void swap(thread& lhs, thread& rhs) BOOST_NOEXCEPT {
     lhs.swap(rhs);
 }
 
@@ -124,7 +128,7 @@ inline void sleep_for(const std::chrono::duration<Rep, Period>& sleep_duration) 
         std::chrono::duration_cast<std::chrono::seconds>(sleep_duration);  // NOLINT
     const auto nanoseconds =
         std::chrono::duration_cast<std::chrono::nanoseconds>(sleep_duration - seconds);  // NOLINT
-    struct timespec sleepVal = {static_cast<std::time_t>(seconds.count()),
+    struct timespec sleepVal = {static_cast<std::time_t>(seconds.count()),               // NOLINT
                                 static_cast<long>(nanoseconds.count())};
     struct timespec remainVal;
     while (nanosleep(&sleepVal, &remainVal) == -1 && errno == EINTR) {

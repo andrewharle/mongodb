@@ -873,8 +873,7 @@
 #if defined(WINDOWS)
 #define BID_SIZE_LONG 4
 #else
-#if defined(__x86_64__) || defined (__ia64__)  || defined(HPUX_OS_64) || defined(__powerpc64__) \
-      || defined(__s390x__)
+#if defined(__x86_64__) || defined (__ia64__)  || defined(HPUX_OS_64)
 #define BID_SIZE_LONG 8
 #else
 #define BID_SIZE_LONG 4

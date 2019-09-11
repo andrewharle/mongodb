@@ -31,8 +31,6 @@
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kStorage
 
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/storage/mmap_v1/heap_record_store_btree.h"
 
 #include "mongo/base/checked_cast.h"
@@ -80,25 +78,18 @@ StatusWith<RecordId> HeapRecordStoreBtree::insertRecord(OperationContext* txn,
     return StatusWith<RecordId>(loc);
 }
 
-Status HeapRecordStoreBtree::insertRecordsWithDocWriter(OperationContext* txn,
-                                                        const DocWriter* const* docs,
-                                                        size_t nDocs,
-                                                        RecordId* idsOut) {
-    // This class is only for unit tests of the mmapv1 btree code and this is how it is called.
-    // If that ever changes, this class will need to be fixed.
-    invariant(nDocs == 1);
-    invariant(idsOut);
-
-    MmapV1RecordHeader rec(docs[0]->documentSize());
-    docs[0]->writeDocument(rec.data.get());
+StatusWith<RecordId> HeapRecordStoreBtree::insertRecord(OperationContext* txn,
+                                                        const DocWriter* doc,
+                                                        bool enforceQuota) {
+    MmapV1RecordHeader rec(doc->documentSize());
+    doc->writeDocument(rec.data.get());
 
     const RecordId loc = allocateLoc();
     _records[loc] = rec;
-    *idsOut = loc;
 
     HeapRecordStoreBtreeRecoveryUnit::notifyInsert(txn, this, loc);
 
-    return Status::OK();
+    return StatusWith<RecordId>(loc);
 }
 
 RecordId HeapRecordStoreBtree::allocateLoc() {

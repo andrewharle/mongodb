@@ -36,10 +36,9 @@
  * TODO: Retire the mongoutils namespace, and move str under the mongo namespace.
  */
 
-#include <sstream>
 #include <string>
+#include <sstream>
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/util/builder.h"
 
 namespace mongoutils {
@@ -64,9 +63,6 @@ public:
     }
     operator std::string() const {
         return ss.str();
-    }
-    operator mongo::StringData() const {
-        return ss.stringData();
     }
 };
 

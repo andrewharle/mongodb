@@ -53,15 +53,13 @@
 #include "mongo/scripting/mozjs/mongo.h"
 #include "mongo/scripting/mozjs/mongohelpers.h"
 #include "mongo/scripting/mozjs/nativefunction.h"
-#include "mongo/scripting/mozjs/numberdecimal.h"
 #include "mongo/scripting/mozjs/numberint.h"
 #include "mongo/scripting/mozjs/numberlong.h"
+#include "mongo/scripting/mozjs/numberdecimal.h"
 #include "mongo/scripting/mozjs/object.h"
 #include "mongo/scripting/mozjs/oid.h"
 #include "mongo/scripting/mozjs/regexp.h"
 #include "mongo/scripting/mozjs/timestamp.h"
-#include "mongo/scripting/mozjs/uri.h"
-#include "mongo/stdx/unordered_set.h"
 
 namespace mongo {
 namespace mozjs {
@@ -292,10 +290,8 @@ public:
         return _timestampProto;
     }
 
-    template <typename T>
-    typename std::enable_if<std::is_same<T, URIInfo>::value, WrapType<T>&>::type getProto() {
-        return _uriProto;
-    }
+    void setQuickExit(int exitCode);
+    bool getQuickExit(int* exitCode);
 
     static const char* const kExecResult;
     static const char* const kInvokeResult;
@@ -317,33 +313,6 @@ public:
         return _internedStrings.getInternedString(name);
     }
 
-    std::string buildStackString();
-
-    template <typename T, typename... Args>
-    T* trackedNew(Args&&... args) {
-        T* t = new T(std::forward<Args>(args)...);
-        _asanHandles.addPointer(t);
-        return t;
-    }
-
-    template <typename T>
-    void trackedDelete(T* t) {
-        _asanHandles.removePointer(t);
-        delete (t);
-    }
-
-    struct ASANHandles {
-        ASANHandles();
-        ~ASANHandles();
-
-        void addPointer(void* ptr);
-        void removePointer(void* ptr);
-
-        stdx::unordered_set<void*> _handles;
-
-        static ASANHandles* getThreadASANHandles();
-    };
-
 private:
     template <typename ImplScopeFunction>
     auto _runSafely(ImplScopeFunction&& functionToRun) -> decltype(functionToRun());
@@ -359,10 +328,11 @@ private:
     struct MozRuntime {
     public:
         MozRuntime(const MozJSScriptEngine* engine);
+        ~MozRuntime();
 
-        std::unique_ptr<PRThread, std::function<void(PRThread*)>> _thread;
-        std::unique_ptr<JSRuntime, std::function<void(JSRuntime*)>> _runtime;
-        std::unique_ptr<JSContext, std::function<void(JSContext*)>> _context;
+        PRThread* _thread = nullptr;
+        JSRuntime* _runtime = nullptr;
+        JSContext* _context = nullptr;
     };
 
     /**
@@ -390,7 +360,6 @@ private:
 
     void setCompileOptions(JS::CompileOptions* co);
 
-    ASANHandles _asanHandles;
     MozJSScriptEngine* _engine;
     MozRuntime _mr;
     JSRuntime* _runtime;
@@ -407,6 +376,8 @@ private:
     std::atomic<bool> _pendingGC;
     ConnectState _connectState;
     Status _status;
+    int _exitCode;
+    bool _quickExit;
     std::string _parentStack;
     std::size_t _generation;
     bool _requireOwnedObjects;
@@ -416,12 +387,12 @@ private:
     WrapType<BSONInfo> _bsonProto;
     WrapType<CodeInfo> _codeProto;
     WrapType<CountDownLatchInfo> _countDownLatchProto;
-    WrapType<CursorHandleInfo> _cursorHandleProto;
     WrapType<CursorInfo> _cursorProto;
+    WrapType<CursorHandleInfo> _cursorHandleProto;
     WrapType<DBCollectionInfo> _dbCollectionProto;
-    WrapType<DBInfo> _dbProto;
     WrapType<DBPointerInfo> _dbPointerProto;
     WrapType<DBQueryInfo> _dbQueryProto;
+    WrapType<DBInfo> _dbProto;
     WrapType<DBRefInfo> _dbRefProto;
     WrapType<ErrorInfo> _errorProto;
     WrapType<JSThreadInfo> _jsThreadProto;
@@ -431,22 +402,17 @@ private:
     WrapType<MongoHelpersInfo> _mongoHelpersProto;
     WrapType<MongoLocalInfo> _mongoLocalProto;
     WrapType<NativeFunctionInfo> _nativeFunctionProto;
-    WrapType<NumberDecimalInfo> _numberDecimalProto;
     WrapType<NumberIntInfo> _numberIntProto;
     WrapType<NumberLongInfo> _numberLongProto;
+    WrapType<NumberDecimalInfo> _numberDecimalProto;
     WrapType<ObjectInfo> _objectProto;
     WrapType<OIDInfo> _oidProto;
     WrapType<RegExpInfo> _regExpProto;
     WrapType<TimestampInfo> _timestampProto;
-    WrapType<URIInfo> _uriProto;
 };
 
 inline MozJSImplScope* getScope(JSContext* cx) {
     return static_cast<MozJSImplScope*>(JS_GetContextPrivate(cx));
-}
-
-inline MozJSImplScope* getScope(JSFreeOp* fop) {
-    return static_cast<MozJSImplScope*>(JS_GetRuntimePrivate(fop->runtime()));
 }
 
 }  // namespace mozjs

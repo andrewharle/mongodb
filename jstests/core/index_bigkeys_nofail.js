@@ -46,8 +46,4 @@
     assert.writeError(t.update({_id: 3}, {$set: {name: x}}));
 
     db.getSiblingDB('admin').runCommand({setParameter: 1, failIndexKeyTooLong: was});
-
-    // Explicitly drop the collection to avoid failures in post-test hooks that run dbHash and
-    // validate commands.
-    t.drop();
 }());

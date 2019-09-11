@@ -30,8 +30,8 @@
 
 #include "mongo/unittest/temp_dir.h"
 
-#include <boost/filesystem.hpp>
 #include <fstream>
+#include <boost/filesystem.hpp>
 
 #include "mongo/unittest/unittest.h"
 

@@ -41,15 +41,13 @@ class RouterStageRemoveSortKey final : public RouterExecStage {
 public:
     RouterStageRemoveSortKey(std::unique_ptr<RouterExecStage> child);
 
-    StatusWith<ClusterQueryResult> next() final;
+    StatusWith<boost::optional<BSONObj>> next() final;
 
     void kill() final;
 
     bool remotesExhausted() final;
 
     Status setAwaitDataTimeout(Milliseconds awaitDataTimeout) final;
-
-    void setOperationContext(OperationContext* txn) final;
 };
 
 }  // namespace mongo

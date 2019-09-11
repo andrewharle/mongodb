@@ -22,7 +22,10 @@ r = function(k, v) {
             total += v[i].stats[j];
         }
     }
-    return {stats: stats, total: total};
+    return {
+        stats: stats,
+        total: total
+    };
 };
 
 // Test that map reduce works with stored javascript

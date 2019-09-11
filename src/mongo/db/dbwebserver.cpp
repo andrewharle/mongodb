@@ -35,6 +35,7 @@
 
 #include "mongo/db/dbwebserver.h"
 
+#include <boost/date_time/posix_time/posix_time.hpp>
 #include <pcrecpp.h>
 
 #include "mongo/base/init.h"
@@ -42,14 +43,14 @@
 #include "mongo/db/auth/authorization_manager_global.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/privilege.h"
-#include "mongo/db/auth/user.h"
 #include "mongo/db/auth/user_name.h"
+#include "mongo/db/auth/user.h"
 #include "mongo/db/background.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/db.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/instance.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/service_context.h"
 #include "mongo/db/stats/snapshots.h"
 #include "mongo/rpc/command_reply.h"
 #include "mongo/rpc/command_reply_builder.h"
@@ -61,6 +62,7 @@
 #include "mongo/util/mongoutils/html.h"
 #include "mongo/util/ramlog.h"
 #include "mongo/util/version.h"
+
 
 namespace mongo {
 
@@ -75,86 +77,27 @@ namespace {
 
 void doUnlockedStuff(stringstream& ss) {
     // This is in the header already ss << "port:      " << port << '\n'
-    auto&& vii = VersionInfoInterface::instance();
     ss << "<pre>";
-    ss << mongodVersion(vii) << '\n';
-    ss << "git hash: " << vii.gitVersion() << '\n';
-    ss << vii.openSSLVersion("OpenSSL version: ", "\n");
+    ss << mongodVersion() << '\n';
+    ss << "git hash: " << gitVersion() << '\n';
+    ss << openSSLVersion("OpenSSL version: ", "\n");
     ss << "uptime: " << time(0) - serverGlobalParams.started << " seconds\n";
     ss << "</pre>";
 }
+
 
 bool prisort(const Prioritizable* a, const Prioritizable* b) {
     return a->priority() < b->priority();
 }
 
-void htmlHelp(Command* command, stringstream& ss) {
-    string helpStr;
-    {
-        stringstream h;
-        command->help(h);
-        helpStr = h.str();
-    }
 
-    ss << "\n<tr><td>";
-    if (command->isWebUI())
-        ss << "<a href=\"/" << command->getName() << "?text=1\">";
-    ss << command->getName();
-    if (command->isWebUI())
-        ss << "</a>";
-    ss << "</td>\n";
-    ss << "<td>";
-    ss << "UNUSED ";
-    if (command->slaveOk())
-        ss << "S ";
-    if (command->adminOnly())
-        ss << "A";
-    ss << "</td>";
-    ss << "<td>";
-    if (helpStr != "no help defined") {
-        const char* p = helpStr.c_str();
-        while (*p) {
-            if (*p == '<') {
-                ss << "&lt;";
-                p++;
-                continue;
-            } else if (*p == '{')
-                ss << "<code>";
-            else if (*p == '}') {
-                ss << "}</code>";
-                p++;
-                continue;
-            }
-            if (strncmp(p, "http:", 5) == 0) {
-                ss << "<a href=\"";
-                const char* q = p;
-                while (*q && *q != ' ' && *q != '\n')
-                    ss << *q++;
-                ss << "\">";
-                q = p;
-                if (str::startsWith(q, "http://www.mongodb.org/display/"))
-                    q += 31;
-                while (*q && *q != ' ' && *q != '\n') {
-                    ss << (*q == '+' ? ' ' : *q);
-                    q++;
-                    if (*q == '#')
-                        while (*q && *q != ' ' && *q != '\n')
-                            q++;
-                }
-                ss << "</a>";
-                p = q;
-                continue;
-            }
-            if (*p == '\n')
-                ss << "<br>";
-            else
-                ss << *p;
-            p++;
-        }
+struct Timing {
+    Timing() {
+        start = timeLocked = 0;
     }
-    ss << "</td>";
-    ss << "</tr>\n";
-}
+    unsigned long long start, timeLocked;
+};
+
 
 class LogPlugin : public WebStatusPlugin {
 public:
@@ -169,6 +112,7 @@ public:
     }
     RamLog* _log;
 };
+
 
 class FavIconHandler : public DbWebHandler {
 public:
@@ -188,6 +132,7 @@ public:
     }
 
 } faviconHandler;
+
 
 class StatusHandler : public DbWebHandler {
 public:
@@ -244,6 +189,7 @@ public:
 
 } statusHandler;
 
+
 class CommandListHandler : public DbWebHandler {
 public:
     CommandListHandler() : DbWebHandler("_commands", 1, true) {}
@@ -272,13 +218,14 @@ public:
         ss << table();
         ss << "<tr><th>Command</th><th>Attributes</th><th>Help</th></tr>\n";
         for (Command::CommandMap::const_iterator i = m->begin(); i != m->end(); ++i) {
-            htmlHelp(i->second, ss);
+            i->second->htmlHelp(ss);
         }
         ss << _table() << _end();
 
         responseMsg = ss.str();
     }
 } commandListHandler;
+
 
 class CommandsHandler : public DbWebHandler {
 public:
@@ -290,13 +237,16 @@ public:
         return true;
     }
 
-    Command* _cmd(const string& cmdName) const {
-        Command* cmd = Command::findCommand(cmdName);
-        if (cmd && cmd->isWebUI()) {
-            return cmd;
-        }
+    Command* _cmd(const string& cmd) const {
+        const Command::CommandMap* m = Command::webCommands();
+        if (!m)
+            return 0;
 
-        return nullptr;
+        Command::CommandMap::const_iterator i = m->find(cmd);
+        if (i == m->end())
+            return 0;
+
+        return i->second;
     }
 
     virtual bool handles(const string& url) const {
@@ -363,8 +313,8 @@ MONGO_INITIALIZER(WebStatusLogPlugin)(InitializerContext*) {
 }  // namespace
 
 
-DbWebServer::DbWebServer(const string& ip, int port, ServiceContext* ctx, AdminAccess* webUsers)
-    : MiniWebServer("admin web console", ip, port, ctx), _webUsers(webUsers) {
+DbWebServer::DbWebServer(const string& ip, int port, AdminAccess* webUsers)
+    : MiniWebServer("admin web console", ip, port), _webUsers(webUsers) {
     WebStatusPlugin::initAll();
 }
 
@@ -449,29 +399,29 @@ void DbWebServer::doRequest(const char* rq,
     ss << "<p><a href=\"/_commands\">List all commands</a> | \n";
     ss << "<a href=\"/_replSet\">Replica set status</a></p>\n";
 
-    ss << a("",
-            "These read-only context-less commands can be executed from the web "
-            "interface. Results are json format, unless ?text=1 is appended in which "
-            "case the result is output as text for easier human viewing",
-            "Commands")
-       << ": ";
+    {
+        const Command::CommandMap* m = Command::webCommands();
+        if (m) {
+            ss << a("",
+                    "These read-only context-less commands can be executed from the web "
+                    "interface. Results are json format, unless ?text=1 is appended in which "
+                    "case the result is output as text for easier human viewing",
+                    "Commands") << ": ";
 
-    auto m = Command::commandsByBestName();
+            for (Command::CommandMap::const_iterator i = m->begin(); i != m->end(); ++i) {
+                stringstream h;
+                i->second->help(h);
 
-    for (Command::CommandMap::const_iterator i = m->begin(); i != m->end(); ++i) {
-        if (!i->second->isWebUI())
-            continue;
+                const string help = h.str();
+                ss << "<a href=\"/" << i->first << "?text=1\"";
+                if (help != "no help defined") {
+                    ss << " title=\"" << help << '"';
+                }
 
-        stringstream h;
-        i->second->help(h);
-
-        const string help = h.str();
-        ss << "<a href=\"/" << i->first << "?text=1\"";
-        if (help != "no help defined") {
-            ss << " title=\"" << help << '"';
+                ss << ">" << i->first << "</a> ";
+            }
+            ss << '\n';
         }
-
-        ss << ">" << i->first << "</a> ";
     }
 
     ss << '\n';

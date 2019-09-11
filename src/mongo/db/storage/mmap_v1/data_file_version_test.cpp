@@ -62,13 +62,17 @@ TEST(DataFileVersionTest, CanSetMayHave30Freelist) {
     ASSERT_TRUE(version.mayHave30Freelist());
 }
 
-TEST(DataFileVersionTest, CanSetMayHaveCollationMetadata) {
+TEST(DataFileVersionTest, CanSetAndClearMayHaveCollationMetadata) {
     auto version = DataFileVersion::defaultForNewFiles();
     ASSERT_OK(version.isCompatibleWithCurrentCode());
 
     ASSERT_FALSE(version.getMayHaveCollationMetadata());
     version.setMayHaveCollationMetadata();
     ASSERT_TRUE(version.getMayHaveCollationMetadata());
+    ASSERT_OK(version.isCompatibleWithCurrentCode());
+
+    version.clearMayHaveCollationMetadata();
+    ASSERT_FALSE(version.getMayHaveCollationMetadata());
     ASSERT_OK(version.isCompatibleWithCurrentCode());
 }
 

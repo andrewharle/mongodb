@@ -32,24 +32,18 @@
 
 #include <map>
 
-#include "mongo/db/storage/mmap_v1/extent_manager.h"
 #include "mongo/db/storage/mmap_v1/record_access_tracker.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/stdx/mutex.h"
 
 namespace mongo {
 
-class ClockSource;
 class JournalListener;
 class MMAPV1DatabaseCatalogEntry;
 
 class MMAPV1Engine : public StorageEngine {
 public:
-    MMAPV1Engine(const StorageEngineLockFile* lockFile, ClockSource* cs);
-
-    MMAPV1Engine(const StorageEngineLockFile* lockFile,
-                 ClockSource* cs,
-                 std::unique_ptr<ExtentManager::Factory> extentManagerFactory);
+    MMAPV1Engine(const StorageEngineLockFile& lockFile);
     virtual ~MMAPV1Engine();
 
     void finishInit();
@@ -85,6 +79,8 @@ public:
         return Status(ErrorCodes::InternalError, "MMAPv1 doesn't support repairRecordStore");
     }
 
+    virtual Status requireDataFileCompatibilityWithPriorRelease(OperationContext* opCtx);
+
     // MMAPv1 specific (non-virtual)
     Status repairDatabase(OperationContext* txn,
                           const std::string& dbName,
@@ -115,11 +111,6 @@ private:
     // addresses. It is used when higher layers (e.g. the query system) need to ask
     // the storage engine whether data is likely in physical memory.
     RecordAccessTracker _recordAccessTracker;
-
-    std::unique_ptr<ExtentManager::Factory> _extentManagerFactory;
-
-    ClockSource* _clock;
-    int64_t _startMs;
 };
 
 void _deleteDataFiles(const std::string& database);

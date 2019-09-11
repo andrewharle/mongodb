@@ -86,7 +86,7 @@ private:
     const std::string _dir;
     const std::string _database;
 
-    DurableMappedFile _f{MongoFile::Options::SEQUENTIAL};
+    DurableMappedFile _f;
     std::unique_ptr<NamespaceHashTable> _ht;
 };
 }

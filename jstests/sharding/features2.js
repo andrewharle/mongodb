@@ -86,7 +86,9 @@
         for (var i = 0; i < values.length; i++) {
             total += values[i].count;
         }
-        return {count: total};
+        return {
+            count: total
+        };
     };
 
     doMR = function(n) {
@@ -140,11 +142,16 @@
 
     s.adminCommand({split: 'test.mr', middle: {x: 3}});
     s.adminCommand({split: 'test.mr', middle: {x: 4}});
-    s.adminCommand({movechunk: 'test.mr', find: {x: 3}, to: s.getPrimaryShard('test').name});
+    s.adminCommand({movechunk: 'test.mr', find: {x: 3}, to: s.getServer('test').name});
 
     doMR("after extra split");
 
-    cmd = {mapreduce: "mr", map: "emit( ", reduce: "fooz + ", out: "broken1"};
+    cmd = {
+        mapreduce: "mr",
+        map: "emit( ",
+        reduce: "fooz + ",
+        out: "broken1"
+    };
 
     x = db.runCommand(cmd);
     y = s._connections[0].getDB("test").runCommand(cmd);

@@ -28,7 +28,6 @@
 
 #include "mongo/db/ops/modifier_object_replace.h"
 
-#include "mongo/base/data_view.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/mutable/document.h"
 #include "mongo/db/global_timestamp.h"
@@ -49,14 +48,13 @@ Status fixupTimestamps(const BSONObj& obj) {
 
         // Skip _id field -- we do not replace it
         if (e.type() == bsonTimestamp && e.fieldNameStringData() != idFieldName) {
-            auto timestampView = DataView(const_cast<char*>(e.value()));
-
-            // We don't need to do an endian-safe read here, because 0 is 0 either way.
-            unsigned long long timestamp = timestampView.read<unsigned long long>();
+            // TODO(emilkie): This is not endian-safe.
+            unsigned long long& timestamp =
+                *(reinterpret_cast<unsigned long long*>(const_cast<char*>(e.value())));
             if (timestamp == 0) {
                 // performance note, this locks a mutex:
                 Timestamp ts(getNextGlobalTimestamp());
-                timestampView.write(tagLittleEndian(ts.asULL()));
+                timestamp = ts.asULL();
             }
         }
     }
@@ -86,8 +84,7 @@ Status ModifierObjectReplace::init(const BSONElement& modExpr,
         // Impossible, really since the caller check this already...
         return Status(ErrorCodes::BadValue,
                       str::stream() << "Document replacement expects a complete document"
-                                       " but the type supplied was "
-                                    << modExpr.type());
+                                       " but the type supplied was " << modExpr.type());
     }
 
     // Object replacements never have positional operator.
@@ -148,13 +145,11 @@ Status ModifierObjectReplace::apply() const {
 
             // Do not duplicate _id field
             if (srcIdElement.ok()) {
-                if (srcIdElement.compareWithBSONElement(dstIdElement, nullptr, true) != 0) {
+                if (srcIdElement.compareWithBSONElement(dstIdElement, true) != 0) {
                     return Status(ErrorCodes::ImmutableField,
                                   str::stream() << "The _id field cannot be changed from {"
-                                                << srcIdElement.toString()
-                                                << "} to {"
-                                                << dstIdElement.toString()
-                                                << "}.");
+                                                << srcIdElement.toString() << "} to {"
+                                                << dstIdElement.toString() << "}.");
                 }
                 continue;
             }

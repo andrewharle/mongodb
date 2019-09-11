@@ -39,10 +39,10 @@ var before = a.system.users.count({db: mydb.getName()});
 
 assert.throws(function() {
     mydb.createUser({user: "", pwd: "abc", roles: jsTest.basicUserRoles});
-}, [], "C1");
+}, null, "C1");
 assert.throws(function() {
     mydb.createUser({user: "abc", pwd: "", roles: jsTest.basicUserRoles});
-}, [], "C2");
+}, null, "C2");
 
 var after = a.system.users.count({db: mydb.getName()});
 assert(before > 0, "C3");

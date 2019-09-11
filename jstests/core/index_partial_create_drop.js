@@ -2,14 +2,13 @@
 
 (function() {
     "use strict";
+    var isMongos = (db.runCommand("isMaster").msg === "isdbgrid");
     var coll = db.index_partial_create_drop;
 
     var getNumKeys = function(idxName) {
         var res = assert.commandWorked(coll.validate(true));
         var kpi;
-
-        var isShardedNS = res.hasOwnProperty('raw');
-        if (isShardedNS) {
+        if (isMongos) {
             kpi = res.raw[Object.getOwnPropertyNames(res.raw)[0]].keysPerIndex;
         } else {
             kpi = res.keysPerIndex;
@@ -24,10 +23,12 @@
     assert.commandFailed(coll.ensureIndex({x: 1}, {partialFilterExpression: {x: {$asdasd: 3}}}));
     assert.commandFailed(coll.ensureIndex({x: 1}, {partialFilterExpression: {$and: 5}}));
     assert.commandFailed(coll.ensureIndex({x: 1}, {partialFilterExpression: {x: /abc/}}));
-    assert.commandFailed(coll.ensureIndex({x: 1}, {
-        partialFilterExpression:
-            {$and: [{$and: [{x: {$lt: 2}}, {x: {$gt: 0}}]}, {x: {$exists: true}}]}
-    }));
+    assert.commandFailed(coll.ensureIndex(
+        {x: 1},
+        {
+          partialFilterExpression:
+              {$and: [{$and: [{x: {$lt: 2}}, {x: {$gt: 0}}]}, {x: {$exists: true}}]}
+        }));
 
     for (var i = 0; i < 10; i++) {
         assert.writeOK(coll.insert({x: i, a: i}));

@@ -28,8 +28,6 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/storage/record_store_test_harness.h"
 
 
@@ -48,12 +46,12 @@ TEST(RecordStoreTestHarness, TouchEmpty) {
     unique_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
 
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(0, rs->numRecords(opCtx.get()));
     }
 
     {
-        ServiceContext::UniqueOperationContext opCtx(
+        unique_ptr<OperationContext> opCtx(
             harnessHelper->newOperationContext(harnessHelper->client()));
         {
             BSONObjBuilder stats;
@@ -70,13 +68,13 @@ TEST(RecordStoreTestHarness, TouchNonEmpty) {
     unique_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
 
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(0, rs->numRecords(opCtx.get()));
     }
 
     int nToInsert = 10;
     for (int i = 0; i < nToInsert; i++) {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             stringstream ss;
             ss << "record " << i;
@@ -91,12 +89,12 @@ TEST(RecordStoreTestHarness, TouchNonEmpty) {
     }
 
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(nToInsert, rs->numRecords(opCtx.get()));
     }
 
     {
-        ServiceContext::UniqueOperationContext opCtx(
+        unique_ptr<OperationContext> opCtx(
             harnessHelper->newOperationContext(harnessHelper->client()));
         {
             BSONObjBuilder stats;
@@ -115,12 +113,12 @@ TEST(RecordStoreTestHarness, TouchEmptyWithNullStats) {
     unique_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
 
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(0, rs->numRecords(opCtx.get()));
     }
 
     {
-        ServiceContext::UniqueOperationContext opCtx(
+        unique_ptr<OperationContext> opCtx(
             harnessHelper->newOperationContext(harnessHelper->client()));
         Status status = rs->touch(opCtx.get(), NULL /* stats output */);
         ASSERT(status.isOK() || status.code() == ErrorCodes::CommandNotSupported);
@@ -134,13 +132,13 @@ TEST(RecordStoreTestHarness, TouchNonEmptyWithNullStats) {
     unique_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
 
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(0, rs->numRecords(opCtx.get()));
     }
 
     int nToInsert = 10;
     for (int i = 0; i < nToInsert; i++) {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             stringstream ss;
             ss << "record " << i;
@@ -155,12 +153,12 @@ TEST(RecordStoreTestHarness, TouchNonEmptyWithNullStats) {
     }
 
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(nToInsert, rs->numRecords(opCtx.get()));
     }
 
     {
-        ServiceContext::UniqueOperationContext opCtx(
+        unique_ptr<OperationContext> opCtx(
             harnessHelper->newOperationContext(harnessHelper->client()));
         // XXX does not verify the collection was loaded into cache
         // (even if supported by storage engine)

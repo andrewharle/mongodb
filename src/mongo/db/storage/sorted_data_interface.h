@@ -42,7 +42,6 @@ namespace mongo {
 class BSONObjBuilder;
 class BucketDeletionNotification;
 class SortedDataBuilderInterface;
-struct ValidateResults;
 
 /**
  * This interface is a work in progress.  Notes below:
@@ -122,24 +121,20 @@ public:
      */
     virtual Status dupKeyCheck(OperationContext* txn, const BSONObj& key, const RecordId& loc) = 0;
 
-    /**
-     * Attempt to reduce the storage space used by this index via compaction. Only called if the
-     * indexed record store supports compaction-in-place.
-     */
-    virtual Status compact(OperationContext* txn) {
-        return Status::OK();
-    }
-
     //
     // Information about the tree
     //
 
     /**
+     * 'output' is used to store results of validate when 'full' is true.
+     * If 'full' is false, 'output' may be NULL.
+     *
      * TODO: expose full set of args for testing?
      */
     virtual void fullValidate(OperationContext* txn,
+                              bool full,
                               long long* numKeysOut,
-                              ValidateResults* fullResults) const = 0;
+                              BSONObjBuilder* output) const = 0;
 
     virtual bool appendCustomStats(OperationContext* txn,
                                    BSONObjBuilder* output,
@@ -181,7 +176,7 @@ public:
      */
     virtual long long numEntries(OperationContext* txn) const {
         long long x = -1;
-        fullValidate(txn, &x, NULL);
+        fullValidate(txn, false, &x, NULL);
         return x;
     }
 

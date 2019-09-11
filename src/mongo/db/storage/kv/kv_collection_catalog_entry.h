@@ -30,8 +30,6 @@
 
 #pragma once
 
-#include <memory>
-
 #include "mongo/db/catalog/collection_catalog_entry.h"
 #include "mongo/db/storage/bson_collection_catalog_entry.h"
 #include "mongo/db/storage/record_store.h"
@@ -43,11 +41,8 @@ class KVEngine;
 
 class KVCollectionCatalogEntry final : public BSONCollectionCatalogEntry {
 public:
-    KVCollectionCatalogEntry(KVEngine* engine,
-                             KVCatalog* catalog,
-                             StringData ns,
-                             StringData ident,
-                             std::unique_ptr<RecordStore> rs);
+    KVCollectionCatalogEntry(
+        KVEngine* engine, KVCatalog* catalog, StringData ns, StringData ident, RecordStore* rs);
 
     ~KVCollectionCatalogEntry() final;
 
@@ -57,7 +52,11 @@ public:
 
     bool setIndexIsMultikey(OperationContext* txn,
                             StringData indexName,
-                            const MultikeyPaths& multikeyPaths) final;
+                            bool multikey = true) final;
+
+    void removePathLevelMultikeyInfoFromAllIndexes(OperationContext* txn) final;
+
+    bool hasCollationMetadata(OperationContext* txn) const;
 
     void setIndexHead(OperationContext* txn, StringData indexName, const RecordId& newHead) final;
 

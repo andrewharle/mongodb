@@ -56,8 +56,7 @@ StatusWith<OplogInterface::Iterator::Value> OplogIteratorRemote::next() {
         return StatusWith<Value>(ErrorCodes::NamespaceNotFound, "no cursor for remote oplog");
     }
     if (!_cursor->more()) {
-        return StatusWith<Value>(ErrorCodes::CollectionIsEmpty,
-                                 "no more operations in remote oplog");
+        return StatusWith<Value>(ErrorCodes::NoSuchKey, "no more operations in remote oplog");
     }
     return StatusWith<Value>(std::make_pair(_cursor->nextSafe(), RecordId()));
 }

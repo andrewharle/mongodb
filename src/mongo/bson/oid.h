@@ -32,7 +32,6 @@
 #include <string>
 
 #include "mongo/base/data_view.h"
-#include "mongo/base/static_assert.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/util/time_support.h"
 
@@ -90,7 +89,7 @@ public:
     }
 
     /** init from a reference to a 12-byte array */
-    explicit OID(const unsigned char (&arr)[kOIDSize]) {
+    explicit OID(const unsigned char(&arr)[kOIDSize]) {
         std::memcpy(_data, arr, sizeof(arr));
     }
 
@@ -114,8 +113,8 @@ public:
         return o;
     }
 
-    MONGO_STATIC_ASSERT_MSG(sizeof(int64_t) == kInstanceUniqueSize + kIncrementSize,
-                            "size of term must be size of instance unique + increment");
+    static_assert(sizeof(int64_t) == kInstanceUniqueSize + kIncrementSize,
+                  "size of term must be size of instance unique + increment");
 
     // Return OID initialized with a 8 byte term id and max Timestamp. Used for ElectionID.
     static OID fromTerm(int64_t term) {

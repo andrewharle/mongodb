@@ -487,8 +487,7 @@ MONGO_INITIALIZER_WITH_PREREQUISITES(SaslSspiClientPlugin,
     if (SASL_OK != ret) {
         return Status(ErrorCodes::UnknownError,
                       mongoutils::str::stream() << "could not add SASL Client SSPI plugin "
-                                                << sspiPluginName
-                                                << ": "
+                                                << sspiPluginName << ": "
                                                 << sasl_errstring(ret, NULL, NULL));
     }
 
@@ -501,8 +500,7 @@ MONGO_INITIALIZER_WITH_PREREQUISITES(SaslCramClientPlugin,
     if (SASL_OK != ret) {
         return Status(ErrorCodes::UnknownError,
                       mongoutils::str::stream() << "Could not add SASL Client CRAM-MD5 plugin "
-                                                << sspiPluginName
-                                                << ": "
+                                                << sspiPluginName << ": "
                                                 << sasl_errstring(ret, NULL, NULL));
     }
 
@@ -516,8 +514,7 @@ MONGO_INITIALIZER_WITH_PREREQUISITES(SaslPlainClientPlugin,
     if (SASL_OK != ret) {
         return Status(ErrorCodes::UnknownError,
                       mongoutils::str::stream() << "Could not add SASL Client PLAIN plugin "
-                                                << sspiPluginName
-                                                << ": "
+                                                << sspiPluginName << ": "
                                                 << sasl_errstring(ret, NULL, NULL));
     }
 

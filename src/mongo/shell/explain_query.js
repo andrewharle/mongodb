@@ -96,7 +96,6 @@ var DBExplainQuery = (function() {
         var delegationFuncNames = [
             "addOption",
             "batchSize",
-            "collation",
             "comment",
             "hint",
             "limit",
@@ -137,6 +136,9 @@ var DBExplainQuery = (function() {
             // Explain always gets pretty printed.
             this._query._prettyShell = true;
 
+            // Explain always passes a negative value for limit.
+            this._query._limit = Math.abs(this._query._limit) * -1;
+
             if (this._mongo.hasExplainCommand()) {
                 // The wire protocol version indicates that the server has the explain command.
                 // Convert this explain query into an explain command, and send the command to
@@ -150,7 +152,9 @@ var DBExplainQuery = (function() {
                     innerCmd = this._query._convertToCommand(canAttachReadPref);
                 }
 
-                var explainCmd = {explain: innerCmd};
+                var explainCmd = {
+                    explain: innerCmd
+                };
                 explainCmd["verbosity"] = this._verbosity;
 
                 var explainDb = this._query._db;
@@ -225,7 +229,6 @@ var DBExplainQuery = (function() {
             print("\t.addOption(n)");
             print("\t.batchSize(n)");
             print("\t.comment(comment)");
-            print("\t.collation(collationSpec)");
             print("\t.count()");
             print("\t.hint(hintSpec)");
             print("\t.limit(n)");

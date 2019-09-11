@@ -31,7 +31,10 @@ var $config = (function() {
         }
     };
 
-    var transitions = {insert: {insert: 0.2, update: 0.8}, update: {insert: 0.2, update: 0.8}};
+    var transitions = {
+        insert: {insert: 0.2, update: 0.8},
+        update: {insert: 0.2, update: 0.8}
+    };
 
     return {
         threadCount: 5,

@@ -30,12 +30,12 @@
 
 #include <vector>
 
-namespace mongo {
+#include "mongo/db/lasterror.h"
+#include "mongo/s/write_ops/batched_command_request.h"
+#include "mongo/s/write_ops/batched_command_response.h"
+#include "mongo/util/net/message.h"
 
-class BatchedCommandRequest;
-class BatchedCommandResponse;
-class LastError;
-class Message;
+namespace mongo {
 
 //
 // Utility functions for up-converting incoming write messages into batch write requests.
@@ -53,5 +53,4 @@ void msgToBatchRequests(const Message& msg, std::vector<BatchedCommandRequest*>*
 bool batchErrorToLastError(const BatchedCommandRequest& request,
                            const BatchedCommandResponse& response,
                            LastError* error);
-
-}  // namespace mongo
+}

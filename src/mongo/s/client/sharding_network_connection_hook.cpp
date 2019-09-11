@@ -31,13 +31,12 @@
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/util/bson_extract.h"
-#include "mongo/db/server_options.h"
 #include "mongo/db/wire_version.h"
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/executor/remote_command_response.h"
 #include "mongo/rpc/get_status_from_command_result.h"
-#include "mongo/s/client/shard_registry.h"
 #include "mongo/s/grid.h"
+#include "mongo/s/client/shard_registry.h"
 #include "mongo/s/set_shard_version_request.h"
 #include "mongo/util/mongoutils/str.h"
 #include "mongo/util/net/hostandport.h"
@@ -46,11 +45,13 @@ namespace mongo {
 
 Status ShardingNetworkConnectionHook::validateHost(
     const HostAndPort& remoteHost, const executor::RemoteCommandResponse& isMasterReply) {
-    return validateHostImpl(remoteHost, isMasterReply);
+    return validateHostImpl(remoteHost, isMasterReply, false);
 }
 
 Status ShardingNetworkConnectionHook::validateHostImpl(
-    const HostAndPort& remoteHost, const executor::RemoteCommandResponse& isMasterReply) {
+    const HostAndPort& remoteHost,
+    const executor::RemoteCommandResponse& isMasterReply,
+    bool forSCC) {
     auto shard = grid.shardRegistry()->getShardForHostNoReload(remoteHost);
     if (!shard) {
         return {ErrorCodes::ShardNotFound,
@@ -59,7 +60,6 @@ Status ShardingNetworkConnectionHook::validateHostImpl(
 
     long long configServerModeNumber;
     auto status = bsonExtractIntegerField(isMasterReply.data, "configsvr", &configServerModeNumber);
-    // TODO SERVER-22320 fix should collapse the switch to only NoSuchKey handling
 
     switch (status.code()) {
         case ErrorCodes::OK: {
@@ -69,7 +69,40 @@ Status ShardingNetworkConnectionHook::validateHostImpl(
                         str::stream() << "Surprised to discover that " << remoteHost.toString()
                                       << " believes it is a config server"};
             }
-            return Status::OK();
+            using ConfigServerMode = CatalogManager::ConfigServerMode;
+            auto configServerMode =
+                (configServerModeNumber == 0 ? ConfigServerMode::SCCC : ConfigServerMode::CSRS);
+
+            if (configServerMode == ConfigServerMode::CSRS) {
+                uassert(ErrorCodes::ReplicaSetNotFound,
+                        "CSRS replica set is not initialized",
+                        isMasterReply.data.hasField("setName"));
+            }
+
+            const BSONElement setName = isMasterReply.data["setName"];
+            // We still want to call scheduleReplaceCatalogManagerIfNeeded when configServerMode
+            // is SCCC to catch illegal downgrade attempts and return a useful error message.
+            // To enable that we use the default (invalid) ConnectionString when configServerMode
+            // is SCCC.
+            ConnectionString configConnString;
+            if (configServerMode == ConfigServerMode::CSRS) {
+                configConnString =
+                    ConnectionString::forReplicaSet(setName.valueStringData(), {remoteHost});
+            }
+
+            auto catalogSwapStatus =
+                grid.forwardingCatalogManager()->scheduleReplaceCatalogManagerIfNeeded(
+                    configServerMode, configConnString);
+            if (configServerMode == ConfigServerMode::CSRS && catalogSwapStatus.isOK() && forSCC) {
+                // Even though scheduleReplaceCatalogManagerIfNeeded didn't indicate that a catalog
+                // manager swap is needed, if this connection is part of a SyncClusterConnection,
+                // and it's talking to a CSRS config server we still need to fail.
+                return Status(ErrorCodes::IncompatibleCatalogManager,
+                              "Need to swap sharding catalog manager. Detected config server in "
+                              "CSRS mode while using a SyncClusterConnection, which only supports "
+                              "SCCC mode config servers");
+            }
+            return catalogSwapStatus;
         }
         case ErrorCodes::NoSuchKey: {
             // The ismaster response indicates that remoteHost is not a config server, or that
@@ -77,7 +110,20 @@ Status ShardingNetworkConnectionHook::validateHostImpl(
             if (!shard->isConfig()) {
                 return Status::OK();
             }
-
+            long long remoteMaxWireVersion;
+            status = bsonExtractIntegerFieldWithDefault(isMasterReply.data,
+                                                        "maxWireVersion",
+                                                        RELEASE_2_4_AND_BEFORE,
+                                                        &remoteMaxWireVersion);
+            if (!status.isOK()) {
+                return status;
+            }
+            if (remoteMaxWireVersion < FIND_COMMAND) {
+                // Prior to the introduction of the find command and the 3.1 release series, it was
+                // not possible to distinguish a config server from a shard server from its ismaster
+                // response. As such, we must assume that the system is properly configured.
+                return Status::OK();
+            }
             return {ErrorCodes::InvalidOptions,
                     str::stream() << "Surprised to discover that " << remoteHost.toString()
                                   << " does not believe it is a config server"};
@@ -107,7 +153,7 @@ ShardingNetworkConnectionHook::makeRequest(const HostAndPort& remoteHost) {
     executor::RemoteCommandRequest request;
     request.dbname = "admin";
     request.target = remoteHost;
-    request.timeout = Seconds{30};
+    request.timeout = stdx::chrono::seconds{30};
     request.cmdObj = ssv.toBSON();
 
     return {request};

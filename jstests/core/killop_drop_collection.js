@@ -3,18 +3,20 @@
  * to complete. Interrupting a collection drop could leave the database in an inconsistent state.
  * This test confirms that killOp won't interrupt a collection drop, and that the drop occurs
  * successfully.
+ *
+ * @tags: [requires_parallel_shell]
  */
 (function() {
     "use strict";
 
-    const collectionName = "killop_drop";
-    let collection = db.getCollection(collectionName);
+    var collectionName = "killop_drop";
+    var collection = db.getCollection(collectionName);
     collection.drop();
     assert.writeOK(collection.insert({x: 1}));
 
     // Attempt to fsyncLock the database, aborting early if the storage engine doesn't support it.
-    const storageEngine = jsTest.options().storageEngine;
-    let fsyncRes = db.fsyncLock();
+    var storageEngine = jsTest.options().storageEngine;
+    var fsyncRes = db.fsyncLock();
     if (!fsyncRes.ok) {
         assert.commandFailedWithCode(fsyncRes, ErrorCodes.CommandNotSupported);
         jsTest.log("Skipping test on storage engine " + storageEngine +
@@ -23,17 +25,18 @@
     }
 
     // Kick off a drop on the collection.
-    const useDefaultPort = null;
-    const noConnect = false;
-    let awaitDropCommand = startParallelShell(function() {
+    var useDefaultPort = null;
+    var noConnect = false;
+    var awaitDropCommand = startParallelShell(function() {
         assert.commandWorked(db.getSiblingDB("test").runCommand({drop: "killop_drop"}));
     }, useDefaultPort, noConnect);
 
     // Wait for the drop operation to appear in the db.currentOp() output.
-    let dropCommandOpId = null;
+    var dropCommandOpId = null;
     assert.soon(function() {
-        let dropOpsInProgress =
-            db.currentOp().inprog.filter(op => op.query && op.query.drop === collection.getName());
+        var dropOpsInProgress = db.currentOp().inprog.filter(function(op) {
+            return op.query && op.query.drop === collection.getName();
+        });
         if (dropOpsInProgress.length > 0) {
             dropCommandOpId = dropOpsInProgress[0].opid;
         }
@@ -43,13 +46,11 @@
     // Issue a killOp for the drop command, then unlock the server. We expect that the drop
     // operation was *not* killed, and that the collection was dropped successfully.
     assert.commandWorked(db.killOp(dropCommandOpId));
-    let unlockRes = assert.commandWorked(db.fsyncUnlock());
-    assert.eq(0,
-              unlockRes.lockCount,
-              "Expected the number of fsyncLocks to be zero after issuing fsyncUnlock");
+    assert.commandWorked(db.fsyncUnlock());
     awaitDropCommand();
 
     // Ensure that the collection has been dropped.
-    assert(!db.getCollectionNames().includes(collectionName),
-           "Expected collection to not appear in listCollections output after being dropped");
+    assert.eq(-1,
+              db.getCollectionNames().indexOf(collectionName),
+              "Expected collection to not appear in listCollections output after being dropped");
 }());

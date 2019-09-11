@@ -41,7 +41,6 @@ const BSONField<BSONObj> BatchedUpdateDocument::query("q");
 const BSONField<BSONObj> BatchedUpdateDocument::updateExpr("u");
 const BSONField<bool> BatchedUpdateDocument::multi("multi", false);
 const BSONField<bool> BatchedUpdateDocument::upsert("upsert", false);
-const BSONField<BSONObj> BatchedUpdateDocument::collation("collation");
 
 BatchedUpdateDocument::BatchedUpdateDocument() {
     clear();
@@ -84,9 +83,6 @@ BSONObj BatchedUpdateDocument::toBSON() const {
     if (_isUpsertSet)
         builder.append(upsert(), _upsert);
 
-    if (_isCollationSet)
-        builder.append(collation(), _collation);
-
     return builder.obj();
 }
 
@@ -124,14 +120,6 @@ bool BatchedUpdateDocument::parseBSON(const BSONObj& source, string* errMsg) {
             if (fieldState == FieldParser::FIELD_INVALID)
                 return false;
             _isUpsertSet = fieldState == FieldParser::FIELD_SET;
-        } else if (fieldName == collation.name()) {
-            fieldState = FieldParser::extract(elem, collation, &_collation, errMsg);
-            if (fieldState == FieldParser::FIELD_INVALID)
-                return false;
-            _isCollationSet = fieldState == FieldParser::FIELD_SET;
-        } else {
-            *errMsg = str::stream() << "Unknown option in update document: " << fieldName;
-            return false;
         }
     }
 
@@ -150,9 +138,6 @@ void BatchedUpdateDocument::clear() {
 
     _upsert = false;
     _isUpsertSet = false;
-
-    _collation = BSONObj();
-    _isCollationSet = false;
 }
 
 void BatchedUpdateDocument::cloneTo(BatchedUpdateDocument* other) const {
@@ -169,9 +154,6 @@ void BatchedUpdateDocument::cloneTo(BatchedUpdateDocument* other) const {
 
     other->_upsert = _upsert;
     other->_isUpsertSet = _isUpsertSet;
-
-    other->_collation = _collation;
-    other->_isCollationSet = _isCollationSet;
 }
 
 std::string BatchedUpdateDocument::toString() const {
@@ -254,24 +236,6 @@ bool BatchedUpdateDocument::getUpsert() const {
     } else {
         return upsert.getDefault();
     }
-}
-
-void BatchedUpdateDocument::setCollation(const BSONObj& collation) {
-    _collation = collation.getOwned();
-    _isCollationSet = true;
-}
-
-void BatchedUpdateDocument::unsetCollation() {
-    _isCollationSet = false;
-}
-
-bool BatchedUpdateDocument::isCollationSet() const {
-    return _isCollationSet;
-}
-
-const BSONObj& BatchedUpdateDocument::getCollation() const {
-    dassert(_isCollationSet);
-    return _collation;
 }
 
 }  // namespace mongo

@@ -78,13 +78,11 @@
 #include <iomanip>
 #include <utility>
 
-#include "mongo/base/static_assert.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands/server_status.h"
 #include "mongo/db/concurrency/lock_state.h"
-#include "mongo/db/operation_context.h"
+#include "mongo/db/operation_context_impl.h"
 #include "mongo/db/storage/mmap_v1/aligned_builder.h"
-#include "mongo/db/storage/mmap_v1/commit_notifier.h"
 #include "mongo/db/storage/mmap_v1/dur_commitjob.h"
 #include "mongo/db/storage/mmap_v1/dur_journal.h"
 #include "mongo/db/storage/mmap_v1/dur_journal_writer.h"
@@ -96,7 +94,7 @@
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/stdx/thread.h"
-#include "mongo/util/clock_source.h"
+#include "mongo/util/concurrency/synchronization.h"
 #include "mongo/util/exit.h"
 #include "mongo/util/log.h"
 #include "mongo/util/timer.h"
@@ -123,12 +121,12 @@ stdx::condition_variable flushRequested;
 // This is waited on for getlasterror acknowledgements. It means that data has been written to
 // the journal, but not necessarily applied to the shared view, so it is all right to
 // acknowledge the user operation, but NOT all right to delete the journal files for example.
-CommitNotifier commitNotify;
+NotifyAll commitNotify;
 
 // This is waited on for complete flush. It means that data has been both written to journal
 // and applied to the shared view, so it is allowed to delete the journal files. Used for
 // fsync:true, close DB, shutdown acknowledgements.
-CommitNotifier applyToDataFilesNotify;
+NotifyAll applyToDataFilesNotify;
 
 // When set, the flush thread will exit
 AtomicUInt32 shutdownRequested(0);
@@ -150,8 +148,10 @@ unsigned remapFileToStartAt;
 enum { DurStatsResetIntervalMillis = 3 * 1000 };
 
 // Size sanity checks
-MONGO_STATIC_ASSERT(UncommittedBytesLimit > BSONObjMaxInternalSize * 3);
-MONGO_STATIC_ASSERT(sizeof(void*) == 4 || UncommittedBytesLimit > BSONObjMaxInternalSize * 6);
+static_assert(UncommittedBytesLimit > BSONObjMaxInternalSize * 3,
+              "UncommittedBytesLimit > BSONObjMaxInternalSize * 3");
+static_assert(sizeof(void*) == 4 || UncommittedBytesLimit > BSONObjMaxInternalSize * 6,
+              "sizeof(void*) == 4 || UncommittedBytesLimit > BSONObjMaxInternalSize * 6");
 
 
 /**
@@ -228,7 +228,7 @@ public:
     virtual void closingFileNotification();
     virtual void commitAndStopDurThread();
 
-    void start(ClockSource* cs, int64_t serverStartMs);
+    void start();
 
 private:
     stdx::thread _durThreadHandle;
@@ -409,17 +409,14 @@ static stdx::mutex journalListenerMutex;
 
 
 // Declared in dur_preplogbuffer.cpp
-void PREPLOGBUFFER(JSectHeader& outHeader,
-                   AlignedBuilder& outBuffer,
-                   ClockSource* cs,
-                   int64_t serverStartMs);
+void PREPLOGBUFFER(JSectHeader& outHeader, AlignedBuilder& outBuffer);
 
 // Declared in dur_journal.cpp
 boost::filesystem::path getJournalDir();
 void preallocateFiles();
 
 // Forward declaration
-static void durThread(ClockSource* cs, int64_t serverStartMs);
+static void durThread();
 
 // Durability activity statistics
 Stats stats;
@@ -487,15 +484,10 @@ void Stats::S::_asObj(BSONObjBuilder* builder) const {
       << _journaledBytes / (_uncompressedBytes + 1.0) << "commitsInWriteLock" << _commitsInWriteLock
       << "earlyCommits" << 0 << "timeMs"
       << BSON("dt" << _durationMillis << "prepLogBuffer" << (unsigned)(_prepLogBufferMicros / 1000)
-                   << "writeToJournal"
-                   << (unsigned)(_writeToJournalMicros / 1000)
-                   << "writeToDataFiles"
-                   << (unsigned)(_writeToDataFilesMicros / 1000)
-                   << "remapPrivateView"
-                   << (unsigned)(_remapPrivateViewMicros / 1000)
-                   << "commits"
-                   << (unsigned)(_commitsMicros / 1000)
-                   << "commitsInWriteLock"
+                   << "writeToJournal" << (unsigned)(_writeToJournalMicros / 1000)
+                   << "writeToDataFiles" << (unsigned)(_writeToDataFilesMicros / 1000)
+                   << "remapPrivateView" << (unsigned)(_remapPrivateViewMicros / 1000) << "commits"
+                   << (unsigned)(_commitsMicros / 1000) << "commitsInWriteLock"
                    << (unsigned)(_commitsInWriteLockMicros / 1000));
 
     if (storageGlobalParams.journalCommitIntervalMs != 0) {
@@ -518,7 +510,7 @@ DurableInterface::~DurableInterface() {}
 //
 
 bool DurableImpl::commitNow(OperationContext* txn) {
-    CommitNotifier::When when = commitNotify.now();
+    NotifyAll::When when = commitNotify.now();
 
     AutoYieldFlushLockForMMAPV1Commit flushLockYield(txn->lockState());
 
@@ -589,7 +581,7 @@ void DurableImpl::closingFileNotification() {
 }
 
 void DurableImpl::commitAndStopDurThread() {
-    CommitNotifier::When when = commitNotify.now();
+    NotifyAll::When when = commitNotify.now();
 
     // There is always just one waiting anyways
     flushRequested.notify_one();
@@ -615,9 +607,9 @@ void DurableImpl::commitAndStopDurThread() {
     _durThreadHandle.join();
 }
 
-void DurableImpl::start(ClockSource* cs, int64_t serverStartMs) {
+void DurableImpl::start() {
     // Start the durability thread
-    stdx::thread t(durThread, cs, serverStartMs);
+    stdx::thread t(durThread);
     _durThreadHandle.swap(t);
 }
 
@@ -643,16 +635,15 @@ static void remapPrivateView(double fraction) {
         LOG(4) << "remapPrivateView end";
         return;
     } catch (DBException& e) {
-        severe() << "dbexception in remapPrivateView causing immediate shutdown: " << redact(e);
+        severe() << "dbexception in remapPrivateView causing immediate shutdown: " << e.toString();
     } catch (std::ios_base::failure& e) {
         severe() << "ios_base exception in remapPrivateView causing immediate shutdown: "
-                 << redact(e.what());
+                 << e.what();
     } catch (std::bad_alloc& e) {
         severe() << "bad_alloc exception in remapPrivateView causing immediate shutdown: "
-                 << redact(e.what());
+                 << e.what();
     } catch (std::exception& e) {
-        severe() << "exception in remapPrivateView causing immediate shutdown: "
-                 << redact(e.what());
+        severe() << "exception in remapPrivateView causing immediate shutdown: " << e.what();
     } catch (...) {
         severe() << "unknown exception in remapPrivateView causing immediate shutdown: ";
     }
@@ -664,7 +655,7 @@ static void remapPrivateView(double fraction) {
 /**
  * The main durability thread loop. There is a single instance of this function running.
  */
-static void durThread(ClockSource* cs, int64_t serverStartMs) {
+static void durThread() {
     Client::initThread("durability");
 
     log() << "Durability thread started";
@@ -692,7 +683,7 @@ static void durThread(ClockSource* cs, int64_t serverStartMs) {
         }
 
         // +1 so it never goes down to zero
-        const int64_t oneThird = (ms / 3) + 1;
+        const unsigned oneThird = (ms / 3) + 1;
 
         // Reset the stats based on the reset interval
         if (stats.curr()->getCurrentDurationMillis() > DurStatsResetIntervalMillis) {
@@ -704,7 +695,7 @@ static void durThread(ClockSource* cs, int64_t serverStartMs) {
 
             for (unsigned i = 0; i <= 2; i++) {
                 if (stdx::cv_status::no_timeout ==
-                    flushRequested.wait_for(lock, Milliseconds(oneThird).toSystemDuration())) {
+                    flushRequested.wait_for(lock, Milliseconds(oneThird))) {
                     // Someone forced a flush
                     break;
                 }
@@ -725,13 +716,12 @@ static void durThread(ClockSource* cs, int64_t serverStartMs) {
 
             Timer t;
 
-            const ServiceContext::UniqueOperationContext txnPtr = cc().makeOperationContext();
-            OperationContext& txn = *txnPtr;
+            OperationContextImpl txn;
             AutoAcquireFlushLockForMMAPV1Commit autoFlushLock(txn.lockState());
 
             // We need to snapshot the commitNumber after the flush lock has been obtained,
             // because at this point we know that we have a stable snapshot of the data.
-            const CommitNotifier::When commitNumber(commitNotify.now());
+            const NotifyAll::When commitNumber(commitNotify.now());
 
             LOG(4) << "Processing commit number " << commitNumber;
 
@@ -751,7 +741,7 @@ static void durThread(ClockSource* cs, int64_t serverStartMs) {
             } else {
                 // This copies all the in-memory changes into the journal writer's buffer.
                 JournalWriter::Buffer* const buffer = journalWriter.newBuffer();
-                PREPLOGBUFFER(buffer->getHeader(), buffer->getBuilder(), cs, serverStartMs);
+                PREPLOGBUFFER(buffer->getHeader(), buffer->getBuilder());
 
                 estimatedPrivateMapSize += commitJob.bytes();
                 commitCounter++;
@@ -846,18 +836,16 @@ static void durThread(ClockSource* cs, int64_t serverStartMs) {
 
             LOG(4) << "groupCommit end";
         } catch (DBException& e) {
-            severe() << "dbexception in durThread causing immediate shutdown: " << redact(e);
+            severe() << "dbexception in durThread causing immediate shutdown: " << e.toString();
             invariant(false);
         } catch (std::ios_base::failure& e) {
-            severe() << "ios_base exception in durThread causing immediate shutdown: "
-                     << redact(e.what());
+            severe() << "ios_base exception in durThread causing immediate shutdown: " << e.what();
             invariant(false);
         } catch (std::bad_alloc& e) {
-            severe() << "bad_alloc exception in durThread causing immediate shutdown: "
-                     << redact(e.what());
+            severe() << "bad_alloc exception in durThread causing immediate shutdown: " << e.what();
             invariant(false);
         } catch (std::exception& e) {
-            severe() << "exception in durThread causing immediate shutdown: " << redact(e.what());
+            severe() << "exception in durThread causing immediate shutdown: " << e.what();
             invariant(false);
         } catch (...) {
             severe() << "unhandled exception in durThread causing immediate shutdown";
@@ -879,20 +867,20 @@ static void durThread(ClockSource* cs, int64_t serverStartMs) {
  * Invoked at server startup. Recovers the database by replaying journal files and then
  * starts the durability thread.
  */
-void startup(ClockSource* cs, int64_t serverStartMs) {
+void startup() {
     if (!storageGlobalParams.dur) {
         return;
     }
 
-    journalMakeDir(cs, serverStartMs);
+    journalMakeDir();
 
     try {
         replayJournalFilesAtStartup();
     } catch (DBException& e) {
-        severe() << "dbexception during recovery: " << redact(e);
+        severe() << "dbexception during recovery: " << e.toString();
         throw;
     } catch (std::exception& e) {
-        severe() << "std::exception during recovery: " << redact(e.what());
+        severe() << "std::exception during recovery: " << e.what();
         throw;
     } catch (...) {
         severe() << "exception during recovery";
@@ -901,7 +889,7 @@ void startup(ClockSource* cs, int64_t serverStartMs) {
 
     preallocateFiles();
 
-    durableImpl.start(cs, serverStartMs);
+    durableImpl.start();
     DurableInterface::_impl = &durableImpl;
 }
 

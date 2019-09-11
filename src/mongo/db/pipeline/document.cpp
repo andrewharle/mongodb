@@ -32,7 +32,6 @@
 
 #include <boost/functional/hash.hpp>
 
-#include "mongo/bson/bson_depth.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/pipeline/field_path.h"
 #include "mongo/util/mongoutils/str.h"
@@ -42,8 +41,6 @@ using namespace mongoutils;
 using boost::intrusive_ptr;
 using std::string;
 using std::vector;
-
-const DocumentStorage DocumentStorage::kEmptyDoc;
 
 Position DocumentStorage::findField(StringData requested) const {
     int reqSize = requested.size();  // get size calculation out of the way if needed
@@ -187,12 +184,10 @@ intrusive_ptr<DocumentStorage> DocumentStorage::clone() const {
 
     // Make a copy of the buffer.
     // It is very important that the positions of each field are the same after cloning.
-    const size_t bufferBytes = allocatedBytes();
+    const size_t bufferBytes = (_bufferEnd + hashTabBytes()) - _buffer;
     out->_buffer = new char[bufferBytes];
     out->_bufferEnd = out->_buffer + (_bufferEnd - _buffer);
-    if (bufferBytes > 0) {
-        memcpy(out->_buffer, _buffer, bufferBytes);
-    }
+    memcpy(out->_buffer, _buffer, bufferBytes);
 
     // Copy remaining fields
     out->_usedBytes = _usedBytes;
@@ -230,16 +225,6 @@ Document::Document(const BSONObj& bson) {
     *this = md.freeze();
 }
 
-Document::Document(std::initializer_list<std::pair<StringData, ImplicitValue>> initializerList) {
-    MutableDocument mutableDoc(initializerList.size());
-
-    for (auto&& pair : initializerList) {
-        mutableDoc.addField(pair.first, pair.second);
-    }
-
-    *this = mutableDoc.freeze();
-}
-
 BSONObjBuilder& operator<<(BSONObjBuilderValueStream& builder, const Document& doc) {
     BSONObjBuilder subobj(builder.subobjStart());
     doc.toBson(&subobj);
@@ -247,15 +232,9 @@ BSONObjBuilder& operator<<(BSONObjBuilderValueStream& builder, const Document& d
     return builder.builder();
 }
 
-void Document::toBson(BSONObjBuilder* builder, size_t recursionLevel) const {
-    uassert(ErrorCodes::Overflow,
-            str::stream() << "cannot convert document to BSON because it exceeds the limit of "
-                          << BSONDepth::getMaxAllowableDepth()
-                          << " levels of nesting",
-            recursionLevel <= BSONDepth::getMaxAllowableDepth());
-
+void Document::toBson(BSONObjBuilder* pBuilder) const {
     for (DocumentStorageIterator it = storage().iterator(); !it.atEnd(); it.advance()) {
-        it->val.addToBsonObj(builder, it->nameSD(), recursionLevel);
+        *pBuilder << it->nameSD() << it->val;
     }
 }
 
@@ -265,8 +244,8 @@ BSONObj Document::toBson() const {
     return bb.obj();
 }
 
-const StringData Document::metaFieldTextScore("$textScore"_sd);
-const StringData Document::metaFieldRandVal("$randVal"_sd);
+const StringData Document::metaFieldTextScore("$textScore", StringData::LiteralTag());
+const StringData Document::metaFieldRandVal("$randVal", StringData::LiteralTag());
 
 BSONObj Document::toBsonWithMetaData() const {
     BSONObjBuilder bb;
@@ -342,7 +321,7 @@ static Value getNestedFieldHelper(const Document& doc,
                                   const FieldPath& fieldNames,
                                   vector<Position>* positions,
                                   size_t level) {
-    const auto fieldName = fieldNames.getFieldName(level);
+    const string& fieldName = fieldNames.getFieldName(level);
     const Position pos = doc.positionOf(fieldName);
 
     if (!pos.found())
@@ -382,18 +361,15 @@ size_t Document::getApproximateSize() const {
     return size;
 }
 
-void Document::hash_combine(size_t& seed,
-                            const StringData::ComparatorInterface* stringComparator) const {
+void Document::hash_combine(size_t& seed) const {
     for (DocumentStorageIterator it = storage().iterator(); !it.atEnd(); it.advance()) {
         StringData name = it->nameSD();
         boost::hash_range(seed, name.rawData(), name.rawData() + name.size());
-        it->val.hash_combine(seed, stringComparator);
+        it->val.hash_combine(seed);
     }
 }
 
-int Document::compare(const Document& rL,
-                      const Document& rR,
-                      const StringData::ComparatorInterface* stringComparator) {
+int Document::compare(const Document& rL, const Document& rR) {
     DocumentStorageIterator lIt = rL.storage().iterator();
     DocumentStorageIterator rIt = rR.storage().iterator();
 
@@ -422,7 +398,7 @@ int Document::compare(const Document& rL,
         if (nameCmp)
             return nameCmp;  // field names are unequal
 
-        const int valueCmp = Value::compare(lField.val, rField.val, stringComparator);
+        const int valueCmp = Value::compare(lField.val, rField.val);
         if (valueCmp)
             return valueCmp;  // fields are unequal
 
@@ -468,7 +444,7 @@ void Document::serializeForSorter(BufBuilder& buf) const {
 }
 
 Document Document::deserializeForSorter(BufReader& buf, const SorterDeserializeSettings&) {
-    const int numElems = buf.read<LittleEndian<int>>();
+    const int numElems = buf.read<int>();
     MutableDocument doc(numElems);
     for (int i = 0; i < numElems; i++) {
         StringData name = buf.readCStr();
@@ -477,9 +453,9 @@ Document Document::deserializeForSorter(BufReader& buf, const SorterDeserializeS
 
     while (char marker = buf.read<char>()) {
         if (marker == char(DocumentStorage::MetaType::TEXT_SCORE) + 1) {
-            doc.setTextScore(buf.read<LittleEndian<double>>());
+            doc.setTextScore(buf.read<double>());
         } else if (marker == char(DocumentStorage::MetaType::RAND_VAL) + 1) {
-            doc.setRandMetaField(buf.read<LittleEndian<double>>());
+            doc.setRandMetaField(buf.read<double>());
         } else {
             uasserted(28744, "Unrecognized marker, unable to deserialize buffer");
         }

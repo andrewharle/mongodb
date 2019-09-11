@@ -32,120 +32,124 @@
 
 #include "mongo/db/repl/sync_source_feedback.h"
 
-#include "mongo/db/client.h"
+#include "mongo/client/constants.h"
+#include "mongo/client/dbclientcursor.h"
+#include "mongo/db/auth/authorization_manager.h"
+#include "mongo/db/auth/authorization_manager_global.h"
+#include "mongo/db/auth/authorization_session.h"
+#include "mongo/db/auth/internal_user_auth.h"
+#include "mongo/db/commands.h"
+#include "mongo/db/dbhelpers.h"
+#include "mongo/db/operation_context_impl.h"
 #include "mongo/db/repl/bgsync.h"
-#include "mongo/db/repl/repl_set_config.h"
-#include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/repl/reporter.h"
-#include "mongo/executor/task_executor.h"
-#include "mongo/util/concurrency/idle_thread_block.h"
+#include "mongo/db/repl/oplogreader.h"
+#include "mongo/db/repl/replica_set_config.h"
+#include "mongo/db/repl/replication_coordinator_global.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/util/exit.h"
 #include "mongo/util/log.h"
 #include "mongo/util/net/hostandport.h"
-#include "mongo/util/scopeguard.h"
-#include "mongo/util/time_support.h"
 
 namespace mongo {
+
+using std::endl;
+using std::string;
+
 namespace repl {
 
-namespace {
-
-
-const Milliseconds maximumKeepAliveIntervalMS(30 * 1000);
-
-// The network timeout used for replSetUpdatePosition requests made to a node's sync source.
-const Seconds syncSourceFeedbackNetworkTimeoutSecs(30);
-
-/**
- * Calculates the keep alive interval based on the given ReplSetConfig.
- */
-Milliseconds calculateKeepAliveInterval(const ReplSetConfig& rsConfig) {
-    return rsConfig.getElectionTimeoutPeriod() / 2;
+void SyncSourceFeedback::_resetConnection() {
+    LOG(1) << "resetting connection in sync source feedback";
+    _connection.reset();
+    _fallBackToOldUpdatePosition = false;
 }
 
-/**
- * Returns function to prepare update command
- */
-Reporter::PrepareReplSetUpdatePositionCommandFn makePrepareReplSetUpdatePositionCommandFn(
-    ReplicationCoordinator* replCoord,
-    stdx::mutex& mtx,
-    const HostAndPort& syncTarget,
-    BackgroundSync* bgsync) {
-    return [&mtx, syncTarget, replCoord, bgsync](
-               ReplicationCoordinator::ReplSetUpdatePositionCommandStyle
-                   commandStyle) -> StatusWith<BSONObj> {
-        auto currentSyncTarget = bgsync->getSyncTarget();
-        if (currentSyncTarget != syncTarget) {
-            if (currentSyncTarget.empty()) {
-                // Sync source was cleared.
-                return Status(ErrorCodes::InvalidSyncSource,
-                              str::stream() << "Sync source was cleared. Was " << syncTarget);
+bool SyncSourceFeedback::replAuthenticate() {
+    if (!getGlobalAuthorizationManager()->isAuthEnabled())
+        return true;
 
-            } else {
-                // Sync source changed.
-                return Status(ErrorCodes::InvalidSyncSource,
-                              str::stream() << "Sync source changed from " << syncTarget << " to "
-                                            << currentSyncTarget);
-            }
-        }
-
-        if (replCoord->getMemberState().primary()) {
-            // Primary has no one to send updates to.
-            return Status(ErrorCodes::InvalidSyncSource,
-                          "Currently primary - no one to send updates to");
-        }
-
-        return replCoord->prepareReplSetUpdatePositionCommand(commandStyle);
-    };
+    if (!isInternalAuthSet())
+        return false;
+    return _connection->authenticateInternalUser();
 }
 
-}  // namespace
+bool SyncSourceFeedback::_connect(const ReplicaSetConfig& rsConfig, const HostAndPort& host) {
+    if (hasConnection()) {
+        return true;
+    }
+    log() << "setting syncSourceFeedback to " << host.toString();
+    _connection.reset(
+        new DBClientConnection(false, durationCount<Seconds>(OplogReader::kSocketTimeout)));
+    string errmsg;
+    try {
+        if (!_connection->connect(host, errmsg) ||
+            (getGlobalAuthorizationManager()->isAuthEnabled() && !replAuthenticate())) {
+            _resetConnection();
+            log() << errmsg << endl;
+            return false;
+        }
+    } catch (const DBException& e) {
+        error() << "Error connecting to " << host.toString() << ": " << e.what();
+        _resetConnection();
+        return false;
+    }
+
+    // Update keepalive value from config.
+    _keepAliveInterval = rsConfig.getElectionTimeoutPeriod() / 2;
+
+    return hasConnection();
+}
 
 void SyncSourceFeedback::forwardSlaveProgress() {
-    {
-        stdx::unique_lock<stdx::mutex> lock(_mtx);
-        _positionChanged = true;
-        _cond.notify_all();
-        if (_reporter) {
-            auto triggerStatus = _reporter->trigger();
-            if (!triggerStatus.isOK()) {
-                warning() << "unable to forward slave progress to " << _reporter->getTarget()
-                          << ": " << triggerStatus;
-            }
-        }
-    }
+    stdx::lock_guard<stdx::mutex> lock(_mtx);
+    _positionChanged = true;
+    _cond.notify_all();
 }
 
-Status SyncSourceFeedback::_updateUpstream(ReplicationCoordinator* replCoord,
-                                           BackgroundSync* bgsync,
-                                           Reporter* reporter) {
-    auto syncTarget = reporter->getTarget();
+Status SyncSourceFeedback::updateUpstream(ReplicationCoordinator* replCoord, bool oldStyle) {
+    if (replCoord->getMemberState().primary()) {
+        // Primary has no one to send updates to.
+        return Status::OK();
+    }
+    BSONObjBuilder cmd;
+    // The command could not be created, likely because this node was removed from the set.
+    if (!oldStyle) {
+        if (!replCoord->prepareReplSetUpdatePositionCommand(&cmd)) {
+            return Status::OK();
+        }
+    } else {
+        if (!replCoord->prepareOldReplSetUpdatePositionCommand(&cmd)) {
+            return Status::OK();
+        }
+    }
+    BSONObj res;
 
-    auto triggerStatus = reporter->trigger();
-    if (!triggerStatus.isOK()) {
-        warning() << "unable to schedule reporter to update replication progress on " << syncTarget
-                  << ": " << triggerStatus;
-        return triggerStatus;
+    LOG(2) << "Sending slave oplog progress to upstream updater: " << cmd.done();
+    try {
+        _connection->runCommand("admin", cmd.obj(), res);
+    } catch (const DBException& e) {
+        log() << "SyncSourceFeedback error sending " << (oldStyle ? "old style " : "")
+              << "update: " << e.what();
+        // Blacklist sync target for .5 seconds and find a new one.
+        replCoord->blacklistSyncSource(_syncTarget, Date_t::now() + Milliseconds(500));
+        BackgroundSync::get()->clearSyncTarget();
+        _resetConnection();
+        return e.toStatus();
     }
 
-    auto status = reporter->join();
-
+    Status status = Command::getStatusFromCommandResult(res);
     if (!status.isOK()) {
-        log() << "SyncSourceFeedback error sending update to " << syncTarget << ": " << status;
-
-        // Some errors should not cause result in blacklisting the sync source.
-        if (status != ErrorCodes::InvalidSyncSource) {
-            // The command could not be created because the node is now primary.
-        } else if (status != ErrorCodes::NodeNotFound) {
-            // The command could not be created, likely because this node was removed from the set.
-        } else {
-            // Blacklist sync target for .5 seconds and find a new one.
-            stdx::lock_guard<stdx::mutex> lock(_mtx);
-            const auto blacklistDuration = Milliseconds{500};
-            const auto until = Date_t::now() + blacklistDuration;
-            log() << "Blacklisting " << syncTarget << " due to error: '" << status << "' for "
-                  << blacklistDuration << " until: " << until;
-            replCoord->blacklistSyncSource(syncTarget, until);
-            bgsync->clearSyncTarget();
+        log() << "SyncSourceFeedback error sending " << (oldStyle ? "old style " : "")
+              << "update, response: " << res.toString();
+        if (status == ErrorCodes::BadValue && !oldStyle) {
+            log() << "SyncSourceFeedback falling back to old style UpdatePosition command";
+            _fallBackToOldUpdatePosition = true;
+        } else if (status != ErrorCodes::InvalidReplicaSetConfig || res["configVersion"].eoo() ||
+                   res["configVersion"].numberLong() < replCoord->getConfig().getConfigVersion()) {
+            // Blacklist sync target for .5 seconds and find a new one, unless we were rejected due
+            // to the syncsource having a newer config.
+            replCoord->blacklistSyncSource(_syncTarget, Date_t::now() + Milliseconds(500));
+            BackgroundSync::get()->clearSyncTarget();
+            _resetConnection();
         }
     }
 
@@ -154,45 +158,23 @@ Status SyncSourceFeedback::_updateUpstream(ReplicationCoordinator* replCoord,
 
 void SyncSourceFeedback::shutdown() {
     stdx::unique_lock<stdx::mutex> lock(_mtx);
-    if (_reporter) {
-        _reporter->shutdown();
-    }
     _shutdownSignaled = true;
     _cond.notify_all();
 }
 
-void SyncSourceFeedback::run(executor::TaskExecutor* executor,
-                             BackgroundSync* bgsync,
-                             ReplicationCoordinator* replCoord) {
+void SyncSourceFeedback::run(ReplicationCoordinator* replCoord) {
     Client::initThread("SyncSourceFeedback");
-
-    HostAndPort syncTarget;
-
-    // keepAliveInterval indicates how frequently to forward progress in the absence of updates.
-    Milliseconds keepAliveInterval(0);
 
     while (true) {  // breaks once _shutdownSignaled is true
 
-        if (keepAliveInterval == Milliseconds(0)) {
-            keepAliveInterval = calculateKeepAliveInterval(replCoord->getConfig());
-        }
-
         {
-            // Take SyncSourceFeedback lock before calling into ReplicationCoordinator
-            // to avoid deadlock because ReplicationCoordinator could conceivably calling back into
-            // this class.
             stdx::unique_lock<stdx::mutex> lock(_mtx);
             while (!_positionChanged && !_shutdownSignaled) {
-                {
-                    MONGO_IDLE_THREAD_BLOCK;
-                    if (_cond.wait_for(lock, keepAliveInterval.toSystemDuration()) !=
-                        stdx::cv_status::timeout) {
-                        continue;
+                if (_cond.wait_for(lock, _keepAliveInterval) == stdx::cv_status::timeout) {
+                    MemberState state = replCoord->getMemberState();
+                    if (!(state.primary() || state.startup())) {
+                        break;
                     }
-                }
-                MemberState state = replCoord->getMemberState();
-                if (!(state.primary() || state.startup())) {
-                    break;
                 }
             }
 
@@ -203,63 +185,35 @@ void SyncSourceFeedback::run(executor::TaskExecutor* executor,
             _positionChanged = false;
         }
 
-        {
-            stdx::lock_guard<stdx::mutex> lock(_mtx);
-            MemberState state = replCoord->getMemberState();
-            if (state.primary() || state.startup()) {
+        MemberState state = replCoord->getMemberState();
+        if (state.primary() || state.startup()) {
+            _resetConnection();
+            continue;
+        }
+        const HostAndPort target = BackgroundSync::get()->getSyncTarget();
+        if (_syncTarget != target) {
+            _resetConnection();
+            _syncTarget = target;
+        }
+        if (!hasConnection()) {
+            // fix connection if need be
+            if (target.empty() || !_connect(replCoord->getConfig(), target)) {
+                // Loop back around again; the keepalive functionality will cause us to retry
                 continue;
             }
         }
-
-        const HostAndPort target = bgsync->getSyncTarget();
-        // Log sync source changes.
-        if (target.empty()) {
-            if (syncTarget != target) {
-                syncTarget = target;
-            }
-            // Loop back around again; the keepalive functionality will cause us to retry
-            continue;
-        }
-
-        if (syncTarget != target) {
-            LOG(1) << "setting syncSourceFeedback to " << target;
-            syncTarget = target;
-
-            // Update keepalive value from config.
-            auto oldKeepAliveInterval = keepAliveInterval;
-            keepAliveInterval = calculateKeepAliveInterval(replCoord->getConfig());
-            if (oldKeepAliveInterval != keepAliveInterval) {
-                LOG(1) << "new syncSourceFeedback keep alive duration = " << keepAliveInterval
-                       << " (previously " << oldKeepAliveInterval << ")";
-            }
-        }
-
-        Reporter reporter(
-            executor,
-            makePrepareReplSetUpdatePositionCommandFn(replCoord, _mtx, syncTarget, bgsync),
-            syncTarget,
-            keepAliveInterval,
-            syncSourceFeedbackNetworkTimeoutSecs);
-        {
-            stdx::lock_guard<stdx::mutex> lock(_mtx);
-            if (_shutdownSignaled) {
-                break;
-            }
-            _reporter = &reporter;
-        }
-        ON_BLOCK_EXIT([this]() {
-            stdx::lock_guard<stdx::mutex> lock(_mtx);
-            _reporter = nullptr;
-        });
-
-        auto status = _updateUpstream(replCoord, bgsync, &reporter);
+        bool oldFallBackValue = _fallBackToOldUpdatePosition;
+        Status status = updateUpstream(replCoord, _fallBackToOldUpdatePosition);
         if (!status.isOK()) {
-            LOG(1) << "The replication progress command (replSetUpdatePosition) failed and will be "
-                      "retried: "
-                   << status;
+            if (_fallBackToOldUpdatePosition != oldFallBackValue) {
+                stdx::unique_lock<stdx::mutex> lock(_mtx);
+                _positionChanged = true;
+            } else {
+                log() << (_fallBackToOldUpdatePosition ? "old style " : "") << "updateUpstream"
+                      << " failed: " << status << ", will retry";
+            }
         }
     }
 }
-
 }  // namespace repl
 }  // namespace mongo

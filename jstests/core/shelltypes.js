@@ -28,16 +28,16 @@ assert.eq(tojson(a), tojson(b), "timestamp");
 
 assert.throws(function() {
     Timestamp(-2, 3);
-}, [], "Timestamp time must not accept negative time");
+}, null, "Timestamp time must not accept negative time");
 assert.throws(function() {
     Timestamp(0, -1);
-}, [], "Timestamp increment must not accept negative time");
+}, null, "Timestamp increment must not accept negative time");
 assert.throws(function() {
     Timestamp(0x10000 * 0x10000, 0);
-}, [], "Timestamp time must not accept values larger than 2**32 - 1");
+}, null, "Timestamp time must not accept values larger than 2**32 - 1");
 assert.throws(function() {
     Timestamp(0, 0x10000 * 0x10000);
-}, [], "Timestamp increment must not accept values larger than 2**32 - 1");
+}, null, "Timestamp increment must not accept values larger than 2**32 - 1");
 
 a = new Timestamp(0x80008000, 0x80008000 + 0.5);
 b = Timestamp(a.t, Math.round(a.i));
@@ -83,15 +83,15 @@ var dateA = new Date(timestampA.getTime());
 // ObjectId.fromDate - invalid input types
 assert.throws(function() {
     ObjectId.fromDate(undefined);
-}, [], "ObjectId.fromDate should error on undefined date");
+}, null, "ObjectId.fromDate should error on undefined date");
 
 assert.throws(function() {
     ObjectId.fromDate(12345);
-}, [], "ObjectId.fromDate should error on numerical value");
+}, null, "ObjectId.fromDate should error on numerical value");
 
 assert.throws(function() {
     ObjectId.fromDate(dateA.toISOString());
-}, [], "ObjectId.fromDate should error on string value");
+}, null, "ObjectId.fromDate should error on string value");
 
 // SERVER-14623 dates less than or equal to 1978-07-04T21:24:15Z fail
 var checkFromDate = function(millis, expected, comment) {
@@ -106,7 +106,7 @@ checkFromDate(0, "000000000000000000000000", "start of epoch");
 checkFromDate((Math.pow(2, 32) * 1000) - 1, "ffffffff0000000000000000", "last valid date");
 assert.throws(function() {
     ObjectId.fromDate(new Date(Math.pow(2, 32) * 1000));
-}, [], "ObjectId limited to 4 bytes for seconds");
+}, null, "ObjectId limited to 4 bytes for seconds");
 
 // ObjectId.fromDate - Date
 b = ObjectId.fromDate(dateA);

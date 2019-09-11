@@ -13,8 +13,7 @@ var authutil;
             conn = [conn];
         }
         for (i = 0; i < conn.length; ++i) {
-            var curDB = new DB(conn[i], dbname);
-            curDB.logout();
+            conn[i].getDB(dbname).logout();
         }
     };
 
@@ -32,9 +31,7 @@ var authutil;
         try {
             for (i = 0; i < conns.length; ++i) {
                 conn = conns[i];
-                // Bypass the implicit auth call in getDB();
-                var db = new DB(conn, dbName);
-                assert(db.auth(authParams),
+                assert(conn.getDB(dbName).auth(authParams),
                        "Failed to authenticate " + conn + " to " + dbName + " using parameters " +
                            tojson(authParams));
             }
@@ -58,9 +55,7 @@ var authutil;
 
         for (i = 0; i < conns.length; ++i) {
             conn = conns[i];
-            // Bypass the implicit auth call in getDB();
-            var db = new DB(conn, dbName);
-            assert(!db.auth(authParams),
+            assert(!conn.getDB(dbName).auth(authParams),
                    "Unexpectedly authenticated " + conn + " to " + dbName + " using parameters " +
                        tojson(authParams));
         }
@@ -72,27 +67,19 @@ var authutil;
      */
     authutil.asCluster = function(conn, keyfile, action) {
         var ex;
-        const authMode = jsTest.options().clusterAuthMode;
-
-        if (authMode === 'keyFile') {
-            authutil.assertAuthenticate(conn, 'admin', {
-                user: '__system',
-                mechanism: 'SCRAM-SHA-1',
-                pwd: cat(keyfile).replace(/[\011-\015\040]/g, '')
-            });
-        } else if (authMode === 'x509') {
-            authutil.assertAuthenticate(conn, '$external', {
-                mechanism: 'MONGODB-X509',
-            });
-        } else {
-            throw new Error('clusterAuthMode ' + authMode + ' is currently unsupported');
-        }
+        authutil.assertAuthenticate(conn,
+                                    'local',
+                                    {
+                                      user: '__system',
+                                      mechanism: 'SCRAM-SHA-1',
+                                      pwd: cat(keyfile).replace(/[\011-\015\040]/g, '')
+                                    });
 
         try {
             return action();
         } finally {
             try {
-                authutil.logout(conn, 'admin');
+                authutil.logout(conn, 'local');
             } catch (ex) {
             }
         }

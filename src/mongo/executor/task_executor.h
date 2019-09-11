@@ -28,9 +28,9 @@
 
 #pragma once
 
-#include <functional>
-#include <memory>
 #include <string>
+#include <memory>
+#include <functional>
 
 #include "mongo/base/disallow_copying.h"
 #include "mongo/base/status.h"
@@ -38,7 +38,6 @@
 #include "mongo/base/string_data.h"
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/executor/remote_command_response.h"
-#include "mongo/platform/hash_namespace.h"
 #include "mongo/stdx/functional.h"
 #include "mongo/util/time_support.h"
 
@@ -83,7 +82,7 @@ public:
     class EventState;
     class EventHandle;
 
-    using ResponseStatus = RemoteCommandResponse;
+    using ResponseStatus = StatusWith<RemoteCommandResponse>;
 
     /**
      * Type of a regular callback function.
@@ -136,7 +135,7 @@ public:
     /**
      * Returns diagnostic information.
      */
-    virtual std::string getDiagnosticString() const = 0;
+    virtual std::string getDiagnosticString() = 0;
 
     /**
      * Gets the current time.  Callbacks should use this method to read the system clock.
@@ -407,23 +406,24 @@ struct TaskExecutor::RemoteCommandCallbackArgs {
     RemoteCommandCallbackArgs(TaskExecutor* theExecutor,
                               const CallbackHandle& theHandle,
                               const RemoteCommandRequest& theRequest,
-                              const ResponseStatus& theResponse);
+                              const StatusWith<RemoteCommandResponse>& theResponse);
 
     TaskExecutor* executor;
     CallbackHandle myHandle;
     RemoteCommandRequest request;
-    ResponseStatus response;
+    StatusWith<RemoteCommandResponse> response;
 };
 
 }  // namespace executor
 }  // namespace mongo
 
-// Provide a specialization for hash<CallbackHandle> so it can easily be stored in unordered_set.
-MONGO_HASH_NAMESPACE_START
+// Provide a specialization for std::hash<CallbackHandle> so it can easily
+// be stored in unordered_set.
+namespace std {
 template <>
 struct hash<::mongo::executor::TaskExecutor::CallbackHandle> {
     size_t operator()(const ::mongo::executor::TaskExecutor::CallbackHandle& x) const {
         return x.hash();
     }
 };
-MONGO_HASH_NAMESPACE_END
+}  // namespace std

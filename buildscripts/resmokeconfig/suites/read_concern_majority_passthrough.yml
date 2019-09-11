@@ -1,7 +1,7 @@
 selector:
   js_test:
     roots:
-    - jstests/core/**/*.js
+    - jstests/core/*.js
     exclude_files:
     # These tests are not expected to pass with replica-sets:
     - jstests/core/dbadmin.js
@@ -28,11 +28,6 @@ selector:
 
 executor:
   js_test:
-    archive:
-      hooks:
-        - CheckReplOplogs
-        - CheckReplDBHash
-        - ValidateCollections
     config:
       shell_options:
         global_vars:
@@ -46,7 +41,6 @@ executor:
     # The CheckReplDBHash hook waits until all operations have replicated to and have been applied
     # on the secondaries, so we run the ValidateCollections hook after it to ensure we're
     # validating the entire contents of the collection.
-    - class: CheckReplOplogs
     - class: CheckReplDBHash
     - class: ValidateCollections
     - class: CleanEveryN
@@ -56,7 +50,5 @@ executor:
       mongod_options:
         set_parameters:
           enableTestCommands: 1
-          numInitialSyncAttempts: 1
-          writePeriodicNoops: 1
         enableMajorityReadConcern: ''
       num_nodes: 2

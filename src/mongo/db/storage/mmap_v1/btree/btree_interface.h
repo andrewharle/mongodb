@@ -30,7 +30,6 @@
 
 #include "mongo/bson/ordering.h"
 #include "mongo/db/catalog/head_manager.h"
-#include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/storage/mmap_v1/diskloc.h"
@@ -47,6 +46,6 @@ SortedDataInterface* getMMAPV1Interface(HeadManager* headManager,
                                         SavedCursorRegistry* cursorRegistry,
                                         const Ordering& ordering,
                                         const std::string& indexName,
-                                        IndexDescriptor::IndexVersion version,
+                                        int version,
                                         bool isUnique);
 }  // namespace mongo

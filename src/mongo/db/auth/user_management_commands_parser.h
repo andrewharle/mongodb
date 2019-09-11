@@ -31,11 +31,10 @@
 #include <string>
 #include <vector>
 
-#include "mongo/base/disallow_copying.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
+#include "mongo/base/disallow_copying.h"
 #include "mongo/db/auth/privilege.h"
-#include "mongo/db/auth/privilege_format.h"
 #include "mongo/db/auth/role_name.h"
 #include "mongo/db/auth/user.h"
 #include "mongo/db/auth/user_name.h"
@@ -52,6 +51,7 @@ struct CreateOrUpdateUserArgs {
     BSONObj customData;
     bool hasRoles;
     std::vector<RoleName> roles;
+    BSONObj writeConcern;
 
     CreateOrUpdateUserArgs() : hasHashedPassword(false), hasCustomData(false), hasRoles(false) {}
 };
@@ -78,16 +78,18 @@ Status parseRolePossessionManipulationCommands(const BSONObj& cmdObj,
                                                StringData cmdName,
                                                const std::string& dbname,
                                                std::string* parsedName,
-                                               std::vector<RoleName>* parsedRoleNames);
+                                               std::vector<RoleName>* parsedRoleNames,
+                                               BSONObj* parsedWriteConcern);
 
 /**
  * Takes a command object describing an invocation of the "dropUser" command and parses out
- * the UserName of the user to be removed.
+ * the UserName of the user to be removed and the writeConcern.
  * Also validates the input and returns a non-ok Status if there is anything wrong.
  */
 Status parseAndValidateDropUserCommand(const BSONObj& cmdObj,
                                        const std::string& dbname,
-                                       UserName* parsedUserName);
+                                       UserName* parsedUserName,
+                                       BSONObj* parsedWriteConcern);
 
 /**
  * Takes a command object describing an invocation of the "dropAllUsersFromDatabase" command and
@@ -95,7 +97,8 @@ Status parseAndValidateDropUserCommand(const BSONObj& cmdObj,
  * Also validates the input and returns a non-ok Status if there is anything wrong.
  */
 Status parseAndValidateDropAllUsersFromDatabaseCommand(const BSONObj& cmdObj,
-                                                       const std::string& dbname);
+                                                       const std::string& dbname,
+                                                       BSONObj* parsedWriteConcern);
 
 struct UsersInfoArgs {
     std::vector<UserName> userNames;
@@ -114,10 +117,9 @@ Status parseUsersInfoCommand(const BSONObj& cmdObj, StringData dbname, UsersInfo
 struct RolesInfoArgs {
     std::vector<RoleName> roleNames;
     bool allForDB;
-    PrivilegeFormat privilegeFormat;
+    bool showPrivileges;
     bool showBuiltinRoles;
-    RolesInfoArgs()
-        : allForDB(false), privilegeFormat(PrivilegeFormat::kOmit), showBuiltinRoles(false) {}
+    RolesInfoArgs() : allForDB(false), showPrivileges(false), showBuiltinRoles(false) {}
 };
 
 /**
@@ -132,7 +134,7 @@ struct CreateOrUpdateRoleArgs {
     std::vector<RoleName> roles;
     bool hasPrivileges;
     PrivilegeVector privileges;
-
+    BSONObj writeConcern;
     CreateOrUpdateRoleArgs() : hasRoles(false), hasPrivileges(false) {}
 };
 
@@ -155,21 +157,25 @@ Status parseAndValidateRolePrivilegeManipulationCommands(const BSONObj& cmdObj,
                                                          StringData cmdName,
                                                          const std::string& dbname,
                                                          RoleName* parsedRoleName,
-                                                         PrivilegeVector* parsedPrivileges);
+                                                         PrivilegeVector* parsedPrivileges,
+                                                         BSONObj* parsedWriteConcern);
 
 /**
  * Takes a command object describing an invocation of the "dropRole" command and parses out
- * the RoleName of the role to be removed.
+ * the RoleName of the role to be removed and the writeConcern.
  */
 Status parseDropRoleCommand(const BSONObj& cmdObj,
                             const std::string& dbname,
-                            RoleName* parsedRoleName);
+                            RoleName* parsedRoleName,
+                            BSONObj* parsedWriteConcern);
 
 /**
  * Takes a command object describing an invocation of the "dropAllRolesFromDatabase" command and
  * parses out the write concern.
  */
-Status parseDropAllRolesFromDatabaseCommand(const BSONObj& cmdObj, const std::string& dbname);
+Status parseDropAllRolesFromDatabaseCommand(const BSONObj& cmdObj,
+                                            const std::string& dbname,
+                                            BSONObj* parsedWriteConcern);
 
 /**
  * Parses the privileges described in "privileges" into a vector of Privilege objects.
@@ -201,14 +207,15 @@ struct MergeAuthzCollectionsArgs {
     std::string rolesCollName;
     std::string db;
     bool drop;
-
+    BSONObj writeConcern;
     MergeAuthzCollectionsArgs() : drop(false) {}
 };
 
 /**
  * Takes a command object describing an invocation of the "_mergeAuthzCollections" command and
  * parses out the name of the temporary collections to use for user and role data, whether or
- * not to drop the existing users/roles, the database if this is a for a db-specific restore.
+ * not to drop the existing users/roles, the database if this is a for a db-specific restore,
+ * and the writeConcern.
  * Returns ErrorCodes::OutdatedClient if the "db" field is missing, as that likely indicates
  * the command was sent by an outdated (pre 2.6.4) version of mongorestore.
  * Returns other codes indicating missing or incorrectly typed fields.
@@ -219,6 +226,7 @@ Status parseMergeAuthzCollectionsCommand(const BSONObj& cmdObj,
 struct AuthSchemaUpgradeArgs {
     int maxSteps = 3;
     bool shouldUpgradeShards = true;
+    BSONObj writeConcern;
 };
 
 /**

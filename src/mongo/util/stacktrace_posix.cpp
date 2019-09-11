@@ -42,7 +42,6 @@
 #include "mongo/db/jsobj.h"
 #include "mongo/util/hex.h"
 #include "mongo/util/log.h"
-#include "mongo/util/stringutils.h"
 #include "mongo/util/version.h"
 
 #if defined(MONGO_CONFIG_HAVE_EXECINFO_BACKTRACE)
@@ -256,12 +255,9 @@ void addOSComponentsToSoMap(BSONObjBuilder* soMap);
  */
 MONGO_INITIALIZER(ExtractSOMap)(InitializerContext*) {
     BSONObjBuilder soMap;
-
-    auto&& vii = VersionInfoInterface::instance(VersionInfoInterface::NotEnabledAction::kFallback);
-    soMap << "mongodbVersion" << vii.version();
-    soMap << "gitVersion" << vii.gitVersion();
-    soMap << "compiledModules" << vii.modules();
-
+    soMap << "mongodbVersion" << versionString;
+    soMap << "gitVersion" << gitVersion();
+    soMap << "compiledModules" << compiledModules();
     struct utsname unameData;
     if (!uname(&unameData)) {
         BSONObjBuilder unameBuilder(soMap.subobjStart("uname"));
@@ -323,7 +319,8 @@ void processNoteSegment(const dl_phdr_info& info, const ElfW(Phdr) & phdr, BSONO
         if (noteHeader.n_type != NT_GNU_BUILD_ID)
             continue;
         const char* const noteNameBegin = notesCurr + sizeof(noteHeader);
-        if (StringData(noteNameBegin, noteHeader.n_namesz - 1) != ELF_NOTE_GNU) {
+        if (StringData(noteNameBegin, noteHeader.n_namesz - 1) !=
+            StringData(ELF_NOTE_GNU, StringData::LiteralTag())) {
             continue;
         }
         const char* const noteDescBegin =

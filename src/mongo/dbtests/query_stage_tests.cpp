@@ -26,19 +26,16 @@
  *    then also delete it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
 #include "mongo/client/dbclientcursor.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/database.h"
-#include "mongo/db/client.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/exec/index_scan.h"
 #include "mongo/db/exec/plan_stage.h"
 #include "mongo/db/json.h"
 #include "mongo/db/matcher/expression_parser.h"
-#include "mongo/db/matcher/extensions_callback_disallow_extensions.h"
+#include "mongo/db/operation_context_impl.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/dbtests/dbtests.h"
 #include "mongo/stdx/memory.h"
@@ -80,9 +77,7 @@ public:
     int countResults(const IndexScanParams& params, BSONObj filterObj = BSONObj()) {
         AutoGetCollectionForRead ctx(&_txn, ns());
 
-        const CollatorInterface* collator = nullptr;
-        StatusWithMatchExpression statusWithMatcher = MatchExpressionParser::parse(
-            filterObj, ExtensionsCallbackDisallowExtensions(), collator);
+        StatusWithMatchExpression statusWithMatcher = MatchExpressionParser::parse(filterObj);
         verify(statusWithMatcher.isOK());
         unique_ptr<MatchExpression> filterExpr = std::move(statusWithMatcher.getValue());
 
@@ -96,11 +91,9 @@ public:
         unique_ptr<PlanExecutor> exec = std::move(statusWithPlanExecutor.getValue());
 
         int count = 0;
-        PlanExecutor::ExecState state;
-        for (RecordId dl; PlanExecutor::ADVANCED == (state = exec->getNext(NULL, &dl));) {
+        for (RecordId dl; PlanExecutor::ADVANCED == exec->getNext(NULL, &dl);) {
             ++count;
         }
-        ASSERT_EQUALS(PlanExecutor::IS_EOF, state);
 
         return count;
     }
@@ -118,9 +111,7 @@ public:
     IndexDescriptor* getIndex(const BSONObj& obj) {
         AutoGetCollectionForRead ctx(&_txn, ns());
         Collection* collection = ctx.getCollection();
-        std::vector<IndexDescriptor*> indexes;
-        collection->getIndexCatalog()->findIndexesByKeyPattern(&_txn, obj, false, &indexes);
-        return indexes.empty() ? nullptr : indexes[0];
+        return collection->getIndexCatalog()->findIndexByKeyPattern(&_txn, obj);
     }
 
     static int numObj() {
@@ -131,8 +122,7 @@ public:
     }
 
 protected:
-    const ServiceContext::UniqueOperationContext _txnPtr = cc().makeOperationContext();
-    OperationContext& _txn = *_txnPtr;
+    OperationContextImpl _txn;
 
 private:
     DBDirectClient _client;
@@ -149,7 +139,7 @@ public:
         params.bounds.isSimpleRange = true;
         params.bounds.startKey = BSON("" << 20);
         params.bounds.endKey = BSONObj();
-        params.bounds.boundInclusion = BoundInclusion::kIncludeBothStartAndEndKeys;
+        params.bounds.endKeyInclusive = true;
         params.direction = -1;
 
         ASSERT_EQUALS(countResults(params), 21);
@@ -167,7 +157,7 @@ public:
         params.bounds.isSimpleRange = true;
         params.bounds.startKey = BSON("" << 20);
         params.bounds.endKey = BSON("" << 30);
-        params.bounds.boundInclusion = BoundInclusion::kIncludeStartKeyOnly;
+        params.bounds.endKeyInclusive = false;
         params.direction = 1;
 
         ASSERT_EQUALS(countResults(params), 10);
@@ -185,7 +175,7 @@ public:
         params.bounds.isSimpleRange = true;
         params.bounds.startKey = BSON("" << 20);
         params.bounds.endKey = BSON("" << 30);
-        params.bounds.boundInclusion = BoundInclusion::kIncludeBothStartAndEndKeys;
+        params.bounds.endKeyInclusive = true;
         params.direction = 1;
 
         ASSERT_EQUALS(countResults(params), 11);
@@ -204,7 +194,7 @@ public:
         params.bounds.isSimpleRange = true;
         params.bounds.startKey = BSON("" << 20);
         params.bounds.endKey = BSON("" << 30);
-        params.bounds.boundInclusion = BoundInclusion::kIncludeBothStartAndEndKeys;
+        params.bounds.endKeyInclusive = true;
         params.direction = 1;
 
         ASSERT_EQUALS(countResults(params, BSON("foo" << 25)), 1);
@@ -223,7 +213,7 @@ public:
         params.bounds.isSimpleRange = true;
         params.bounds.startKey = BSON("" << 20);
         params.bounds.endKey = BSON("" << 30);
-        params.bounds.boundInclusion = BoundInclusion::kIncludeBothStartAndEndKeys;
+        params.bounds.endKeyInclusive = true;
         params.direction = 1;
 
         ASSERT_THROWS(countResults(params, BSON("baz" << 25)), MsgAssertionException);

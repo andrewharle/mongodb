@@ -52,8 +52,8 @@ TEST(TagsType, Valid) {
 
     ASSERT_EQUALS(tag.getNS(), "test.mycol");
     ASSERT_EQUALS(tag.getTag(), "tag");
-    ASSERT_BSONOBJ_EQ(tag.getMinKey(), BSON("a" << 10));
-    ASSERT_BSONOBJ_EQ(tag.getMaxKey(), BSON("a" << 20));
+    ASSERT_EQUALS(tag.getMinKey(), BSON("a" << 10));
+    ASSERT_EQUALS(tag.getMaxKey(), BSON("a" << 20));
 }
 
 TEST(TagsType, MissingNsField) {
@@ -117,8 +117,9 @@ TEST(TagsType, KeysNotAscending) {
         BSON(TagsType::tag("tag") << TagsType::ns("test.mycol") << TagsType::min(BSON("a" << 20))
                                   << TagsType::max(BSON("a" << 10)));
 
-    StatusWith<TagsType> tagStatus = TagsType::fromBSON(obj);
-    ASSERT_EQUALS(ErrorCodes::FailedToParse, tagStatus.getStatus());
+    StatusWith<TagsType> status = TagsType::fromBSON(obj);
+    const TagsType& tag = status.getValue();
+    ASSERT_EQUALS(ErrorCodes::BadValue, tag.validate());
 }
 
 TEST(TagsType, BadType) {

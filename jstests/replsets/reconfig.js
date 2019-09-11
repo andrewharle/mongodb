@@ -23,7 +23,11 @@
 
     jsTestLog("Invalid reconfig");
     config.version++;
-    var badMember = {_id: numNodes, host: "localhost:12345", priority: "High"};
+    var badMember = {
+        _id: numNodes,
+        host: "localhost:12345",
+        priority: "High"
+    };
     config.members.push(badMember);
     var invalidConfigCode = 93;
     assert.commandFailedWithCode(primary.adminCommand({replSetReconfig: config}),

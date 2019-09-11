@@ -31,21 +31,18 @@
  * ClientCursor::deregisterExecutor.
  */
 
-#include "mongo/platform/basic.h"
-
 #include "mongo/client/dbclientcursor.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/database.h"
-#include "mongo/db/client.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/exec/collection_scan.h"
 #include "mongo/db/exec/plan_stage.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/json.h"
 #include "mongo/db/matcher/expression_parser.h"
-#include "mongo/db/matcher/extensions_callback_disallow_extensions.h"
+#include "mongo/db/operation_context_impl.h"
 #include "mongo/db/query/plan_executor.h"
-#include "mongo/db/service_context.h"
 #include "mongo/dbtests/dbtests.h"
 
 namespace ExecutorRegistry {
@@ -77,9 +74,7 @@ public:
         unique_ptr<CollectionScan> scan(new CollectionScan(&_opCtx, params, ws.get(), NULL));
 
         // Create a plan executor to hold it
-        auto qr = stdx::make_unique<QueryRequest>(nss);
-        auto statusWithCQ = CanonicalQuery::canonicalize(
-            &_opCtx, std::move(qr), ExtensionsCallbackDisallowExtensions());
+        auto statusWithCQ = CanonicalQuery::canonicalize(nss, BSONObj());
         ASSERT_OK(statusWithCQ.getStatus());
         std::unique_ptr<CanonicalQuery> cq = std::move(statusWithCQ.getValue());
 
@@ -121,8 +116,7 @@ public:
     }
 
     // Order of these is important for initialization
-    const ServiceContext::UniqueOperationContext _opCtxPtr = cc().makeOperationContext();
-    OperationContext& _opCtx = *_opCtxPtr;
+    OperationContextImpl _opCtx;
     unique_ptr<OldClientWriteContext> _ctx;
     DBDirectClient _client;
 };

@@ -29,6 +29,7 @@
 #pragma once
 
 #include <memory>
+#include <unordered_map>
 #include <vector>
 
 #include "mongo/db/cursor_id.h"
@@ -36,13 +37,11 @@
 #include "mongo/platform/random.h"
 #include "mongo/s/query/cluster_client_cursor.h"
 #include "mongo/stdx/mutex.h"
-#include "mongo/stdx/unordered_map.h"
 #include "mongo/util/time_support.h"
 
 namespace mongo {
 
 class ClockSource;
-class OperationContext;
 template <typename T>
 class StatusWith;
 
@@ -154,7 +153,7 @@ public:
          *
          * Can block.
          */
-        StatusWith<ClusterQueryResult> next();
+        StatusWith<boost::optional<BSONObj>> next();
 
         /**
          * Returns whether or not the underlying cursor is tailing a capped collection.  Cannot be
@@ -185,7 +184,7 @@ public:
         /**
          * Stashes 'obj' to be returned later by this cursor. A cursor must be owned.
          */
-        void queueResult(const ClusterQueryResult& result);
+        void queueResult(const BSONObj& obj);
 
         /**
          * Returns whether or not all the remote cursors underlying this cursor have been
@@ -201,14 +200,6 @@ public:
          * if the cursor is not tailable + awaitData).
          */
         Status setAwaitDataTimeout(Milliseconds awaitDataTimeout);
-
-
-        /**
-         * Update the operation context for remote requests.
-         *
-         * Network requests depend on having a valid operation context for user initiated actions.
-         */
-        void setOperationContext(OperationContext* txn);
 
     private:
         // ClusterCursorManager is a friend so that its methods can call the PinnedCursor
@@ -287,9 +278,7 @@ public:
      *
      * Does not block.
      */
-    StatusWith<PinnedCursor> checkOutCursor(const NamespaceString& nss,
-                                            CursorId cursorId,
-                                            OperationContext* txn);
+    StatusWith<PinnedCursor> checkOutCursor(const NamespaceString& nss, CursorId cursorId);
 
     /**
      * Informs the manager that the given cursor should be killed.  The cursor need not necessarily
@@ -320,7 +309,7 @@ public:
 
     /**
      * Attempts to performs a blocking kill and deletion of all non-pinned cursors that are marked
-     * as 'kill pending'. Returns the number of cursors that were marked as inactive.
+     * as 'kill pending'.
      *
      * If no other non-const methods are called simultaneously, it is guaranteed that this method
      * will delete all non-pinned cursors marked as 'kill pending'.  Otherwise, no such guarantee is
@@ -329,7 +318,7 @@ public:
      *
      * Can block.
      */
-    std::size_t reapZombieCursors();
+    void reapZombieCursors();
 
     /**
      * Returns the number of open cursors on a ClusterCursorManager, broken down by type.
@@ -351,17 +340,9 @@ public:
      */
     boost::optional<NamespaceString> getNamespaceForCursorId(CursorId cursorId) const;
 
-    void incrementCursorsTimedOut(size_t inc) {
-        _cursorsTimedOut += inc;
-    }
-
-    size_t cursorsTimedOut() const {
-        return _cursorsTimedOut;
-    }
-
 private:
     class CursorEntry;
-    using CursorEntryMap = stdx::unordered_map<CursorId, CursorEntry>;
+    using CursorEntryMap = std::unordered_map<CursorId, CursorEntry>;
 
     /**
      * Transfers ownership of the given pinned cursor back to the manager, and moves the cursor to
@@ -422,15 +403,29 @@ private:
             invariant(_cursor);
         }
 
+#if defined(_MSC_VER) && _MSC_VER < 1900
+        CursorEntry(CursorEntry&& other)
+            : _cursor(std::move(other._cursor)),
+              _killPending(std::move(other._killPending)),
+              _cursorType(std::move(other._cursorType)),
+              _cursorLifetime(std::move(other._cursorLifetime)),
+              _lastActive(std::move(other._lastActive)) {}
+
+        CursorEntry& operator=(CursorEntry&& other) {
+            _cursor = std::move(other._cursor);
+            _killPending = std::move(other._killPending);
+            _cursorType = std::move(other._cursorType);
+            _cursorLifetime = std::move(other._cursorLifetime);
+            _lastActive = std::move(other._lastActive);
+            return *this;
+        }
+#else
         CursorEntry(CursorEntry&& other) = default;
         CursorEntry& operator=(CursorEntry&& other) = default;
+#endif
 
         bool getKillPending() const {
             return _killPending;
-        }
-
-        bool isInactive() const {
-            return _isInactive;
         }
 
         CursorType getCursorType() const {
@@ -470,10 +465,6 @@ private:
             _killPending = true;
         }
 
-        void setInactive() {
-            _isInactive = true;
-        }
-
         void setLastActive(Date_t lastActive) {
             _lastActive = lastActive;
         }
@@ -481,7 +472,6 @@ private:
     private:
         std::unique_ptr<ClusterClientCursor> _cursor;
         bool _killPending = false;
-        bool _isInactive = false;
         CursorType _cursorType = CursorType::NamespaceNotSharded;
         CursorLifetime _cursorLifetime = CursorLifetime::Mortal;
         Date_t _lastActive;
@@ -496,8 +486,20 @@ private:
 
         CursorEntryContainer(uint32_t containerPrefix) : containerPrefix(containerPrefix) {}
 
+#if defined(_MSC_VER) && _MSC_VER < 1900
+        CursorEntryContainer(CursorEntryContainer&& other)
+            : containerPrefix(std::move(other.containerPrefix)),
+              entryMap(std::move(other.entryMap)) {}
+
+        CursorEntryContainer& operator=(CursorEntryContainer&& other) {
+            containerPrefix = std::move(other.containerPrefix);
+            entryMap = std::move(other.entryMap);
+            return *this;
+        }
+#else
         CursorEntryContainer(CursorEntryContainer&& other) = default;
         CursorEntryContainer& operator=(CursorEntryContainer&& other) = default;
+#endif
 
         // Common cursor id prefix for all cursors in this container.
         uint32_t containerPrefix;
@@ -528,16 +530,14 @@ private:
     //
     // Entries are added when the first cursor on the given namespace is registered, and removed
     // when the last cursor on the given namespace is destroyed.
-    stdx::unordered_map<uint32_t, NamespaceString> _cursorIdPrefixToNamespaceMap;
+    std::unordered_map<uint32_t, NamespaceString> _cursorIdPrefixToNamespaceMap;
 
     // Map from namespace to the CursorEntryContainer for that namespace.
     //
     // Entries are added when the first cursor on the given namespace is registered, and removed
     // when the last cursor on the given namespace is destroyed.
-    stdx::unordered_map<NamespaceString, CursorEntryContainer, NamespaceString::Hasher>
+    std::unordered_map<NamespaceString, CursorEntryContainer, NamespaceString::Hasher>
         _namespaceToContainerMap;
-
-    size_t _cursorsTimedOut = 0;
 };
 
 }  // namespace

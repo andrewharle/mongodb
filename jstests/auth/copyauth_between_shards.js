@@ -4,7 +4,11 @@
 var baseName = "jstests_clone_copyauth_between_shards";
 
 function copydbWithinShardedCluster(useReplSets, passCredentials, useAuth) {
-    var clusterConfig = {shards: 1, mongos: 1, config: 1};
+    var clusterConfig = {
+        shards: 1,
+        mongos: 1,
+        config: 1
+    };
 
     if (useAuth) {
         clusterConfig.auth = "";

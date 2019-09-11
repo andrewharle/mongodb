@@ -48,8 +48,7 @@ public:
         return true;
     }
 
-
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    virtual bool isWriteCommandForConfigServer() const {
         return false;
     }
 
@@ -57,7 +56,7 @@ public:
         help << "Not supported through mongos";
     }
 
-    virtual Status checkAuthForCommand(Client* client,
+    virtual Status checkAuthForCommand(ClientBasic* client,
                                        const std::string& dbname,
                                        const BSONObj& cmdObj) {
         // Require no auth since this command isn't supported in mongos

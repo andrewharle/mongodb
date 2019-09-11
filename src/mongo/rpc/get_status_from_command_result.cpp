@@ -30,19 +30,11 @@
 
 #include "mongo/rpc/get_status_from_command_result.h"
 
-#include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
-#include "mongo/bson/util/bson_extract.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/rpc/write_concern_error_detail.h"
 #include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
-
-namespace {
-const std::string kCmdResponseWriteConcernField = "writeConcernError";
-const std::string kCmdResponseWriteErrorsField = "writeErrors";
-}  // namespace
 
 Status getStatusFromCommandResult(const BSONObj& result) {
     BSONElement okElement = result["ok"];
@@ -78,76 +70,6 @@ Status getStatusFromCommandResult(const BSONObj& result) {
     }
 
     return Status(ErrorCodes::Error(code), errmsg);
-}
-
-Status getWriteConcernStatusFromCommandResult(const BSONObj& obj) {
-    BSONElement wcErrorElem;
-    Status status = bsonExtractTypedField(obj, kCmdResponseWriteConcernField, Object, &wcErrorElem);
-    if (!status.isOK()) {
-        if (status == ErrorCodes::NoSuchKey) {
-            return Status::OK();
-        } else {
-            return status;
-        }
-    }
-
-    BSONObj wcErrObj(wcErrorElem.Obj());
-
-    WriteConcernErrorDetail wcError;
-    std::string wcErrorParseMsg;
-    if (!wcError.parseBSON(wcErrObj, &wcErrorParseMsg)) {
-        return Status(ErrorCodes::UnsupportedFormat,
-                      str::stream() << "Failed to parse write concern section due to "
-                                    << wcErrorParseMsg);
-    }
-    std::string wcErrorInvalidMsg;
-    if (!wcError.isValid(&wcErrorInvalidMsg)) {
-        return Status(ErrorCodes::UnsupportedFormat,
-                      str::stream() << "Failed to parse write concern section due to "
-                                    << wcErrorInvalidMsg);
-    }
-    return wcError.toStatus();
-}
-
-Status getFirstWriteErrorStatusFromCommandResult(const BSONObj& cmdResponse) {
-    BSONElement writeErrorElem;
-    auto status = bsonExtractTypedField(
-        cmdResponse, kCmdResponseWriteErrorsField, BSONType::Array, &writeErrorElem);
-    if (!status.isOK()) {
-        if (status == ErrorCodes::NoSuchKey) {
-            return Status::OK();
-        } else {
-            return status;
-        }
-    }
-
-    auto firstWriteErrorElem = writeErrorElem.Obj().firstElement();
-    if (!firstWriteErrorElem) {
-        return Status::OK();
-    }
-
-    if (firstWriteErrorElem.type() != BSONType::Object) {
-        return Status(ErrorCodes::UnsupportedFormat,
-                      str::stream() << "writeErrors should be an array of objects, found "
-                                    << typeName(firstWriteErrorElem.type()));
-    }
-
-    auto firstWriteErrorObj = firstWriteErrorElem.Obj();
-
-    return Status(ErrorCodes::fromInt(firstWriteErrorObj["code"].Int()),
-                  firstWriteErrorObj["errmsg"].String());
-}
-
-Status getStatusFromWriteCommandReply(const BSONObj& cmdResponse) {
-    auto status = getStatusFromCommandResult(cmdResponse);
-    if (!status.isOK()) {
-        return status;
-    }
-    status = getFirstWriteErrorStatusFromCommandResult(cmdResponse);
-    if (!status.isOK()) {
-        return status;
-    }
-    return getWriteConcernStatusFromCommandResult(cmdResponse);
 }
 
 }  // namespace mongo

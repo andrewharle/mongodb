@@ -28,11 +28,10 @@
 
 #include "mongo/db/query/parsed_projection.h"
 
+#include <memory>
 #include "mongo/db/json.h"
 #include "mongo/db/matcher/expression_parser.h"
-#include "mongo/db/matcher/extensions_callback_disallow_extensions.h"
 #include "mongo/unittest/unittest.h"
-#include <memory>
 
 namespace {
 
@@ -47,19 +46,14 @@ using namespace mongo;
 //
 
 unique_ptr<ParsedProjection> createParsedProjection(const BSONObj& query, const BSONObj& projObj) {
-    const CollatorInterface* collator = nullptr;
-    StatusWithMatchExpression statusWithMatcher =
-        MatchExpressionParser::parse(query, ExtensionsCallbackDisallowExtensions(), collator);
+    StatusWithMatchExpression statusWithMatcher = MatchExpressionParser::parse(query);
     ASSERT(statusWithMatcher.isOK());
     std::unique_ptr<MatchExpression> queryMatchExpr = std::move(statusWithMatcher.getValue());
     ParsedProjection* out = NULL;
-    Status status = ParsedProjection::make(
-        projObj, queryMatchExpr.get(), &out, ExtensionsCallbackDisallowExtensions());
+    Status status = ParsedProjection::make(projObj, queryMatchExpr.get(), &out);
     if (!status.isOK()) {
-        FAIL(mongoutils::str::stream() << "failed to parse projection " << projObj << " (query: "
-                                       << query
-                                       << "): "
-                                       << status.toString());
+        FAIL(mongoutils::str::stream() << "failed to parse projection " << projObj
+                                       << " (query: " << query << "): " << status.toString());
     }
     ASSERT(out);
     return unique_ptr<ParsedProjection>(out);
@@ -78,14 +72,11 @@ unique_ptr<ParsedProjection> createParsedProjection(const char* queryStr, const 
 void assertInvalidProjection(const char* queryStr, const char* projStr) {
     BSONObj query = fromjson(queryStr);
     BSONObj projObj = fromjson(projStr);
-    const CollatorInterface* collator = nullptr;
-    StatusWithMatchExpression statusWithMatcher =
-        MatchExpressionParser::parse(query, ExtensionsCallbackDisallowExtensions(), collator);
+    StatusWithMatchExpression statusWithMatcher = MatchExpressionParser::parse(query);
     ASSERT(statusWithMatcher.isOK());
     std::unique_ptr<MatchExpression> queryMatchExpr = std::move(statusWithMatcher.getValue());
     ParsedProjection* out = NULL;
-    Status status = ParsedProjection::make(
-        projObj, queryMatchExpr.get(), &out, ExtensionsCallbackDisallowExtensions());
+    Status status = ParsedProjection::make(projObj, queryMatchExpr.get(), &out);
     std::unique_ptr<ParsedProjection> destroy(out);
     ASSERT(!status.isOK());
 }
@@ -106,7 +97,7 @@ TEST(ParsedProjectionTest, MakeEmpty) {
 TEST(ParsedProjectionTest, MakeSingleField) {
     unique_ptr<ParsedProjection> parsedProj(createParsedProjection("{}", "{a: 1}"));
     ASSERT(!parsedProj->requiresDocument());
-    const vector<StringData>& fields = parsedProj->getRequiredFields();
+    const vector<string>& fields = parsedProj->getRequiredFields();
     ASSERT_EQUALS(fields.size(), 2U);
     ASSERT_EQUALS(fields[0], "_id");
     ASSERT_EQUALS(fields[1], "a");
@@ -115,7 +106,7 @@ TEST(ParsedProjectionTest, MakeSingleField) {
 TEST(ParsedProjectionTest, MakeSingleFieldCovered) {
     unique_ptr<ParsedProjection> parsedProj(createParsedProjection("{}", "{_id: 0, a: 1}"));
     ASSERT(!parsedProj->requiresDocument());
-    const vector<StringData>& fields = parsedProj->getRequiredFields();
+    const vector<string>& fields = parsedProj->getRequiredFields();
     ASSERT_EQUALS(fields.size(), 1U);
     ASSERT_EQUALS(fields[0], "a");
 }
@@ -123,7 +114,7 @@ TEST(ParsedProjectionTest, MakeSingleFieldCovered) {
 TEST(ParsedProjectionTest, MakeSingleFieldIDCovered) {
     unique_ptr<ParsedProjection> parsedProj(createParsedProjection("{}", "{_id: 1}"));
     ASSERT(!parsedProj->requiresDocument());
-    const vector<StringData>& fields = parsedProj->getRequiredFields();
+    const vector<string>& fields = parsedProj->getRequiredFields();
     ASSERT_EQUALS(fields.size(), 1U);
     ASSERT_EQUALS(fields[0], "_id");
 }
@@ -132,7 +123,7 @@ TEST(ParsedProjectionTest, MakeSingleFieldIDCovered) {
 TEST(ParsedProjectionTest, MakeSingleFieldCoveredBoolean) {
     unique_ptr<ParsedProjection> parsedProj(createParsedProjection("{}", "{_id: 0, a: true}"));
     ASSERT(!parsedProj->requiresDocument());
-    const vector<StringData>& fields = parsedProj->getRequiredFields();
+    const vector<string>& fields = parsedProj->getRequiredFields();
     ASSERT_EQUALS(fields.size(), 1U);
     ASSERT_EQUALS(fields[0], "a");
 }
@@ -141,7 +132,7 @@ TEST(ParsedProjectionTest, MakeSingleFieldCoveredBoolean) {
 TEST(ParsedProjectionTest, MakeSingleFieldCoveredIdBoolean) {
     unique_ptr<ParsedProjection> parsedProj(createParsedProjection("{}", "{_id: false, a: 1}"));
     ASSERT(!parsedProj->requiresDocument());
-    const vector<StringData>& fields = parsedProj->getRequiredFields();
+    const vector<string>& fields = parsedProj->getRequiredFields();
     ASSERT_EQUALS(fields.size(), 1U);
     ASSERT_EQUALS(fields[0], "a");
 }
@@ -185,20 +176,18 @@ TEST(ParsedProjectionTest, ValidPositionalOperatorProjections) {
 // to achieve the same effect.
 // Projection parser should handle this the same way as an empty path.
 TEST(ParsedProjectionTest, InvalidPositionalProjectionDefaultPathMatchExpression) {
-    unique_ptr<MatchExpression> queryMatchExpr(new FalseMatchExpression(""));
+    unique_ptr<MatchExpression> queryMatchExpr(new FalseMatchExpression());
     ASSERT(NULL == queryMatchExpr->path().rawData());
 
     ParsedProjection* out = NULL;
     BSONObj projObj = fromjson("{'a.$': 1}");
-    Status status = ParsedProjection::make(
-        projObj, queryMatchExpr.get(), &out, ExtensionsCallbackDisallowExtensions());
+    Status status = ParsedProjection::make(projObj, queryMatchExpr.get(), &out);
     ASSERT(!status.isOK());
     std::unique_ptr<ParsedProjection> destroy(out);
 
     // Projecting onto empty field should fail.
     BSONObj emptyFieldProjObj = fromjson("{'.$': 1}");
-    status = ParsedProjection::make(
-        emptyFieldProjObj, queryMatchExpr.get(), &out, ExtensionsCallbackDisallowExtensions());
+    status = ParsedProjection::make(emptyFieldProjObj, queryMatchExpr.get(), &out);
     ASSERT(!status.isOK());
 }
 
@@ -216,7 +205,7 @@ TEST(ParsedProjectionTest, ParsedProjectionDefaults) {
 TEST(ParsedProjectionTest, SortKeyMetaProjection) {
     auto parsedProjection = createParsedProjection("{}", "{foo: {$meta: 'sortKey'}}");
 
-    ASSERT_BSONOBJ_EQ(parsedProjection->getProjObj(), fromjson("{foo: {$meta: 'sortKey'}}"));
+    ASSERT_EQ(parsedProjection->getProjObj(), fromjson("{foo: {$meta: 'sortKey'}}"));
     ASSERT_TRUE(parsedProjection->wantSortKey());
     ASSERT_TRUE(parsedProjection->requiresDocument());
 
@@ -229,8 +218,7 @@ TEST(ParsedProjectionTest, SortKeyMetaProjection) {
 TEST(ParsedProjectionTest, SortKeyMetaProjectionCovered) {
     auto parsedProjection = createParsedProjection("{}", "{a: 1, foo: {$meta: 'sortKey'}, _id: 0}");
 
-    ASSERT_BSONOBJ_EQ(parsedProjection->getProjObj(),
-                      fromjson("{a: 1, foo: {$meta: 'sortKey'}, _id: 0}"));
+    ASSERT_EQ(parsedProjection->getProjObj(), fromjson("{a: 1, foo: {$meta: 'sortKey'}, _id: 0}"));
     ASSERT_TRUE(parsedProjection->wantSortKey());
 
     ASSERT_FALSE(parsedProjection->requiresDocument());
@@ -244,8 +232,8 @@ TEST(ParsedProjectionTest, SortKeyMetaAndSlice) {
     auto parsedProjection =
         createParsedProjection("{}", "{a: 1, foo: {$meta: 'sortKey'}, _id: 0, b: {$slice: 1}}");
 
-    ASSERT_BSONOBJ_EQ(parsedProjection->getProjObj(),
-                      fromjson("{a: 1, foo: {$meta: 'sortKey'}, _id: 0, b: {$slice: 1}}"));
+    ASSERT_EQ(parsedProjection->getProjObj(),
+              fromjson("{a: 1, foo: {$meta: 'sortKey'}, _id: 0, b: {$slice: 1}}"));
     ASSERT_TRUE(parsedProjection->wantSortKey());
     ASSERT_TRUE(parsedProjection->requiresDocument());
 
@@ -259,8 +247,8 @@ TEST(ParsedProjectionTest, SortKeyMetaAndElemMatch) {
     auto parsedProjection = createParsedProjection(
         "{}", "{a: 1, foo: {$meta: 'sortKey'}, _id: 0, b: {$elemMatch: {a: 1}}}");
 
-    ASSERT_BSONOBJ_EQ(parsedProjection->getProjObj(),
-                      fromjson("{a: 1, foo: {$meta: 'sortKey'}, _id: 0, b: {$elemMatch: {a: 1}}}"));
+    ASSERT_EQ(parsedProjection->getProjObj(),
+              fromjson("{a: 1, foo: {$meta: 'sortKey'}, _id: 0, b: {$elemMatch: {a: 1}}}"));
     ASSERT_TRUE(parsedProjection->wantSortKey());
     ASSERT_TRUE(parsedProjection->requiresDocument());
 
@@ -273,8 +261,7 @@ TEST(ParsedProjectionTest, SortKeyMetaAndElemMatch) {
 TEST(ParsedProjectionTest, SortKeyMetaAndExclusion) {
     auto parsedProjection = createParsedProjection("{}", "{a: 0, foo: {$meta: 'sortKey'}, _id: 0}");
 
-    ASSERT_BSONOBJ_EQ(parsedProjection->getProjObj(),
-                      fromjson("{a: 0, foo: {$meta: 'sortKey'}, _id: 0}"));
+    ASSERT_EQ(parsedProjection->getProjObj(), fromjson("{a: 0, foo: {$meta: 'sortKey'}, _id: 0}"));
     ASSERT_TRUE(parsedProjection->wantSortKey());
     ASSERT_TRUE(parsedProjection->requiresDocument());
 
@@ -282,162 +269,6 @@ TEST(ParsedProjectionTest, SortKeyMetaAndExclusion) {
     ASSERT_FALSE(parsedProjection->wantGeoNearDistance());
     ASSERT_FALSE(parsedProjection->wantGeoNearPoint());
     ASSERT_FALSE(parsedProjection->wantIndexKey());
-}
-
-//
-// Cases for ParsedProjection::isFieldRetainedExactly().
-//
-
-TEST(ParsedProjectionTest, InclusionProjectionPreservesChild) {
-    auto parsedProjection = createParsedProjection("{}", "{a: 1}");
-    ASSERT_TRUE(parsedProjection->isFieldRetainedExactly("a.b"));
-}
-
-TEST(ParsedProjectionTest, InclusionProjectionDoesNotPreserveParent) {
-    auto parsedProjection = createParsedProjection("{}", "{'a.b': 1}");
-    ASSERT_FALSE(parsedProjection->isFieldRetainedExactly("a"));
-}
-
-TEST(ParsedProjectionTest, InclusionProjectionPreservesField) {
-    auto parsedProjection = createParsedProjection("{}", "{a: 1}");
-    ASSERT_TRUE(parsedProjection->isFieldRetainedExactly("a"));
-}
-
-TEST(ParsedProjectionTest, InclusionProjectionOrderingDeterminesPreservation) {
-    auto parsedProjection = createParsedProjection("{}", "{a: 1, 'a.b': 1}");
-    ASSERT_FALSE(parsedProjection->isFieldRetainedExactly("a"));
-    ASSERT_TRUE(parsedProjection->isFieldRetainedExactly("a.b"));
-
-    parsedProjection = createParsedProjection("{}", "{'a.b': 1, a: 1}");
-    ASSERT_TRUE(parsedProjection->isFieldRetainedExactly("a"));
-    ASSERT_TRUE(parsedProjection->isFieldRetainedExactly("a.b"));
-}
-
-TEST(ParsedProjectionTest, ExclusionProjectionDoesNotPreserveParent) {
-    auto parsedProjection = createParsedProjection("{}", "{'a.b': 0}");
-    ASSERT_FALSE(parsedProjection->isFieldRetainedExactly("a"));
-}
-
-TEST(ParsedProjectionTest, ExclusionProjectionDoesNotPreserveChild) {
-    auto parsedProjection = createParsedProjection("{}", "{a: 0}");
-    ASSERT_FALSE(parsedProjection->isFieldRetainedExactly("a.b"));
-}
-
-TEST(ParsedProjectionTest, ExclusionProjectionDoesNotPreserveField) {
-    auto parsedProjection = createParsedProjection("{}", "{a: 0}");
-    ASSERT_FALSE(parsedProjection->isFieldRetainedExactly("a"));
-}
-
-TEST(ParsedProjectionTest, InclusionProjectionDoesNotPreserveNonIncludedFields) {
-    auto parsedProjection = createParsedProjection("{}", "{a: 1}");
-    ASSERT_FALSE(parsedProjection->isFieldRetainedExactly("c"));
-}
-
-TEST(ParsedProjectionTest, ExclusionProjectionPreservesNonExcludedFields) {
-    auto parsedProjection = createParsedProjection("{}", "{a: 0}");
-    ASSERT_TRUE(parsedProjection->isFieldRetainedExactly("c"));
-}
-
-TEST(ParsedProjectionTest, PositionalProjectionDoesNotPreserveField) {
-    auto parsedProjection = createParsedProjection("{a: {$elemMatch: {$eq: 0}}}", "{'a.$': 1}");
-    ASSERT_FALSE(parsedProjection->isFieldRetainedExactly("a"));
-}
-
-TEST(ParsedProjectionTest, PositionalProjectionDoesNotPreserveChild) {
-    auto parsedProjection = createParsedProjection("{a: {$elemMatch: {$eq: 0}}}", "{'a.$': 1}");
-    ASSERT_FALSE(parsedProjection->isFieldRetainedExactly("a.b"));
-}
-
-TEST(ParsedProjectionTest, PositionalProjectionDoesNotPreserveParent) {
-    auto parsedProjection =
-        createParsedProjection("{'a.b': {$elemMatch: {$eq: 0}}}", "{'a.b.$': 1}");
-    ASSERT_FALSE(parsedProjection->isFieldRetainedExactly("a"));
-}
-
-TEST(ParsedProjectionTest, MetaProjectionDoesNotPreserveField) {
-    auto parsedProjection = createParsedProjection("{}", "{a: {$meta: 'textScore'}}");
-    ASSERT_FALSE(parsedProjection->isFieldRetainedExactly("a"));
-}
-
-TEST(ParsedProjectionTest, MetaProjectionDoesNotPreserveChild) {
-    auto parsedProjection = createParsedProjection("{}", "{a: {$meta: 'textScore'}}");
-    ASSERT_FALSE(parsedProjection->isFieldRetainedExactly("a.b"));
-}
-
-TEST(ParsedProjectionTest, IdExclusionProjectionPreservesOtherFields) {
-    auto parsedProjection = createParsedProjection("{}", "{_id: 0}");
-    ASSERT_TRUE(parsedProjection->isFieldRetainedExactly("a"));
-}
-
-TEST(ParsedProjectionTest, IdInclusionProjectionDoesNotPreserveOtherFields) {
-    auto parsedProjection = createParsedProjection("{}", "{_id: 1}");
-    ASSERT_FALSE(parsedProjection->isFieldRetainedExactly("a"));
-}
-
-TEST(ParsedProjectionTest, IdSubfieldExclusionProjectionPreservesId) {
-    auto parsedProjection = createParsedProjection("{}", "{'_id.a': 0}");
-    ASSERT_TRUE(parsedProjection->isFieldRetainedExactly("b"));
-    ASSERT_TRUE(parsedProjection->isFieldRetainedExactly("_id"));
-    ASSERT_TRUE(parsedProjection->isFieldRetainedExactly("_id.a"));
-}
-
-TEST(ParsedProjectionTest, IdSubfieldInclusionProjectionPreservesId) {
-    auto parsedProjection = createParsedProjection("{}", "{'_id.a': 1}");
-    ASSERT_FALSE(parsedProjection->isFieldRetainedExactly("b"));
-    ASSERT_TRUE(parsedProjection->isFieldRetainedExactly("_id"));
-    ASSERT_TRUE(parsedProjection->isFieldRetainedExactly("_id.a"));
-    ASSERT_TRUE(parsedProjection->isFieldRetainedExactly("_id.b"));
-}
-
-TEST(ParsedProjectionTest, IdExclusionWithExclusionProjectionDoesNotPreserveId) {
-    auto parsedProjection = createParsedProjection("{}", "{_id: 0, a: 0}");
-    ASSERT_FALSE(parsedProjection->isFieldRetainedExactly("_id"));
-    ASSERT_TRUE(parsedProjection->isFieldRetainedExactly("b"));
-    ASSERT_FALSE(parsedProjection->isFieldRetainedExactly("a"));
-}
-
-TEST(ParsedProjectionTest, IdInclusionWithInclusionProjectionPreservesId) {
-    auto parsedProjection = createParsedProjection("{}", "{_id: 1, a: 1}");
-    ASSERT_TRUE(parsedProjection->isFieldRetainedExactly("_id"));
-    ASSERT_FALSE(parsedProjection->isFieldRetainedExactly("b"));
-    ASSERT_TRUE(parsedProjection->isFieldRetainedExactly("a"));
-}
-
-TEST(ParsedProjectionTest, IdExclusionWithInclusionProjectionDoesNotPreserveId) {
-    auto parsedProjection = createParsedProjection("{}", "{_id: 0, a: 1}");
-    ASSERT_FALSE(parsedProjection->isFieldRetainedExactly("_id"));
-    ASSERT_FALSE(parsedProjection->isFieldRetainedExactly("b"));
-    ASSERT_TRUE(parsedProjection->isFieldRetainedExactly("a"));
-}
-
-TEST(ParsedProjectionTest, PositionalProjectionDoesNotPreserveFields) {
-    auto parsedProjection = createParsedProjection("{a: 1}", "{'a.$': 1}");
-    ASSERT_FALSE(parsedProjection->isFieldRetainedExactly("b"));
-    ASSERT_FALSE(parsedProjection->isFieldRetainedExactly("a"));
-    ASSERT_FALSE(parsedProjection->isFieldRetainedExactly("a.b"));
-    ASSERT_TRUE(parsedProjection->isFieldRetainedExactly("_id"));
-}
-
-TEST(ParsedProjectionTest, PositionalProjectionWithIdExclusionDoesNotPreserveFields) {
-    auto parsedProjection = createParsedProjection("{a: 1}", "{_id: 0, 'a.$': 1}");
-    ASSERT_FALSE(parsedProjection->isFieldRetainedExactly("b"));
-    ASSERT_FALSE(parsedProjection->isFieldRetainedExactly("a"));
-    ASSERT_FALSE(parsedProjection->isFieldRetainedExactly("a.b"));
-    ASSERT_FALSE(parsedProjection->isFieldRetainedExactly("_id"));
-}
-
-TEST(ParsedProjectionTest, PositionalProjectionWithIdInclusionPreservesId) {
-    auto parsedProjection = createParsedProjection("{a: 1}", "{_id: 1, 'a.$': 1}");
-    ASSERT_FALSE(parsedProjection->isFieldRetainedExactly("b"));
-    ASSERT_FALSE(parsedProjection->isFieldRetainedExactly("a"));
-    ASSERT_FALSE(parsedProjection->isFieldRetainedExactly("a.b"));
-    ASSERT_TRUE(parsedProjection->isFieldRetainedExactly("_id"));
-}
-
-TEST(ParsedProjectionTest, ProjectionOfFieldSimilarToIdIsNotSpecial) {
-    auto parsedProjection = createParsedProjection("{}", "{_idimpostor: 0}");
-    ASSERT_TRUE(parsedProjection->isFieldRetainedExactly("_id"));
-    ASSERT_FALSE(parsedProjection->isFieldRetainedExactly("_idimpostor"));
 }
 
 //

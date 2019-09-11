@@ -34,7 +34,6 @@
 #include <type_traits>
 #include <utility>
 
-#include "mongo/base/static_assert.h"
 #include "mongo/base/status.h"
 
 #define MONGO_INCLUDE_INVARIANT_H_WHITELISTED
@@ -62,30 +61,19 @@ namespace mongo {
  */
 template <typename T>
 class StatusWith {
-    MONGO_STATIC_ASSERT_MSG(!(std::is_same<T, mongo::Status>::value),
-                            "StatusWith<Status> is banned.");
+    static_assert(!(std::is_same<T, mongo::Status>::value), "StatusWith<Status> is banned.");
 
 public:
     /**
      * for the error case
      */
-    MONGO_COMPILER_COLD_FUNCTION StatusWith(ErrorCodes::Error code,
-                                            std::string reason,
-                                            int location = 0)
+    StatusWith(ErrorCodes::Error code, std::string reason, int location = 0)
         : _status(code, std::move(reason), location) {}
-    MONGO_COMPILER_COLD_FUNCTION StatusWith(ErrorCodes::Error code,
-                                            const char* reason,
-                                            int location = 0)
-        : _status(code, reason, location) {}
-    MONGO_COMPILER_COLD_FUNCTION StatusWith(ErrorCodes::Error code,
-                                            const mongoutils::str::stream& reason,
-                                            int location = 0)
-        : _status(code, reason, location) {}
 
     /**
      * for the error case
      */
-    MONGO_COMPILER_COLD_FUNCTION StatusWith(Status status) : _status(std::move(status)) {
+    StatusWith(Status status) : _status(std::move(status)) {
         dassert(!isOK());
     }
 
@@ -93,6 +81,24 @@ public:
      * for the OK case
      */
     StatusWith(T t) : _status(Status::OK()), _t(std::move(t)) {}
+
+#if defined(_MSC_VER) && _MSC_VER < 1900
+    StatusWith(const StatusWith& s) : _status(s._status), _t(s._t) {}
+
+    StatusWith(StatusWith&& s) : _status(std::move(s._status)), _t(std::move(s._t)) {}
+
+    StatusWith& operator=(const StatusWith& other) {
+        _status = other._status;
+        _t = other._t;
+        return *this;
+    }
+
+    StatusWith& operator=(StatusWith&& other) {
+        _status = std::move(other._status);
+        _t = std::move(other._t);
+        return *this;
+    }
+#endif
 
     const T& getValue() const {
         dassert(isOK());

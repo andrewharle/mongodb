@@ -38,47 +38,24 @@
 #include "mongo/base/status.h"
 #include "mongo/db/auth/action_set.h"
 #include "mongo/db/auth/action_type.h"
-#include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authz_session_external_state.h"
+#include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/auth/security_key.h"
-#include "mongo/db/auth/user_management_commands_parser.h"
-#include "mongo/db/bson/dotted_path_support.h"
 #include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/client.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/pipeline/pipeline.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
 
-namespace dps = ::mongo::dotted_path_support;
 using std::vector;
 
 namespace {
 const std::string ADMIN_DBNAME = "admin";
-
-// Checks if this connection has the privileges necessary to create or modify the view 'viewNs'
-// to be a view on 'viewOnNs' with pipeline 'viewPipeline'. Call this function after verifying
-// that the user has the 'createCollection' or 'collMod' action, respectively.
-Status checkAuthForCreateOrModifyView(AuthorizationSession* authzSession,
-                                      const NamespaceString& viewNs,
-                                      const NamespaceString& viewOnNs,
-                                      const BSONArray& viewPipeline) {
-    // It's safe to allow a user to create or modify a view if they can't read it anyway.
-    if (!authzSession->isAuthorizedForActionsOnNamespace(viewNs, ActionType::find)) {
-        return Status::OK();
-    }
-
-    // This check ignores some invalid pipeline specifications. For example, if a user specifies a
-    // view definition with an invalid specification like {$lookup: "blah"}, the authorization check
-    // will succeed but the pipeline will fail to parse later in Command::run().
-    return authzSession->checkAuthForAggregate(
-        viewOnNs, BSON("aggregate" << viewOnNs.coll() << "pipeline" << viewPipeline));
-}
 }  // namespace
 
 AuthorizationSession::AuthorizationSession(std::unique_ptr<AuthzSessionExternalState> externalState)
@@ -201,109 +178,6 @@ PrivilegeVector AuthorizationSession::getDefaultPrivileges() {
     return defaultPrivileges;
 }
 
-void AuthorizationSession::_addPrivilegesForStage(const std::string& db,
-                                                  const BSONObj& cmdObj,
-                                                  PrivilegeVector* requiredPrivileges,
-                                                  BSONObj stageSpec,
-                                                  bool haveRecursed) {
-    StringData stageName = stageSpec.firstElementFieldName();
-    if (stageName == "$out" && stageSpec.firstElementType() == BSONType::String) {
-        NamespaceString outputNs(db, stageSpec.firstElement().str());
-        uassert(17139,
-                mongoutils::str::stream() << "Invalid $out target namespace, " << outputNs.ns(),
-                outputNs.isValid());
-
-        ActionSet actions;
-        actions.addAction(ActionType::remove);
-        actions.addAction(ActionType::insert);
-        if (shouldBypassDocumentValidationForCommand(cmdObj)) {
-            actions.addAction(ActionType::bypassDocumentValidation);
-        }
-        Privilege::addPrivilegeToPrivilegeVector(
-            requiredPrivileges, Privilege(ResourcePattern::forExactNamespace(outputNs), actions));
-    } else if (stageName == "$lookup" && stageSpec.firstElementType() == BSONType::Object) {
-        NamespaceString fromNs(db, stageSpec.firstElement()["from"].str());
-        Privilege::addPrivilegeToPrivilegeVector(
-            requiredPrivileges,
-            Privilege(ResourcePattern::forExactNamespace(fromNs), ActionType::find));
-    } else if (stageName == "$graphLookup" && stageSpec.firstElementType() == BSONType::Object) {
-        NamespaceString fromNs(db, stageSpec.firstElement()["from"].str());
-        Privilege::addPrivilegeToPrivilegeVector(
-            requiredPrivileges,
-            Privilege(ResourcePattern::forExactNamespace(fromNs), ActionType::find));
-    } else if (stageName == "$facet" && stageSpec.firstElementType() == BSONType::Object &&
-               !haveRecursed) {
-        // Add privileges of sub-stages, but only if we haven't recursed already. We don't want to
-        // get a stack overflow while checking privileges. If we ever allow a $facet stage inside of
-        // a $facet stage, this code will have to be modified to avoid causing a stack overflow, but
-        // still check all required privileges of nested stages.
-        for (auto&& subPipeline : stageSpec.firstElement().embeddedObject()) {
-            if (subPipeline.type() == BSONType::Array) {
-                for (auto&& subPipeStageSpec : subPipeline.embeddedObject()) {
-                    _addPrivilegesForStage(db,
-                                           cmdObj,
-                                           requiredPrivileges,
-                                           subPipeStageSpec.embeddedObjectUserCheck(),
-                                           true);
-                }
-            }
-        }
-    }
-}
-
-Status AuthorizationSession::checkAuthForAggregate(const NamespaceString& ns,
-                                                   const BSONObj& cmdObj) {
-    std::string db(ns.db().toString());
-    auto inputResource = ResourcePattern::forExactNamespace(ns);
-    uassert(
-        17138, mongoutils::str::stream() << "Invalid input namespace, " << ns.ns(), ns.isValid());
-
-    PrivilegeVector privileges;
-
-    BSONElement pipelineElem = cmdObj["pipeline"];
-    if (pipelineElem.type() != BSONType::Array) {
-        return Status(ErrorCodes::TypeMismatch, "'pipeline' must be specified as an array");
-    }
-
-    BSONObj pipeline = pipelineElem.embeddedObject();
-    if (pipeline.isEmpty()) {
-        // The pipeline is empty, so we require only the find action.
-        Privilege::addPrivilegeToPrivilegeVector(&privileges,
-                                                 Privilege(inputResource, ActionType::find));
-    } else {
-        if (pipeline.firstElementType() != BSONType::Object) {
-            // The pipeline contains something that's not an object.
-            return Status(ErrorCodes::TypeMismatch,
-                          "'pipeline' cannot contain non-object elements");
-        }
-
-        // We treat the first stage in the pipeline specially, as some aggregation stages that are
-        // valid initial sources have different auth requirements.
-        BSONObj firstPipelineStage = pipeline.firstElement().embeddedObject();
-        if (str::equals("$indexStats", firstPipelineStage.firstElementFieldName())) {
-            Privilege::addPrivilegeToPrivilegeVector(
-                &privileges, Privilege(inputResource, ActionType::indexStats));
-        } else if (str::equals("$collStats", firstPipelineStage.firstElementFieldName())) {
-            Privilege::addPrivilegeToPrivilegeVector(
-                &privileges, Privilege(inputResource, ActionType::collStats));
-        } else {
-            // If no source requiring an alternative permission scheme is specified then default to
-            // requiring find() privileges on the given namespace.
-            Privilege::addPrivilegeToPrivilegeVector(&privileges,
-                                                     Privilege(inputResource, ActionType::find));
-        }
-
-        // Add additional required privileges for each stage in the pipeline.
-        for (auto&& stageElem : pipeline) {
-            _addPrivilegesForStage(db, cmdObj, &privileges, stageElem.embeddedObjectUserCheck());
-        }
-    }
-
-    if (isAuthorizedForPrivileges(privileges))
-        return Status::OK();
-    return Status(ErrorCodes::Unauthorized, "unauthorized");
-}
-
 Status AuthorizationSession::checkAuthForFind(const NamespaceString& ns, bool hasTerm) {
     if (MONGO_unlikely(ns.isCommand())) {
         return Status(ErrorCodes::InternalError,
@@ -373,7 +247,7 @@ Status AuthorizationSession::checkAuthForGetMore(const NamespaceString& ns,
 Status AuthorizationSession::checkAuthForInsert(OperationContext* txn,
                                                 const NamespaceString& ns,
                                                 const BSONObj& document) {
-    if (ns.coll() == "system.indexes"_sd) {
+    if (ns.coll() == StringData("system.indexes", StringData::LiteralTag())) {
         BSONElement nsElement = document["ns"];
         if (nsElement.type() != String) {
             return Status(nsElement.type() == BSONType::EOO ? ErrorCodes::NoSuchKey
@@ -387,10 +261,13 @@ Status AuthorizationSession::checkAuthForInsert(OperationContext* txn,
                           str::stream() << "not authorized to create index on " << indexNS.ns());
         }
     } else {
-        ActionSet required{ActionType::insert};
+        ActionSet required;
+        required.addAction(ActionType::insert);
+
         if (documentValidationDisabled(txn)) {
             required.addAction(ActionType::bypassDocumentValidation);
         }
+
         if (!isAuthorizedForActionsOnNamespace(ns, required)) {
             return Status(ErrorCodes::Unauthorized,
                           str::stream() << "not authorized for insert on " << ns.ns());
@@ -405,12 +282,13 @@ Status AuthorizationSession::checkAuthForUpdate(OperationContext* txn,
                                                 const BSONObj& query,
                                                 const BSONObj& update,
                                                 bool upsert) {
-    ActionSet required{ActionType::update};
-    StringData operationType = "update"_sd;
+    ActionSet required;
+    required.addAction(ActionType::update);
+    StringData operationType = "update";
 
     if (upsert) {
         required.addAction(ActionType::insert);
-        operationType = "upsert"_sd;
+        operationType = "upsert";
     }
 
     if (documentValidationDisabled(txn)) {
@@ -468,65 +346,6 @@ Status AuthorizationSession::checkAuthForKillCursors(const NamespaceString& ns,
     return Status::OK();
 }
 
-Status AuthorizationSession::checkAuthForCreate(const NamespaceString& ns, const BSONObj& cmdObj) {
-    if (cmdObj["capped"].trueValue() &&
-        !isAuthorizedForActionsOnNamespace(ns, ActionType::convertToCapped)) {
-        return Status(ErrorCodes::Unauthorized, "unauthorized");
-    }
-
-    const bool hasCreateCollectionAction =
-        isAuthorizedForActionsOnNamespace(ns, ActionType::createCollection);
-
-    // If attempting to create a view, check for additional required privileges.
-    if (cmdObj["viewOn"]) {
-        // You need the createCollection action on this namespace; the insert action is not
-        // sufficient.
-        if (!hasCreateCollectionAction) {
-            return Status(ErrorCodes::Unauthorized, "unauthorized");
-        }
-
-        // Parse the viewOn namespace and the pipeline. If no pipeline was specified, use the empty
-        // pipeline.
-        NamespaceString viewOnNs(ns.db(), cmdObj["viewOn"].checkAndGetStringData());
-        auto pipeline =
-            cmdObj.hasField("pipeline") ? BSONArray(cmdObj["pipeline"].Obj()) : BSONArray();
-        return checkAuthForCreateOrModifyView(this, ns, viewOnNs, pipeline);
-    }
-
-    // To create a regular collection, ActionType::createCollection or ActionType::insert are
-    // both acceptable.
-    if (hasCreateCollectionAction || isAuthorizedForActionsOnNamespace(ns, ActionType::insert)) {
-        return Status::OK();
-    }
-
-    return Status(ErrorCodes::Unauthorized, "unauthorized");
-}
-
-Status AuthorizationSession::checkAuthForCollMod(const NamespaceString& ns, const BSONObj& cmdObj) {
-    if (!isAuthorizedForActionsOnNamespace(ns, ActionType::collMod)) {
-        return Status(ErrorCodes::Unauthorized, "unauthorized");
-    }
-
-    // Check for additional required privileges if attempting to modify a view. When auth is
-    // enabled, users must specify both "viewOn" and "pipeline" together. This prevents a user from
-    // exposing more information in the original underlying namespace by only changing "pipeline",
-    // or looking up more information via the original pipeline by only changing "viewOn".
-    const bool hasViewOn = cmdObj.hasField("viewOn");
-    const bool hasPipeline = cmdObj.hasField("pipeline");
-    if (hasViewOn != hasPipeline) {
-        return Status(
-            ErrorCodes::InvalidOptions,
-            "Must specify both 'viewOn' and 'pipeline' when modifying a view and auth is enabled");
-    }
-    if (hasViewOn) {
-        NamespaceString viewOnNs(ns.db(), cmdObj["viewOn"].checkAndGetStringData());
-        auto viewPipeline = BSONArray(cmdObj["pipeline"].Obj());
-        return checkAuthForCreateOrModifyView(this, ns, viewOnNs, viewPipeline);
-    }
-
-    return Status::OK();
-}
-
 Status AuthorizationSession::checkAuthorizedToGrantPrivilege(const Privilege& privilege) {
     const ResourcePattern& resource = privilege.getResourcePattern();
     if (resource.isDatabasePattern() || resource.isExactNamespacePattern()) {
@@ -535,8 +354,7 @@ Status AuthorizationSession::checkAuthorizedToGrantPrivilege(const Privilege& pr
                 ActionType::grantRole)) {
             return Status(ErrorCodes::Unauthorized,
                           str::stream() << "Not authorized to grant privileges on the "
-                                        << resource.databaseToMatch()
-                                        << "database");
+                                        << resource.databaseToMatch() << "database");
         }
     } else if (!isAuthorizedForActionsOnResource(ResourcePattern::forDatabaseName("admin"),
                                                  ActionType::grantRole)) {
@@ -556,8 +374,7 @@ Status AuthorizationSession::checkAuthorizedToRevokePrivilege(const Privilege& p
                 ActionType::revokeRole)) {
             return Status(ErrorCodes::Unauthorized,
                           str::stream() << "Not authorized to revoke privileges on the "
-                                        << resource.databaseToMatch()
-                                        << "database");
+                                        << resource.databaseToMatch() << "database");
         }
     } else if (!isAuthorizedForActionsOnResource(ResourcePattern::forDatabaseName("admin"),
                                                  ActionType::revokeRole)) {
@@ -566,32 +383,6 @@ Status AuthorizationSession::checkAuthorizedToRevokePrivilege(const Privilege& p
                       " must be authorized to revoke roles from the admin database");
     }
     return Status::OK();
-}
-
-bool AuthorizationSession::isAuthorizedToCreateRole(
-    const struct auth::CreateOrUpdateRoleArgs& args) {
-    // A user is allowed to create a role under either of two conditions.
-
-    // The user may create a role if the authorization system says they are allowed to.
-    if (isAuthorizedForActionsOnResource(ResourcePattern::forDatabaseName(args.roleName.getDB()),
-                                         ActionType::createRole)) {
-        return true;
-    }
-
-    // The user may create a role if the localhost exception is enabled, and they already own the
-    // role. This implies they have obtained the role through an external authorization mechanism.
-    if (_externalState->shouldAllowLocalhost()) {
-        for (const User* const user : _authenticatedUsers) {
-            if (user->hasRole(args.roleName)) {
-                return true;
-            }
-        }
-        log() << "Not authorized to create the first role in the system '" << args.roleName
-              << "' using the localhost exception. The user needs to acquire the role through "
-                 "external authentication first.";
-    }
-
-    return false;
 }
 
 bool AuthorizationSession::isAuthorizedToGrantRole(const RoleName& role) {
@@ -679,12 +470,7 @@ static int buildResourceSearchList(const ResourcePattern& target,
             // Some databases should not be matchable with ResourcePattern::forAnyNormalResource.
             // 'local' and 'config' are used to store special system collections, which user level
             // administrators should not be able to manipulate.
-            // '$setFeatureCompatibilityVersion' is a virtual database that
-            // setFeatureCompatibilityVersion performs auth checks against. When this command was
-            // first written, there was a moratorium on creating new ActionTypes. SERVER-31983
-            // introduced the ActionType after the moratorium expired.
-            if (target.ns().db() != "local" && target.ns().db() != "config" &&
-                target.ns().db() != "$setFeatureCompatibilityVersion") {
+            if (target.ns().db() != "local" && target.ns().db() != "config") {
                 resourceSearchList[size++] = ResourcePattern::forAnyNormalResource();
             }
             resourceSearchList[size++] = ResourcePattern::forDatabaseName(target.ns().db());
@@ -768,8 +554,7 @@ void AuthorizationSession::_refreshUserInfoAsNeeded(OperationContext* txn) {
                     // Unrecognized error; assume that it's transient, and continue working with the
                     // out-of-date privilege data.
                     warning() << "Could not fetch updated user privilege information for " << name
-                              << "; continuing to use old information.  Reason is "
-                              << redact(status);
+                              << "; continuing to use old information.  Reason is " << status;
                     break;
             }
         }
@@ -835,7 +620,7 @@ void AuthorizationSession::setImpersonatedUserData(std::vector<UserName> usernam
     _impersonationFlag = true;
 }
 
-bool AuthorizationSession::isCoauthorizedWithClient(Client* opClient) {
+bool AuthorizationSession::isCoauthorizedWithClient(ClientBasic* opClient) {
     auto getUserNames = [](AuthorizationSession* authSession) {
         if (authSession->isImpersonating()) {
             return authSession->getImpersonatedUserNames();

@@ -1,10 +1,24 @@
 // Test that initial sync aborts when it encounters auth data from unsupported
 // auth schemas (see: SERVER-17671)
 
+function checkedReInitiate(rst) {
+    try {
+        rst.reInitiate();
+    } catch (e) {
+        // reInitiate can throw because it tries to run an ismaster command on
+        // all secondaries, including the new one that may have already aborted
+        var errMsg = tojson(e);
+        if (errMsg.indexOf('error doing query: failed') > -1 ||
+            errMsg.indexOf('socket exception') > -1) {
+            // Ignore these exceptions, which are indicative of an aborted node
+        } else {
+            throw e;
+        }
+    }
+}
+
 function testInitialSyncAbortsWithUnsupportedAuthSchema(schema) {
     'use strict';
-
-    load("jstests/replsets/rslib.js");  // For reInitiateWithoutThrowingOnAbortedMember
 
     // Create a replica set with one data-bearing node and one arbiter to
     // ensure availability when the added node fasserts later in the test
@@ -22,7 +36,7 @@ function testInitialSyncAbortsWithUnsupportedAuthSchema(schema) {
     rst.add();
 
     clearRawMongoProgramOutput();
-    reInitiateWithoutThrowingOnAbortedMember(rst);
+    checkedReInitiate(rst);
 
     var msg;
     if (schema.hasOwnProperty('currentVersion')) {
@@ -31,23 +45,15 @@ function testInitialSyncAbortsWithUnsupportedAuthSchema(schema) {
         msg = /During initial sync, found malformed auth schema version/;
     }
 
-    print("**** Looking for string in logs: " + msg);
-
     var assertFn = function() {
-        var foundMatch = rawMongoProgramOutput().match(msg);
-        if (foundMatch) {
-            print("***** found matching string in log: " + msg);
-        }
-        return foundMatch;
+        return rawMongoProgramOutput().match(msg);
     };
     assert.soon(assertFn,
                 'Initial sync should have aborted due to an invalid or unsupported' +
                     ' authSchema version: ' + tojson(schema),
                 60000);
 
-    rst.stopSet(undefined,
-                undefined,
-                {allowedExitCodes: [MongoRunner.EXIT_ABRUPT, MongoRunner.EXIT_ABORT]});
+    rst.stopSet();
 }
 
 function testInitialSyncAbortsWithExistingUserAndNoAuthSchema() {
@@ -69,18 +75,11 @@ function testInitialSyncAbortsWithExistingUserAndNoAuthSchema() {
     rst.add();
 
     clearRawMongoProgramOutput();
-    reInitiateWithoutThrowingOnAbortedMember(rst);
+    checkedReInitiate(rst);
 
     var msg = /During initial sync, found documents in admin\.system\.users/;
-
-    print("**** Looking for string in logs: " + msg);
-
     var assertFn = function() {
-        var foundMatch = rawMongoProgramOutput().match(msg);
-        if (foundMatch) {
-            print("***** found matching string in log: " + msg);
-        }
-        return foundMatch;
+        return rawMongoProgramOutput().match(msg);
     };
 
     assert.soon(assertFn,
@@ -88,9 +87,7 @@ function testInitialSyncAbortsWithExistingUserAndNoAuthSchema() {
                     ' a missing auth schema',
                 60000);
 
-    rst.stopSet(undefined,
-                undefined,
-                {allowedExitCodes: [MongoRunner.EXIT_ABRUPT, MongoRunner.EXIT_ABORT]});
+    rst.stopSet();
 }
 
 testInitialSyncAbortsWithUnsupportedAuthSchema({_id: 'authSchema'});

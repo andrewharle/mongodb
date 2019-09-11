@@ -30,6 +30,7 @@
 
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
+#include "mongo/util/net/sock.h"
 
 namespace mongo {
 namespace {
@@ -42,8 +43,7 @@ public:
         return true;
     }
 
-
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    virtual bool isWriteCommandForConfigServer() const {
         return false;
     }
 

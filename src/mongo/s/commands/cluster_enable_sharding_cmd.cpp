@@ -37,10 +37,11 @@
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authorization_session.h"
-#include "mongo/db/client.h"
+#include "mongo/db/client_basic.h"
 #include "mongo/db/commands.h"
-#include "mongo/s/catalog/sharding_catalog_client.h"
-#include "mongo/s/catalog_cache.h"
+#include "mongo/s/catalog/catalog_cache.h"
+#include "mongo/s/catalog/catalog_manager.h"
+#include "mongo/s/config.h"
 #include "mongo/s/grid.h"
 #include "mongo/util/log.h"
 
@@ -59,8 +60,7 @@ public:
         return true;
     }
 
-
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    virtual bool isWriteCommandForConfigServer() const {
         return false;
     }
 
@@ -70,7 +70,7 @@ public:
              << "  { enablesharding : \"<dbname>\" }\n";
     }
 
-    virtual Status checkAuthForCommand(Client* client,
+    virtual Status checkAuthForCommand(ClientBasic* client,
                                        const std::string& dbname,
                                        const BSONObj& cmdObj) {
         if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
@@ -86,7 +86,7 @@ public:
         return cmdObj.firstElement().str();
     }
 
-    virtual bool run(OperationContext* opCtx,
+    virtual bool run(OperationContext* txn,
                      const std::string& dbname_unused,
                      BSONObj& cmdObj,
                      int options,
@@ -99,19 +99,20 @@ public:
             return false;
         }
 
-        if (dbname == NamespaceString::kAdminDb || dbname == NamespaceString::kConfigDb ||
-            dbname == NamespaceString::kLocalDb) {
+        if (dbname == "admin" || dbname == "config" || dbname == "local") {
             errmsg = "can't shard " + dbname + " database";
             return false;
         }
 
-        uassertStatusOK(Grid::get(opCtx)->catalogClient(opCtx)->enableSharding(opCtx, dbname));
-        audit::logEnableSharding(Client::getCurrent(), dbname);
+        Status status = grid.catalogManager(txn)->enableSharding(txn, dbname);
+        if (status.isOK()) {
+            audit::logEnableSharding(ClientBasic::getCurrent(), dbname);
+        }
 
         // Make sure to force update of any stale metadata
-        Grid::get(opCtx)->catalogCache()->purgeDatabase(dbname);
+        grid.catalogCache()->invalidate(dbname);
 
-        return true;
+        return appendCommandStatus(result, status);
     }
 
 } enableShardingCmd;

@@ -49,19 +49,10 @@ public:
     ShardedConnectionInfo();
     ~ShardedConnectionInfo();
 
-    static ShardedConnectionInfo* get(Client* client, bool create);
-
-    /**
-     * Returns the shard version associated with the specified namespace on this connection. If no
-     * version is associated with the namespace returns ChunkVersion::UNSHARDED.
-     */
-    ChunkVersion getVersion(const std::string& ns) const;
-
-    /**
-     * Assigns a new version on the connection to the specified namespace.
-     */
+    const ChunkVersion getVersion(const std::string& ns) const;
     void setVersion(const std::string& ns, const ChunkVersion& version);
 
+    static ShardedConnectionInfo* get(Client* client, bool create);
     static void reset(Client* client);
     static void addHook();
 

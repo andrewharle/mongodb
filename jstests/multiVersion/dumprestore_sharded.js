@@ -1,3 +1,5 @@
+// dumprestore_sharded.js
+
 load('./jstests/multiVersion/libs/dumprestore_helpers.js');
 
 // The base name to use for various things in the test, including the dbpath and the database name
@@ -16,8 +18,7 @@ var shardedDumpTests = {
     'dumpDir': [dumpDir],
     'testDbpath': [testDbpath],
     'dumpType': ["mongos"],
-    'restoreType': ["mongod"],
-    'storageEngine': [jsTest.options().storageEngine || "wiredTiger"]
+    'restoreType': ["mongod"]
 };
 runAllDumpRestoreTests(shardedDumpTests);
 
@@ -30,7 +31,6 @@ var shardedRestoreTests = {
     'dumpDir': [dumpDir],
     'testDbpath': [testDbpath],
     'dumpType': ["mongod"],
-    'restoreType': ["mongos"],
-    'storageEngine': [jsTest.options().storageEngine || "wiredTiger"]
+    'restoreType': ["mongos"]
 };
 runAllDumpRestoreTests(shardedRestoreTests);

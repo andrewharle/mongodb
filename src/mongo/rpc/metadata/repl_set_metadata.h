@@ -133,14 +133,9 @@ public:
         return _currentTerm;
     }
 
-    /**
-     * Returns a stringified version of the metadata.
-     */
-    std::string toString() const;
-
 private:
-    repl::OpTime _lastOpCommitted;
-    repl::OpTime _lastOpVisible;
+    repl::OpTime _lastOpCommitted = repl::OpTime(Timestamp(0, 0), repl::OpTime::kUninitializedTerm);
+    repl::OpTime _lastOpVisible = repl::OpTime(Timestamp(0, 0), repl::OpTime::kUninitializedTerm);
     long long _currentTerm = -1;
     long long _configVersion = -1;
     OID _replicaSetId;

@@ -5,20 +5,20 @@ var m = MongoRunner.runMongod({noprealloc: "", smallfiles: ""});
 db = m.getDB("test");
 
 var t = db[baseName];
-var getTotalNonLocalNonAdminSize = function() {
-    var totalNonLocalNonAdminDBSize = 0;
+var getTotalNonLocalSize = function() {
+    var totalNonLocalDBSize = 0;
     m.getDBs().databases.forEach(function(dbStats) {
-        // We accept the local database's and admin database's space overhead.
-        if (dbStats.name == "local" || dbStats.name == "admin")
+        // We accept the local database's space overhead.
+        if (dbStats.name == "local")
             return;
 
         // Databases with "sizeOnDisk=1" and "empty=true" dont' actually take up space o disk.
         // See SERVER-11051.
         if (dbStats.sizeOnDisk == 1 && dbStats.empty)
             return;
-        totalNonLocalNonAdminDBSize += dbStats.sizeOnDisk;
+        totalNonLocalDBSize += dbStats.sizeOnDisk;
     });
-    return totalNonLocalNonAdminDBSize;
+    return totalNonLocalDBSize;
 };
 
 for (var pass = 0; pass <= 1; pass++) {
@@ -26,9 +26,9 @@ for (var pass = 0; pass <= 1; pass++) {
     if (pass == 0)
         t.drop();
 
-    size = getTotalNonLocalNonAdminSize();
+    size = getTotalNonLocalSize();
     t.save({});
-    assert.eq(size, getTotalNonLocalNonAdminSize());
+    assert.eq(size, getTotalNonLocalSize());
     assert(size <= 32 * 1024 * 1024);
 
     t.drop();

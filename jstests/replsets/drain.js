@@ -20,9 +20,7 @@
             {"_id": 0, "host": nodes[0]},
             {"_id": 1, "host": nodes[1]},
             {"_id": 2, "host": nodes[2], "arbiterOnly": true}
-        ],
-        // No primary catch-up so we focus on the drain mode.
-        "settings": {"catchUpTimeoutMillis": 0},
+        ]
     });
 
     var primary = replSet.getPrimary();
@@ -44,7 +42,7 @@
     }
     assert.writeOK(bulk.execute());
     jsTestLog('Number of documents inserted into collection on primary: ' + numDocuments);
-    assert.eq(numDocuments, primary.getDB("foo").foo.find().itcount());
+    assert.eq(numDocuments, primary.getDB("foo").foo.count());
 
     assert.soon(function() {
         var serverStatus = secondary.getDB('foo').serverStatus();
@@ -105,5 +103,5 @@
     // Check for at least two entries. There was one prior to freezing op application on the
     // secondary and we cannot guarantee all writes reached the secondary's op queue prior to
     // shutting down the original primary.
-    assert.gte(primary.getDB("foo").foo.find().itcount(), 2);
+    assert.gte(primary.getDB("foo").foo.count(), 2);
 })();

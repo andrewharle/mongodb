@@ -48,14 +48,14 @@ class RepairCursorCmd : public Command {
 public:
     RepairCursorCmd() : Command("repairCursor") {}
 
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    virtual bool isWriteCommandForConfigServer() const {
         return false;
     }
     virtual bool slaveOk() const {
         return true;
     }
 
-    virtual Status checkAuthForCommand(Client* client,
+    virtual Status checkAuthForCommand(ClientBasic* client,
                                        const std::string& dbname,
                                        const BSONObj& cmdObj) {
         ActionSet actions;

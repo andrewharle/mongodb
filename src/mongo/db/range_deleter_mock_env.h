@@ -127,7 +127,6 @@ public:
     bool deleteRange(OperationContext* txn,
                      const RangeDeleteEntry& taskDetails,
                      long long int* deletedDocs,
-                     Milliseconds& replWaitDuration,
                      std::string* errMsg);
 
     /**

@@ -61,7 +61,7 @@ public:
     /**
      * Starts cloning by scheduling initial command to be run by the executor.
      */
-    virtual Status startup() noexcept = 0;
+    virtual Status start() = 0;
 
     /**
      * Cancels current remote command request.
@@ -69,13 +69,13 @@ public:
      *
      * Callback function may be invoked with an ErrorCodes::CallbackCanceled status.
      */
-    virtual void shutdown() = 0;
+    virtual void cancel() = 0;
 
     /**
      * Waits for active remote commands and database worker to complete.
      * Returns immediately if cloner is not active.
      */
-    virtual void join() = 0;
+    virtual void wait() = 0;
 };
 
 }  // namespace repl

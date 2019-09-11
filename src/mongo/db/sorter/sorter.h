@@ -30,7 +30,6 @@
 
 #include <deque>
 #include <fstream>
-#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -159,8 +158,7 @@ public:
     typedef std::pair<Key, Value> Data;
     typedef SortIteratorInterface<Key, Value> Iterator;
     typedef std::pair<typename Key::SorterDeserializeSettings,
-                      typename Value::SorterDeserializeSettings>
-        Settings;
+                      typename Value::SorterDeserializeSettings> Settings;
 
     template <typename Comparator>
     static Sorter* make(const SortOptions& opts,
@@ -188,8 +186,7 @@ class SortedFileWriter {
 public:
     typedef SortIteratorInterface<Key, Value> Iterator;
     typedef std::pair<typename Key::SorterDeserializeSettings,
-                      typename Value::SorterDeserializeSettings>
-        Settings;
+                      typename Value::SorterDeserializeSettings> Settings;
 
     explicit SortedFileWriter(const SortOptions& opts, const Settings& settings = Settings());
 

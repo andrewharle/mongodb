@@ -32,7 +32,6 @@
 
 #include "mongo/base/owned_pointer_vector.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/db/exec/plan_stage.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/plan_cache.h"
@@ -76,7 +75,7 @@ public:
     static bool canUseSubplanning(const CanonicalQuery& query);
 
     bool isEOF() final;
-    StageState doWork(WorkingSetID* out) final;
+    StageState work(WorkingSetID* out) final;
 
     StageType stageType() const final {
         return STAGE_SUBPLAN;
@@ -126,14 +125,6 @@ public:
      * otherwise returns false.
      */
     bool branchPlannedFromCache(size_t i) const;
-
-    /**
-     * Provide access to the query solution for our composite solution. Does not relinquish
-     * ownership.
-     */
-    QuerySolution* compositeSolution() const {
-        return _compositeSolution.get();
-    }
 
 private:
     /**
@@ -206,7 +197,7 @@ private:
     OwnedPointerVector<BranchPlanningResult> _branchResults;
 
     // We need this to extract cache-friendly index data from the index assignments.
-    std::map<StringData, size_t> _indexMap;
+    std::map<BSONObj, size_t> _indexMap;
 };
 
 }  // namespace mongo

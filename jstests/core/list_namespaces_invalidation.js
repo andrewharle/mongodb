@@ -3,32 +3,32 @@
 // @tags: [requires_collmod_command]
 (function() {
     'use strict';
-    let dbInvalidName = 'system_namespaces_invalidations';
-    let dbInvalid = db.getSiblingDB(dbInvalidName);
-    let num_collections = 3;
-    let DROP = 1;
-    let RENAME = 2;
-    let MOVE = 3;
+    var dbInvalidName = 'system_namespaces_invalidations';
+    var dbInvalid = db.getSiblingDB(dbInvalidName);
+    var num_collections = 3;
+    var DROP = 1;
+    var RENAME = 2;
+    var MOVE = 3;
     function testNamespaceInvalidation(namespaceAction, batchSize) {
         dbInvalid.dropDatabase();
 
         // Create enough collections to necessitate multiple cursor batches.
-        for (let i = 0; i < num_collections; i++) {
+        for (var i = 0; i < num_collections; i++) {
             assert.commandWorked(dbInvalid.createCollection('coll' + i.toString()));
         }
 
         // Get the first two namespaces. Use find on 'system.namespaces' on MMAPv1, listCollections
         // otherwise.
-        let cmd = dbInvalid.system.indexes.count() ? {find: 'system.namespaces'}
+        var cmd = dbInvalid.system.indexes.count() ? {find: 'system.namespaces'}
                                                    : {listCollections: dbInvalidName};
         Object.extend(cmd, {batchSize: batchSize});
-        let res = dbInvalid.runCommand(cmd);
+        var res = dbInvalid.runCommand(cmd);
         assert.commandWorked(res, 'could not run ' + tojson(cmd));
         printjson(res);
 
         // Ensure the cursor has data, invalidate the namespace, and exhaust the cursor.
-        let cursor = new DBCommandCursor(dbInvalid.getMongo(), res);
-        let errMsg =
+        var cursor = new DBCommandCursor(dbInvalid.getMongo(), res);
+        var errMsg =
             'expected more data from command ' + tojson(cmd) + ', with result ' + tojson(res);
         assert(cursor.hasNext(), errMsg);
         if (namespaceAction == RENAME) {
@@ -41,7 +41,7 @@
         } else if (namespaceAction == DROP) {
             assert(dbInvalid['coll1'].drop());
         } else if (namespaceAction == MOVE) {
-            let modCmd = {
+            var modCmd = {
                 collMod: 'coll1',
                 validator: {
                     $or: [
@@ -67,7 +67,7 @@
     }
     // Test that we invalidate the old namespace record ID when we remove, rename, or move a
     // namespace record.
-    for (let j = 2; j < 7; j++) {
+    for (var j = 2; j < 7; j++) {
         testNamespaceInvalidation(DROP, j);
         testNamespaceInvalidation(RENAME, j);
         testNamespaceInvalidation(MOVE, j);

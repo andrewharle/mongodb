@@ -1,7 +1,7 @@
-/**
- * Testing migrations are successful and immediately visible on the secondaries, when
- * secondaryThrottle is used.
- */
+//
+// Testing migrations are successful with secondaryThrottle.
+//
+
 (function() {
     'use strict';
 
@@ -12,57 +12,50 @@
         other: {
             chunkSize: 1,
             rs0: {
-                nodes: [
-                    {rsConfig: {votes: 1}},
-                    {rsConfig: {priority: 0, votes: 0}},
-                ],
+                nodes: [{rsConfig: {votes: 1}}, {rsConfig: {priority: 0, votes: 0}}, ],
             },
             rs1: {
-                nodes: [
-                    {rsConfig: {votes: 1}},
-                    {rsConfig: {priority: 0, votes: 0}},
-                ],
+                nodes: [{rsConfig: {votes: 1}}, {rsConfig: {priority: 0, votes: 0}}, ],
             }
         }
     });
 
-    var bulk = s.s0.getDB('TestDB').TestColl.initializeUnorderedBulkOp();
+    var db = s.getDB("test");
+    var bulk = db.foo.initializeUnorderedBulkOp();
     for (var i = 0; i < 2100; i++) {
         bulk.insert({_id: i, x: i});
     }
     assert.writeOK(bulk.execute());
 
-    assert.commandWorked(s.s0.adminCommand({enablesharding: 'TestDB'}));
-    s.ensurePrimaryShard('TestDB', s.shard0.shardName);
-    assert.commandWorked(s.s0.adminCommand({shardcollection: 'TestDB.TestColl', key: {_id: 1}}));
+    assert.commandWorked(s.s0.adminCommand({enablesharding: "test"}));
+    s.ensurePrimaryShard('test', 'test-rs0');
+    assert.commandWorked(s.s0.adminCommand({shardcollection: "test.foo", key: {_id: 1}}));
 
     for (i = 0; i < 20; i++) {
-        assert.commandWorked(s.s0.adminCommand({split: 'TestDB.TestColl', middle: {_id: i * 100}}));
+        assert.commandWorked(s.s0.adminCommand({split: "test.foo", middle: {_id: i * 100}}));
     }
 
-    var collPrimary = (new Mongo(s.s0.host)).getDB('TestDB').TestColl;
-    assert.eq(2100, collPrimary.find().itcount());
+    assert.eq(2100, db.foo.find().itcount());
 
-    var collSlaveOk = (new Mongo(s.s0.host)).getDB('TestDB').TestColl;
-    collSlaveOk.setSlaveOk();
-    assert.eq(2100, collSlaveOk.find().itcount());
+    var coll = db.foo;
+    coll.setSlaveOk();
+
+    var serverName = s.getServerName("test");
+    var other = s.config.shards.findOne({_id: {$ne: serverName}});
 
     for (i = 0; i < 20; i++) {
         // Needs to waitForDelete because we'll be performing a slaveOk query, and secondaries don't
         // have a chunk manager so it doesn't know how to filter out docs it doesn't own.
         assert.commandWorked(s.s0.adminCommand({
-            moveChunk: 'TestDB.TestColl',
+            moveChunk: "test.foo",
             find: {_id: i * 100},
-            to: s.shard1.shardName,
+            to: other._id,
             _secondaryThrottle: true,
             writeConcern: {w: 2},
             _waitForDelete: true
         }));
 
-        assert.eq(2100,
-                  collSlaveOk.find().itcount(),
-                  'Incorrect count when reading from secondary. Count from primary is ' +
-                      collPrimary.find().itcount());
+        assert.eq(2100, coll.find().itcount());
     }
 
     s.stop();

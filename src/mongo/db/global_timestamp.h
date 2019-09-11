@@ -40,7 +40,6 @@ Timestamp getLastSetTimestamp();
 
 /**
  * Generates a new and unique Timestamp.
- * If count > 1 that many unique Timestamps are reserved starting with the returned value.
  */
-Timestamp getNextGlobalTimestamp(unsigned count = 1);
+Timestamp getNextGlobalTimestamp();
 }

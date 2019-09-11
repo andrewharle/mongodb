@@ -30,14 +30,12 @@
 
 #include <string>
 
-#include "mongo/db/index/multikey_paths.h"
 #include "mongo/db/index_names.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
 
-class CollatorInterface;
 class MatchExpression;
 
 /**
@@ -50,22 +48,18 @@ struct IndexEntry {
     IndexEntry(const BSONObj& kp,
                const std::string& accessMethod,
                bool mk,
-               const MultikeyPaths& mkp,
                bool sp,
                bool unq,
                const std::string& n,
                const MatchExpression* fe,
-               const BSONObj& io,
-               const CollatorInterface* ci)
+               const BSONObj& io)
         : keyPattern(kp),
           multikey(mk),
-          multikeyPaths(mkp),
           sparse(sp),
           unique(unq),
           name(n),
           filterExpr(fe),
-          infoObj(io),
-          collator(ci) {
+          infoObj(io) {
         type = IndexNames::nameToType(accessMethod);
     }
 
@@ -92,33 +86,20 @@ struct IndexEntry {
     /**
      * For testing purposes only.
      */
-    IndexEntry(const BSONObj& kp, const std::string& indexName = "test_foo")
+    IndexEntry(const BSONObj& kp)
         : keyPattern(kp),
           multikey(false),
           sparse(false),
           unique(false),
-          name(indexName),
+          name("test_foo"),
           filterExpr(nullptr),
           infoObj(BSONObj()) {
         type = IndexNames::nameToType(IndexNames::findPluginName(keyPattern));
     }
 
-    bool operator==(const IndexEntry& rhs) const {
-        // Indexes are logically equal when names are equal.
-        return this->name == rhs.name;
-    }
-
-    std::string toString() const;
-
     BSONObj keyPattern;
 
     bool multikey;
-
-    // If non-empty, 'multikeyPaths' is a vector with size equal to the number of elements in the
-    // index key pattern. Each element in the vector is an ordered set of positions (starting at 0)
-    // into the corresponding indexed field that represent what prefixes of the indexed field cause
-    // the index to be multikey.
-    MultikeyPaths multikeyPaths;
 
     bool sparse;
 
@@ -135,9 +116,7 @@ struct IndexEntry {
     // by the keyPattern?)
     IndexType type;
 
-    // Null if this index orders strings according to the simple binary compare. If non-null,
-    // represents the collator used to generate index keys for indexed strings.
-    const CollatorInterface* collator = nullptr;
+    std::string toString() const;
 };
 
 }  // namespace mongo

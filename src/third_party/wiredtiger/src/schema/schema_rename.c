@@ -233,7 +233,7 @@ __rename_table(WT_SESSION_IMPL *session,
 	WT_ERR(__metadata_rename(session, uri, newuri));
 
 err:	if (table != NULL)
-		WT_TRET(__wt_schema_release_table(session, table));
+		__wt_schema_release_table(session, table);
 	return (ret);
 }
 

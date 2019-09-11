@@ -83,7 +83,7 @@ public:
 
     bool isEOF() final;
 
-    StageState doWork(WorkingSetID* out) final;
+    StageState work(WorkingSetID* out) final;
 
     void doSaveState() final;
     void doRestoreState() final;

@@ -68,7 +68,10 @@ function runTest(conn) {
             __system: true
         };
 
-        var privilege = {resource: {cluster: true}, actions: ['inprog']};
+        var privilege = {
+            resource: {cluster: true},
+            actions: ['inprog']
+        };
 
         var testFunc = function(shouldPass) {
             var passed = true;
@@ -107,7 +110,10 @@ function runTest(conn) {
             __system: true
         };
 
-        var privilege = {resource: {cluster: true}, actions: ['killop']};
+        var privilege = {
+            resource: {cluster: true},
+            actions: ['killop']
+        };
 
         var testFunc = function(shouldPass) {
             var passed = true;
@@ -153,7 +159,10 @@ function runTest(conn) {
             __system: true
         };
 
-        var privilege = {resource: {cluster: true}, actions: ['unlock']};
+        var privilege = {
+            resource: {cluster: true},
+            actions: ['unlock']
+        };
 
         var testFunc = function(shouldPass) {
             var passed = true;

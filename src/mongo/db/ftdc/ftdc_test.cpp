@@ -43,28 +43,10 @@
 #include "mongo/stdx/memory.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/clock_source.h"
-#include "mongo/util/clock_source_mock.h"
-#include "mongo/util/tick_source_mock.h"
 
 namespace mongo {
 
-namespace {
-
-BSONObj filteredFTDCCopy(const BSONObj& obj) {
-    BSONObjBuilder builder;
-    for (const auto& f : obj) {
-        if (FTDCBSONUtil::isFTDCType(f.type())) {
-            builder.append(f);
-        }
-    }
-    return builder.obj();
-}
-}  // namespace
-
-
-void ValidateDocumentList(const boost::filesystem::path& p,
-                          const std::vector<BSONObj>& docs,
-                          FTDCValidationMode mode) {
+void ValidateDocumentList(const boost::filesystem::path& p, const std::vector<BSONObj>& docs) {
     FTDCFileReader reader;
 
     ASSERT_OK(reader.open(p));
@@ -78,32 +60,20 @@ void ValidateDocumentList(const boost::filesystem::path& p,
 
     ASSERT_OK(sw);
 
-    ValidateDocumentList(list, docs, mode);
+    ValidateDocumentList(list, docs);
 }
 
-void ValidateDocumentList(const std::vector<BSONObj>& docs1,
-                          const std::vector<BSONObj>& docs2,
-                          FTDCValidationMode mode) {
+void ValidateDocumentList(const std::vector<BSONObj>& docs1, const std::vector<BSONObj>& docs2) {
     ASSERT_EQUALS(docs1.size(), docs2.size());
 
     auto ai = docs1.begin();
     auto bi = docs2.begin();
 
     while (ai != docs1.end() && bi != docs2.end()) {
-        if (mode == FTDCValidationMode::kStrict) {
-            if (SimpleBSONObjComparator::kInstance.evaluate(*ai != *bi)) {
-                std::cout << *ai << " vs " << *bi << std::endl;
-                ASSERT_BSONOBJ_EQ(*ai, *bi);
-            }
-        } else {
-            BSONObj left = filteredFTDCCopy(*ai);
-            BSONObj right = filteredFTDCCopy(*bi);
-            if (SimpleBSONObjComparator::kInstance.evaluate(left != right)) {
-                std::cout << left << " vs " << right << std::endl;
-                ASSERT_BSONOBJ_EQ(left, right);
-            }
+        if (!(*ai == *bi)) {
+            std::cout << *ai << " vs " << *bi << std::endl;
+            ASSERT_TRUE(*ai == *bi);
         }
-
         ++ai;
         ++bi;
     }
@@ -139,13 +109,17 @@ void createDirectoryClean(const boost::filesystem::path& dir) {
     boost::filesystem::create_directory(dir);
 }
 
-MONGO_INITIALIZER_WITH_PREREQUISITES(FTDCTestInit, ("ThreadNameInitializer"))
-(InitializerContext* context) {
+class FTDCClockSourceMock : public ClockSource {
+    Date_t now() final {
+        return Date_t::fromMillisSinceEpoch(37);
+    }
+};
+
+MONGO_INITIALIZER_WITH_PREREQUISITES(FTDCTestInit,
+                                     ("ThreadNameInitializer"))(InitializerContext* context) {
     setGlobalServiceContext(stdx::make_unique<ServiceContextNoop>());
 
-    getGlobalServiceContext()->setFastClockSource(stdx::make_unique<ClockSourceMock>());
-    getGlobalServiceContext()->setPreciseClockSource(stdx::make_unique<ClockSourceMock>());
-    getGlobalServiceContext()->setTickSource(stdx::make_unique<TickSourceMock>());
+    getGlobalServiceContext()->setClockSource(stdx::make_unique<FTDCClockSourceMock>());
 
     Client::initThreadIfNotAlready("UnitTest");
 

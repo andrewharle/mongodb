@@ -13,21 +13,22 @@ if (testingReplication) {
     coll.setWriteConcern({w: 2});
 }
 
-Random.setRandomSeed();
-
 var parallelInsert = startParallelShell(
-    "Random.setRandomSeed();" + "for ( var i = 0; i < 1000; i++ ) {" +
+    "for ( var i = 0; i < 1000; i++ ) {" +
     "    var doc = { loc: [ Random.rand() * 180, Random.rand() * 180 ], v: '' };" +
     "    db.jstests_geo_update_btree.insert(doc);" + "}");
 
 for (i = 0; i < 1000; i++) {
-    coll.update({
-        loc:
-            {$within: {$center: [[Random.rand() * 180, Random.rand() * 180], Random.rand() * 50]}}
-    },
-                {$set: {v: big}},
-                false,
-                true);
+    coll.update(
+        {
+          loc: {
+              $within:
+                  {$center: [[Random.rand() * 180, Random.rand() * 180], Random.rand() * 50]}
+          }
+        },
+        {$set: {v: big}},
+        false,
+        true);
 
     if (i % 10 == 0)
         print(i);

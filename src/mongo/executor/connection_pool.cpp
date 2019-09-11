@@ -37,7 +37,6 @@
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/destructor_guard.h"
 #include "mongo/util/log.h"
 #include "mongo/util/scopeguard.h"
 
@@ -153,7 +152,7 @@ public:
 
 private:
     using OwnedConnection = std::unique_ptr<ConnectionInterface>;
-    using OwnershipPool = stdx::unordered_map<ConnectionInterface*, OwnedConnection>;
+    using OwnershipPool = std::unordered_map<ConnectionInterface*, OwnedConnection>;
     using Request = std::pair<Date_t, GetConnectionCallback>;
     struct RequestComparator {
         bool operator()(const Request& a, const Request& b) {
@@ -221,12 +220,12 @@ private:
     State _state;
 };
 
-constexpr Milliseconds ConnectionPool::kDefaultHostTimeout;
+const Milliseconds ConnectionPool::kDefaultHostTimeout = Minutes(5);
 size_t const ConnectionPool::kDefaultMaxConns = std::numeric_limits<size_t>::max();
 size_t const ConnectionPool::kDefaultMinConns = 1;
+const Milliseconds ConnectionPool::kDefaultRefreshRequirement = Minutes(1);
+const Milliseconds ConnectionPool::kDefaultRefreshTimeout = Seconds(20);
 size_t const ConnectionPool::kDefaultMaxConnecting = std::numeric_limits<size_t>::max();
-constexpr Milliseconds ConnectionPool::kDefaultRefreshRequirement;
-constexpr Milliseconds ConnectionPool::kDefaultRefreshTimeout;
 
 const Status ConnectionPool::kConnectionStateUnknown =
     Status(ErrorCodes::InternalError, "Connection is in an unknown state");
@@ -246,11 +245,13 @@ void ConnectionPool::dropConnections(const HostAndPort& hostAndPort) {
     if (iter == _pools.end())
         return;
 
-    iter->second->runWithActiveClient(std::move(lk), [&](decltype(lk) lk) {
-        iter->second->processFailure(
-            Status(ErrorCodes::PooledConnectionsDropped, "Pooled connections dropped"),
-            std::move(lk));
-    });
+    iter->second->runWithActiveClient(
+        std::move(lk),
+        [&](decltype(lk) lk) {
+            iter->second->processFailure(
+                Status(ErrorCodes::PooledConnectionsDropped, "Pooled connections dropped"),
+                std::move(lk));
+        });
 }
 
 void ConnectionPool::get(const HostAndPort& hostAndPort,
@@ -272,9 +273,11 @@ void ConnectionPool::get(const HostAndPort& hostAndPort,
 
     invariant(pool);
 
-    pool->runWithActiveClient(std::move(lk), [&](decltype(lk) lk) {
-        pool->getConnection(hostAndPort, timeout, std::move(lk), std::move(cb));
-    });
+    pool->runWithActiveClient(std::move(lk),
+                              [&](decltype(lk) lk) {
+                                  pool->getConnection(
+                                      hostAndPort, timeout, std::move(lk), std::move(cb));
+                              });
 }
 
 void ConnectionPool::appendConnectionStats(ConnectionPoolStats* stats) const {
@@ -309,9 +312,9 @@ void ConnectionPool::returnConnection(ConnectionInterface* conn) {
 
     invariant(iter != _pools.end());
 
-    iter->second->runWithActiveClient(std::move(lk), [&](decltype(lk) lk) {
-        iter->second->returnConnection(conn, std::move(lk));
-    });
+    iter->second->runWithActiveClient(
+        std::move(lk),
+        [&](decltype(lk) lk) { iter->second->returnConnection(conn, std::move(lk)); });
 }
 
 ConnectionPool::SpecificPool::SpecificPool(ConnectionPool* parent, const HostAndPort& hostAndPort)
@@ -410,48 +413,49 @@ void ConnectionPool::SpecificPool::returnConnection(ConnectionInterface* connPtr
 
         // Unlock in case refresh can occur immediately
         lk.unlock();
-        connPtr->refresh(
-            _parent->_options.refreshTimeout, [this](ConnectionInterface* connPtr, Status status) {
-                connPtr->indicateUsed();
+        connPtr->refresh(_parent->_options.refreshTimeout,
+                         [this](ConnectionInterface* connPtr, Status status) {
+                             connPtr->indicateUsed();
 
-                runWithActiveClient([&](stdx::unique_lock<stdx::mutex> lk) {
-                    auto conn = takeFromProcessingPool(connPtr);
+                             runWithActiveClient([&](stdx::unique_lock<stdx::mutex> lk) {
+                                 auto conn = takeFromProcessingPool(connPtr);
 
-                    // If the host and port were dropped, let this lapse
-                    if (conn->getGeneration() != _generation) {
-                        spawnConnections(lk);
-                        return;
-                    }
+                                 // If the host and port were dropped, let this lapse
+                                 if (conn->getGeneration() != _generation) {
+                                     spawnConnections(lk);
+                                     return;
+                                 }
 
-                    // If we're in shutdown, we don't need refreshed connections
-                    if (_state == State::kInShutdown)
-                        return;
+                                 // If we're in shutdown, we don't need refreshed connections
+                                 if (_state == State::kInShutdown)
+                                     return;
 
-                    // If the connection refreshed successfully, throw it back in
-                    // the ready pool
-                    if (status.isOK()) {
-                        addToReady(lk, std::move(conn));
-                        spawnConnections(lk);
-                        return;
-                    }
+                                 // If the connection refreshed successfully, throw it back in
+                                 // the ready pool
+                                 if (status.isOK()) {
+                                     addToReady(lk, std::move(conn));
+                                     spawnConnections(lk);
+                                     return;
+                                 }
 
-                    // If we've exceeded the time limit, start a new connect,
-                    // rather than failing all operations.  We do this because the
-                    // various callers have their own time limit which is unrelated
-                    // to our internal one.
-                    if (status.code() == ErrorCodes::NetworkInterfaceExceededTimeLimit) {
-                        log() << "Pending connection to host " << _hostAndPort
-                              << " did not complete within the connection timeout,"
-                              << " retrying with a new connection;" << openConnections(lk)
-                              << " connections to that host remain open";
-                        spawnConnections(lk);
-                        return;
-                    }
+                                 // If we've exceeded the time limit, start a new connect,
+                                 // rather than failing all operations.  We do this because the
+                                 // various callers have their own time limit which is unrelated
+                                 // to our internal one.
+                                 if (status.code() == ErrorCodes::ExceededTimeLimit) {
+                                     log() << "Pending connection to host " << _hostAndPort
+                                           << " did not complete within the connection timeout,"
+                                           << " retrying with a new connection;"
+                                           << openConnections(lk)
+                                           << " connections to that host remain open";
+                                     spawnConnections(lk);
+                                     return;
+                                 }
 
-                    // Otherwise pass the failure on through
-                    processFailure(status, std::move(lk));
-                });
-            });
+                                 // Otherwise pass the failure on through
+                                 processFailure(status, std::move(lk));
+                             });
+                         });
         lk.lock();
     } else {
         // If it's fine as it is, just put it in the ready queue
@@ -471,29 +475,30 @@ void ConnectionPool::SpecificPool::addToReady(stdx::unique_lock<stdx::mutex>& lk
     // Our strategy for refreshing connections is to check them out and
     // immediately check them back in (which kicks off the refresh logic in
     // returnConnection
-    connPtr->setTimeout(_parent->_options.refreshRequirement, [this, connPtr]() {
-        OwnedConnection conn;
+    connPtr->setTimeout(_parent->_options.refreshRequirement,
+                        [this, connPtr]() {
+                            OwnedConnection conn;
 
-        runWithActiveClient([&](stdx::unique_lock<stdx::mutex> lk) {
-            if (!_readyPool.count(connPtr)) {
-                // We've already been checked out. We don't need to refresh
-                // ourselves.
-                return;
-            }
+                            runWithActiveClient([&](stdx::unique_lock<stdx::mutex> lk) {
+                                if (!_readyPool.count(connPtr)) {
+                                    // We've already been checked out. We don't need to refresh
+                                    // ourselves.
+                                    return;
+                                }
 
-            conn = takeFromPool(_readyPool, connPtr);
+                                conn = takeFromPool(_readyPool, connPtr);
 
-            // If we're in shutdown, we don't need to refresh connections
-            if (_state == State::kInShutdown)
-                return;
+                                // If we're in shutdown, we don't need to refresh connections
+                                if (_state == State::kInShutdown)
+                                    return;
 
-            _checkedOutPool[connPtr] = std::move(conn);
+                                _checkedOutPool[connPtr] = std::move(conn);
 
-            connPtr->indicateSuccess();
+                                connPtr->indicateSuccess();
 
-            returnConnection(connPtr, std::move(lk));
-        });
-    });
+                                returnConnection(connPtr, std::move(lk));
+                            });
+                        });
 
     fulfillRequests(lk);
 }
@@ -631,31 +636,34 @@ void ConnectionPool::SpecificPool::spawnConnections(stdx::unique_lock<stdx::mute
 
         // Run the setup callback
         lk.unlock();
-        connPtr->setup(
-            _parent->_options.refreshTimeout, [this](ConnectionInterface* connPtr, Status status) {
-                connPtr->indicateUsed();
+        connPtr->setup(_parent->_options.refreshTimeout,
+                       [this](ConnectionInterface* connPtr, Status status) {
+                           connPtr->indicateUsed();
 
-                runWithActiveClient([&](stdx::unique_lock<stdx::mutex> lk) {
-                    auto conn = takeFromProcessingPool(connPtr);
+                           runWithActiveClient([&](stdx::unique_lock<stdx::mutex> lk) {
+                               auto conn = takeFromProcessingPool(connPtr);
 
-                    if (conn->getGeneration() != _generation) {
-                        // If the host and port was dropped, let the
-                        // connection lapse
-                        spawnConnections(lk);
-                    } else if (status.isOK()) {
-                        addToReady(lk, std::move(conn));
-                        spawnConnections(lk);
-                    } else if (status.code() == ErrorCodes::NetworkInterfaceExceededTimeLimit) {
-                        // If we've exceeded the time limit, restart the connect, rather than
-                        // failing all operations.  We do this because the various callers
-                        // have their own time limit which is unrelated to our internal one.
-                        spawnConnections(lk);
-                    } else {
-                        // If the setup failed, cascade the failure edge
-                        processFailure(status, std::move(lk));
-                    }
-                });
-            });
+                               if (conn->getGeneration() != _generation) {
+                                   // If the host and port was dropped, let the
+                                   // connection lapse
+                                   spawnConnections(lk);
+                               } else if (status.isOK()) {
+                                   addToReady(lk, std::move(conn));
+                                   spawnConnections(lk);
+                               } else if (status.code() == ErrorCodes::ExceededTimeLimit) {
+                                   // If we've exceeded the time limit, restart the connect, rather
+                                   // than
+                                   // failing all operations.  We do this because the various
+                                   // callers
+                                   // have their own time limit which is unrelated to our internal
+                                   // one.
+                                   spawnConnections(lk);
+                               } else {
+                                   // If the setup failed, cascade the failure edge
+                                   processFailure(status, std::move(lk));
+                               }
+                           });
+                       });
         // Note that this assumes that the refreshTimeout is sound for the
         // setupTimeout
 
@@ -741,29 +749,31 @@ void ConnectionPool::SpecificPool::updateStateInLock() {
 
         // We set a timer for the most recent request, then invoke each timed
         // out request we couldn't service
-        _requestTimer->setTimeout(timeout, [this]() {
-            runWithActiveClient([&](stdx::unique_lock<stdx::mutex> lk) {
-                auto now = _parent->_factory->now();
+        _requestTimer->setTimeout(
+            timeout,
+            [this]() {
+                runWithActiveClient([&](stdx::unique_lock<stdx::mutex> lk) {
+                    auto now = _parent->_factory->now();
 
-                while (_requests.size()) {
-                    auto& x = _requests.top();
+                    while (_requests.size()) {
+                        auto& x = _requests.top();
 
-                    if (x.first <= now) {
-                        auto cb = std::move(x.second);
-                        _requests.pop();
+                        if (x.first <= now) {
+                            auto cb = std::move(x.second);
+                            _requests.pop();
 
-                        lk.unlock();
-                        cb(Status(ErrorCodes::NetworkInterfaceExceededTimeLimit,
-                                  "Couldn't get a connection within the time limit"));
-                        lk.lock();
-                    } else {
-                        break;
+                            lk.unlock();
+                            cb(Status(ErrorCodes::ExceededTimeLimit,
+                                      "Couldn't get a connection within the time limit"));
+                            lk.lock();
+                        } else {
+                            break;
+                        }
                     }
-                }
 
-                updateStateInLock();
+                    updateStateInLock();
+                });
             });
-        });
     } else if (_checkedOutPool.size()) {
         // If we have no requests, but someone's using a connection, we just
         // hang around until the next request or a return

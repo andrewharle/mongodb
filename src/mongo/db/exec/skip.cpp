@@ -52,7 +52,12 @@ bool SkipStage::isEOF() {
     return child()->isEOF();
 }
 
-PlanStage::StageState SkipStage::doWork(WorkingSetID* out) {
+PlanStage::StageState SkipStage::work(WorkingSetID* out) {
+    ++_commonStats.works;
+
+    // Adds the amount of time taken by work() to executionTimeMillis.
+    ScopedTimer timer(&_commonStats.executionTimeMillis);
+
     WorkingSetID id = WorkingSet::INVALID_ID;
     StageState status = child()->work(&id);
 
@@ -62,10 +67,12 @@ PlanStage::StageState SkipStage::doWork(WorkingSetID* out) {
             // ...drop the result.
             --_toSkip;
             _ws->free(id);
+            ++_commonStats.needTime;
             return PlanStage::NEED_TIME;
         }
 
         *out = id;
+        ++_commonStats.advanced;
         return PlanStage::ADVANCED;
     } else if (PlanStage::FAILURE == status || PlanStage::DEAD == status) {
         *out = id;
@@ -79,7 +86,10 @@ PlanStage::StageState SkipStage::doWork(WorkingSetID* out) {
             *out = WorkingSetCommon::allocateStatusMember(_ws, status);
         }
         return status;
+    } else if (PlanStage::NEED_TIME == status) {
+        ++_commonStats.needTime;
     } else if (PlanStage::NEED_YIELD == status) {
+        ++_commonStats.needYield;
         *out = id;
     }
 

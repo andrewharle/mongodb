@@ -61,11 +61,6 @@ Status wrappedRun(OperationContext* txn,
 
     // If db/collection does not exist, short circuit and return.
     if (!db || !collection) {
-        if (db && db->getViewCatalog()->lookup(txn, toDeleteNs)) {
-            return {ErrorCodes::CommandNotSupportedOnView,
-                    str::stream() << "Cannot drop indexes on view " << toDeleteNs};
-        }
-
         return Status(ErrorCodes::NamespaceNotFound, "ns not found");
     }
 
@@ -108,24 +103,14 @@ Status wrappedRun(OperationContext* txn,
     }
 
     if (f.type() == Object) {
-        std::vector<IndexDescriptor*> indexes;
-        collection->getIndexCatalog()->findIndexesByKeyPattern(
-            txn, f.embeddedObject(), false, &indexes);
-        if (indexes.empty()) {
+        IndexDescriptor* desc =
+            collection->getIndexCatalog()->findIndexByKeyPattern(txn, f.embeddedObject());
+        if (desc == NULL) {
             return Status(ErrorCodes::IndexNotFound,
-                          str::stream() << "can't find index with key: " << f.embeddedObject());
-        } else if (indexes.size() > 1) {
-            return Status(ErrorCodes::AmbiguousIndexKeyPattern,
-                          str::stream() << indexes.size() << " indexes found for key: "
-                                        << f.embeddedObject()
-                                        << ", identify by name instead."
-                                        << " Conflicting indexes: "
-                                        << indexes[0]->infoObj()
-                                        << ", "
-                                        << indexes[1]->infoObj());
+                          str::stream()
+                              << "can't find index with key: " << f.embeddedObject().toString());
         }
 
-        IndexDescriptor* desc = indexes[0];
         if (desc->isIdIndex()) {
             return Status(ErrorCodes::InvalidOptions, "cannot drop _id index");
         }
@@ -155,8 +140,8 @@ Status dropIndexes(OperationContext* txn,
             !repl::getGlobalReplicationCoordinator()->canAcceptWritesFor(nss);
 
         if (userInitiatedWritesAndNotPrimary) {
-            return {ErrorCodes::NotMaster,
-                    str::stream() << "Not primary while dropping indexes in " << nss.ns()};
+            return Status(ErrorCodes::NotMaster,
+                          str::stream() << "Not primary while dropping indexes in " << nss.ns());
         }
 
         WriteUnitOfWork wunit(txn);
@@ -164,10 +149,8 @@ Status dropIndexes(OperationContext* txn,
         if (!status.isOK()) {
             return status;
         }
-
         getGlobalServiceContext()->getOpObserver()->onDropIndex(
             txn, dbName.toString() + ".$cmd", idxDescriptor);
-
         wunit.commit();
     }
     MONGO_WRITE_CONFLICT_RETRY_LOOP_END(txn, "dropIndexes", dbName);

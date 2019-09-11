@@ -32,9 +32,6 @@
 #include <tuple>
 #include <utility>
 
-#include "mongo/base/simple_string_data_comparator.h"
-#include "mongo/bson/simple_bsonobj_comparator.h"
-
 namespace mongo {
 
 using std::string;
@@ -103,9 +100,8 @@ bool IndexBounds::operator==(const IndexBounds& other) const {
     }
 
     if (this->isSimpleRange) {
-        return SimpleBSONObjComparator::kInstance.evaluate(this->startKey == other.startKey) &&
-            SimpleBSONObjComparator::kInstance.evaluate(this->endKey == other.endKey) &&
-            (this->boundInclusion == other.boundInclusion);
+        return std::tie(this->startKey, this->endKey, this->endKeyInclusive) ==
+            std::tie(other.startKey, other.endKey, other.endKeyInclusive);
     }
 
     if (this->fields.size() != other.fields.size()) {
@@ -137,49 +133,6 @@ string OrderedIntervalList::toString() const {
     return ss;
 }
 
-bool IndexBounds::isStartIncludedInBound(BoundInclusion boundInclusion) {
-    return boundInclusion == BoundInclusion::kIncludeBothStartAndEndKeys ||
-        boundInclusion == BoundInclusion::kIncludeStartKeyOnly;
-}
-
-bool IndexBounds::isEndIncludedInBound(BoundInclusion boundInclusion) {
-    return boundInclusion == BoundInclusion::kIncludeBothStartAndEndKeys ||
-        boundInclusion == BoundInclusion::kIncludeEndKeyOnly;
-}
-
-BoundInclusion IndexBounds::makeBoundInclusionFromBoundBools(bool startKeyInclusive,
-                                                             bool endKeyInclusive) {
-    if (startKeyInclusive) {
-        if (endKeyInclusive) {
-            return BoundInclusion::kIncludeBothStartAndEndKeys;
-        } else {
-            return BoundInclusion::kIncludeStartKeyOnly;
-        }
-    } else {
-        if (endKeyInclusive) {
-            return BoundInclusion::kIncludeEndKeyOnly;
-        } else {
-            return BoundInclusion::kExcludeBothStartAndEndKeys;
-        }
-    }
-}
-
-BoundInclusion IndexBounds::reverseBoundInclusion(BoundInclusion b) {
-    switch (b) {
-        case BoundInclusion::kIncludeStartKeyOnly:
-            return BoundInclusion::kIncludeEndKeyOnly;
-        case BoundInclusion::kIncludeEndKeyOnly:
-            return BoundInclusion::kIncludeStartKeyOnly;
-        case BoundInclusion::kIncludeBothStartAndEndKeys:
-        case BoundInclusion::kExcludeBothStartAndEndKeys:
-            // These are both symmetric.
-            return b;
-        default:
-            MONGO_UNREACHABLE;
-    }
-}
-
-
 bool OrderedIntervalList::operator==(const OrderedIntervalList& other) const {
     if (this->name != other.name) {
         return false;
@@ -200,38 +153,6 @@ bool OrderedIntervalList::operator==(const OrderedIntervalList& other) const {
 
 bool OrderedIntervalList::operator!=(const OrderedIntervalList& other) const {
     return !(*this == other);
-}
-
-void OrderedIntervalList::reverse() {
-    for (size_t i = 0; i < (intervals.size() + 1) / 2; i++) {
-        const size_t otherIdx = intervals.size() - i - 1;
-        intervals[i].reverse();
-        if (i != otherIdx) {
-            intervals[otherIdx].reverse();
-            std::swap(intervals[i], intervals[otherIdx]);
-        }
-    }
-}
-
-OrderedIntervalList OrderedIntervalList::reverseClone() const {
-    OrderedIntervalList clone(name);
-
-    for (auto it = intervals.rbegin(); it != intervals.rend(); ++it) {
-        clone.intervals.push_back(it->reverseClone());
-    }
-
-    return clone;
-}
-
-Interval::Direction OrderedIntervalList::computeDirection() const {
-    for (auto&& iv : intervals) {
-        const auto dir = iv.getDirection();
-        if (dir != Interval::Direction::kDirectionNone) {
-            return dir;
-        }
-    }
-
-    return Interval::Direction::kDirectionNone;
 }
 
 // static
@@ -292,17 +213,12 @@ void OrderedIntervalList::complement() {
 string IndexBounds::toString() const {
     mongoutils::str::stream ss;
     if (isSimpleRange) {
-        if (IndexBounds::isStartIncludedInBound(boundInclusion)) {
-            ss << "[";
-        } else {
-            ss << "(";
-        }
-        ss << startKey.toString() << ", ";
+        ss << "[" << startKey.toString() << ", ";
         if (endKey.isEmpty()) {
             ss << "]";
         } else {
             ss << endKey.toString();
-            if (IndexBounds::isEndIncludedInBound(boundInclusion)) {
+            if (endKeyInclusive) {
                 ss << "]";
             } else {
                 ss << ")";
@@ -345,40 +261,6 @@ BSONObj IndexBounds::toBSON() const {
     }
 
     return bob.obj();
-}
-
-IndexBounds IndexBounds::forwardize() const {
-    IndexBounds newBounds;
-    newBounds.isSimpleRange = isSimpleRange;
-
-    if (isSimpleRange) {
-        const int cmpRes = startKey.woCompare(endKey);
-        if (cmpRes <= 0) {
-            newBounds.startKey = startKey;
-            newBounds.endKey = endKey;
-            newBounds.boundInclusion = boundInclusion;
-        } else {
-            // Swap start and end key.
-            newBounds.endKey = startKey;
-            newBounds.startKey = endKey;
-            newBounds.boundInclusion = IndexBounds::reverseBoundInclusion(boundInclusion);
-        }
-
-        return newBounds;
-    }
-
-    newBounds.fields.reserve(fields.size());
-    std::transform(fields.begin(),
-                   fields.end(),
-                   std::back_inserter(newBounds.fields),
-                   [](const OrderedIntervalList& oil) -> OrderedIntervalList {
-                       if (oil.computeDirection() == Interval::Direction::kDirectionDescending) {
-                           return oil.reverseClone();
-                       }
-                       return oil;
-                   });
-
-    return newBounds;
 }
 
 //

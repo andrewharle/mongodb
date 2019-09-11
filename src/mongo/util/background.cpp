@@ -38,13 +38,13 @@
 #include "mongo/stdx/functional.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/stdx/thread.h"
-#include "mongo/util/concurrency/idle_thread_block.h"
 #include "mongo/util/concurrency/mutex.h"
 #include "mongo/util/concurrency/spin_lock.h"
 #include "mongo/util/concurrency/thread_name.h"
 #include "mongo/util/debug_util.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
+#include "mongo/util/net/ssl_manager.h"
 #include "mongo/util/timer.h"
 
 using namespace std;
@@ -143,20 +143,29 @@ BackgroundJob::~BackgroundJob() {}
 void BackgroundJob::jobBody() {
     const string threadName = name();
     if (!threadName.empty()) {
-        setThreadName(threadName);
+        setThreadName(threadName.c_str());
     }
 
-    LOG(1) << "BackgroundJob starting: " << threadName;
+    LOG(1) << "BackgroundJob starting: " << threadName << endl;
 
     try {
         run();
     } catch (const std::exception& e) {
-        error() << "backgroundjob " << threadName << " exception: " << redact(e.what());
+        error() << "backgroundjob " << threadName << " exception: " << e.what();
         throw;
     }
 
     // We must cache this value so that we can use it after we leave the following scope.
     const bool selfDelete = _selfDelete;
+
+#ifdef MONGO_CONFIG_SSL
+    // TODO(sverch): Allow people who use the BackgroundJob to also specify cleanup tasks.
+    // Currently the networking code depends on this class and this class depends on the
+    // networking code because of this ad hoc cleanup.
+    SSLManagerInterface* manager = getSSLManager();
+    if (manager)
+        manager->cleanupThreadLocals();
+#endif
 
     {
         // It is illegal to access any state owned by this BackgroundJob after leaving this
@@ -201,12 +210,11 @@ Status BackgroundJob::cancel() {
 
 bool BackgroundJob::wait(unsigned msTimeOut) {
     verify(!_selfDelete);  // you cannot call wait on a self-deleting job
-    const auto deadline = Date_t::now() + Milliseconds(msTimeOut);
+    const auto deadline = stdx::chrono::system_clock::now() + stdx::chrono::milliseconds(msTimeOut);
     stdx::unique_lock<stdx::mutex> l(_status->mutex);
     while (_status->state != Done) {
         if (msTimeOut) {
-            if (stdx::cv_status::timeout ==
-                _status->done.wait_until(l, deadline.toSystemTimePoint()))
+            if (stdx::cv_status::timeout == _status->done.wait_until(l, deadline))
                 return false;
         } else {
             _status->done.wait(l);
@@ -306,16 +314,12 @@ Status PeriodicTaskRunner::stop(int gracePeriodMillis) {
 
 void PeriodicTaskRunner::run() {
     // Use a shorter cycle time in debug mode to help catch race conditions.
-    const Seconds waitTime(kDebugBuild ? 5 : 60);
+    const stdx::chrono::seconds waitTime(kDebugBuild ? 5 : 60);
 
     stdx::unique_lock<stdx::mutex> lock(_mutex);
     while (!_shutdownRequested) {
-        {
-            MONGO_IDLE_THREAD_BLOCK;
-            if (stdx::cv_status::timeout != _cond.wait_for(lock, waitTime.toSystemDuration()))
-                continue;
-        }
-        _runTasks();
+        if (stdx::cv_status::timeout == _cond.wait_for(lock, waitTime))
+            _runTasks();
     }
 }
 
@@ -338,14 +342,14 @@ void PeriodicTaskRunner::_runTask(PeriodicTask* const task) {
     try {
         task->taskDoWork();
     } catch (const std::exception& e) {
-        error() << "task: " << taskName << " failed: " << redact(e.what());
+        error() << "task: " << taskName << " failed: " << e.what() << endl;
     } catch (...) {
-        error() << "task: " << taskName << " failed with unknown error";
+        error() << "task: " << taskName << " failed with unknown error" << endl;
     }
 
     const int ms = timer.millis();
     const int kMinLogMs = 100;
-    LOG(ms <= kMinLogMs ? 3 : 0) << "task: " << taskName << " took: " << ms << "ms";
+    LOG(ms <= kMinLogMs ? 3 : 0) << "task: " << taskName << " took: " << ms << "ms" << endl;
 }
 
 }  // namespace mongo

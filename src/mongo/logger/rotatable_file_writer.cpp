@@ -187,6 +187,21 @@ Win32FileStreambuf::int_type Win32FileStreambuf::overflow(int_type ch) {
     return traits_type::eof();
 }
 
+// Win32 implementation of renameFile that handles non-ascii file names.
+int renameFile(const std::string& oldName, const std::string& newName) {
+    return _wrename(utf8ToWide(oldName).c_str(), utf8ToWide(newName).c_str());
+}
+
+}  // namespace
+#else
+
+namespace {
+
+// *nix implementation of renameFile that assumes the OS is encoding file names in UTF-8.
+int renameFile(const std::string& oldName, const std::string& newName) {
+    return rename(oldName.c_str(), newName.c_str());
+}
+
 }  // namespace
 #endif
 
@@ -207,33 +222,25 @@ Status RotatableFileWriter::Use::rotate(bool renameOnRotate, const std::string& 
         if (renameOnRotate) {
             try {
                 if (boost::filesystem::exists(renameTarget)) {
-                    return Status(
-                        ErrorCodes::FileRenameFailed,
-                        mongoutils::str::stream() << "Renaming file " << _writer->_fileName
-                                                  << " to "
-                                                  << renameTarget
-                                                  << " failed; destination already exists");
+                    return Status(ErrorCodes::FileRenameFailed,
+                                  mongoutils::str::stream()
+                                      << "Renaming file " << _writer->_fileName << " to "
+                                      << renameTarget << " failed; destination already exists");
                 }
             } catch (const std::exception& e) {
-                return Status(
-                    ErrorCodes::FileRenameFailed,
-                    mongoutils::str::stream() << "Renaming file " << _writer->_fileName << " to "
-                                              << renameTarget
-                                              << " failed; Cannot verify whether destination "
-                                                 "already exists: "
-                                              << e.what());
+                return Status(ErrorCodes::FileRenameFailed,
+                              mongoutils::str::stream()
+                                  << "Renaming file " << _writer->_fileName << " to "
+                                  << renameTarget << " failed; Cannot verify whether destination "
+                                                     "already exists: " << e.what());
             }
 
-            boost::system::error_code ec;
-            boost::filesystem::rename(_writer->_fileName, renameTarget, ec);
-            if (ec) {
+            if (0 != renameFile(_writer->_fileName, renameTarget)) {
                 return Status(ErrorCodes::FileRenameFailed,
-                              mongoutils::str::stream() << "Failed  to rename \""
-                                                        << _writer->_fileName
-                                                        << "\" to \""
-                                                        << renameTarget
-                                                        << "\": "
-                                                        << ec.message());
+                              mongoutils::str::stream()
+                                  << "Failed  to rename \"" << _writer->_fileName << "\" to \""
+                                  << renameTarget << "\": " << strerror(errno) << " (" << errno
+                                  << ')');
                 // TODO(schwerin): Make errnoWithDescription() available in the logger library, and
                 // use it here.
             }

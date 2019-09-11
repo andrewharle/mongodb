@@ -34,16 +34,18 @@
 
 #include <string>
 
+#include "mongo/base/counter.h"
 #include "mongo/client/dbclientinterface.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authorization_manager_global.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/internal_user_auth.h"
+#include "mongo/db/commands/server_status_metric.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/db/repl/minvalid.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/repl/storage_interface.h"
 #include "mongo/executor/network_interface.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/log.h"
@@ -58,12 +60,20 @@ namespace repl {
 
 const BSONObj reverseNaturalObj = BSON("$natural" << -1);
 
+// number of readers created;
+//  this happens when the source source changes, a reconfig/network-error or the cursor dies
+static Counter64 readersCreatedStats;
+static ServerStatusMetricField<Counter64> displayReadersCreated("repl.network.readersCreated",
+                                                                &readersCreatedStats);
+
+
 bool replAuthenticate(DBClientBase* conn) {
-    if (isInternalAuthSet())
-        return conn->authenticateInternalUser();
-    if (getGlobalAuthorizationManager()->isAuthEnabled())
+    if (!getGlobalAuthorizationManager()->isAuthEnabled())
+        return true;
+
+    if (!isInternalAuthSet())
         return false;
-    return true;
+    return conn->authenticateInternalUser();
 }
 
 const Seconds OplogReader::kSocketTimeout(30);
@@ -74,6 +84,8 @@ OplogReader::OplogReader() {
 
     /* TODO: slaveOk maybe shouldn't use? */
     _tailingQueryOptions |= QueryOption_AwaitData;
+
+    readersCreatedStats.increment();
 }
 
 bool OplogReader::connect(const HostAndPort& host) {
@@ -82,13 +94,13 @@ bool OplogReader::connect(const HostAndPort& host) {
         _conn = shared_ptr<DBClientConnection>(
             new DBClientConnection(false, durationCount<Seconds>(kSocketTimeout)));
         string errmsg;
-        if (!_conn->connect(host, StringData(), errmsg) || !replAuthenticate(_conn.get())) {
+        if (!_conn->connect(host, errmsg) ||
+            (getGlobalAuthorizationManager()->isAuthEnabled() && !replAuthenticate(_conn.get()))) {
             resetConnection();
             error() << errmsg << endl;
             return false;
         }
-        _conn->port().setTag(_conn->port().getTag() |
-                             executor::NetworkInterface::kMessagingPortKeepOpen);
+        _conn->port().tag |= executor::NetworkInterface::kMessagingPortKeepOpen;
         _host = host;
     }
     return true;
@@ -109,7 +121,7 @@ void OplogReader::query(
 
 void OplogReader::tailingQuery(const char* ns, const BSONObj& query) {
     verify(!haveCursor());
-    LOG(2) << ns << ".find(" << redact(query) << ')' << endl;
+    LOG(2) << ns << ".find(" << query.toString() << ')' << endl;
     cursor.reset(_conn->query(ns, query, 0, 0, nullptr, _tailingQueryOptions).release());
 }
 
@@ -137,11 +149,9 @@ Status OplogReader::_compareRequiredOpTimeWithQueryResponse(const OpTime& requir
     if (requiredOpTime != opTime) {
         return Status(ErrorCodes::BadValue,
                       str::stream() << "remote oplog contain entry with matching timestamp "
-                                    << opTime.getTimestamp().toString()
-                                    << " but optime "
-                                    << opTime.toString()
-                                    << " does not "
-                                       "match our required optime");
+                                    << opTime.getTimestamp().toString() << " but optime "
+                                    << opTime.toString() << " does not "
+                                                            "match our required optime");
     }
     if (requiredOpTime.getTerm() != opTime.getTerm()) {
         return Status(ErrorCodes::BadValue,
@@ -155,16 +165,16 @@ Status OplogReader::_compareRequiredOpTimeWithQueryResponse(const OpTime& requir
 void OplogReader::connectToSyncSource(OperationContext* txn,
                                       const OpTime& lastOpTimeFetched,
                                       const OpTime& requiredOpTime,
-                                      ReplicationCoordinator* replCoord) {
-    const Timestamp sentinelTimestamp(duration_cast<Seconds>(Date_t::now().toDurationSinceEpoch()),
-                                      0);
+                                      ReplicationCoordinator* replCoord,
+                                      int* rbidOut) {
+    const Timestamp sentinelTimestamp(duration_cast<Seconds>(Milliseconds(curTimeMillis64())), 0);
     const OpTime sentinel(sentinelTimestamp, std::numeric_limits<long long>::max());
     OpTime oldestOpTimeSeen = sentinel;
 
     invariant(conn() == NULL);
 
     while (true) {
-        HostAndPort candidate = replCoord->chooseNewSyncSource(lastOpTimeFetched);
+        HostAndPort candidate = replCoord->chooseNewSyncSource(lastOpTimeFetched.getTimestamp());
 
         if (candidate.empty()) {
             if (oldestOpTimeSeen == sentinel) {
@@ -200,6 +210,18 @@ void OplogReader::connectToSyncSource(OperationContext* txn,
             replCoord->blacklistSyncSource(candidate, Date_t::now() + Seconds(10));
             continue;
         }
+
+        if (rbidOut) {
+            BSONObj reply;
+            if (!conn()->runCommand("admin", BSON("replSetGetRBID" << 1), reply)) {
+                log() << "Error getting rbid from " << candidate << ": " << reply;
+                resetConnection();
+                replCoord->blacklistSyncSource(candidate, Date_t::now() + Seconds(10));
+                continue;
+            }
+            *rbidOut = reply["rbid"].Int();
+        }
+
         // Read the first (oldest) op and confirm that it's not newer than our last
         // fetched op. Otherwise, we have fallen off the back of that source's oplog.
         BSONObj remoteOldestOp(findOne(rsOplogName.c_str(), Query()));
@@ -232,8 +254,8 @@ void OplogReader::connectToSyncSource(OperationContext* txn,
                 const auto until = Date_t::now() + blacklistDuration;
                 warning() << "We cannot use " << candidate.toString()
                           << " as a sync source because it does not contain the necessary "
-                             "operations for us to reach a consistent state: "
-                          << status << " last fetched optime: " << lastOpTimeFetched
+                             "operations for us to reach a consistent state: " << status
+                          << " last fetched optime: " << lastOpTimeFetched
                           << ". required optime: " << requiredOpTime
                           << ". Blacklisting this sync source for " << blacklistDuration
                           << " until: " << until;

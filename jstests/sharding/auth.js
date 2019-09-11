@@ -2,13 +2,24 @@
 // authentication is used
 (function() {
     'use strict';
-    load("jstests/replsets/rslib.js");
 
-    var adminUser = {db: "admin", username: "foo", password: "bar"};
+    var adminUser = {
+        db: "admin",
+        username: "foo",
+        password: "bar"
+    };
 
-    var testUser = {db: "test", username: "bar", password: "baz"};
+    var testUser = {
+        db: "test",
+        username: "bar",
+        password: "baz"
+    };
 
-    var testUserReadOnly = {db: "test", username: "sad", password: "bat"};
+    var testUserReadOnly = {
+        db: "test",
+        username: "sad",
+        password: "bat"
+    };
 
     function login(userObj, thingToUse) {
         if (!thingToUse) {
@@ -38,7 +49,10 @@
         name: "auth",
         mongos: 1,
         shards: 0,
-        other: {keyFile: "jstests/libs/key1", chunkSize: 1, enableAutoSplit: false},
+        other: {
+            extraOptions: {"keyFile": "jstests/libs/key1"},
+            noChunkSize: true,
+        }
     });
 
     if (s.getDB('admin').runCommand('buildInfo').bits < 64) {
@@ -47,14 +61,14 @@
     }
 
     print("Configuration: Add user " + tojson(adminUser));
-    s.getDB(adminUser.db).createUser({
-        user: adminUser.username,
-        pwd: adminUser.password,
-        roles: jsTest.adminUserRoles
-    });
+    s.getDB(adminUser.db)
+        .createUser(
+            {user: adminUser.username, pwd: adminUser.password, roles: jsTest.adminUserRoles});
     login(adminUser);
 
     // Set the chunk size, disable the secondary throttle (so the test doesn't run so slow)
+    assert.writeOK(
+        s.getDB("config").settings.update({_id: "chunksize"}, {$set: {value: 1}}, {upsert: true}));
     assert.writeOK(s.getDB("config").settings.update(
         {_id: "balancer"},
         {$set: {"_secondaryThrottle": false, "_waitForDelete": true}},
@@ -63,17 +77,19 @@
     printjson(s.getDB("config").settings.find().toArray());
 
     print("Restart mongos with different auth options");
-    s.restartMongos(0);
+    s.restartMongos(0, {v: 2, configdb: s._configDB, keyFile: "jstests/libs/key1", chunkSize: 1});
     login(adminUser);
 
     var d1 = new ReplSetTest({name: "d1", nodes: 3, useHostName: true});
-    d1.startSet({keyFile: "jstests/libs/key2", shardsvr: ""});
+    d1.startSet({keyFile: "jstests/libs/key2"});
     d1.initiate();
 
     print("d1 initiated");
-    var shardName = authutil.asCluster(d1.nodes, "jstests/libs/key2", function() {
-        return getShardName(d1);
-    });
+    var shardName = authutil.asCluster(d1.nodes,
+                                       "jstests/libs/key2",
+                                       function() {
+                                           return getShardName(d1);
+                                       });
 
     print("adding shard w/out auth " + shardName);
     logout(adminUser);
@@ -98,7 +114,7 @@
     print("start rs w/correct key");
 
     d1.stopSet();
-    d1.startSet({keyFile: "jstests/libs/key1", restart: true});
+    d1.startSet({keyFile: "jstests/libs/key1"});
     d1.initiate();
 
     var master = d1.getPrimary();
@@ -113,16 +129,15 @@
 
     d1.waitForState(d1.getSecondaries(), ReplSetTest.State.SECONDARY, 5 * 60 * 1000);
 
-    s.getDB(testUser.db).createUser({
-        user: testUser.username,
-        pwd: testUser.password,
-        roles: jsTest.basicUserRoles
-    });
-    s.getDB(testUserReadOnly.db).createUser({
-        user: testUserReadOnly.username,
-        pwd: testUserReadOnly.password,
-        roles: jsTest.readOnlyUserRoles
-    });
+    s.getDB(testUser.db)
+        .createUser(
+            {user: testUser.username, pwd: testUser.password, roles: jsTest.basicUserRoles});
+    s.getDB(testUserReadOnly.db)
+        .createUser({
+            user: testUserReadOnly.username,
+            pwd: testUserReadOnly.password,
+            roles: jsTest.readOnlyUserRoles
+        });
 
     logout(adminUser);
 
@@ -148,26 +163,27 @@
     logout(testUser);
 
     var d2 = new ReplSetTest({name: "d2", nodes: 3, useHostName: true});
-    d2.startSet({keyFile: "jstests/libs/key1", shardsvr: ""});
+    d2.startSet({keyFile: "jstests/libs/key1"});
     d2.initiate();
     d2.awaitSecondaryNodes();
 
-    shardName = authutil.asCluster(d2.nodes, "jstests/libs/key1", function() {
-        return getShardName(d2);
-    });
+    shardName = authutil.asCluster(d2.nodes,
+                                   "jstests/libs/key1",
+                                   function() {
+                                       return getShardName(d2);
+                                   });
 
     print("adding shard " + shardName);
     login(adminUser);
     print("logged in");
     result = s.getDB("admin").runCommand({addShard: shardName});
 
-    awaitRSClientHosts(s.s, d1.nodes, {ok: true});
-    awaitRSClientHosts(s.s, d2.nodes, {ok: true});
+    ReplSetTest.awaitRSClientHosts(s.s, d1.nodes, {ok: true});
+    ReplSetTest.awaitRSClientHosts(s.s, d2.nodes, {ok: true});
 
     s.getDB("test").foo.remove({});
 
     var num = 10000;
-    assert.commandWorked(s.s.adminCommand({split: "test.foo", middle: {x: num / 2}}));
     var bulk = s.getDB("test").foo.initializeUnorderedBulkOp();
     for (i = 0; i < num; i++) {
         bulk.insert(
@@ -243,12 +259,16 @@
     d1.waitForState(d1.getSecondaries(), ReplSetTest.State.SECONDARY, 5 * 60 * 1000);
     d2.waitForState(d2.getSecondaries(), ReplSetTest.State.SECONDARY, 5 * 60 * 1000);
 
-    authutil.asCluster(d1.nodes, "jstests/libs/key1", function() {
-        d1.awaitReplication();
-    });
-    authutil.asCluster(d2.nodes, "jstests/libs/key1", function() {
-        d2.awaitReplication();
-    });
+    authutil.asCluster(d1.nodes,
+                       "jstests/libs/key1",
+                       function() {
+                           d1.awaitReplication(120000);
+                       });
+    authutil.asCluster(d2.nodes,
+                       "jstests/libs/key1",
+                       function() {
+                           d2.awaitReplication(120000);
+                       });
 
     // add admin on shard itself, hack to prevent localhost auth bypass
     d1.getPrimary()
@@ -282,13 +302,14 @@
     assert.commandWorked(res);
 
     // Check that dump doesn't get stuck with auth
-    var exitCode = MongoRunner.runMongoTool("mongodump", {
-        host: s.s.host,
-        db: testUser.db,
-        username: testUser.username,
-        password: testUser.password,
-        authenticationMechanism: "SCRAM-SHA-1",
-    });
+    var exitCode = MongoRunner.runMongoTool("mongodump",
+                                            {
+                                              host: s.s.host,
+                                              db: testUser.db,
+                                              username: testUser.username,
+                                              password: testUser.password,
+                                              authenticationMechanism: "SCRAM-SHA-1",
+                                            });
     assert.eq(0, exitCode, "mongodump failed to run with authentication enabled");
 
     // Test read only users

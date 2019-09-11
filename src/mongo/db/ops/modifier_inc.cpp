@@ -89,8 +89,7 @@ Status ModifierInc::init(const BSONElement& modExpr, const Options& opts, bool* 
     if (foundDollar && foundCount > 1) {
         return Status(ErrorCodes::BadValue,
                       str::stream() << "Too many positional (i.e. '$') elements found in path '"
-                                    << _fieldRef.dottedField()
-                                    << "'");
+                                    << _fieldRef.dottedField() << "'");
     }
 
     //
@@ -102,9 +101,7 @@ Status ModifierInc::init(const BSONElement& modExpr, const Options& opts, bool* 
         // include mod code, etc.
         return Status(ErrorCodes::TypeMismatch,
                       str::stream() << "Cannot " << (_mode == MODE_INC ? "increment" : "multiply")
-                                    << " with non-numeric argument: {"
-                                    << modExpr
-                                    << "}");
+                                    << " with non-numeric argument: {" << modExpr << "}");
     }
 
     _val = modExpr;
@@ -166,7 +163,7 @@ Status ModifierInc::prepare(mutablebson::Element root,
         // always yield a zero of the same type of operand that the user provided
         // (e.g. double).
         if (_mode == MODE_MUL)
-            _preparedState->newValue *= SafeNum(static_cast<int32_t>(0));
+            _preparedState->newValue *= SafeNum(static_cast<int>(0));
 
         if (elemFoundIsArray) {
             // Report that an existing array will gain a new element as a result of this mod.
@@ -182,8 +179,7 @@ Status ModifierInc::prepare(mutablebson::Element root,
         mb::Element idElem = mb::findFirstChildNamed(root, "_id");
         return Status(ErrorCodes::TypeMismatch,
                       str::stream() << "Cannot apply " << (_mode == MODE_INC ? "$inc" : "$mul")
-                                    << " to a value of non-numeric type. {"
-                                    << idElem.toString()
+                                    << " to a value of non-numeric type. {" << idElem.toString()
                                     << "} has the field '"
                                     << _preparedState->elemFound.getFieldName()
                                     << "' of non-numeric type "
@@ -202,10 +198,8 @@ Status ModifierInc::prepare(mutablebson::Element root,
         mb::Element idElem = mb::findFirstChildNamed(root, "_id");
         return Status(ErrorCodes::BadValue,
                       str::stream() << "Failed to apply $inc operations to current value ("
-                                    << currentValue.debugString()
-                                    << ") for document {"
-                                    << idElem.toString()
-                                    << "}");
+                                    << currentValue.debugString() << ") for document {"
+                                    << idElem.toString() << "}");
     }
 
     // If the values are identical (same type, same value), then this is a no-op.
@@ -267,11 +261,8 @@ Status ModifierInc::log(LogBuilder* logBuilder) const {
     if (!logElement.ok()) {
         return Status(ErrorCodes::InternalError,
                       str::stream() << "Could not append entry to "
-                                    << (_mode == MODE_INC ? "$inc" : "$mul")
-                                    << " oplog entry: "
-                                    << "set '"
-                                    << _fieldRef.dottedField()
-                                    << "' -> "
+                                    << (_mode == MODE_INC ? "$inc" : "$mul") << " oplog entry: "
+                                    << "set '" << _fieldRef.dottedField() << "' -> "
                                     << _preparedState->newValue.debugString());
     }
 

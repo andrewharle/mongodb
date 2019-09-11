@@ -130,13 +130,5 @@
         {a: NumberInt("1")}, {a: NumberLong("1")}, bsonWoCompareWrapper, "bsonWoCompare");
     testObjectsAreNotEqual(
         {a: NumberInt("1")}, {a: NumberLong("1")}, bsonBinaryEqual, "bsonBinaryEqual");
-    testObjectsAreEqual(
-        {a: NumberInt("1")}, {a: NumberDecimal("1.0")}, bsonWoCompareWrapper, "bsonWoCompare");
-    testObjectsAreNotEqual(
-        {a: NumberInt("1")}, {a: NumberDecimal("1.0")}, bsonBinaryEqual, "bsonBinaryEqual");
-    testObjectsAreEqual(
-        {a: NumberLong("1")}, {a: NumberDecimal("1.0")}, bsonWoCompareWrapper, "bsonWoCompare");
-    testObjectsAreNotEqual(
-        {a: NumberLong("1")}, {a: NumberDecimal("1.0")}, bsonBinaryEqual, "bsonBinaryEqual");
 
 })();

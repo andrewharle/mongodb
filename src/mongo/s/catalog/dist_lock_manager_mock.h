@@ -31,7 +31,6 @@
 #include <string>
 #include <vector>
 
-#include "mongo/s/catalog/dist_lock_catalog.h"
 #include "mongo/s/catalog/dist_lock_manager.h"
 #include "mongo/stdx/functional.h"
 
@@ -39,39 +38,35 @@ namespace mongo {
 
 class DistLockManagerMock : public DistLockManager {
 public:
-    DistLockManagerMock(std::unique_ptr<DistLockCatalog> catalog);
+    DistLockManagerMock();
 
     virtual ~DistLockManagerMock() = default;
 
-    void startUp() override;
-    void shutDown(OperationContext* txn) override;
+    virtual void startUp() override;
+    virtual void shutDown(OperationContext* txn, bool allowNetworking) override;
 
-    std::string getProcessID() override;
+    virtual std::string getProcessID() override;
 
-    StatusWith<DistLockHandle> lockWithSessionID(OperationContext* txn,
-                                                 StringData name,
-                                                 StringData whyMessage,
-                                                 const OID& lockSessionID,
-                                                 Milliseconds waitFor) override;
+    virtual StatusWith<DistLockManager::ScopedDistLock> lock(
+        OperationContext* txn,
+        StringData name,
+        StringData whyMessage,
+        stdx::chrono::milliseconds waitFor,
+        stdx::chrono::milliseconds lockTryInterval) override;
 
-    StatusWith<DistLockHandle> tryLockWithLocalWriteConcern(OperationContext* txn,
-                                                            StringData name,
-                                                            StringData whyMessage,
-                                                            const OID& lockSessionID) override;
+    virtual void unlockAll(OperationContext* txn, const std::string& processID) override;
 
-    void unlockAll(OperationContext* txn, const std::string& processID) override;
-
-    using LockFunc =
-        stdx::function<void(StringData name, StringData whyMessage, Milliseconds waitFor)>;
+    using LockFunc = stdx::function<void(StringData name,
+                                         StringData whyMessage,
+                                         stdx::chrono::milliseconds waitFor,
+                                         stdx::chrono::milliseconds lockTryInterval)>;
 
     void expectLock(LockFunc checkerFunc, Status lockStatus);
 
 protected:
-    void unlock(OperationContext* txn, const DistLockHandle& lockHandle) override;
+    virtual void unlock(OperationContext* txn, const DistLockHandle& lockHandle) override;
 
-    void unlock(OperationContext* txn, const DistLockHandle& lockHandle, StringData name) override;
-
-    Status checkStatus(OperationContext* txn, const DistLockHandle& lockHandle) override;
+    virtual Status checkStatus(OperationContext* txn, const DistLockHandle& lockHandle) override;
 
 private:
     struct LockInfo {
@@ -79,14 +74,8 @@ private:
         std::string name;
     };
 
-    /**
-     * Unused, but needed so that test code mirrors the ownership semantics of production code.
-     */
-    const std::unique_ptr<DistLockCatalog> _catalog;
-
     std::vector<LockInfo> _locks;
     Status _lockReturnStatus;
     LockFunc _lockChecker;
 };
-
-}  // namespace mongo
+}

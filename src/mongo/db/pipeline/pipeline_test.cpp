@@ -28,23 +28,20 @@
 
 #include "mongo/platform/basic.h"
 
-#include <boost/intrusive_ptr.hpp>
-#include <string>
-#include <vector>
-
+#include "mongo/db/auth/action_set.h"
+#include "mongo/db/auth/authorization_manager.h"
+#include "mongo/db/auth/authorization_session_for_test.h"
+#include "mongo/db/auth/authz_manager_external_state_mock.h"
+#include "mongo/db/auth/authz_session_external_state_mock.h"
 #include "mongo/db/operation_context_noop.h"
-#include "mongo/db/pipeline/aggregation_context_fixture.h"
-#include "mongo/db/pipeline/dependencies.h"
 #include "mongo/db/pipeline/document.h"
-#include "mongo/db/pipeline/document_source.h"
-#include "mongo/db/pipeline/document_source_mock.h"
-#include "mongo/db/pipeline/document_value_test_util.h"
-#include "mongo/db/pipeline/expression_context_for_test.h"
+#include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/field_path.h"
 #include "mongo/db/pipeline/pipeline.h"
-#include "mongo/db/query/collation/collator_interface_mock.h"
-#include "mongo/db/query/query_test_service_context.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/service_context_noop.h"
 #include "mongo/dbtests/dbtests.h"
+#include "mongo/stdx/memory.h"
 
 namespace mongo {
 bool isMongos() {
@@ -56,7 +53,6 @@ namespace PipelineTests {
 
 using boost::intrusive_ptr;
 using std::string;
-using std::vector;
 
 namespace Optimizations {
 using namespace mongo;
@@ -64,18 +60,9 @@ using namespace mongo;
 namespace Local {
 class Base {
 public:
-    // These return json arrays of pipeline operators
+    // These both return json arrays of pipeline operators
     virtual string inputPipeJson() = 0;
     virtual string outputPipeJson() = 0;
-
-    // This returns a json array of pipeline operators, and is used to check that each pipeline
-    // stage is serialized correctly (note: this is not the same as being explained correctly.)
-    virtual string serializedPipeJson() {
-        // serializedPipeJson should be equal to outputPipeJson if a stage's explain output is
-        // parseable. An example of a stage that has unparseable explain output would be:
-        // {$lookup: {..., unwinding: {...}}} instead of {$lookup: {...}}, {$unwind: {...}}.
-        return outputPipeJson();
-    }
 
     BSONObj pipelineFromJsonArray(const string& array) {
         return fromjson("{pipeline: " + array + "}");
@@ -83,29 +70,15 @@ public:
     virtual void run() {
         const BSONObj inputBson = pipelineFromJsonArray(inputPipeJson());
         const BSONObj outputPipeExpected = pipelineFromJsonArray(outputPipeJson());
-        const BSONObj serializePipeExpected = pipelineFromJsonArray(serializedPipeJson());
 
-        ASSERT_EQUALS(inputBson["pipeline"].type(), BSONType::Array);
-        vector<BSONObj> rawPipeline;
-        for (auto&& stageElem : inputBson["pipeline"].Array()) {
-            ASSERT_EQUALS(stageElem.type(), BSONType::Object);
-            rawPipeline.push_back(stageElem.embeddedObject());
-        }
-        AggregationRequest request(NamespaceString("a.collection"), rawPipeline);
-        intrusive_ptr<ExpressionContextForTest> ctx =
-            new ExpressionContextForTest(&_opCtx, request);
+        intrusive_ptr<ExpressionContext> ctx =
+            new ExpressionContext(&_opCtx, NamespaceString("a.collection"));
+        string errmsg;
+        intrusive_ptr<Pipeline> outputPipe = Pipeline::parseCommand(errmsg, inputBson, ctx);
+        ASSERT_EQUALS(errmsg, "");
+        ASSERT(outputPipe != NULL);
 
-        // For $graphLookup and $lookup, we have to populate the resolvedNamespaces so that the
-        // operations will be able to have a resolved view definition.
-        NamespaceString lookupCollNs("a", "lookupColl");
-        ctx->setResolvedNamespace(lookupCollNs, {lookupCollNs, std::vector<BSONObj>{}});
-
-        auto outputPipe = uassertStatusOK(Pipeline::parse(request.getPipeline(), ctx));
-        outputPipe->optimizePipeline();
-
-        ASSERT_VALUE_EQ(Value(outputPipe->writeExplainOps()),
-                        Value(outputPipeExpected["pipeline"]));
-        ASSERT_VALUE_EQ(Value(outputPipe->serialize()), Value(serializePipeExpected["pipeline"]));
+        ASSERT_EQUALS(Value(outputPipe->writeExplainOps()), Value(outputPipeExpected["pipeline"]));
     }
 
     virtual ~Base() {}
@@ -118,8 +91,9 @@ class MoveSkipBeforeProject : public Base {
     string inputPipeJson() override {
         return "[{$project: {a : 1}}, {$skip : 5}]";
     }
+
     string outputPipeJson() override {
-        return "[{$skip : 5}, {$project: {_id: true, a : true}}]";
+        return "[{$skip : 5}, {$project: {a : true}}]";
     }
 };
 
@@ -129,32 +103,17 @@ class MoveLimitBeforeProject : public Base {
     }
 
     string outputPipeJson() override {
-        return "[{$limit : 5}, {$project: {_id: true, a : true}}]";
+        return "[{$limit : 5}, {$project: {a : true}}]";
     }
 };
 
-class MoveMultipleSkipsAndLimitsBeforeProject : public Base {
+class MoveMulitipleSkipsAndLimitsBeforeProject : public Base {
     string inputPipeJson() override {
         return "[{$project: {a : 1}}, {$limit : 5}, {$skip : 3}]";
     }
 
     string outputPipeJson() override {
-        return "[{$limit : 5}, {$skip : 3}, {$project: {_id: true, a : true}}]";
-    }
-};
-
-class SkipSkipLimitBecomesLimitSkip : public Base {
-    string inputPipeJson() override {
-        return "[{$skip : 3}"
-               ",{$skip : 5}"
-               ",{$limit: 5}"
-               "]";
-    }
-
-    string outputPipeJson() override {
-        return "[{$limit: 13}"
-               ",{$skip :  8}"
-               "]";
+        return "[{$limit : 5}, {$skip : 3}, {$project: {a : true}}]";
     }
 };
 
@@ -172,16 +131,7 @@ class SortMatchProjSkipLimBecomesMatchTopKSortSkipProj : public Base {
         return "[{$match: {a: 1}}"
                ",{$sort: {sortKey: {a: 1}, limit: 8}}"
                ",{$skip: 3}"
-               ",{$project: {_id: true, a: true}}"
-               "]";
-    }
-
-    string serializedPipeJson() override {
-        return "[{$match: {a: 1}}"
-               ",{$sort: {a: 1}}"
-               ",{$limit: 8}"
-               ",{$skip : 3}"
-               ",{$project : {_id: true, a: true}}"
+               ",{$project: {a: true}}"
                "]";
     }
 };
@@ -237,657 +187,58 @@ class DoNotRemoveNonEmptyMatch : public Base {
     }
 };
 
-class MoveMatchBeforeSort : public Base {
-    string inputPipeJson() override {
-        return "[{$sort: {b: 1}}, {$match: {a: 2}}]";
-    }
-
-    string outputPipeJson() override {
-        return "[{$match: {a: 2}}, {$sort: {sortKey: {b: 1}}}]";
-    }
-
-    string serializedPipeJson() override {
-        return "[{$match: {a: 2}}, {$sort: {b: 1}}]";
-    }
-};
-
 class LookupShouldCoalesceWithUnwindOnAs : public Base {
     string inputPipeJson() {
-        return "[{$lookup: {from : 'lookupColl', as : 'same', localField: 'left', foreignField: "
+        return "[{$lookup: {from : 'coll2', as : 'same', localField: 'left', foreignField: "
                "'right'}}"
                ",{$unwind: {path: '$same'}}"
                "]";
     }
     string outputPipeJson() {
-        return "[{$lookup: {from : 'lookupColl', as : 'same', localField: 'left', foreignField: "
+        return "[{$lookup: {from : 'coll2', as : 'same', localField: 'left', foreignField: "
                "'right', unwinding: {preserveNullAndEmptyArrays: false}}}]";
-    }
-    string serializedPipeJson() {
-        return "[{$lookup: {from : 'lookupColl', as : 'same', localField: 'left', foreignField: "
-               "'right'}}"
-               ",{$unwind: {path: '$same'}}"
-               "]";
     }
 };
 
 class LookupShouldCoalesceWithUnwindOnAsWithPreserveEmpty : public Base {
     string inputPipeJson() {
-        return "[{$lookup: {from : 'lookupColl', as : 'same', localField: 'left', foreignField: "
+        return "[{$lookup: {from : 'coll2', as : 'same', localField: 'left', foreignField: "
                "'right'}}"
                ",{$unwind: {path: '$same', preserveNullAndEmptyArrays: true}}"
                "]";
     }
     string outputPipeJson() {
-        return "[{$lookup: {from : 'lookupColl', as : 'same', localField: 'left', foreignField: "
+        return "[{$lookup: {from : 'coll2', as : 'same', localField: 'left', foreignField: "
                "'right', unwinding: {preserveNullAndEmptyArrays: true}}}]";
-    }
-    string serializedPipeJson() {
-        return "[{$lookup: {from : 'lookupColl', as : 'same', localField: 'left', foreignField: "
-               "'right'}}"
-               ",{$unwind: {path: '$same', preserveNullAndEmptyArrays: true}}"
-               "]";
     }
 };
 
 class LookupShouldCoalesceWithUnwindOnAsWithIncludeArrayIndex : public Base {
     string inputPipeJson() {
-        return "[{$lookup: {from : 'lookupColl', as : 'same', localField: 'left', foreignField: "
+        return "[{$lookup: {from : 'coll2', as : 'same', localField: 'left', foreignField: "
                "'right'}}"
                ",{$unwind: {path: '$same', includeArrayIndex: 'index'}}"
                "]";
     }
     string outputPipeJson() {
-        return "[{$lookup: {from : 'lookupColl', as : 'same', localField: 'left', foreignField: "
+        return "[{$lookup: {from : 'coll2', as : 'same', localField: 'left', foreignField: "
                "'right', unwinding: {preserveNullAndEmptyArrays: false, includeArrayIndex: "
                "'index'}}}]";
-    }
-    string serializedPipeJson() {
-        return "[{$lookup: {from : 'lookupColl', as : 'same', localField: 'left', foreignField: "
-               "'right'}}"
-               ",{$unwind: {path: '$same', includeArrayIndex: 'index'}}"
-               "]";
     }
 };
 
 class LookupShouldNotCoalesceWithUnwindNotOnAs : public Base {
     string inputPipeJson() {
-        return "[{$lookup: {from : 'lookupColl', as : 'same', localField: 'left', foreignField: "
+        return "[{$lookup: {from : 'coll2', as : 'same', localField: 'left', foreignField: "
                "'right'}}"
                ",{$unwind: {path: '$from'}}"
                "]";
     }
     string outputPipeJson() {
-        return "[{$lookup: {from : 'lookupColl', as : 'same', localField: 'left', foreignField: "
+        return "[{$lookup: {from : 'coll2', as : 'same', localField: 'left', foreignField: "
                "'right'}}"
                ",{$unwind: {path: '$from'}}"
                "]";
-    }
-};
-
-class LookupShouldSwapWithMatch : public Base {
-    string inputPipeJson() {
-        return "[{$lookup: {from: 'lookupColl', as: 'asField', localField: 'y', foreignField: "
-               "'z'}}, "
-               " {$match: {'independent': 0}}]";
-    }
-    string outputPipeJson() {
-        return "[{$match: {independent: 0}}, "
-               " {$lookup: {from: 'lookupColl', as: 'asField', localField: 'y', foreignField: "
-               "'z'}}]";
-    }
-};
-
-class LookupShouldSplitMatch : public Base {
-    string inputPipeJson() {
-        return "[{$lookup: {from: 'lookupColl', as: 'asField', localField: 'y', foreignField: "
-               "'z'}}, "
-               " {$match: {'independent': 0, asField: {$eq: 3}}}]";
-    }
-    string outputPipeJson() {
-        return "[{$match: {independent: {$eq: 0}}}, "
-               " {$lookup: {from: 'lookupColl', as: 'asField', localField: 'y', foreignField: "
-               "'z'}}, "
-               " {$match: {asField: {$eq: 3}}}]";
-    }
-};
-
-class LookupShouldNotAbsorbMatchOnAs : public Base {
-    string inputPipeJson() {
-        return "[{$lookup: {from: 'lookupColl', as: 'asField', localField: 'y', foreignField: "
-               "'z'}}, "
-               " {$match: {'asField.subfield': 0}}]";
-    }
-    string outputPipeJson() {
-        return "[{$lookup: {from: 'lookupColl', as: 'asField', localField: 'y', foreignField: "
-               "'z'}}, "
-               " {$match: {'asField.subfield': 0}}]";
-    }
-};
-
-class LookupShouldAbsorbUnwindMatch : public Base {
-    string inputPipeJson() {
-        return "[{$lookup: {from: 'lookupColl', as: 'asField', localField: 'y', foreignField: "
-               "'z'}}, "
-               "{$unwind: '$asField'}, "
-               "{$match: {'asField.subfield': {$eq: 1}}}]";
-    }
-    string outputPipeJson() {
-        return "[{$lookup: {from: 'lookupColl', as: 'asField', localField: 'y', foreignField: 'z', "
-               "            unwinding: {preserveNullAndEmptyArrays: false}, "
-               "            matching: {subfield: {$eq: 1}}}}]";
-    }
-    string serializedPipeJson() {
-        return "[{$lookup: {from: 'lookupColl', as: 'asField', localField: 'y', foreignField: "
-               "'z'}}, "
-               "{$unwind: {path: '$asField'}}, "
-               "{$match: {'asField.subfield': {$eq: 1}}}]";
-    }
-};
-
-class LookupShouldAbsorbUnwindAndSplitAndAbsorbMatch : public Base {
-    string inputPipeJson() {
-        return "[{$lookup: {from: 'lookupColl', as: 'asField', localField: 'y', foreignField: "
-               "'z'}}, "
-               " {$unwind: '$asField'}, "
-               " {$match: {'asField.subfield': {$eq: 1}, independentField: {$gt: 2}}}]";
-    }
-    string outputPipeJson() {
-        return "[{$match: {independentField: {$gt: 2}}}, "
-               " {$lookup: { "
-               "      from: 'lookupColl', "
-               "      as: 'asField', "
-               "      localField: 'y', "
-               "      foreignField: 'z', "
-               "      unwinding: { "
-               "          preserveNullAndEmptyArrays: false"
-               "      }, "
-               "      matching: { "
-               "          subfield: {$eq: 1} "
-               "      } "
-               " }}]";
-    }
-    string serializedPipeJson() {
-        return "[{$match: {independentField: {$gt: 2}}}, "
-               " {$lookup: {from: 'lookupColl', as: 'asField', localField: 'y', foreignField: "
-               "'z'}}, "
-               " {$unwind: {path: '$asField'}}, "
-               " {$match: {'asField.subfield': {$eq: 1}}}]";
-    }
-};
-
-class LookupShouldNotSplitIndependentAndDependentOrClauses : public Base {
-    // If any child of the $or is dependent on the 'asField', then the $match cannot be moved above
-    // the $lookup, and if any child of the $or is independent of the 'asField', then the $match
-    // cannot be absorbed by the $lookup.
-    string inputPipeJson() {
-        return "[{$lookup: {from: 'lookupColl', as: 'asField', localField: 'y', foreignField: "
-               "'z'}}, "
-               " {$unwind: '$asField'}, "
-               " {$match: {$or: [{'independent': {$gt: 4}}, "
-               "                 {'asField.dependent': {$elemMatch: {a: {$eq: 1}}}}]}}]";
-    }
-    string outputPipeJson() {
-        return "[{$lookup: {from: 'lookupColl', as: 'asField', localField: 'y', foreignField: 'z', "
-               "            unwinding: {preserveNullAndEmptyArrays: false}}}, "
-               " {$match: {$or: [{'independent': {$gt: 4}}, "
-               "                 {'asField.dependent': {$elemMatch: {a: {$eq: 1}}}}]}}]";
-    }
-    string serializedPipeJson() {
-        return "[{$lookup: {from: 'lookupColl', as: 'asField', localField: 'y', foreignField: "
-               "'z'}}, "
-               " {$unwind: {path: '$asField'}}, "
-               " {$match: {$or: [{'independent': {$gt: 4}}, "
-               "                 {'asField.dependent': {$elemMatch: {a: {$eq: 1}}}}]}}]";
-    }
-};
-
-class LookupWithMatchOnArrayIndexFieldShouldNotCoalesce : public Base {
-    string inputPipeJson() {
-        return "[{$lookup: {from: 'lookupColl', as: 'asField', localField: 'y', foreignField: "
-               "'z'}}, "
-               " {$unwind: {path: '$asField', includeArrayIndex: 'index'}}, "
-               " {$match: {index: 0, 'asField.value': {$gt: 0}, independent: 1}}]";
-    }
-    string outputPipeJson() {
-        return "[{$match: {independent: {$eq: 1}}}, "
-               " {$lookup: { "
-               "      from: 'lookupColl', "
-               "      as: 'asField', "
-               "      localField: 'y', "
-               "      foreignField: 'z', "
-               "      unwinding: { "
-               "          preserveNullAndEmptyArrays: false, "
-               "          includeArrayIndex: 'index' "
-               "      } "
-               " }}, "
-               " {$match: {$and: [{index: {$eq: 0}}, {'asField.value': {$gt: 0}}]}}]";
-    }
-    string serializedPipeJson() {
-        return "[{$match: {independent: {$eq: 1}}}, "
-               " {$lookup: {from: 'lookupColl', as: 'asField', localField: 'y', foreignField: "
-               "'z'}}, "
-               " {$unwind: {path: '$asField', includeArrayIndex: 'index'}}, "
-               " {$match: {$and: [{index: {$eq: 0}}, {'asField.value': {$gt: 0}}]}}]";
-    }
-};
-
-class LookupWithUnwindPreservingNullAndEmptyArraysShouldNotCoalesce : public Base {
-    string inputPipeJson() {
-        return "[{$lookup: {from: 'lookupColl', as: 'asField', localField: 'y', foreignField: "
-               "'z'}}, "
-               " {$unwind: {path: '$asField', preserveNullAndEmptyArrays: true}}, "
-               " {$match: {'asField.value': {$gt: 0}, independent: 1}}]";
-    }
-    string outputPipeJson() {
-        return "[{$match: {independent: {$eq: 1}}}, "
-               " {$lookup: { "
-               "      from: 'lookupColl', "
-               "      as: 'asField', "
-               "      localField: 'y', "
-               "      foreignField: 'z', "
-               "      unwinding: { "
-               "          preserveNullAndEmptyArrays: true"
-               "      } "
-               " }}, "
-               " {$match: {'asField.value': {$gt: 0}}}]";
-    }
-    string serializedPipeJson() {
-        return "[{$match: {independent: {$eq: 1}}}, "
-               " {$lookup: {from: 'lookupColl', as: 'asField', localField: 'y', foreignField: "
-               "'z'}}, "
-               " {$unwind: {path: '$asField', preserveNullAndEmptyArrays: true}}, "
-               " {$match: {'asField.value': {$gt: 0}}}]";
-    }
-};
-
-class LookupDoesNotAbsorbElemMatch : public Base {
-    string inputPipeJson() {
-        return "[{$lookup: {from: 'lookupColl', as: 'x', localField: 'y', foreignField: 'z'}}, "
-               " {$unwind: '$x'}, "
-               " {$match: {x: {$elemMatch: {a: 1}}}}]";
-    }
-    string outputPipeJson() {
-        return "[{$lookup: { "
-               "             from: 'lookupColl', "
-               "             as: 'x', "
-               "             localField: 'y', "
-               "             foreignField: 'z', "
-               "             unwinding: { "
-               "                          preserveNullAndEmptyArrays: false "
-               "             } "
-               "           } "
-               " }, "
-               " {$match: {x: {$elemMatch: {a: 1}}}}]";
-    }
-    string serializedPipeJson() {
-        return "[{$lookup: {from: 'lookupColl', as: 'x', localField: 'y', foreignField: 'z'}}, "
-               " {$unwind: {path: '$x'}}, "
-               " {$match: {x: {$elemMatch: {a: 1}}}}]";
-    }
-};
-
-class LookupDoesSwapWithMatchOnLocalField : public Base {
-    string inputPipeJson() {
-        return "[{$lookup: {from: 'lookupColl', as: 'x', localField: 'y', foreignField: 'z'}}, "
-               " {$match: {y: {$eq: 3}}}]";
-    }
-    string outputPipeJson() {
-        return "[{$match: {y: {$eq: 3}}}, "
-               " {$lookup: {from: 'lookupColl', as: 'x', localField: 'y', foreignField: 'z'}}]";
-    }
-};
-
-class LookupDoesSwapWithMatchOnFieldWithSameNameAsForeignField : public Base {
-    string inputPipeJson() {
-        return "[{$lookup: {from: 'lookupColl', as: 'x', localField: 'y', foreignField: 'z'}}, "
-               " {$match: {z: {$eq: 3}}}]";
-    }
-    string outputPipeJson() {
-        return "[{$match: {z: {$eq: 3}}}, "
-               " {$lookup: {from: 'lookupColl', as: 'x', localField: 'y', foreignField: 'z'}}]";
-    }
-};
-
-class LookupDoesNotAbsorbUnwindOnSubfieldOfAsButStillMovesMatch : public Base {
-    string inputPipeJson() {
-        return "[{$lookup: {from: 'lookupColl', as: 'x', localField: 'y', foreignField: 'z'}}, "
-               " {$unwind: {path: '$x.subfield'}}, "
-               " {$match: {'independent': 2, 'x.dependent': 2}}]";
-    }
-    string outputPipeJson() {
-        return "[{$match: {'independent': {$eq: 2}}}, "
-               " {$lookup: {from: 'lookupColl', as: 'x', localField: 'y', foreignField: 'z'}}, "
-               " {$match: {'x.dependent': {$eq: 2}}}, "
-               " {$unwind: {path: '$x.subfield'}}]";
-    }
-};
-
-class MatchShouldDuplicateItselfBeforeRedact : public Base {
-    string inputPipeJson() {
-        return "[{$redact: '$$PRUNE'}, {$match: {a: 1, b:12}}]";
-    }
-    string outputPipeJson() {
-        return "[{$match: {a: 1, b:12}}, {$redact: '$$PRUNE'}, {$match: {a: 1, b:12}}]";
-    }
-};
-
-class MatchShouldSwapWithUnwind : public Base {
-    string inputPipeJson() {
-        return "[{$unwind: '$a.b.c'}, "
-               "{$match: {'b': 1}}]";
-    }
-    string outputPipeJson() {
-        return "[{$match: {'b': 1}}, "
-               "{$unwind: {path: '$a.b.c'}}]";
-    }
-};
-
-class MatchOnPrefixShouldNotSwapOnUnwind : public Base {
-    string inputPipeJson() {
-        return "[{$unwind: {path: '$a.b.c'}}, "
-               "{$match: {'a.b': 1}}]";
-    }
-    string outputPipeJson() {
-        return "[{$unwind: {path: '$a.b.c'}}, "
-               "{$match: {'a.b': 1}}]";
-    }
-};
-
-class MatchShouldSplitOnUnwind : public Base {
-    string inputPipeJson() {
-        return "[{$unwind: '$a.b'}, "
-               "{$match: {$and: [{f: {$eq: 5}}, "
-               "                 {$nor: [{'a.d': 1, c: 5}, {'a.b': 3, c: 5}]}]}}]";
-    }
-    string outputPipeJson() {
-        return "[{$match: {$and: [{f: {$eq: 5}},"
-               "                  {$nor: [{$and: [{'a.d': {$eq: 1}}, {c: {$eq: 5}}]}]}]}},"
-               "{$unwind: {path: '$a.b'}}, "
-               "{$match: {$nor: [{$and: [{'a.b': {$eq: 3}}, {c: {$eq: 5}}]}]}}]";
-    }
-};
-
-class MatchShouldNotOptimizeWithElemMatch : public Base {
-    string inputPipeJson() {
-        return "[{$unwind: {path: '$a.b'}}, "
-               "{$match: {a: {$elemMatch: {b: {d: 1}}}}}]";
-    }
-    string outputPipeJson() {
-        return "[{$unwind: {path: '$a.b'}}, "
-               "{$match: {a: {$elemMatch: {b: {d: 1}}}}}]";
-    }
-};
-
-class MatchShouldNotOptimizeWhenMatchingOnIndexField : public Base {
-    string inputPipeJson() {
-        return "[{$unwind: {path: '$a', includeArrayIndex: 'foo'}}, "
-               " {$match: {foo: 0, b: 1}}]";
-    }
-    string outputPipeJson() {
-        return "[{$match: {b: {$eq: 1}}}, "
-               " {$unwind: {path: '$a', includeArrayIndex: 'foo'}}, "
-               " {$match: {foo: {$eq: 0}}}]";
-    }
-};
-
-class MatchWithNorOnlySplitsIndependentChildren : public Base {
-    string inputPipeJson() {
-        return "[{$unwind: {path: '$a'}}, "
-               "{$match: {$nor: [{$and: [{a: {$eq: 1}}, {b: {$eq: 1}}]}, {b: {$eq: 2}} ]}}]";
-    }
-    string outputPipeJson() {
-        return "[{$match: {$nor: [{b: {$eq: 2}}]}}, "
-               "{$unwind: {path: '$a'}}, "
-               "{$match: {$nor: [{$and: [{a: {$eq: 1}}, {b: {$eq: 1}}]}]}}]";
-    }
-};
-
-class MatchWithOrDoesNotSplit : public Base {
-    string inputPipeJson() {
-        return "[{$unwind: {path: '$a'}}, "
-               "{$match: {$or: [{a: {$eq: 'dependent'}}, {b: {$eq: 'independent'}}]}}]";
-    }
-    string outputPipeJson() {
-        return "[{$unwind: {path: '$a'}}, "
-               "{$match: {$or: [{a: {$eq: 'dependent'}}, {b: {$eq: 'independent'}}]}}]";
-    }
-};
-
-class UnwindBeforeDoubleMatchShouldRepeatedlyOptimize : public Base {
-    string inputPipeJson() {
-        return "[{$unwind: '$a'}, "
-               "{$match: {b: {$gt: 0}}}, "
-               "{$match: {a: 1, c: 1}}]";
-    }
-    string outputPipeJson() {
-        return "[{$match: {$and: [{b: {$gt: 0}}, {c: {$eq: 1}}]}},"
-               "{$unwind: {path: '$a'}}, "
-               "{$match: {a: {$eq: 1}}}]";
-    }
-};
-
-class GraphLookupShouldCoalesceWithUnwindOnAs : public Base {
-    string inputPipeJson() final {
-        return "[{$graphLookup: {from: 'lookupColl', as: 'out', connectToField: 'b', "
-               "                 connectFromField: 'c', startWith: '$d'}}, "
-               " {$unwind: '$out'}]";
-    }
-
-    string outputPipeJson() final {
-        return "[{$graphLookup: {from: 'lookupColl', as: 'out', connectToField: 'b', "
-               "                 connectFromField: 'c', startWith: '$d', "
-               "                 unwinding: {preserveNullAndEmptyArrays: false}}}]";
-    }
-
-    string serializedPipeJson() final {
-        return "[{$graphLookup: {from: 'lookupColl', as: 'out', connectToField: 'b', "
-               "                 connectFromField: 'c', startWith: '$d'}}, "
-               " {$unwind: {path: '$out'}}]";
-    }
-};
-
-class GraphLookupShouldCoalesceWithUnwindOnAsWithPreserveEmpty : public Base {
-    string inputPipeJson() final {
-        return "[{$graphLookup: {from: 'lookupColl', as: 'out', connectToField: 'b', "
-               "                 connectFromField: 'c', startWith: '$d'}}, "
-               " {$unwind: {path: '$out', preserveNullAndEmptyArrays: true}}]";
-    }
-
-    string outputPipeJson() final {
-        return "[{$graphLookup: {from: 'lookupColl', as: 'out', connectToField: 'b', "
-               "                 connectFromField: 'c', startWith: '$d', "
-               "                 unwinding: {preserveNullAndEmptyArrays: true}}}]";
-    }
-
-    string serializedPipeJson() final {
-        return "[{$graphLookup: {from: 'lookupColl', as: 'out', connectToField: 'b', "
-               "                 connectFromField: 'c', startWith: '$d'}}, "
-               " {$unwind: {path: '$out', preserveNullAndEmptyArrays: true}}]";
-    }
-};
-
-class GraphLookupShouldCoalesceWithUnwindOnAsWithIncludeArrayIndex : public Base {
-    string inputPipeJson() final {
-        return "[{$graphLookup: {from: 'lookupColl', as: 'out', connectToField: 'b', "
-               "                 connectFromField: 'c', startWith: '$d'}}, "
-               " {$unwind: {path: '$out', includeArrayIndex: 'index'}}]";
-    }
-
-    string outputPipeJson() final {
-        return "[{$graphLookup: {from: 'lookupColl', as: 'out', connectToField: 'b', "
-               "                 connectFromField: 'c', startWith: '$d', "
-               "                 unwinding: {preserveNullAndEmptyArrays: false, "
-               "                             includeArrayIndex: 'index'}}}]";
-    }
-
-    string serializedPipeJson() final {
-        return "[{$graphLookup: {from: 'lookupColl', as: 'out', connectToField: 'b', "
-               "                 connectFromField: 'c', "
-               "                 startWith: '$d'}}, "
-               " {$unwind: {path: '$out', includeArrayIndex: 'index'}}]";
-    }
-};
-
-class GraphLookupShouldNotCoalesceWithUnwindNotOnAs : public Base {
-    string inputPipeJson() final {
-        return "[{$graphLookup: {from: 'lookupColl', as: 'out', connectToField: 'b', "
-               "                 connectFromField: 'c', startWith: '$d'}}, "
-               " {$unwind: '$nottherightthing'}]";
-    }
-
-    string outputPipeJson() final {
-        return "[{$graphLookup: {from: 'lookupColl', as: 'out', connectToField: 'b', "
-               "                 connectFromField: 'c', startWith: '$d'}}, "
-               " {$unwind: {path: '$nottherightthing'}}]";
-    }
-};
-
-class GraphLookupShouldSwapWithMatch : public Base {
-    string inputPipeJson() {
-        return "[{$graphLookup: {"
-               "    from: 'lookupColl',"
-               "    as: 'results',"
-               "    connectToField: 'to',"
-               "    connectFromField: 'from',"
-               "    startWith: '$startVal'"
-               " }},"
-               " {$match: {independent: 'x'}}"
-               "]";
-    }
-    string outputPipeJson() {
-        return "[{$match: {independent: 'x'}},"
-               " {$graphLookup: {"
-               "    from: 'lookupColl',"
-               "    as: 'results',"
-               "    connectToField: 'to',"
-               "    connectFromField: 'from',"
-               "    startWith: '$startVal'"
-               " }}]";
-    }
-};
-
-class ExclusionProjectShouldSwapWithIndependentMatch : public Base {
-    string inputPipeJson() final {
-        return "[{$project: {redacted: 0}}, {$match: {unrelated: 4}}]";
-    }
-    string outputPipeJson() final {
-        return "[{$match: {unrelated: 4}}, {$project: {redacted: false}}]";
-    }
-};
-
-class ExclusionProjectShouldNotSwapWithMatchOnExcludedFields : public Base {
-    string inputPipeJson() final {
-        return "[{$project: {subdoc: {redacted: false}}}, {$match: {'subdoc.redacted': 4}}]";
-    }
-    string outputPipeJson() final {
-        return inputPipeJson();
-    }
-};
-
-class MatchShouldSplitIfPartIsIndependentOfExclusionProjection : public Base {
-    string inputPipeJson() final {
-        return "[{$project: {redacted: 0}},"
-               " {$match: {redacted: 'x', unrelated: 4}}]";
-    }
-    string outputPipeJson() final {
-        return "[{$match: {unrelated: {$eq: 4}}},"
-               " {$project: {redacted: false}},"
-               " {$match: {redacted: {$eq: 'x'}}}]";
-    }
-};
-
-class InclusionProjectShouldSwapWithIndependentMatch : public Base {
-    string inputPipeJson() final {
-        return "[{$project: {included: 1}}, {$match: {included: 4}}]";
-    }
-    string outputPipeJson() final {
-        return "[{$match: {included: 4}}, {$project: {_id: true, included: true}}]";
-    }
-};
-
-class InclusionProjectShouldNotSwapWithMatchOnFieldsNotIncluded : public Base {
-    string inputPipeJson() final {
-        return "[{$project: {_id: true, included: true, subdoc: {included: true}}},"
-               " {$match: {notIncluded: 'x', unrelated: 4}}]";
-    }
-    string outputPipeJson() final {
-        return inputPipeJson();
-    }
-};
-
-class MatchShouldSplitIfPartIsIndependentOfInclusionProjection : public Base {
-    string inputPipeJson() final {
-        return "[{$project: {_id: true, included: true}},"
-               " {$match: {included: 'x', unrelated: 4}}]";
-    }
-    string outputPipeJson() final {
-        return "[{$match: {included: {$eq: 'x'}}},"
-               " {$project: {_id: true, included: true}},"
-               " {$match: {unrelated: {$eq: 4}}}]";
-    }
-};
-
-class TwoMatchStagesShouldBothPushIndependentPartsBeforeProjection : public Base {
-    string inputPipeJson() final {
-        return "[{$project: {_id: true, included: true}},"
-               " {$match: {included: 'x', unrelated: 4}},"
-               " {$match: {included: 'y', unrelated: 5}}]";
-    }
-    string outputPipeJson() final {
-        return "[{$match: {$and: [{included: {$eq: 'x'}}, {included: {$eq: 'y'}}]}},"
-               " {$project: {_id: true, included: true}},"
-               " {$match: {$and: [{unrelated: {$eq: 4}}, {unrelated: {$eq: 5}}]}}]";
-    }
-};
-
-class NeighboringMatchesShouldCoalesce : public Base {
-    string inputPipeJson() final {
-        return "[{$match: {x: 'x'}},"
-               " {$match: {y: 'y'}}]";
-    }
-    string outputPipeJson() final {
-        return "[{$match: {$and: [{x: 'x'}, {y: 'y'}]}}]";
-    }
-};
-
-class MatchShouldNotSwapBeforeLimit : public Base {
-    string inputPipeJson() final {
-        return "[{$limit: 3},"
-               " {$match: {y: 'y'}}]";
-    }
-    string outputPipeJson() final {
-        return inputPipeJson();
-    }
-};
-
-class MatchShouldNotSwapBeforeSkip : public Base {
-    string inputPipeJson() final {
-        return "[{$skip: 3},"
-               " {$match: {y: 'y'}}]";
-    }
-    string outputPipeJson() final {
-        return inputPipeJson();
-    }
-};
-
-class MatchCannotSwapWithLimit : public Base {
-    string inputPipeJson() final {
-        return "[{$limit: 3}, {$match: {x: {$gt: 0}}}]";
-    }
-    string outputPipeJson() final {
-        return inputPipeJson();
-    }
-};
-
-class MatchCannotSwapWithSortLimit : public Base {
-    string inputPipeJson() final {
-        return "[{$sort: {x: -1}}, {$limit: 3}, {$match: {x: {$gt: 0}}}]";
-    }
-    string outputPipeJson() final {
-        return "[{$sort: {sortKey: {x: -1}, limit: 3}}, {$match: {x: {$gt: 0}}}]";
-    }
-    string serializedPipeJson() override {
-        return inputPipeJson();
     }
 };
 
@@ -909,29 +260,18 @@ public:
         const BSONObj shardPipeExpected = pipelineFromJsonArray(shardPipeJson());
         const BSONObj mergePipeExpected = pipelineFromJsonArray(mergePipeJson());
 
-        ASSERT_EQUALS(inputBson["pipeline"].type(), BSONType::Array);
-        vector<BSONObj> rawPipeline;
-        for (auto&& stageElem : inputBson["pipeline"].Array()) {
-            ASSERT_EQUALS(stageElem.type(), BSONType::Object);
-            rawPipeline.push_back(stageElem.embeddedObject());
-        }
-        AggregationRequest request(NamespaceString("a.collection"), rawPipeline);
-        intrusive_ptr<ExpressionContextForTest> ctx =
-            new ExpressionContextForTest(&_opCtx, request);
-
-        // For $graphLookup and $lookup, we have to populate the resolvedNamespaces so that the
-        // operations will be able to have a resolved view definition.
-        NamespaceString lookupCollNs("a", "lookupColl");
-        ctx->setResolvedNamespace(lookupCollNs, {lookupCollNs, std::vector<BSONObj>{}});
-
-        mergePipe = uassertStatusOK(Pipeline::parse(request.getPipeline(), ctx));
-        mergePipe->optimizePipeline();
+        intrusive_ptr<ExpressionContext> ctx =
+            new ExpressionContext(&_opCtx, NamespaceString("a.collection"));
+        string errmsg;
+        mergePipe = Pipeline::parseCommand(errmsg, inputBson, ctx);
+        ASSERT_EQUALS(errmsg, "");
+        ASSERT(mergePipe != NULL);
 
         shardPipe = mergePipe->splitForSharded();
-        ASSERT(shardPipe != nullptr);
+        ASSERT(shardPipe != NULL);
 
-        ASSERT_VALUE_EQ(Value(shardPipe->writeExplainOps()), Value(shardPipeExpected["pipeline"]));
-        ASSERT_VALUE_EQ(Value(mergePipe->writeExplainOps()), Value(mergePipeExpected["pipeline"]));
+        ASSERT_EQUALS(Value(shardPipe->writeExplainOps()), Value(shardPipeExpected["pipeline"]));
+        ASSERT_EQUALS(Value(mergePipe->writeExplainOps()), Value(mergePipeExpected["pipeline"]));
     }
 
     virtual ~Base() {}
@@ -1067,6 +407,21 @@ class NothingNeeded : public Base {
     }
 };
 
+class JustNeedsMetadata : public Base {
+    // Currently this optimization doesn't handle metadata and the shards assume it
+    // needs to be propagated implicitly. Therefore the $project produced should be
+    // the same as in NothingNeeded.
+    string inputPipeJson() {
+        return "[{$limit:1}, {$project: {_id: false, a: {$meta: 'textScore'}}}]";
+    }
+    string shardPipeJson() {
+        return "[{$limit:1}, {$project: {_id: true}}]";
+    }
+    string mergePipeJson() {
+        return "[{$limit:1}, {$project: {_id: false, a: {$meta: 'textScore'}}}]";
+    }
+};
+
 class ShardAlreadyExhaustive : public Base {
     // No new project should be added. This test reflects current behavior where the
     // 'a' field is still sent because it is explicitly asked for, even though it
@@ -1100,13 +455,13 @@ class ShardedSortMatchProjSkipLimBecomesMatchTopKSortSkipProj : public Base {
     string shardPipeJson() {
         return "[{$match: {a: 1}}"
                ",{$sort: {sortKey: {a: 1}, limit: 8}}"
-               ",{$project: {_id: true, a: true}}"
+               ",{$project: {a: true, _id: true}}"
                "]";
     }
     string mergePipeJson() {
         return "[{$sort: {sortKey: {a: 1}, mergePresorted: true, limit: 8}}"
                ",{$skip: 3}"
-               ",{$project: {_id: true, a: true}}"
+               ",{$project: {a: true}}"
                "]";
     }
 };
@@ -1117,7 +472,7 @@ namespace coalesceLookUpAndUnwind {
 
 class ShouldCoalesceUnwindOnAs : public Base {
     string inputPipeJson() {
-        return "[{$lookup: {from : 'lookupColl', as : 'same', localField: 'left', foreignField: "
+        return "[{$lookup: {from : 'coll2', as : 'same', localField: 'left', foreignField: "
                "'right'}}"
                ",{$unwind: {path: '$same'}}"
                "]";
@@ -1126,14 +481,14 @@ class ShouldCoalesceUnwindOnAs : public Base {
         return "[]";
     }
     string mergePipeJson() {
-        return "[{$lookup: {from : 'lookupColl', as : 'same', localField: 'left', foreignField: "
+        return "[{$lookup: {from : 'coll2', as : 'same', localField: 'left', foreignField: "
                "'right', unwinding: {preserveNullAndEmptyArrays: false}}}]";
     }
 };
 
 class ShouldCoalesceUnwindOnAsWithPreserveEmpty : public Base {
     string inputPipeJson() {
-        return "[{$lookup: {from : 'lookupColl', as : 'same', localField: 'left', foreignField: "
+        return "[{$lookup: {from : 'coll2', as : 'same', localField: 'left', foreignField: "
                "'right'}}"
                ",{$unwind: {path: '$same', preserveNullAndEmptyArrays: true}}"
                "]";
@@ -1142,14 +497,14 @@ class ShouldCoalesceUnwindOnAsWithPreserveEmpty : public Base {
         return "[]";
     }
     string mergePipeJson() {
-        return "[{$lookup: {from : 'lookupColl', as : 'same', localField: 'left', foreignField: "
+        return "[{$lookup: {from : 'coll2', as : 'same', localField: 'left', foreignField: "
                "'right', unwinding: {preserveNullAndEmptyArrays: true}}}]";
     }
 };
 
 class ShouldCoalesceUnwindOnAsWithIncludeArrayIndex : public Base {
     string inputPipeJson() {
-        return "[{$lookup: {from : 'lookupColl', as : 'same', localField: 'left', foreignField: "
+        return "[{$lookup: {from : 'coll2', as : 'same', localField: 'left', foreignField: "
                "'right'}}"
                ",{$unwind: {path: '$same', includeArrayIndex: 'index'}}"
                "]";
@@ -1158,7 +513,7 @@ class ShouldCoalesceUnwindOnAsWithIncludeArrayIndex : public Base {
         return "[]";
     }
     string mergePipeJson() {
-        return "[{$lookup: {from : 'lookupColl', as : 'same', localField: 'left', foreignField: "
+        return "[{$lookup: {from : 'coll2', as : 'same', localField: 'left', foreignField: "
                "'right', unwinding: {preserveNullAndEmptyArrays: false, includeArrayIndex: "
                "'index'}}}]";
     }
@@ -1166,7 +521,7 @@ class ShouldCoalesceUnwindOnAsWithIncludeArrayIndex : public Base {
 
 class ShouldNotCoalesceUnwindNotOnAs : public Base {
     string inputPipeJson() {
-        return "[{$lookup: {from : 'lookupColl', as : 'same', localField: 'left', foreignField: "
+        return "[{$lookup: {from : 'coll2', as : 'same', localField: 'left', foreignField: "
                "'right'}}"
                ",{$unwind: {path: '$from'}}"
                "]";
@@ -1175,7 +530,7 @@ class ShouldNotCoalesceUnwindNotOnAs : public Base {
         return "[]";
     }
     string mergePipeJson() {
-        return "[{$lookup: {from : 'lookupColl', as : 'same', localField: 'left', foreignField: "
+        return "[{$lookup: {from : 'coll2', as : 'same', localField: 'left', foreignField: "
                "'right'}}"
                ",{$unwind: {path: '$from'}}"
                "]";
@@ -1218,7 +573,7 @@ class Project : public needsPrimaryShardMergerBase {
         return "[{$project: {a : 1}}]";
     }
     string shardPipeJson() {
-        return "[{$project: {_id: true, a: true}}]";
+        return "[{$project: {a: true}}]";
     }
     string mergePipeJson() {
         return "[]";
@@ -1230,14 +585,14 @@ class LookUp : public needsPrimaryShardMergerBase {
         return true;
     }
     string inputPipeJson() {
-        return "[{$lookup: {from : 'lookupColl', as : 'same', localField: 'left', foreignField: "
+        return "[{$lookup: {from : 'coll2', as : 'same', localField: 'left', foreignField: "
                "'right'}}]";
     }
     string shardPipeJson() {
         return "[]";
     }
     string mergePipeJson() {
-        return "[{$lookup: {from : 'lookupColl', as : 'same', localField: 'left', foreignField: "
+        return "[{$lookup: {from : 'coll2', as : 'same', localField: 'left', foreignField: "
                "'right'}}]";
     }
 };
@@ -1246,275 +601,23 @@ class LookUp : public needsPrimaryShardMergerBase {
 }  // namespace Sharded
 }  // namespace Optimizations
 
-namespace {
-
-TEST(PipelineInitialSource, GeoNearInitialQuery) {
-    OperationContextNoop _opCtx;
-    const std::vector<BSONObj> rawPipeline = {
-        fromjson("{$geoNear: {distanceField: 'd', near: [0, 0], query: {a: 1}}}")};
-    intrusive_ptr<ExpressionContextForTest> ctx = new ExpressionContextForTest(
-        &_opCtx, AggregationRequest(NamespaceString("a.collection"), rawPipeline));
-    auto pipe = uassertStatusOK(Pipeline::parse(rawPipeline, ctx));
-    ASSERT_BSONOBJ_EQ(pipe->getInitialQuery(), BSON("a" << 1));
-}
-
-TEST(PipelineInitialSource, MatchInitialQuery) {
-    OperationContextNoop _opCtx;
-    const std::vector<BSONObj> rawPipeline = {fromjson("{$match: {'a': 4}}")};
-    intrusive_ptr<ExpressionContextForTest> ctx = new ExpressionContextForTest(
-        &_opCtx, AggregationRequest(NamespaceString("a.collection"), rawPipeline));
-
-    auto pipe = uassertStatusOK(Pipeline::parse(rawPipeline, ctx));
-    ASSERT_BSONOBJ_EQ(pipe->getInitialQuery(), BSON("a" << 4));
-}
-
-namespace Dependencies {
-
-using PipelineDependenciesTest = AggregationContextFixture;
-
-TEST_F(PipelineDependenciesTest, EmptyPipelineShouldRequireWholeDocument) {
-    auto pipeline = unittest::assertGet(Pipeline::create({}, getExpCtx()));
-
-    auto depsTracker = pipeline->getDependencies(DepsTracker::MetadataAvailable::kNoMetadata);
-    ASSERT_TRUE(depsTracker.needWholeDocument);
-    ASSERT_FALSE(depsTracker.getNeedTextScore());
-
-    depsTracker = pipeline->getDependencies(DepsTracker::MetadataAvailable::kTextScore);
-    ASSERT_TRUE(depsTracker.needWholeDocument);
-    ASSERT_TRUE(depsTracker.getNeedTextScore());
-}
-
-//
-// Some dummy DocumentSources with different dependencies.
-//
-
-// Like a DocumentSourceMock, but can be used anywhere in the pipeline.
-class DocumentSourceDependencyDummy : public DocumentSourceMock {
-public:
-    DocumentSourceDependencyDummy() : DocumentSourceMock({}) {}
-
-    bool isValidInitialSource() const final {
-        return false;
-    }
-};
-
-class DocumentSourceDependenciesNotSupported : public DocumentSourceDependencyDummy {
-public:
-    GetDepsReturn getDependencies(DepsTracker* deps) const final {
-        return GetDepsReturn::NOT_SUPPORTED;
-    }
-
-    static boost::intrusive_ptr<DocumentSourceDependenciesNotSupported> create() {
-        return new DocumentSourceDependenciesNotSupported();
-    }
-};
-
-class DocumentSourceNeedsASeeNext : public DocumentSourceDependencyDummy {
-public:
-    GetDepsReturn getDependencies(DepsTracker* deps) const final {
-        deps->fields.insert("a");
-        return GetDepsReturn::SEE_NEXT;
-    }
-
-    static boost::intrusive_ptr<DocumentSourceNeedsASeeNext> create() {
-        return new DocumentSourceNeedsASeeNext();
-    }
-};
-
-class DocumentSourceNeedsOnlyB : public DocumentSourceDependencyDummy {
-public:
-    GetDepsReturn getDependencies(DepsTracker* deps) const final {
-        deps->fields.insert("b");
-        return GetDepsReturn::EXHAUSTIVE_FIELDS;
-    }
-
-    static boost::intrusive_ptr<DocumentSourceNeedsOnlyB> create() {
-        return new DocumentSourceNeedsOnlyB();
-    }
-};
-
-class DocumentSourceNeedsOnlyTextScore : public DocumentSourceDependencyDummy {
-public:
-    GetDepsReturn getDependencies(DepsTracker* deps) const final {
-        deps->setNeedTextScore(true);
-        return GetDepsReturn::EXHAUSTIVE_META;
-    }
-
-    static boost::intrusive_ptr<DocumentSourceNeedsOnlyTextScore> create() {
-        return new DocumentSourceNeedsOnlyTextScore();
-    }
-};
-
-class DocumentSourceStripsTextScore : public DocumentSourceDependencyDummy {
-public:
-    GetDepsReturn getDependencies(DepsTracker* deps) const final {
-        return GetDepsReturn::EXHAUSTIVE_META;
-    }
-
-    static boost::intrusive_ptr<DocumentSourceStripsTextScore> create() {
-        return new DocumentSourceStripsTextScore();
-    }
-};
-
-TEST_F(PipelineDependenciesTest, ShouldRequireWholeDocumentIfAnyStageDoesNotSupportDeps) {
-    auto ctx = getExpCtx();
-    auto needsASeeNext = DocumentSourceNeedsASeeNext::create();
-    auto notSupported = DocumentSourceDependenciesNotSupported::create();
-    auto pipeline = unittest::assertGet(Pipeline::create({needsASeeNext, notSupported}, ctx));
-
-    auto depsTracker = pipeline->getDependencies(DepsTracker::MetadataAvailable::kNoMetadata);
-    ASSERT_TRUE(depsTracker.needWholeDocument);
-    // The inputs did not have a text score available, so we should not require a text score.
-    ASSERT_FALSE(depsTracker.getNeedTextScore());
-
-    // Now in the other order.
-    pipeline = unittest::assertGet(Pipeline::create({notSupported, needsASeeNext}, ctx));
-
-    depsTracker = pipeline->getDependencies(DepsTracker::MetadataAvailable::kNoMetadata);
-    ASSERT_TRUE(depsTracker.needWholeDocument);
-}
-
-TEST_F(PipelineDependenciesTest, ShouldRequireWholeDocumentIfNoStageReturnsExhaustiveFields) {
-    auto ctx = getExpCtx();
-    auto needsASeeNext = DocumentSourceNeedsASeeNext::create();
-    auto pipeline = unittest::assertGet(Pipeline::create({needsASeeNext}, ctx));
-
-    auto depsTracker = pipeline->getDependencies(DepsTracker::MetadataAvailable::kNoMetadata);
-    ASSERT_TRUE(depsTracker.needWholeDocument);
-}
-
-TEST_F(PipelineDependenciesTest, ShouldNotRequireWholeDocumentIfAnyStageReturnsExhaustiveFields) {
-    auto ctx = getExpCtx();
-    auto needsASeeNext = DocumentSourceNeedsASeeNext::create();
-    auto needsOnlyB = DocumentSourceNeedsOnlyB::create();
-    auto pipeline = unittest::assertGet(Pipeline::create({needsASeeNext, needsOnlyB}, ctx));
-
-    auto depsTracker = pipeline->getDependencies(DepsTracker::MetadataAvailable::kNoMetadata);
-    ASSERT_FALSE(depsTracker.needWholeDocument);
-    ASSERT_EQ(depsTracker.fields.size(), 2UL);
-    ASSERT_EQ(depsTracker.fields.count("a"), 1UL);
-    ASSERT_EQ(depsTracker.fields.count("b"), 1UL);
-}
-
-TEST_F(PipelineDependenciesTest, ShouldNotAddAnyRequiredFieldsAfterFirstStageWithExhaustiveFields) {
-    auto ctx = getExpCtx();
-    auto needsOnlyB = DocumentSourceNeedsOnlyB::create();
-    auto needsASeeNext = DocumentSourceNeedsASeeNext::create();
-    auto pipeline = unittest::assertGet(Pipeline::create({needsOnlyB, needsASeeNext}, ctx));
-
-    auto depsTracker = pipeline->getDependencies(DepsTracker::MetadataAvailable::kNoMetadata);
-    ASSERT_FALSE(depsTracker.needWholeDocument);
-    ASSERT_FALSE(depsTracker.getNeedTextScore());
-
-    // 'needsOnlyB' claims to know all its field dependencies, so we shouldn't add any from
-    // 'needsASeeNext'.
-    ASSERT_EQ(depsTracker.fields.size(), 1UL);
-    ASSERT_EQ(depsTracker.fields.count("b"), 1UL);
-}
-
-TEST_F(PipelineDependenciesTest, ShouldNotRequireTextScoreIfThereIsNoScoreAvailable) {
-    auto ctx = getExpCtx();
-    auto pipeline = unittest::assertGet(Pipeline::create({}, ctx));
-
-    auto depsTracker = pipeline->getDependencies(DepsTracker::MetadataAvailable::kNoMetadata);
-    ASSERT_FALSE(depsTracker.getNeedTextScore());
-}
-
-TEST_F(PipelineDependenciesTest, ShouldThrowIfTextScoreIsNeededButNotPresent) {
-    auto ctx = getExpCtx();
-    auto needsText = DocumentSourceNeedsOnlyTextScore::create();
-    auto pipeline = unittest::assertGet(Pipeline::create({needsText}, ctx));
-
-    ASSERT_THROWS(pipeline->getDependencies(DepsTracker::MetadataAvailable::kNoMetadata),
-                  UserException);
-}
-
-TEST_F(PipelineDependenciesTest, ShouldRequireTextScoreIfAvailableAndNoStageReturnsExhaustiveMeta) {
-    auto ctx = getExpCtx();
-    auto pipeline = unittest::assertGet(Pipeline::create({}, ctx));
-
-    auto depsTracker = pipeline->getDependencies(DepsTracker::MetadataAvailable::kTextScore);
-    ASSERT_TRUE(depsTracker.getNeedTextScore());
-
-    auto needsASeeNext = DocumentSourceNeedsASeeNext::create();
-    pipeline = unittest::assertGet(Pipeline::create({needsASeeNext}, ctx));
-    depsTracker = pipeline->getDependencies(DepsTracker::MetadataAvailable::kTextScore);
-    ASSERT_TRUE(depsTracker.getNeedTextScore());
-}
-
-TEST_F(PipelineDependenciesTest, ShouldNotRequireTextScoreIfAvailableButDefinitelyNotNeeded) {
-    auto ctx = getExpCtx();
-    auto stripsTextScore = DocumentSourceStripsTextScore::create();
-    auto needsText = DocumentSourceNeedsOnlyTextScore::create();
-    auto pipeline = unittest::assertGet(Pipeline::create({stripsTextScore, needsText}, ctx));
-
-    auto depsTracker = pipeline->getDependencies(DepsTracker::MetadataAvailable::kTextScore);
-
-    // 'stripsTextScore' claims that no further stage will need metadata information, so we
-    // shouldn't have the text score as a dependency.
-    ASSERT_FALSE(depsTracker.getNeedTextScore());
-}
-
-}  // namespace Dependencies
-}  // namespace
-
 class All : public Suite {
 public:
-    All() : Suite("PipelineOptimizations") {}
+    All() : Suite("pipeline") {}
     void setupTests() {
         add<Optimizations::Local::RemoveSkipZero>();
         add<Optimizations::Local::MoveLimitBeforeProject>();
         add<Optimizations::Local::MoveSkipBeforeProject>();
-        add<Optimizations::Local::MoveMultipleSkipsAndLimitsBeforeProject>();
-        add<Optimizations::Local::SkipSkipLimitBecomesLimitSkip>();
+        add<Optimizations::Local::MoveMulitipleSkipsAndLimitsBeforeProject>();
         add<Optimizations::Local::SortMatchProjSkipLimBecomesMatchTopKSortSkipProj>();
         add<Optimizations::Local::DoNotRemoveSkipOne>();
         add<Optimizations::Local::RemoveEmptyMatch>();
         add<Optimizations::Local::RemoveMultipleEmptyMatches>();
-        add<Optimizations::Local::MoveMatchBeforeSort>();
         add<Optimizations::Local::DoNotRemoveNonEmptyMatch>();
         add<Optimizations::Local::LookupShouldCoalesceWithUnwindOnAs>();
         add<Optimizations::Local::LookupShouldCoalesceWithUnwindOnAsWithPreserveEmpty>();
         add<Optimizations::Local::LookupShouldCoalesceWithUnwindOnAsWithIncludeArrayIndex>();
         add<Optimizations::Local::LookupShouldNotCoalesceWithUnwindNotOnAs>();
-        add<Optimizations::Local::LookupShouldSwapWithMatch>();
-        add<Optimizations::Local::LookupShouldSplitMatch>();
-        add<Optimizations::Local::LookupShouldNotAbsorbMatchOnAs>();
-        add<Optimizations::Local::LookupShouldAbsorbUnwindMatch>();
-        add<Optimizations::Local::LookupShouldAbsorbUnwindAndSplitAndAbsorbMatch>();
-        add<Optimizations::Local::LookupShouldNotSplitIndependentAndDependentOrClauses>();
-        add<Optimizations::Local::LookupWithMatchOnArrayIndexFieldShouldNotCoalesce>();
-        add<Optimizations::Local::LookupWithUnwindPreservingNullAndEmptyArraysShouldNotCoalesce>();
-        add<Optimizations::Local::LookupDoesNotAbsorbElemMatch>();
-        add<Optimizations::Local::LookupDoesSwapWithMatchOnLocalField>();
-        add<Optimizations::Local::LookupDoesNotAbsorbUnwindOnSubfieldOfAsButStillMovesMatch>();
-        add<Optimizations::Local::LookupDoesSwapWithMatchOnFieldWithSameNameAsForeignField>();
-        add<Optimizations::Local::GraphLookupShouldCoalesceWithUnwindOnAs>();
-        add<Optimizations::Local::GraphLookupShouldCoalesceWithUnwindOnAsWithPreserveEmpty>();
-        add<Optimizations::Local::GraphLookupShouldCoalesceWithUnwindOnAsWithIncludeArrayIndex>();
-        add<Optimizations::Local::GraphLookupShouldNotCoalesceWithUnwindNotOnAs>();
-        add<Optimizations::Local::GraphLookupShouldSwapWithMatch>();
-        add<Optimizations::Local::MatchShouldDuplicateItselfBeforeRedact>();
-        add<Optimizations::Local::MatchShouldSwapWithUnwind>();
-        add<Optimizations::Local::MatchShouldNotOptimizeWhenMatchingOnIndexField>();
-        add<Optimizations::Local::MatchOnPrefixShouldNotSwapOnUnwind>();
-        add<Optimizations::Local::MatchShouldNotOptimizeWithElemMatch>();
-        add<Optimizations::Local::MatchWithNorOnlySplitsIndependentChildren>();
-        add<Optimizations::Local::MatchWithOrDoesNotSplit>();
-        add<Optimizations::Local::MatchShouldSplitOnUnwind>();
-        add<Optimizations::Local::UnwindBeforeDoubleMatchShouldRepeatedlyOptimize>();
-        add<Optimizations::Local::ExclusionProjectShouldSwapWithIndependentMatch>();
-        add<Optimizations::Local::ExclusionProjectShouldNotSwapWithMatchOnExcludedFields>();
-        add<Optimizations::Local::MatchShouldSplitIfPartIsIndependentOfExclusionProjection>();
-        add<Optimizations::Local::InclusionProjectShouldSwapWithIndependentMatch>();
-        add<Optimizations::Local::InclusionProjectShouldNotSwapWithMatchOnFieldsNotIncluded>();
-        add<Optimizations::Local::MatchShouldSplitIfPartIsIndependentOfInclusionProjection>();
-        add<Optimizations::Local::TwoMatchStagesShouldBothPushIndependentPartsBeforeProjection>();
-        add<Optimizations::Local::NeighboringMatchesShouldCoalesce>();
-        add<Optimizations::Local::MatchShouldNotSwapBeforeLimit>();
-        add<Optimizations::Local::MatchShouldNotSwapBeforeSkip>();
-        add<Optimizations::Local::MatchCannotSwapWithLimit>();
-        add<Optimizations::Local::MatchCannotSwapWithSortLimit>();
         add<Optimizations::Sharded::Empty>();
         add<Optimizations::Sharded::coalesceLookUpAndUnwind::ShouldCoalesceUnwindOnAs>();
         add<Optimizations::Sharded::coalesceLookUpAndUnwind::
@@ -1530,6 +633,7 @@ public:
         add<Optimizations::Sharded::limitFieldsSentFromShardsToMerger::JustNeedsId>();
         add<Optimizations::Sharded::limitFieldsSentFromShardsToMerger::JustNeedsNonId>();
         add<Optimizations::Sharded::limitFieldsSentFromShardsToMerger::NothingNeeded>();
+        add<Optimizations::Sharded::limitFieldsSentFromShardsToMerger::JustNeedsMetadata>();
         add<Optimizations::Sharded::limitFieldsSentFromShardsToMerger::ShardAlreadyExhaustive>();
         add<Optimizations::Sharded::limitFieldsSentFromShardsToMerger::
                 ShardedSortMatchProjSkipLimBecomesMatchTopKSortSkipProj>();
@@ -1542,4 +646,215 @@ public:
 
 SuiteInstance<All> myall;
 
+namespace AuthzTests {
+const NamespaceString testFooNss("test.foo");
+const NamespaceString testBarNss("test.bar");
+const std::string testFooDb = testFooNss.db().toString();
+const std::string testBarDb = testBarNss.db().toString();
+const ResourcePattern testFooCollResource(ResourcePattern::forExactNamespace(testFooNss));
+const ResourcePattern testBarCollResource(ResourcePattern::forExactNamespace(testBarNss));
+
+class PipelineAuthzTest : public ::mongo::unittest::Test {
+public:
+    AuthzManagerExternalStateMock* managerState;
+    OperationContextNoop txn;
+    AuthzSessionExternalStateMock* sessionState;
+    std::unique_ptr<AuthorizationManager> authzManager;
+    std::unique_ptr<ServiceContextNoop> service;
+    ServiceContext::UniqueClient client;
+    AuthorizationSessionForTest* authzSession;
+
+    void setUp() override {
+        auto localManagerState = stdx::make_unique<AuthzManagerExternalStateMock>();
+        managerState = localManagerState.get();
+        managerState->setAuthzVersion(AuthorizationManager::schemaVersion26Final);
+        authzManager = stdx::make_unique<AuthorizationManager>(std::move(localManagerState));
+        authzManager->setAuthEnabled(true);
+        auto localSessionState =
+            stdx::make_unique<AuthzSessionExternalStateMock>(authzManager.get());
+        sessionState = localSessionState.get();
+        service = stdx::make_unique<ServiceContextNoop>();
+        client = service->makeClient("PipelineAuthzTest");
+        auto authzSessionForTest =
+            stdx::make_unique<AuthorizationSessionForTest>(std::move(localSessionState));
+        authzSession = authzSessionForTest.get();
+        AuthorizationSession::set(client.get(), std::move(authzSessionForTest));
+    }
+};
+
+TEST_F(PipelineAuthzTest, CheckAuthForCommandFailsIfPipelineIsNotAnArray) {
+    BSONObj cmdObjIntPipeline = BSON("aggregate" << testFooNss.coll() << "pipeline" << 7);
+    ASSERT_EQ(ErrorCodes::TypeMismatch,
+              Pipeline::checkAuthForCommand(client.get(), testFooDb, cmdObjIntPipeline));
+
+    BSONObj cmdObjObjPipeline = BSON("aggregate" << testFooNss.coll() << "pipeline" << BSONObj());
+    ASSERT_EQ(ErrorCodes::TypeMismatch,
+              Pipeline::checkAuthForCommand(client.get(), testFooDb, cmdObjObjPipeline));
+
+    BSONObj cmdObjNoPipeline = BSON("aggregate" << testFooNss.coll());
+    ASSERT_EQ(ErrorCodes::TypeMismatch,
+              Pipeline::checkAuthForCommand(client.get(), testFooDb, cmdObjNoPipeline));
+}
+
+TEST_F(PipelineAuthzTest, CheckAuthForCommandFailsIfPipelineFirstStageIsNotAnObject) {
+    BSONObj cmdObjFirstStageInt =
+        BSON("aggregate" << testFooNss.coll() << "pipeline" << BSON_ARRAY(7));
+    ASSERT_EQ(ErrorCodes::TypeMismatch,
+              Pipeline::checkAuthForCommand(client.get(), testFooDb, cmdObjFirstStageInt));
+
+    BSONObj cmdObjFirstStageArray =
+        BSON("aggregate" << testFooNss.coll() << "pipeline" << BSON_ARRAY(BSONArray()));
+    ASSERT_EQ(ErrorCodes::TypeMismatch,
+              Pipeline::checkAuthForCommand(client.get(), testFooDb, cmdObjFirstStageArray));
+}
+
+TEST_F(PipelineAuthzTest, CannotAggregateEmptyPipelineWithoutFindAction) {
+    BSONObj cmdObj = BSON("aggregate" << testFooNss.coll() << "pipeline" << BSONArray());
+    ASSERT_EQ(ErrorCodes::Unauthorized,
+              Pipeline::checkAuthForCommand(client.get(), testFooDb, cmdObj));
+}
+
+TEST_F(PipelineAuthzTest, CanAggregateEmptyPipelineWithFindAction) {
+    authzSession->assumePrivilegesForDB(
+        Privilege(testFooCollResource, ActionSet{ActionType::find}));
+
+    BSONObj cmdObj = BSON("aggregate" << testFooNss.coll() << "pipeline" << BSONArray());
+    ASSERT_OK(Pipeline::checkAuthForCommand(client.get(), testFooDb, cmdObj));
+}
+
+TEST_F(PipelineAuthzTest, CannotAggregateWithoutFindActionIfFirstStageNotIndexStats) {
+    authzSession->assumePrivilegesForDB(
+        Privilege(testFooCollResource, ActionSet{ActionType::indexStats}));
+
+    BSONArray pipeline = BSON_ARRAY(BSON("$limit" << 1) << BSON("$indexStats" << BSONObj()));
+    BSONObj cmdObj = BSON("aggregate" << testFooNss.coll() << "pipeline" << pipeline);
+    ASSERT_EQ(ErrorCodes::Unauthorized,
+              Pipeline::checkAuthForCommand(client.get(), testFooDb, cmdObj));
+}
+
+TEST_F(PipelineAuthzTest, CanAggregateWithFindActionIfFirstStageNotIndexStats) {
+    authzSession->assumePrivilegesForDB(
+        Privilege(testFooCollResource, ActionSet{ActionType::find}));
+
+    BSONArray pipeline = BSON_ARRAY(BSON("$limit" << 1) << BSON("$indexStats" << BSONObj()));
+    BSONObj cmdObj = BSON("aggregate" << testFooNss.coll() << "pipeline" << pipeline);
+    ASSERT_OK(Pipeline::checkAuthForCommand(client.get(), testFooDb, cmdObj));
+}
+
+TEST_F(PipelineAuthzTest, CannotAggregateIndexStatsWithoutIndexStatsAction) {
+    authzSession->assumePrivilegesForDB(
+        Privilege(testFooCollResource, ActionSet{ActionType::find}));
+
+    BSONArray pipeline = BSON_ARRAY(BSON("$indexStats" << BSONObj()));
+    BSONObj cmdObj = BSON("aggregate" << testFooNss.coll() << "pipeline" << pipeline);
+    ASSERT_EQ(ErrorCodes::Unauthorized,
+              Pipeline::checkAuthForCommand(client.get(), testFooDb, cmdObj));
+}
+
+TEST_F(PipelineAuthzTest, CanAggregateIndexStatsWithIndexStatsAction) {
+    authzSession->assumePrivilegesForDB(
+        Privilege(testFooCollResource, ActionSet{ActionType::indexStats}));
+
+    BSONArray pipeline = BSON_ARRAY(BSON("$indexStats" << BSONObj()));
+    BSONObj cmdObj = BSON("aggregate" << testFooNss.coll() << "pipeline" << pipeline);
+    ASSERT_OK(Pipeline::checkAuthForCommand(client.get(), testFooDb, cmdObj));
+}
+
+TEST_F(PipelineAuthzTest, CheckAuthForCommandFailsIfOutNamespaceIsNotValid) {
+    BSONArray pipeline = BSON_ARRAY(BSON("$out"
+                                         << ""));
+    BSONObj cmdObj = BSON("aggregate" << testFooNss.coll() << "pipeline" << pipeline);
+    ASSERT_THROWS_CODE(
+        Pipeline::checkAuthForCommand(client.get(), testFooDb, cmdObj), UserException, 17139);
+}
+
+TEST_F(PipelineAuthzTest, CannotAggregateOutWithoutInsertAndRemoveOnTargetNamespace) {
+    // We only have find on the aggregation namespace.
+    authzSession->assumePrivilegesForDB(
+        Privilege(testFooCollResource, ActionSet{ActionType::find}));
+
+    BSONArray pipeline = BSON_ARRAY(BSON("$out" << testBarNss.coll()));
+    BSONObj cmdObj = BSON("aggregate" << testFooNss.coll() << "pipeline" << pipeline);
+    ASSERT_EQ(ErrorCodes::Unauthorized,
+              Pipeline::checkAuthForCommand(client.get(), testFooDb, cmdObj));
+
+    // We have insert but not remove on the $out namespace.
+    authzSession->assumePrivilegesForDB(
+        {Privilege(testFooCollResource, ActionSet{ActionType::find}),
+         Privilege(testBarCollResource, ActionSet{ActionType::insert})});
+    ASSERT_EQ(ErrorCodes::Unauthorized,
+              Pipeline::checkAuthForCommand(client.get(), testFooDb, cmdObj));
+
+    // We have remove but not insert on the $out namespace.
+    authzSession->assumePrivilegesForDB(
+        {Privilege(testFooCollResource, ActionSet{ActionType::find}),
+         Privilege(testBarCollResource, ActionSet{ActionType::remove})});
+    ASSERT_EQ(ErrorCodes::Unauthorized,
+              Pipeline::checkAuthForCommand(client.get(), testFooDb, cmdObj));
+}
+
+TEST_F(PipelineAuthzTest, CanAggregateOutWithInsertAndRemoveOnTargetNamespace) {
+    authzSession->assumePrivilegesForDB(
+        {Privilege(testFooCollResource, ActionSet{ActionType::find}),
+         Privilege(testBarCollResource, ActionSet{ActionType::insert, ActionType::remove})});
+
+    BSONArray pipeline = BSON_ARRAY(BSON("$out" << testBarNss.coll()));
+    BSONObj cmdObj = BSON("aggregate" << testFooNss.coll() << "pipeline" << pipeline);
+    ASSERT_OK(Pipeline::checkAuthForCommand(client.get(), testFooDb, cmdObj));
+
+    BSONObj cmdObjNoBypassDocumentValidation =
+        BSON("aggregate" << testFooNss.coll() << "pipeline" << pipeline
+                         << "bypassDocumentValidation" << false);
+    ASSERT_OK(
+        Pipeline::checkAuthForCommand(client.get(), testFooDb, cmdObjNoBypassDocumentValidation));
+}
+
+TEST_F(PipelineAuthzTest,
+       CannotAggregateOutBypassingValidationWithoutBypassDocumentValidationOnTargetNamespace) {
+    authzSession->assumePrivilegesForDB(
+        {Privilege(testFooCollResource, ActionSet{ActionType::find}),
+         Privilege(testBarCollResource, ActionSet{ActionType::insert, ActionType::remove})});
+
+    BSONArray pipeline = BSON_ARRAY(BSON("$out" << testBarNss.coll()));
+    BSONObj cmdObj = BSON("aggregate" << testFooNss.coll() << "pipeline" << pipeline
+                                      << "bypassDocumentValidation" << true);
+    ASSERT_EQ(ErrorCodes::Unauthorized,
+              Pipeline::checkAuthForCommand(client.get(), testFooDb, cmdObj));
+}
+
+TEST_F(PipelineAuthzTest,
+       CanAggregateOutBypassingValidationWithBypassDocumentValidationOnTargetNamespace) {
+    authzSession->assumePrivilegesForDB(
+        {Privilege(testFooCollResource, ActionSet{ActionType::find}),
+         Privilege(testBarCollResource,
+                   ActionSet{ActionType::insert,
+                             ActionType::remove,
+                             ActionType::bypassDocumentValidation})});
+
+    BSONArray pipeline = BSON_ARRAY(BSON("$out" << testBarNss.coll()));
+    BSONObj cmdObj = BSON("aggregate" << testFooNss.coll() << "pipeline" << pipeline
+                                      << "bypassDocumentValidation" << true);
+    ASSERT_OK(Pipeline::checkAuthForCommand(client.get(), testFooDb, cmdObj));
+}
+
+TEST_F(PipelineAuthzTest, CannotAggregateLookupWithoutFindOnJoinedNamespace) {
+    authzSession->assumePrivilegesForDB(
+        Privilege(testFooCollResource, ActionSet{ActionType::find}));
+
+    BSONArray pipeline = BSON_ARRAY(BSON("$lookup" << BSON("from" << testBarNss.coll())));
+    BSONObj cmdObj = BSON("aggregate" << testFooNss.coll() << "pipeline" << pipeline);
+    ASSERT_EQ(ErrorCodes::Unauthorized,
+              Pipeline::checkAuthForCommand(client.get(), testFooDb, cmdObj));
+}
+
+TEST_F(PipelineAuthzTest, CanAggregateLookupWithFindOnJoinedNamespace) {
+    authzSession->assumePrivilegesForDB(
+        {Privilege(testFooCollResource, ActionSet{ActionType::find}),
+         Privilege(testBarCollResource, ActionSet{ActionType::find})});
+
+    BSONArray pipeline = BSON_ARRAY(BSON("$lookup" << BSON("from" << testBarNss.coll())));
+    BSONObj cmdObj = BSON("aggregate" << testFooNss.coll() << "pipeline" << pipeline);
+    ASSERT_OK(Pipeline::checkAuthForCommand(client.get(), testFooDb, cmdObj));
+}
+}  // namespace AuthzTests
 }  // namespace PipelineTests

@@ -99,7 +99,7 @@ var Explainable = (function() {
         this.aggregate = function(pipeline, extraOpts) {
             if (!(pipeline instanceof Array)) {
                 // support legacy varargs form. (Also handles db.foo.aggregate())
-                pipeline = Array.from(arguments);
+                pipeline = argumentsToArray(arguments);
                 extraOpts = {};
             }
 
@@ -110,9 +110,8 @@ var Explainable = (function() {
             return this._collection.aggregate(pipeline, extraOpts);
         };
 
-        this.count = function(query, options) {
-            query = this.find(query);
-            return QueryHelpers._applyCountOptions(query, options).count();
+        this.count = function(query) {
+            return this.find(query).count();
         };
 
         /**
@@ -127,31 +126,37 @@ var Explainable = (function() {
 
         this.findAndModify = function(params) {
             var famCmd = Object.extend({"findAndModify": this._collection.getName()}, params);
-            var explainCmd = {"explain": famCmd, "verbosity": this._verbosity};
+            var explainCmd = {
+                "explain": famCmd,
+                "verbosity": this._verbosity
+            };
             var explainResult = this._collection.runReadCommand(explainCmd);
             return throwOrReturn(explainResult);
         };
 
         this.group = function(params) {
             params.ns = this._collection.getName();
-            var grpCmd = {"group": this._collection.getDB()._groupFixParms(params)};
-            var explainCmd = {"explain": grpCmd, "verbosity": this._verbosity};
+            var grpCmd = {
+                "group": this._collection.getDB()._groupFixParms(params)
+            };
+            var explainCmd = {
+                "explain": grpCmd,
+                "verbosity": this._verbosity
+            };
             var explainResult = this._collection.runReadCommand(explainCmd);
             return throwOrReturn(explainResult);
         };
 
-        this.distinct = function(keyString, query, options) {
+        this.distinct = function(keyString, query) {
             var distinctCmd = {
                 distinct: this._collection.getName(),
                 key: keyString,
                 query: query || {}
             };
-
-            if (options && options.hasOwnProperty("collation")) {
-                distinctCmd.collation = options.collation;
-            }
-
-            var explainCmd = {explain: distinctCmd, verbosity: this._verbosity};
+            var explainCmd = {
+                explain: distinctCmd,
+                verbosity: this._verbosity
+            };
             var explainResult = this._collection.runReadCommand(explainCmd);
             return throwOrReturn(explainResult);
         };
@@ -160,15 +165,9 @@ var Explainable = (function() {
             var parsed = this._collection._parseRemove.apply(this._collection, arguments);
             var query = parsed.query;
             var justOne = parsed.justOne;
-            var collation = parsed.collation;
 
             var bulk = this._collection.initializeOrderedBulkOp();
             var removeOp = bulk.find(query);
-
-            if (collation) {
-                removeOp.collation(collation);
-            }
-
             if (justOne) {
                 removeOp.removeOne();
             } else {
@@ -186,17 +185,12 @@ var Explainable = (function() {
             var obj = parsed.obj;
             var upsert = parsed.upsert;
             var multi = parsed.multi;
-            var collation = parsed.collation;
 
             var bulk = this._collection.initializeOrderedBulkOp();
             var updateOp = bulk.find(query);
 
             if (upsert) {
                 updateOp = updateOp.upsert();
-            }
-
-            if (collation) {
-                updateOp.collation(collation);
             }
 
             if (multi) {

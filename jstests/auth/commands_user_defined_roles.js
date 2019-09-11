@@ -108,7 +108,10 @@ function runOneTest(conn, t) {
                 }
 
                 for (var k = 0; k < actions.length; k++) {
-                    var privDoc = {resource: resource, actions: [actions[k]]};
+                    var privDoc = {
+                        resource: resource,
+                        actions: [actions[k]]
+                    };
                     msg = testInsufficientPrivileges(conn, t, testcase, [privDoc]);
                     if (msg) {
                         failures.push(t.testname + ": " + msg);
@@ -139,28 +142,36 @@ function runOneTest(conn, t) {
 
         // Test for proper authorization with the test case's privileges where non-system
         // collections are modified to be the empty string.
-        msg = testProperAuthorization(conn, t, testcase, testcase.privileges.map(function(priv) {
-            // Make a copy of the privilege so as not to modify the original array.
-            var modifiedPrivilege = Object.extend({}, priv, true);
-            if (modifiedPrivilege.resource.collection && !specialResource(priv.resource)) {
-                modifiedPrivilege.resource.collection = "";
-            }
-            return modifiedPrivilege;
-        }));
+        msg = testProperAuthorization(
+            conn,
+            t,
+            testcase,
+            testcase.privileges.map(function(priv) {
+                // Make a copy of the privilege so as not to modify the original array.
+                var modifiedPrivilege = Object.extend({}, priv, true);
+                if (modifiedPrivilege.resource.collection && !specialResource(priv.resource)) {
+                    modifiedPrivilege.resource.collection = "";
+                }
+                return modifiedPrivilege;
+            }));
         if (msg) {
             failures.push(t.testname + ": " + msg);
         }
 
         // Test for proper authorization with the test case's privileges where the database is the
         // empty string.
-        msg = testProperAuthorization(conn, t, testcase, testcase.privileges.map(function(priv) {
-            // Make a copy of the privilege so as not to modify the original array.
-            var modifiedPrivilege = Object.extend({}, priv, true);
-            if (!specialResource(priv.resource)) {
-                modifiedPrivilege.resource.db = "";
-            }
-            return modifiedPrivilege;
-        }));
+        msg = testProperAuthorization(conn,
+                                      t,
+                                      testcase,
+                                      testcase.privileges.map(function(priv) {
+                                          // Make a copy of the privilege so as not to modify the
+                                          // original array.
+                                          var modifiedPrivilege = Object.extend({}, priv, true);
+                                          if (!specialResource(priv.resource)) {
+                                              modifiedPrivilege.resource.db = "";
+                                          }
+                                          return modifiedPrivilege;
+                                      }));
         if (msg) {
             failures.push(t.testname + ": " + msg);
         }
@@ -183,8 +194,14 @@ function createUsers(conn) {
     adminDb.logout();
 }
 
-var opts = {auth: "", enableExperimentalStorageDetailsCmd: ""};
-var impls = {createUsers: createUsers, runOneTest: runOneTest};
+var opts = {
+    auth: "",
+    enableExperimentalStorageDetailsCmd: ""
+};
+var impls = {
+    createUsers: createUsers,
+    runOneTest: runOneTest
+};
 
 // run all tests standalone
 var conn = MongoRunner.runMongod(opts);

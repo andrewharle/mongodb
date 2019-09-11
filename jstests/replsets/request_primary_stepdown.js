@@ -29,8 +29,9 @@
         var result = primary.adminCommand({replSetStepDown: 70, secondaryCatchUpPeriodSecs: 60});
         print('replSetStepDown did not throw exception but returned: ' + tojson(result));
     });
-    assert(isNetworkError(stepDownException),
-           'replSetStepDown did not disconnect client; failed with ' + tojson(stepDownException));
+    assert.neq(-1,
+               tojson(stepDownException).indexOf('error doing query'),
+               'replSetStepDown did not disconnect client');
 
     // Wait for node 1 to be promoted to primary after node 0 stepped down.
     replSet.waitForState(replSet.nodes[1], ReplSetTest.State.PRIMARY, 60 * 1000);

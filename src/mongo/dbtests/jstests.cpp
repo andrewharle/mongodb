@@ -37,9 +37,9 @@
 #include <limits>
 
 #include "mongo/base/parse_number.h"
-#include "mongo/db/client.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/json.h"
+#include "mongo/db/operation_context_impl.h"
 #include "mongo/dbtests/dbtests.h"
 #include "mongo/platform/decimal128.h"
 #include "mongo/scripting/engine.h"
@@ -60,7 +60,7 @@ class BuiltinTests {
 public:
     void run() {
         // Run any tests included with the scripting engine
-        getGlobalScriptEngine()->runTest();
+        globalScriptEngine->runTest();
     }
 };
 
@@ -68,7 +68,7 @@ class BasicScope {
 public:
     void run() {
         unique_ptr<Scope> s;
-        s.reset(getGlobalScriptEngine()->newScope());
+        s.reset(globalScriptEngine->newScope());
 
         s->setNumber("x", 5);
         ASSERT(5 == s->getNumber("x"));
@@ -92,7 +92,7 @@ public:
     void run() {
         /* Currently reset does not clear data in v8 or spidermonkey scopes.  See SECURITY-10
         unique_ptr<Scope> s;
-        s.reset( getGlobalScriptEngine()->newScope() );
+        s.reset( globalScriptEngine->newScope() );
 
         s->setBoolean( "x" , true );
         ASSERT( s->getBoolean( "x" ) );
@@ -108,7 +108,7 @@ public:
     void run() {
         // Test falsy javascript values
         unique_ptr<Scope> s;
-        s.reset(getGlobalScriptEngine()->newScope());
+        s.reset(globalScriptEngine->newScope());
 
         ASSERT(!s->getBoolean("notSet"));
 
@@ -130,7 +130,7 @@ public:
 class SimpleFunctions {
 public:
     void run() {
-        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
+        unique_ptr<Scope> s(globalScriptEngine->newScope());
 
         s->invoke("x=5;", 0, 0);
         ASSERT(5 == s->getNumber("x"));
@@ -160,7 +160,7 @@ class LogRecordingScope {
 public:
     LogRecordingScope()
         : _logged(false),
-          _threadName(mongo::getThreadName().toString()),
+          _threadName(mongo::getThreadName()),
           _handle(mongo::logger::globalLogDomain()->attachAppender(
               mongo::logger::MessageLogDomain::AppenderAutoPtr(new Tee(this)))) {}
     ~LogRecordingScope() {
@@ -196,7 +196,7 @@ private:
 class ExecLogError {
 public:
     void run() {
-        unique_ptr<Scope> scope(getGlobalScriptEngine()->newScope());
+        unique_ptr<Scope> scope(globalScriptEngine->newScope());
 
         // No error is logged when reportError == false.
         ASSERT(!scope->exec("notAFunction()", "foo", false, false, false));
@@ -212,7 +212,7 @@ public:
         // Don't check if we're using SpiderMonkey. Our threading model breaks
         // this test
         // TODO: figure out a way to check for SpiderMonkey
-        auto ivs = getGlobalScriptEngine()->getInterpreterVersionString();
+        auto ivs = globalScriptEngine->getInterpreterVersionString();
         std::string prefix("MozJS");
         if (ivs.compare(0, prefix.length(), prefix) != 0) {
             ASSERT(_logger.logged());
@@ -227,7 +227,7 @@ private:
 class InvokeLogError {
 public:
     void run() {
-        unique_ptr<Scope> scope(getGlobalScriptEngine()->newScope());
+        unique_ptr<Scope> scope(globalScriptEngine->newScope());
 
         // No error is logged for a valid statement.
         ASSERT_EQUALS(0, scope->invoke("validStatement = true", 0, 0));
@@ -243,7 +243,7 @@ public:
         // Don't check if we're using SpiderMonkey. Our threading model breaks
         // this test
         // TODO: figure out a way to check for SpiderMonkey
-        auto ivs = getGlobalScriptEngine()->getInterpreterVersionString();
+        auto ivs = globalScriptEngine->getInterpreterVersionString();
         std::string prefix("MozJS");
         if (ivs.compare(0, prefix.length(), prefix) != 0) {
             ASSERT(_logger.logged());
@@ -257,7 +257,7 @@ private:
 class ObjectMapping {
 public:
     void run() {
-        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
+        unique_ptr<Scope> s(globalScriptEngine->newScope());
 
         BSONObj o = BSON("x" << 17.0 << "y"
                              << "eliot"
@@ -314,7 +314,7 @@ public:
 class ObjectDecoding {
 public:
     void run() {
-        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
+        unique_ptr<Scope> s(globalScriptEngine->newScope());
 
         s->invoke("z = { num : 1 };", 0, 0);
         BSONObj out = s->getObject("z");
@@ -337,7 +337,7 @@ class JSOIDTests {
 public:
     void run() {
 #ifdef MOZJS
-        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
+        unique_ptr<Scope> s(globalScriptEngine->newScope());
 
         s->localConnect("blah");
 
@@ -368,7 +368,7 @@ public:
 class SetImplicit {
 public:
     void run() {
-        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
+        unique_ptr<Scope> s(globalScriptEngine->newScope());
 
         BSONObj o = BSON("foo"
                          << "bar");
@@ -390,14 +390,13 @@ public:
 class ObjectModReadonlyTests {
 public:
     void run() {
-        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
+        unique_ptr<Scope> s(globalScriptEngine->newScope());
 
         BSONObj o = BSON("x" << 17 << "y"
                              << "eliot"
                              << "z"
                              << "sara"
-                             << "zz"
-                             << BSONObj());
+                             << "zz" << BSONObj());
         s->setObject("blah", o, true);
 
         BSONObj out;
@@ -428,7 +427,7 @@ public:
 class OtherJSTypes {
 public:
     void run() {
-        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
+        unique_ptr<Scope> s(globalScriptEngine->newScope());
 
         {
             // date
@@ -525,7 +524,7 @@ public:
 class SpecialDBTypes {
 public:
     void run() {
-        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
+        unique_ptr<Scope> s(globalScriptEngine->newScope());
 
         BSONObjBuilder b;
         b.appendTimestamp("a", 123456789);
@@ -559,7 +558,7 @@ public:
 class TypeConservation {
 public:
     void run() {
-        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
+        unique_ptr<Scope> s(globalScriptEngine->newScope());
 
         //  --  A  --
 
@@ -657,7 +656,7 @@ public:
 class NumberLong {
 public:
     void run() {
-        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
+        unique_ptr<Scope> s(globalScriptEngine->newScope());
         BSONObjBuilder b;
         long long val = (long long)(0xbabadeadbeefbaddULL);
         b.append("a", val);
@@ -699,7 +698,7 @@ public:
         s->setObject("z", BSON("z" << (long long)(4)));
         ASSERT(s->exec("y = {y:z.z.top}", "foo", false, true, false));
         out = s->getObject("y");
-        ASSERT_EQUALS(NumberDouble, out.firstElement().type());
+        ASSERT_EQUALS(Undefined, out.firstElement().type());
 
         ASSERT(s->exec("x = {x:z.z.floatApprox}", "foo", false, true, false));
         out = s->getObject("x");
@@ -716,7 +715,7 @@ public:
 class NumberLong2 {
 public:
     void run() {
-        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
+        unique_ptr<Scope> s(globalScriptEngine->newScope());
 
         BSONObj in;
         {
@@ -736,14 +735,14 @@ public:
 
         ASSERT(s->exec((string) "y = " + outString, "foo2", false, true, false));
         BSONObj out = s->getObject("y");
-        ASSERT_BSONOBJ_EQ(in, out);
+        ASSERT_EQUALS(in, out);
     }
 };
 
 class NumberLongUnderLimit {
 public:
     void run() {
-        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
+        unique_ptr<Scope> s(globalScriptEngine->newScope());
 
         BSONObjBuilder b;
         // limit is 2^53
@@ -789,12 +788,7 @@ public:
 class NumberDecimal {
 public:
     void run() {
-        // Set the featureCompatibilityVersion to 3.4 so that BSON validation always uses
-        // BSONVersion::kLatest.
-        serverGlobalParams.featureCompatibility.version.store(
-            ServerGlobalParams::FeatureCompatibility::Version::k34);
-
-        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
+        unique_ptr<Scope> s(globalScriptEngine->newScope());
         BSONObjBuilder b;
         Decimal128 val = Decimal128("2.010");
         b.append("a", val);
@@ -823,12 +817,7 @@ public:
 class NumberDecimalGetFromScope {
 public:
     void run() {
-        // Set the featureCompatibilityVersion to 3.4 so that BSON validation always uses
-        // BSONVersion::kLatest.
-        serverGlobalParams.featureCompatibility.version.store(
-            ServerGlobalParams::FeatureCompatibility::Version::k34);
-
-        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
+        unique_ptr<Scope> s(globalScriptEngine->newScope());
         ASSERT(s->exec("a = 5;", "a", false, true, false));
         ASSERT_TRUE(Decimal128(5).isEqual(s->getNumberDecimal("a")));
     }
@@ -837,12 +826,7 @@ public:
 class NumberDecimalBigObject {
 public:
     void run() {
-        // Set the featureCompatibilityVersion to 3.4 so that BSON validation always uses
-        // BSONVersion::kLatest.
-        serverGlobalParams.featureCompatibility.version.store(
-            ServerGlobalParams::FeatureCompatibility::Version::k34);
-
-        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
+        unique_ptr<Scope> s(globalScriptEngine->newScope());
 
         BSONObj in;
         {
@@ -862,14 +846,14 @@ public:
 
         ASSERT(s->exec((string) "y = " + outString, "foo2", false, true, false));
         BSONObj out = s->getObject("y");
-        ASSERT_BSONOBJ_EQ(in, out);
+        ASSERT_EQUALS(in, out);
     }
 };
 
 class MaxTimestamp {
 public:
     void run() {
-        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
+        unique_ptr<Scope> s(globalScriptEngine->newScope());
 
         // Timestamp 't' component can exceed max for int32_t.
         BSONObj in;
@@ -898,7 +882,7 @@ public:
     }
 
     void run() {
-        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
+        unique_ptr<Scope> s(globalScriptEngine->newScope());
 
         for (int i = 5; i < 100; i += 10) {
             s->setObject("a", build(i), false);
@@ -916,7 +900,7 @@ public:
 class ExecTimeout {
 public:
     void run() {
-        unique_ptr<Scope> scope(getGlobalScriptEngine()->newScope());
+        unique_ptr<Scope> scope(globalScriptEngine->newScope());
 
         // assert timeout occurred
         ASSERT(!scope->exec("var a = 1; while (true) { ; }", "ExecTimeout", false, true, false, 1));
@@ -929,7 +913,7 @@ public:
 class ExecNoTimeout {
 public:
     void run() {
-        unique_ptr<Scope> scope(getGlobalScriptEngine()->newScope());
+        unique_ptr<Scope> scope(globalScriptEngine->newScope());
 
         // assert no timeout occurred
         ASSERT(scope->exec("var a = function() { return 1; }",
@@ -947,7 +931,7 @@ public:
 class InvokeTimeout {
 public:
     void run() {
-        unique_ptr<Scope> scope(getGlobalScriptEngine()->newScope());
+        unique_ptr<Scope> scope(globalScriptEngine->newScope());
 
         // scope timeout after 500ms
         bool caught = false;
@@ -972,7 +956,7 @@ public:
 class InvokeNoTimeout {
 public:
     void run() {
-        unique_ptr<Scope> scope(getGlobalScriptEngine()->newScope());
+        unique_ptr<Scope> scope(globalScriptEngine->newScope());
 
         // invoke completes before timeout
         scope->invokeSafe(
@@ -995,15 +979,14 @@ public:
         reset();
     }
     void run() {
-        if (!getGlobalScriptEngine()->utf8Ok()) {
+        if (!globalScriptEngine->utf8Ok()) {
             mongo::unittest::log() << "warning: utf8 not supported" << endl;
             return;
         }
         string utf8ObjSpec = "{'_id':'\\u0001\\u007f\\u07ff\\uffff'}";
         BSONObj utf8Obj = fromjson(utf8ObjSpec);
 
-        const ServiceContext::UniqueOperationContext txnPtr = cc().makeOperationContext();
-        OperationContext& txn = *txnPtr;
+        OperationContextImpl txn;
         DBDirectClient client(&txn);
 
         client.insert(ns(), utf8Obj);
@@ -1023,8 +1006,7 @@ private:
     }
 
     void reset() {
-        const ServiceContext::UniqueOperationContext txnPtr = cc().makeOperationContext();
-        OperationContext& txn = *txnPtr;
+        OperationContextImpl txn;
         DBDirectClient client(&txn);
 
         client.dropCollection(ns());
@@ -1044,11 +1026,10 @@ public:
         reset();
     }
     void run() {
-        if (!getGlobalScriptEngine()->utf8Ok())
+        if (!globalScriptEngine->utf8Ok())
             return;
 
-        const ServiceContext::UniqueOperationContext txnPtr = cc().makeOperationContext();
-        OperationContext& txn = *txnPtr;
+        OperationContextImpl txn;
         DBDirectClient client(&txn);
 
         client.eval("unittest",
@@ -1057,8 +1038,7 @@ public:
 
 private:
     void reset() {
-        const ServiceContext::UniqueOperationContext txnPtr = cc().makeOperationContext();
-        OperationContext& txn = *txnPtr;
+        OperationContextImpl txn;
         DBDirectClient client(&txn);
 
         client.dropCollection(ns());
@@ -1072,11 +1052,11 @@ private:
 class InvalidUTF8Check {
 public:
     void run() {
-        if (!getGlobalScriptEngine()->utf8Ok())
+        if (!globalScriptEngine->utf8Ok())
             return;
 
         unique_ptr<Scope> s;
-        s.reset(getGlobalScriptEngine()->newScope());
+        s.reset(globalScriptEngine->newScope());
 
         BSONObj b;
         {
@@ -1102,7 +1082,7 @@ public:
 class CodeTests {
 public:
     void run() {
-        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
+        unique_ptr<Scope> s(globalScriptEngine->newScope());
 
         {
             BSONObjBuilder b;
@@ -1136,14 +1116,8 @@ public:
     void run() {
         // Insert in Javascript -> Find using DBDirectClient
 
-        // Set the featureCompatibilityVersion to 3.4 so that BSON validation always uses
-        // BSONVersion::kLatest.
-        serverGlobalParams.featureCompatibility.version.store(
-            ServerGlobalParams::FeatureCompatibility::Version::k34);
-
         // Drop the collection
-        const ServiceContext::UniqueOperationContext txnPtr = cc().makeOperationContext();
-        OperationContext& txn = *txnPtr;
+        OperationContextImpl txn;
         DBDirectClient client(&txn);
 
         client.dropCollection("unittest.testroundtrip");
@@ -2112,7 +2086,7 @@ public:
     }
 
     void run() {
-        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
+        unique_ptr<Scope> s(globalScriptEngine->newScope());
 
         const char* foo = "asdas\0asdasd";
         const char* base64 = "YXNkYXMAYXNkYXNk";
@@ -2162,7 +2136,7 @@ public:
 class VarTests {
 public:
     void run() {
-        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
+        unique_ptr<Scope> s(globalScriptEngine->newScope());
 
         ASSERT(s->exec("a = 5;", "a", false, true, false));
         ASSERT_EQUALS(5, s->getNumber("a"));
@@ -2179,7 +2153,7 @@ public:
         BSONObj empty;
 
         unique_ptr<Scope> s;
-        s.reset(getGlobalScriptEngine()->newScope());
+        s.reset(globalScriptEngine->newScope());
 
         ScriptingFunction f = s->createFunction("return this.x + 6;");
 
@@ -2197,13 +2171,13 @@ class ScopeOut {
 public:
     void run() {
         unique_ptr<Scope> s;
-        s.reset(getGlobalScriptEngine()->newScope());
+        s.reset(globalScriptEngine->newScope());
 
         s->invokeSafe("x = 5;", 0, 0);
         {
             BSONObjBuilder b;
             s->append(b, "z", "x");
-            ASSERT_BSONOBJ_EQ(BSON("z" << 5), b.obj());
+            ASSERT_EQUALS(BSON("z" << 5), b.obj());
         }
 
         s->invokeSafe("x = function(){ return 17; }", 0, 0);
@@ -2223,7 +2197,7 @@ class RenameTest {
 public:
     void run() {
         unique_ptr<Scope> s;
-        s.reset(getGlobalScriptEngine()->newScope());
+        s.reset(globalScriptEngine->newScope());
 
         s->setNumber("x", 5);
         ASSERT_EQUALS(5, s->getNumber("x"));
@@ -2251,12 +2225,11 @@ public:
         update.appendCode("value",
                           "function () { db.test.find().forEach(function(obj) { continue; }); }");
 
-        const ServiceContext::UniqueOperationContext txnPtr = cc().makeOperationContext();
-        OperationContext& txn = *txnPtr;
+        OperationContextImpl txn;
         DBDirectClient client(&txn);
         client.update("test.system.js", query.obj(), update.obj(), true /* upsert */);
 
-        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
+        unique_ptr<Scope> s(globalScriptEngine->newScope());
         client.eval("test", "invalidstoredjs1()");
 
         BSONObj info;
@@ -2277,7 +2250,7 @@ public:
         uint8_t bits[] = {
             16, 0, 0, 0, 0x01, 'a', '\0', 0x61, 0x79, 0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0,
         };
-        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
+        unique_ptr<Scope> s(globalScriptEngine->newScope());
 
         s->setObject("val", BSONObj(reinterpret_cast<char*>(bits)).getOwned());
 
@@ -2289,7 +2262,7 @@ public:
 class NoReturnSpecified {
 public:
     void run() {
-        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
+        unique_ptr<Scope> s(globalScriptEngine->newScope());
 
         s->invoke("x=5;", 0, 0);
         ASSERT_EQUALS(5, s->getNumber("__returnValue"));
@@ -2343,7 +2316,7 @@ public:
     }
 
     void run() {
-        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
+        unique_ptr<Scope> s(globalScriptEngine->newScope());
 
         s->injectNative("foo", callback, s.get());
         s->invoke("var x = 1; foo();", 0, 0);
@@ -2354,7 +2327,7 @@ public:
 class ErrorCodeFromInvoke {
 public:
     void run() {
-        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
+        unique_ptr<Scope> s(globalScriptEngine->newScope());
 
         {
             bool threwException = false;
@@ -2400,14 +2373,14 @@ public:
 
         // Ensure that by default we can bind owned and unowned
         {
-            unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
+            unique_ptr<Scope> s(globalScriptEngine->newScope());
             s->setObject("unowned", unowned, true);
             s->setObject("owned", owned, true);
         }
 
         // After we set the flag, we should only be able to set owned
         {
-            unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
+            unique_ptr<Scope> s(globalScriptEngine->newScope());
             s->requireOwnedObjects();
             s->setObject("owned", owned, true);
 
@@ -2433,7 +2406,10 @@ public:
 
 class All : public Suite {
 public:
-    All() : Suite("js") {}
+    All() : Suite("js") {
+        // Initialize the Javascript interpreter
+        ScriptEngine::setup();
+    }
 
     void setupTests() {
         add<BuiltinTests>();
@@ -2459,9 +2435,11 @@ public:
         add<NumberLong>();
         add<NumberLong2>();
 
-        add<NumberDecimal>();
-        add<NumberDecimalGetFromScope>();
-        add<NumberDecimalBigObject>();
+        if (Decimal128::enabled) {
+            add<NumberDecimal>();
+            add<NumberDecimalGetFromScope>();
+            add<NumberDecimalBigObject>();
+        }
 
         add<MaxTimestamp>();
         add<RenameTest>();
@@ -2536,17 +2514,19 @@ public:
         add<RoundTripTests::NumberInt>();
         add<RoundTripTests::Number>();
 
-        add<RoundTripTests::NumberDecimal>();
-        add<RoundTripTests::NumberDecimalNegative>();
-        add<RoundTripTests::NumberDecimalMax>();
-        add<RoundTripTests::NumberDecimalMin>();
-        add<RoundTripTests::NumberDecimalPositiveZero>();
-        add<RoundTripTests::NumberDecimalNegativeZero>();
-        add<RoundTripTests::NumberDecimalPositiveNaN>();
-        add<RoundTripTests::NumberDecimalNegativeNaN>();
-        add<RoundTripTests::NumberDecimalPositiveInfinity>();
-        add<RoundTripTests::NumberDecimalNegativeInfinity>();
-        add<RoundTripTests::NumberDecimalPrecision>();
+        if (Decimal128::enabled) {
+            add<RoundTripTests::NumberDecimal>();
+            add<RoundTripTests::NumberDecimalNegative>();
+            add<RoundTripTests::NumberDecimalMax>();
+            add<RoundTripTests::NumberDecimalMin>();
+            add<RoundTripTests::NumberDecimalPositiveZero>();
+            add<RoundTripTests::NumberDecimalNegativeZero>();
+            add<RoundTripTests::NumberDecimalPositiveNaN>();
+            add<RoundTripTests::NumberDecimalNegativeNaN>();
+            add<RoundTripTests::NumberDecimalPositiveInfinity>();
+            add<RoundTripTests::NumberDecimalNegativeInfinity>();
+            add<RoundTripTests::NumberDecimalPrecision>();
+        }
 
         add<RoundTripTests::UUID>();
         add<RoundTripTests::HexData>();

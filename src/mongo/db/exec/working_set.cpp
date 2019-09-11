@@ -28,7 +28,6 @@
 
 #include "mongo/db/exec/working_set.h"
 
-#include "mongo/db/bson/dotted_path_support.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/record_fetcher.h"
@@ -36,8 +35,6 @@
 namespace mongo {
 
 using std::string;
-
-namespace dps = ::mongo::dotted_path_support;
 
 WorkingSet::MemberHolder::MemberHolder() : member(NULL) {}
 WorkingSet::MemberHolder::~MemberHolder() {}
@@ -109,15 +106,15 @@ void WorkingSet::clear() {
     _yieldSensitiveIds.clear();
 }
 
-void WorkingSet::transitionToRecordIdAndIdx(WorkingSetID id) {
+void WorkingSet::transitionToLocAndIdx(WorkingSetID id) {
     WorkingSetMember* member = get(id);
-    member->_state = WorkingSetMember::RID_AND_IDX;
+    member->_state = WorkingSetMember::LOC_AND_IDX;
     _yieldSensitiveIds.push_back(id);
 }
 
-void WorkingSet::transitionToRecordIdAndObj(WorkingSetID id) {
+void WorkingSet::transitionToLocAndObj(WorkingSetID id) {
     WorkingSetMember* member = get(id);
-    member->_state = WorkingSetMember::RID_AND_OBJ;
+    member->_state = WorkingSetMember::LOC_AND_OBJ;
 }
 
 void WorkingSet::transitionToOwnedObj(WorkingSetID id) {
@@ -160,20 +157,20 @@ void WorkingSetMember::transitionToOwnedObj() {
 }
 
 
-bool WorkingSetMember::hasRecordId() const {
-    return _state == RID_AND_IDX || _state == RID_AND_OBJ;
+bool WorkingSetMember::hasLoc() const {
+    return _state == LOC_AND_IDX || _state == LOC_AND_OBJ;
 }
 
 bool WorkingSetMember::hasObj() const {
-    return _state == OWNED_OBJ || _state == RID_AND_OBJ;
+    return _state == OWNED_OBJ || _state == LOC_AND_OBJ;
 }
 
 bool WorkingSetMember::hasOwnedObj() const {
-    return _state == OWNED_OBJ || (_state == RID_AND_OBJ && obj.value().isOwned());
+    return _state == OWNED_OBJ || (_state == LOC_AND_OBJ && obj.value().isOwned());
 }
 
 void WorkingSetMember::makeObjOwnedIfNeeded() {
-    if (supportsDocLocking() && _state == RID_AND_OBJ && !obj.value().isOwned()) {
+    if (supportsDocLocking() && _state == LOC_AND_OBJ && !obj.value().isOwned()) {
         obj.setValue(obj.value().getOwned());
     }
 }
@@ -208,7 +205,7 @@ bool WorkingSetMember::hasFetcher() const {
 bool WorkingSetMember::getFieldDotted(const string& field, BSONElement* out) const {
     // If our state is such that we have an object, use it.
     if (hasObj()) {
-        *out = dps::extractElementAtPath(obj.value(), field);
+        *out = obj.value().getFieldDotted(field);
         return true;
     }
 
@@ -235,7 +232,7 @@ bool WorkingSetMember::getFieldDotted(const string& field, BSONElement* out) con
 size_t WorkingSetMember::getMemUsage() const {
     size_t memUsage = 0;
 
-    if (hasRecordId()) {
+    if (hasLoc()) {
         memUsage += sizeof(RecordId);
     }
 

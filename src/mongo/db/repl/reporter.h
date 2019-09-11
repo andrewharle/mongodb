@@ -31,36 +31,12 @@
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/executor/task_executor.h"
-#include "mongo/stdx/condition_variable.h"
+#include "mongo/db/repl/replication_executor.h"
 #include "mongo/stdx/functional.h"
-#include "mongo/stdx/mutex.h"
-#include "mongo/util/time_support.h"
 
 namespace mongo {
 namespace repl {
 
-/**
- * Once scheduled, the reporter will periodically send the current replication progress, obtained
- * by invoking "_prepareReplSetUpdatePositionCommandFn", to its sync source until it encounters
- * an error.
- *
- * If the sync source cannot accept the current format (used by server versions 3.2.4 and above) of
- * the "replSetUpdatePosition" command, the reporter will not abort and instead downgrade the format
- * of the command it will send upstream.
- *
- * While the reporter is active, it will be in one of three states:
- * 1) triggered and waiting to send command to sync source as soon as possible.
- * 2) waiting for command response from sync source.
- * 3) waiting for at least "_keepAliveInterval" ms before sending command to sync source.
- *
- * Calling trigger() while the reporter is in state 1 or 2 will cause the reporter to immediately
- * send a new command upon receiving a successful command response.
- *
- * Calling trigger() while it is in state 3 sends a command upstream and cancels the current
- * keep alive timeout, resetting the keep alive schedule.
- */
 class Reporter {
     MONGO_DISALLOW_COPYING(Reporter);
 
@@ -71,33 +47,12 @@ public:
      *
      * The returned status indicates whether or not the command was created.
      */
-    using PrepareReplSetUpdatePositionCommandFn = stdx::function<StatusWith<BSONObj>(
-        ReplicationCoordinator::ReplSetUpdatePositionCommandStyle)>;
+    using PrepareReplSetUpdatePositionCommandFn = stdx::function<StatusWith<BSONObj>()>;
 
-    Reporter(executor::TaskExecutor* executor,
-             PrepareReplSetUpdatePositionCommandFn prepareReplSetUpdatePositionCommandFn,
-             const HostAndPort& target,
-             Milliseconds keepAliveInterval,
-             Milliseconds updatePositionTimeout);
-
+    Reporter(ReplicationExecutor* executor,
+             PrepareReplSetUpdatePositionCommandFn prepareOldReplSetUpdatePositionCommandFn,
+             const HostAndPort& target);
     virtual ~Reporter();
-
-    /**
-     * Returns sync target.
-     */
-    HostAndPort getTarget() const;
-
-    /**
-     * Returns an informational string.
-     */
-    std::string toString() const;
-
-    /**
-     * Returns keep alive interval.
-     * Reporter will periodically send replication status to sync source every "_keepAliveInterval"
-     * until an error occurs.
-     */
-    Milliseconds getKeepAliveInterval() const;
 
     /**
      * Returns true if a remote command has been scheduled (but not completed)
@@ -106,22 +61,22 @@ public:
     bool isActive() const;
 
     /**
-     * Returns true if new data is available while a remote command is in progress.
-     * The reporter will schedule a subsequent remote update immediately upon successful
-     * completion of the previous command instead of when the keep alive callback runs.
+     * Returns true if a remote command should be scheduled once the current one returns
+     * from the executor.
      */
-    bool isWaitingToSendReport() const;
+    bool willRunAgain() const;
 
     /**
-     * Cancels both scheduled and active remote command requests.
+     * Cancels remote command request.
      * Returns immediately if the Reporter is not active.
      */
-    void shutdown();
+    void cancel();
 
     /**
-     * Waits until Reporter is inactive and returns reporter status.
+     * Waits for last/current executor handle to finish.
+     * Returns immediately if the handle is invalid.
      */
-    Status join();
+    void wait();
 
     /**
      * Signals to the Reporter that there is new information to be sent to the "_target" server.
@@ -129,88 +84,46 @@ public:
      */
     Status trigger();
 
-    // ================== Test support API ===================
-
     /**
-     * Returns scheduled time of keep alive timeout handler.
+     * Returns the previous return status so that the owner can decide whether the Reporter
+     * needs a new target to whom it can report.
      */
-    Date_t getKeepAliveTimeoutWhen_forTest() const;
-    Status getStatus_forTest() const;
+    Status getStatus() const;
 
 private:
     /**
-     * Returns true if reporter is active.
+     * Schedules remote command to be run by the executor
      */
-    bool _isActive_inlock() const;
+    Status _schedule_inlock();
 
     /**
-     * Prepares remote command to be run by the executor.
+     * Callback for remote command.
      */
-    StatusWith<BSONObj> _prepareCommand();
-
-    /**
-     * Schedules remote command to be run by the executor with the given network timeout.
-     */
-    void _sendCommand_inlock(BSONObj commandRequest, Milliseconds netTimeout);
-
-    /**
-     * Callback for processing response from remote command.
-     */
-    void _processResponseCallback(const executor::TaskExecutor::RemoteCommandCallbackArgs& rcbd);
-
-    /**
-     * Callback for preparing and sending remote command.
-     */
-    void _prepareAndSendCommandCallback(const executor::TaskExecutor::CallbackArgs& args,
-                                        bool fromTrigger);
-
-    /**
-     * Signals end of Reporter work and notifies waiters.
-     */
-    void _onShutdown_inlock();
+    void _callback(const ReplicationExecutor::RemoteCommandCallbackArgs& rcbd);
 
     // Not owned by us.
-    executor::TaskExecutor* const _executor;
+    ReplicationExecutor* _executor;
 
     // Prepares update command object.
-    const PrepareReplSetUpdatePositionCommandFn _prepareReplSetUpdatePositionCommandFn;
+    PrepareReplSetUpdatePositionCommandFn _prepareOldReplSetUpdatePositionCommandFn;
 
     // Host to whom the Reporter sends updates.
-    const HostAndPort _target;
+    HostAndPort _target;
 
-    // Reporter will send updates every "_keepAliveInterval" ms until the reporter is canceled or
-    // encounters an error.
-    const Milliseconds _keepAliveInterval;
-
-    // The network timeout used when sending an updatePosition command to our sync source.
-    const Milliseconds _updatePositionTimeout;
-
-    // Protects member data of this Reporter declared below.
+    // Protects member data of this Reporter.
     mutable stdx::mutex _mutex;
 
-    mutable stdx::condition_variable _condition;
+    // Stores the most recent Status returned from the ReplicationExecutor.
+    Status _status;
 
-    // Stores the most recent Status returned from the executor.
-    Status _status = Status::OK();
-
-    // Stores style of the most recent update command object.
-    ReplicationCoordinator::ReplSetUpdatePositionCommandStyle _commandStyle =
-        ReplicationCoordinator::ReplSetUpdatePositionCommandStyle::kNewStyle;
-
-    // _isWaitingToSendReporter is true when Reporter is scheduled to be run by the executor and
-    // subsequent updates have come in.
-    bool _isWaitingToSendReporter = false;
+    // _willRunAgain is true when Reporter is scheduled to be run by the executor and subsequent
+    // updates have come in.
+    bool _willRunAgain;
+    // _active is true when Reporter is scheduled to be run by the executor.
+    bool _active;
 
     // Callback handle to the scheduled remote command.
-    executor::TaskExecutor::CallbackHandle _remoteCommandCallbackHandle;
-
-    // Callback handle to the scheduled task for preparing and sending the remote command.
-    executor::TaskExecutor::CallbackHandle _prepareAndSendCommandCallbackHandle;
-
-    // Keep alive timeout callback will not run before this time.
-    // If this date is Date_t(), the callback is either unscheduled or canceled.
-    // Used for testing only.
-    Date_t _keepAliveTimeoutWhen;
+    ReplicationExecutor::CallbackHandle _remoteCommandCallbackHandle;
 };
 
 }  // namespace repl

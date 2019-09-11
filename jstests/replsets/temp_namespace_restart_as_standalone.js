@@ -25,7 +25,6 @@
     assert.commandWorked(primaryDB.runCommand({
         create: "temp_collection",
         temp: true,
-        writeConcern: {w: 2, wtimeout: 60000},
     }));
 
     // Verify that the temporary collection exists on the primary and has temp=true.
@@ -38,6 +37,8 @@
               primaryCollectionInfos[0].options.temp,
               "'temp_collection' wasn't created as temporary on the primary: " +
                   tojson(primaryCollectionInfos[0].options));
+
+    rst.awaitReplication();
 
     // Verify that the temporary collection exists on the secondary and has temp=true.
     var secondaryCollectionInfos = secondaryDB.getCollectionInfos({name: "temp_collection"});

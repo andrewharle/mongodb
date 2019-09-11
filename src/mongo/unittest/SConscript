@@ -4,20 +4,19 @@ Import("env")
 
 env.Library(target="unittest",
             source=[
-                'bson_test_util.cpp',
                 'death_test.cpp',
                 'temp_dir.cpp',
                 'unittest.cpp',
                 'unittest_helpers.cpp',
             ],
-            LIBDEPS=[
-                '$BUILD_DIR/mongo/base',
-                '$BUILD_DIR/mongo/util/options_parser/options_parser',
+            LIBDEPS=['$BUILD_DIR/mongo/util/foundation',
+                     '$BUILD_DIR/mongo/util/options_parser/options_parser',
             ])
 
 env.Library("unittest_main", ['unittest_main.cpp'],
             LIBDEPS=[
                 'unittest',
+                '$BUILD_DIR/mongo/base',
                  ])
 
 env.Library(target="integration_test_main",
@@ -32,6 +31,9 @@ env.Library(target="integration_test_main",
             ],
 )
 
+env.Library("unittest_crutch", ['crutch.cpp'], LIBDEPS=['$BUILD_DIR/mongo/base'])
+
+
 env.CppUnitTest('unittest_test', 'unittest_test.cpp')
 env.CppUnitTest('fixture_test', 'fixture_test.cpp')
 env.CppUnitTest('temp_dir_test', 'temp_dir_test.cpp')
@@ -43,15 +45,5 @@ env.Library(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
-    ],
-)
-
-env.Library(
-    target='task_executor_proxy',
-    source=[
-        'task_executor_proxy.cpp',
-    ],
-    LIBDEPS=[
-        '$BUILD_DIR/mongo/executor/task_executor_interface',
     ],
 )

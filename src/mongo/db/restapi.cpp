@@ -41,8 +41,8 @@
 #include "mongo/db/background.h"
 #include "mongo/db/clientcursor.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/dbhelpers.h"
 #include "mongo/db/dbwebserver.h"
-#include "mongo/db/operation_context.h"
 #include "mongo/db/repl/master_slave.h"
 #include "mongo/db/repl/replication_coordinator_global.h"
 #include "mongo/util/log.h"
@@ -52,9 +52,12 @@
 
 namespace mongo {
 
+bool getInitialSyncCompleted();
+
 using std::unique_ptr;
 using std::string;
 using std::stringstream;
+using std::endl;
 using std::vector;
 
 using namespace html;
@@ -120,7 +123,7 @@ public:
             responseCode = 400;
             headers.push_back("X_err: bad request");
             ss << "don't know how to handle a [" << method << "]";
-            log() << "don't know how to handle a [" << method << "]";
+            log() << "don't know how to handle a [" << method << "]" << endl;
         }
 
         if (html)

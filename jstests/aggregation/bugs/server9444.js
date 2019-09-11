@@ -29,16 +29,17 @@
         assert.eq(res.code, outOfMemoryCode);
 
         // ensure allowDiskUse: false does what it says
-        res = t.runCommand('aggregate', {pipeline: pipeline, allowDiskUse: false});
+        var res = t.runCommand('aggregate', {pipeline: pipeline, allowDiskUse: false});
         assert.commandFailed(res);
         assert.eq(res.code, outOfMemoryCode);
 
         // allowDiskUse only supports bool. In particular, numbers aren't allowed.
-        res = t.runCommand('aggregate', {pipeline: pipeline, allowDiskUse: 1});
+        var res = t.runCommand('aggregate', {pipeline: pipeline, allowDiskUse: 1});
         assert.commandFailed(res);
+        assert.eq(res.code, 16949);
 
         // ensure we work when allowDiskUse === true
-        res = t.aggregate(pipeline, {allowDiskUse: true});
+        var res = t.aggregate(pipeline, {allowDiskUse: true});
         assert.eq(res.itcount(), t.count());  // all tests output one doc per input doc
     }
 

@@ -29,9 +29,10 @@
 #pragma once
 
 #include "mongo/db/exec/plan_stage.h"
-#include "mongo/db/s/metadata_manager.h"
 
 namespace mongo {
+
+class CollectionMetadata;
 
 /**
  * This stage drops documents that didn't belong to the shard we're executing on at the time of
@@ -71,13 +72,13 @@ namespace mongo {
 class ShardFilterStage final : public PlanStage {
 public:
     ShardFilterStage(OperationContext* opCtx,
-                     ScopedCollectionMetadata metadata,
+                     const std::shared_ptr<CollectionMetadata>& metadata,
                      WorkingSet* ws,
                      PlanStage* child);
     ~ShardFilterStage();
 
     bool isEOF() final;
-    StageState doWork(WorkingSetID* out) final;
+    StageState work(WorkingSetID* out) final;
 
     StageType stageType() const final {
         return STAGE_SHARDING_FILTER;
@@ -97,7 +98,7 @@ private:
 
     // Note: it is important that this is the metadata from the time this stage is constructed.
     // See class comment for details.
-    ScopedCollectionMetadata _metadata;
+    const std::shared_ptr<CollectionMetadata> _metadata;
 };
 
 }  // namespace mongo

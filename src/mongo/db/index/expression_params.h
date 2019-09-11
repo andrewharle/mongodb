@@ -31,12 +31,11 @@
 #include <string>
 #include <vector>
 
-#include "mongo/db/hasher.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/db/hasher.h"
 
 namespace mongo {
 
-class CollatorInterface;
 struct TwoDIndexingParams;
 struct S2IndexingParams;
 
@@ -54,9 +53,7 @@ void parseHaystackParams(const BSONObj& infoObj,
                          std::vector<std::string>* otherFieldsOut,
                          double* bucketSizeOut);
 
-void initialize2dsphereParams(const BSONObj& infoObj,
-                              const CollatorInterface* collator,
-                              S2IndexingParams* out);
+void parse2dsphereParams(const BSONObj& infoObj, S2IndexingParams* out);
 
 }  // namespace ExpressionParams
 

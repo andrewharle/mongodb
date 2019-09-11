@@ -47,11 +47,11 @@
 #include <mutex>
 
 #include "mongo/config.h"
-#include "mongo/db/bson/dotted_path_support.h"
 #include "mongo/db/client.h"
 #include "mongo/db/db.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/lasterror.h"
+#include "mongo/db/operation_context_impl.h"
 #include "mongo/db/storage/mmap_v1/dur_stats.h"
 #include "mongo/db/storage/mmap_v1/mmap.h"
 #include "mongo/db/storage/storage_options.h"
@@ -75,8 +75,6 @@ using std::setprecision;
 using std::setw;
 using std::string;
 using std::vector;
-
-namespace dps = ::mongo::dotted_path_support;
 
 const bool profiling = false;
 
@@ -108,8 +106,7 @@ protected:
     }
 
 private:
-    const ServiceContext::UniqueOperationContext _txnPtr = cc().makeOperationContext();
-    OperationContext& _txn = *_txnPtr;
+    OperationContextImpl _txn;
     DBDirectClient _client;
 };
 
@@ -202,8 +199,7 @@ public:
                             cout << "stats " << setw(42) << right << "new/old:" << ' ' << setw(9);
                             cout << fixed << setprecision(2) << rps / lastrps;
                             if (needver) {
-                                cout << "         "
-                                     << dps::extractElementAtPath(o, "info.git").toString();
+                                cout << "         " << o.getFieldDotted("info.git").toString();
                             }
                             cout << '\n';
                         }
@@ -226,18 +222,17 @@ public:
                 }
 
                 {
-                    auto&& vii = VersionInfoInterface::instance();
                     bob inf;
-                    inf.append("version", vii.version());
+                    inf.append("version", versionString);
                     if (sizeof(int*) == 4)
                         inf.append("bits", 32);
                     DEV inf.append("DEBUG", true);
 #if defined(_WIN32)
                     inf.append("os", "win");
 #endif
-                    inf.append("git", vii.gitVersion());
+                    inf.append("git", gitVersion());
 #ifdef MONGO_CONFIG_SSL
-                    inf.append("OpenSSL", vii.openSSLVersion());
+                    inf.append("OpenSSL", openSSLVersion());
 #endif
                     inf.append("boost", BOOST_VERSION);
                     b.append("info", inf.obj());
@@ -332,8 +327,7 @@ public:
         srand(++z ^ (unsigned)time(0));
 #endif
         Client::initThreadIfNotAlready("perftestthr");
-        const ServiceContext::UniqueOperationContext txnPtr = cc().makeOperationContext();
-        OperationContext& txn = *txnPtr;
+        OperationContextImpl txn;
         DBDirectClient c(&txn);
 
         const unsigned int Batch = batchSize();

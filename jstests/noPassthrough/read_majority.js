@@ -1,20 +1,4 @@
-/**
- * Tests a variety of functionality related to committed reads:
- *  - A killOp command can successfully kill an operation that is waiting for snapshots to be
- *    created.
- *  - A user should not be able to do any committed reads before a snapshot has been blessed.
- *  - Inserts and catalog changes should not be visible in a snapshot before they occurred.
- *  - A getMore should see the new blessed snapshot.
- *  - Dropping an index, repairing, and reIndexing should bump the min snapshot version.
- *  - Dropping a collection is visible in committed snapshot, since metadata changes are special.
- *  - 'local'-only commands should error on 'majority' level, and accept 'local' level.
- *  - An aggregation with '$out' should fail with 'majority' level.
- *
- * All of this requires support for committed reads, so this test will be skipped if the storage
- * engine does not support them.
- */
-
-load("jstests/libs/analyze_plan.js");
+load('jstests/libs/analyze_plan.js');
 
 (function() {
     "use strict";
@@ -28,8 +12,8 @@ load("jstests/libs/analyze_plan.js");
     var t = db.readMajority;
 
     function assertNoReadMajoritySnapshotAvailable() {
-        var res =
-            t.runCommand('find', {batchSize: 2, readConcern: {level: "majority"}, maxTimeMS: 1000});
+        var res = t.runCommand('find',
+                               {batchSize: 2, readConcern: {level: "majority"}, maxTimeMS: 1000});
         assert.commandFailed(res);
         assert.eq(res.code, ErrorCodes.ExceededTimeLimit);
     }
@@ -41,8 +25,8 @@ load("jstests/libs/analyze_plan.js");
     }
 
     function getReadMajorityAggCursor() {
-        var res = t.runCommand(
-            'aggregate', {pipeline: [], cursor: {batchSize: 2}, readConcern: {level: "majority"}});
+        var res =
+            t.runCommand('aggregate', {cursor: {batchSize: 2}, readConcern: {level: "majority"}});
         assert.commandWorked(res);
         return new DBCommandCursor(db.getMongo(), res, 2);
     }

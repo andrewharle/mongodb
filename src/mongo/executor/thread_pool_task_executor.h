@@ -32,8 +32,8 @@
 
 #include "mongo/base/disallow_copying.h"
 #include "mongo/executor/task_executor.h"
-#include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/list.h"
+#include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/stdx/thread.h"
 
@@ -68,7 +68,7 @@ public:
     void startup() override;
     void shutdown() override;
     void join() override;
-    std::string getDiagnosticString() const override;
+    std::string getDiagnosticString() override;
     Date_t now() override;
     StatusWith<EventHandle> makeEvent() override;
     void signalEvent(const EventHandle& event) override;
@@ -152,11 +152,6 @@ private:
      */
     void runCallback(std::shared_ptr<CallbackState> cbState);
 
-    /**
-     * Returns bson for diagnostics
-     */
-    BSONObj _getDiagnosticBSON() const;
-
     // The network interface used for remote command execution and waiting.
     std::unique_ptr<NetworkInterface> _net;
 
@@ -164,7 +159,7 @@ private:
     std::unique_ptr<ThreadPoolInterface> _pool;
 
     // Mutex guarding all remaining fields.
-    mutable stdx::mutex _mutex;
+    stdx::mutex _mutex;
 
     // Queue containing all items currently scheduled into the thread pool but not yet completed.
     WorkQueue _poolInProgressQueue;

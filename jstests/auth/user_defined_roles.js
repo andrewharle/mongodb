@@ -12,8 +12,8 @@ function runTest(conn) {
 
     conn.getDB('admin').createUser({user: 'admin', pwd: 'pwd', roles: ['root']});
     conn.getDB('admin').auth('admin', 'pwd');
-    conn.getDB('admin').createUser(
-        {user: 'userAdmin', pwd: 'pwd', roles: ['userAdminAnyDatabase']});
+    conn.getDB('admin')
+        .createUser({user: 'userAdmin', pwd: 'pwd', roles: ['userAdminAnyDatabase']});
     conn.getDB('admin').logout();
 
     var userAdminConn = new Mongo(conn.host);
@@ -99,11 +99,12 @@ function runTest(conn) {
         testDB.updateUser('testUser', {customData: {zipCode: 10036}});
     });
     assert.eq(null, testDB.getUser('testUser').customData);
-    testUserAdmin.grantPrivilegesToRole('testRole1',
-                                        [{
-                                           resource: {db: 'test', collection: ''},
-                                           actions: ['changeOwnPassword', 'changeOwnCustomData']
-                                        }]);
+    testUserAdmin.grantPrivilegesToRole(
+        'testRole1',
+            [{
+               resource: {db: 'test', collection: ''},
+               actions: ['changeOwnPassword', 'changeOwnCustomData']
+            }]);
     testDB.changeUserPassword('testUser', 'password');
     assert(!testDB.auth('testUser', 'pwd'));
     assert(testDB.auth('testUser', 'password'));
@@ -123,9 +124,11 @@ function runTest(conn) {
     assert.eq(10036, testDB.getUser('testUser').customData.zipCode);
 
     // Test changeAnyPassword/changeAnyCustomData
-    testUserAdmin.grantPrivilegesToRole('testRole2', [
-        {resource: {db: 'test', collection: ''}, actions: ['changePassword', 'changeCustomData']}
-    ]);
+    testUserAdmin.grantPrivilegesToRole('testRole2',
+                                            [{
+                                               resource: {db: 'test', collection: ''},
+                                               actions: ['changePassword', 'changeCustomData']
+                                            }]);
     testDB.changeUserPassword('testUser', 'pwd');
     assert(!testDB.auth('testUser', 'password'));
     assert(testDB.auth('testUser', 'pwd'));
@@ -134,8 +137,8 @@ function runTest(conn) {
 
     // Test privileges on the cluster resource
     assert.commandFailed(testDB.runCommand({serverStatus: 1}));
-    adminUserAdmin.grantPrivilegesToRole('adminRole',
-                                         [{resource: {cluster: true}, actions: ['serverStatus']}]);
+    adminUserAdmin.grantPrivilegesToRole(
+        'adminRole', [{resource: {cluster: true}, actions: ['serverStatus']}]);
     assert.commandWorked(testDB.serverStatus());
 }
 

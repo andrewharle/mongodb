@@ -3,22 +3,24 @@
 (function() {
     "use strict";
 
-    let coll = db.update_affects_indexes;
+    var coll = db.update_affects_indexes;
     coll.drop();
-    let indexKeyPattern = {"a.b": 1};
+    var indexKeyPattern = {
+        "a.b": 1
+    };
     assert.commandWorked(coll.createIndex(indexKeyPattern));
 
     // Tests that the document 'docId' has all the index keys in 'expectedKeys' and none of the
     // index keys in 'unexpectedKeys'.
     function assertExpectedIndexKeys(docId, expectedKeys, unexpectedKeys) {
-        for (let key of expectedKeys) {
-            let res = coll.find(docId).hint(indexKeyPattern).min(key).returnKey().toArray();
+        for (var key of expectedKeys) {
+            var res = coll.find(docId).hint(indexKeyPattern).min(key).returnKey().toArray();
             assert.eq(1, res.length, tojson(res));
             assert.eq(key, res[0]);
         }
 
-        for (let key of unexpectedKeys) {
-            let res = coll.find(docId).hint(indexKeyPattern).min(key).returnKey().toArray();
+        for (var key of unexpectedKeys) {
+            var res = coll.find(docId).hint(indexKeyPattern).min(key).returnKey().toArray();
             if (res.length > 0) {
                 assert.eq(1, res.length, tojson(res));
                 assert.neq(key, res[0]);

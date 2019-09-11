@@ -36,7 +36,6 @@
 
 namespace mongo {
 
-class CollatorInterface;
 class LogBuilder;
 
 class ModifierAddToSet : public ModifierInterface {
@@ -64,8 +63,6 @@ public:
     /** Converts the effects of this $addToSet into one or more equivalent $set operations. */
     virtual Status log(LogBuilder* logBuilder) const;
 
-    virtual void setCollator(const CollatorInterface* collator);
-
 private:
     // Access to each component of fieldName that's the target of this mod.
     FieldRef _fieldRef;
@@ -79,8 +76,6 @@ private:
 
     struct PreparedState;
     std::unique_ptr<PreparedState> _preparedState;
-
-    const CollatorInterface* _collator = nullptr;
 };
 
 }  // namespace mongo

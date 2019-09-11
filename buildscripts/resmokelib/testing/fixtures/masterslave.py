@@ -31,7 +31,7 @@ class MasterSlaveFixture(interface.ReplFixture):
                  dbpath_prefix=None,
                  preserve_dbpath=False):
 
-        interface.ReplFixture.__init__(self, logger, job_num, dbpath_prefix=dbpath_prefix)
+        interface.ReplFixture.__init__(self, logger, job_num)
 
         if "dbpath" in mongod_options:
             raise ValueError("Cannot specify mongod_options.dbpath")
@@ -42,7 +42,12 @@ class MasterSlaveFixture(interface.ReplFixture):
         self.slave_options = utils.default_if_none(slave_options, {})
         self.preserve_dbpath = preserve_dbpath
 
-        self._dbpath_prefix = os.path.join(self._dbpath_prefix, config.FIXTURE_SUBDIR)
+        # Command line options override the YAML configuration.
+        dbpath_prefix = utils.default_if_none(config.DBPATH_PREFIX, dbpath_prefix)
+        dbpath_prefix = utils.default_if_none(dbpath_prefix, config.DEFAULT_DBPATH_PREFIX)
+        self._dbpath_prefix = os.path.join(dbpath_prefix,
+                                           "job%d" % (self.job_num),
+                                           config.FIXTURE_SUBDIR)
 
         self.master = None
         self.slave = None
@@ -78,13 +83,13 @@ class MasterSlaveFixture(interface.ReplFixture):
             self.logger.info("Replication of write operation timed out.")
             raise
 
-    def _do_teardown(self):
+    def teardown(self):
         running_at_start = self.is_running()
         success = True  # Still a success if nothing is running.
 
         if not running_at_start:
-            self.logger.info(
-                "Master-slave deployment was expected to be running in _do_teardown(), but wasn't.")
+            self.logger.info("Master-slave deployment was expected to be running in teardown(),"
+                             " but wasn't.")
 
         if self.slave is not None:
             if running_at_start:

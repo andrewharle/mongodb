@@ -84,8 +84,7 @@ Status ModifierBit::init(const BSONElement& modExpr, const Options& opts, bool* 
     if (foundDollar && foundCount > 1) {
         return Status(ErrorCodes::BadValue,
                       str::stream() << "Too many positional (i.e. '$') elements found in path '"
-                                    << _fieldRef.dottedField()
-                                    << "'");
+                                    << _fieldRef.dottedField() << "'");
     }
 
     if (modExpr.type() != mongo::Object)
@@ -121,9 +120,7 @@ Status ModifierBit::init(const BSONElement& modExpr, const Options& opts, bool* 
             return Status(ErrorCodes::BadValue,
                           str::stream()
                               << "The $bit modifier only supports 'and', 'or', and 'xor', not '"
-                              << payloadFieldName
-                              << "' which is an unknown operator: {"
-                              << curOp
+                              << payloadFieldName << "' which is an unknown operator: {" << curOp
                               << "}");
         }
 
@@ -131,9 +128,7 @@ Status ModifierBit::init(const BSONElement& modExpr, const Options& opts, bool* 
             return Status(ErrorCodes::BadValue,
                           str::stream()
                               << "The $bit modifier field must be an Integer(32/64 bit); a '"
-                              << typeName(curOp.type())
-                              << "' is not supported here: {"
-                              << curOp
+                              << typeName(curOp.type()) << "' is not supported here: {" << curOp
                               << "}");
 
         const OpEntry entry = {SafeNum(curOp), op};
@@ -190,7 +185,7 @@ Status ModifierBit::prepare(mutablebson::Element root,
     if (!_preparedState->elemFound.ok() || _preparedState->idxFound < (_fieldRef.numParts() - 1)) {
         // If no target element exists, the value we will write is the result of applying
         // the operation to a zero-initialized integer element.
-        _preparedState->newValue = apply(SafeNum(static_cast<int32_t>(0)));
+        _preparedState->newValue = apply(SafeNum(static_cast<int>(0)));
 
         if (elemFoundIsArray) {
             // Report that an existing array will gain a new element as a result of this mod.
@@ -204,8 +199,7 @@ Status ModifierBit::prepare(mutablebson::Element root,
         mb::Element idElem = mb::findElementNamed(root.leftChild(), "_id");
         return Status(ErrorCodes::BadValue,
                       str::stream() << "Cannot apply $bit to a value of non-integral type."
-                                    << idElem.toString()
-                                    << " has the field "
+                                    << idElem.toString() << " has the field "
                                     << _preparedState->elemFound.getFieldName()
                                     << " of non-integer type "
                                     << typeName(_preparedState->elemFound.getType()));
@@ -274,9 +268,7 @@ Status ModifierBit::log(LogBuilder* logBuilder) const {
     if (!logElement.ok()) {
         return Status(ErrorCodes::InternalError,
                       str::stream() << "Could not append entry to $bit oplog entry: "
-                                    << "set '"
-                                    << _fieldRef.dottedField()
-                                    << "' -> "
+                                    << "set '" << _fieldRef.dottedField() << "' -> "
                                     << _preparedState->newValue.debugString());
     }
     return logBuilder->addToSets(logElement);

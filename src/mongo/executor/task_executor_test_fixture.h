@@ -30,13 +30,11 @@
 
 #include <memory>
 
-#include "mongo/base/string_data.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo {
 namespace executor {
 
-struct RemoteCommandRequest;
 class TaskExecutor;
 class NetworkInterface;
 class NetworkInterfaceMock;
@@ -51,13 +49,6 @@ public:
      * component has modified the 'status' field in test fixture.
      */
     static Status getDetectableErrorStatus();
-
-    /**
-     * Validates command name in remote command request. Returns the remote command request from
-     * the network interface for further validation if the command name matches.
-     */
-    static RemoteCommandRequest assertRemoteCommandNameEquals(StringData cmdName,
-                                                              const RemoteCommandRequest& request);
 
 protected:
     virtual ~TaskExecutorTest();
@@ -82,7 +73,6 @@ protected:
     void tearDown() override;
 
     void launchExecutorThread();
-    void shutdownExecutorThread();
     void joinExecutorThread();
 
 private:
@@ -93,12 +83,8 @@ private:
 
     NetworkInterfaceMock* _net;
     std::unique_ptr<TaskExecutor> _executor;
-
-    /**
-     * kPreStart -> kRunning -> kJoinRequired -> kJoining -> kShutdownComplete
-     */
-    enum LifecycleState { kPreStart, kRunning, kJoinRequired, kJoining, kShutdownComplete };
-    LifecycleState _executorState = LifecycleState::kPreStart;
+    bool _executorStarted = false;
+    bool _executorJoined = false;
 };
 
 }  // namespace executor

@@ -34,8 +34,8 @@
 #include <cstdlib>
 
 #if defined(USE_GDBSERVER)
-#include <cstdio>
 #include <unistd.h>
+#include <cstdio>
 #endif
 
 #ifndef _WIN32
@@ -47,9 +47,7 @@
 namespace mongo {
 void breakpoint() {
 #ifdef _WIN32
-    if (IsDebuggerPresent()) {
-        DebugBreak();
-    };
+    DEV DebugBreak();
 #endif
 #ifndef _WIN32
     // code to raise a breakpoint in GDB

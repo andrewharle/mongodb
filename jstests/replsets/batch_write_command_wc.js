@@ -22,10 +22,7 @@ var coll = mongod.getCollection("test.batch_write_command_wc");
 //
 // Basic insert, default WC
 coll.remove({});
-printjson(request = {
-    insert: coll.getName(),
-    documents: [{a: 1}]
-});
+printjson(request = {insert: coll.getName(), documents: [{a: 1}]});
 printjson(result = coll.runCommand(request));
 assert(result.ok);
 assert.eq(1, result.n);
@@ -34,11 +31,7 @@ assert.eq(1, coll.find().itcount());
 //
 // Basic insert, majority WC
 coll.remove({});
-printjson(request = {
-    insert: coll.getName(),
-    documents: [{a: 1}],
-    writeConcern: {w: 'majority'}
-});
+printjson(request = {insert: coll.getName(), documents: [{a: 1}], writeConcern: {w: 'majority'}});
 printjson(result = coll.runCommand(request));
 assert(result.ok);
 assert.eq(1, result.n);
@@ -47,11 +40,7 @@ assert.eq(1, coll.find().itcount());
 //
 // Basic insert,  w:2 WC
 coll.remove({});
-printjson(request = {
-    insert: coll.getName(),
-    documents: [{a: 1}],
-    writeConcern: {w: 2}
-});
+printjson(request = {insert: coll.getName(), documents: [{a: 1}], writeConcern: {w: 2}});
 printjson(result = coll.runCommand(request));
 assert(result.ok);
 assert.eq(1, result.n);
@@ -60,11 +49,7 @@ assert.eq(1, coll.find().itcount());
 //
 // Basic insert, immediate nojournal error
 coll.remove({});
-printjson(request = {
-    insert: coll.getName(),
-    documents: [{a: 1}],
-    writeConcern: {j: true}
-});
+printjson(request = {insert: coll.getName(), documents: [{a: 1}], writeConcern: {j: true}});
 printjson(result = coll.runCommand(request));
 assert(!result.ok);
 assert.eq(0, coll.find().itcount());
@@ -72,11 +57,8 @@ assert.eq(0, coll.find().itcount());
 //
 // Basic insert, timeout wc error
 coll.remove({});
-printjson(request = {
-    insert: coll.getName(),
-    documents: [{a: 1}],
-    writeConcern: {w: 3, wtimeout: 1}
-});
+printjson(
+    request = {insert: coll.getName(), documents: [{a: 1}], writeConcern: {w: 3, wtimeout: 1}});
 printjson(result = coll.runCommand(request));
 assert(result.ok);
 assert.eq(1, result.n);
@@ -87,11 +69,7 @@ assert.eq(1, coll.find().itcount());
 //
 // Basic insert, wmode wc error
 coll.remove({});
-printjson(request = {
-    insert: coll.getName(),
-    documents: [{a: 1}],
-    writeConcern: {w: 'invalid'}
-});
+printjson(request = {insert: coll.getName(), documents: [{a: 1}], writeConcern: {w: 'invalid'}});
 printjson(result = coll.runCommand(request));
 assert(result.ok);
 assert.eq(1, result.n);
@@ -154,10 +132,11 @@ coll.remove({});
 request = {
     insert: coll.getName(),
     documents: [{_id: 1}, {_id: 1}],
-    writeConcern: {wtimeout: 1},
+    writeConcern: {wTimeout: 1},
     ordered: false
 };
-result = assert.commandWorked(coll.runCommand(request));
+result = coll.runCommand(request);
+assert(result.ok);
 assert.eq(1, result.n);
 assert.eq(result.writeErrors.length, 1);
 assert.eq(result.writeErrors[0].index, 1);

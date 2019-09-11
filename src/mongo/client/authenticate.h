@@ -43,7 +43,7 @@ class BSONObj;
 
 namespace auth {
 
-using AuthResponse = executor::RemoteCommandResponse;
+using AuthResponse = StatusWith<executor::RemoteCommandResponse>;
 using AuthCompletionHandler = stdx::function<void(AuthResponse)>;
 using RunCommandResultHandler = AuthCompletionHandler;
 using RunCommandHook =

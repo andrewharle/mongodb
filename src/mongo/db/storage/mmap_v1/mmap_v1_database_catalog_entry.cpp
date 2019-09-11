@@ -39,10 +39,10 @@
 #include "mongo/db/catalog/index_catalog_entry.h"
 #include "mongo/db/index/2d_access_method.h"
 #include "mongo/db/index/btree_access_method.h"
+#include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index/fts_access_method.h"
 #include "mongo/db/index/hash_access_method.h"
 #include "mongo/db/index/haystack_access_method.h"
-#include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index/s2_access_method.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id.h"
@@ -154,19 +154,12 @@ private:
     Entry* const _cachedEntry;
 };
 
-MMAPV1DatabaseCatalogEntry::MMAPV1DatabaseCatalogEntry(OperationContext* txn,
-                                                       StringData name,
-                                                       StringData path,
-                                                       bool directoryPerDB,
-                                                       bool transient,
-                                                       std::unique_ptr<ExtentManager> extentManager)
+MMAPV1DatabaseCatalogEntry::MMAPV1DatabaseCatalogEntry(
+    OperationContext* txn, StringData name, StringData path, bool directoryPerDB, bool transient)
     : DatabaseCatalogEntry(name),
       _path(path.toString()),
       _namespaceIndex(_path, name.toString()),
-      _extentManager(std::move(extentManager)) {
-    massert(34469,
-            str::stream() << name << " is not a valid database name",
-            NamespaceString::validDBName(name));
+      _extentManager(name, path, directoryPerDB) {
     invariant(txn->lockState()->isDbLockedForMode(name, MODE_X));
 
     try {
@@ -177,9 +170,9 @@ MMAPV1DatabaseCatalogEntry::MMAPV1DatabaseCatalogEntry(OperationContext* txn,
         // Initialize the extent manager. This will create the first data file (.0) if needed
         // and if this fails we would leak the .ns file above. Leaking the .ns or .0 file is
         // acceptable, because subsequent openDB calls will exercise the code path again.
-        Status s = _extentManager->init(txn);
+        Status s = _extentManager.init(txn);
         if (!s.isOK()) {
-            msgasserted(16966, str::stream() << "_extentManager->init failed: " << s.toString());
+            msgasserted(16966, str::stream() << "_extentManager.init failed: " << s.toString());
         }
 
         // This is the actual loading of the on-disk structures into cache.
@@ -240,7 +233,7 @@ Status MMAPV1DatabaseCatalogEntry::dropCollection(OperationContext* txn, StringD
 
     // free extents
     if (!details->firstExtent.isNull()) {
-        _extentManager->freeExtents(txn, details->firstExtent, details->lastExtent);
+        _extentManager.freeExtents(txn, details->firstExtent, details->lastExtent);
         *txn->recoveryUnit()->writing(&details->firstExtent) = DiskLoc().setInvalid();
         *txn->recoveryUnit()->writing(&details->lastExtent) = DiskLoc().setInvalid();
     }
@@ -411,13 +404,13 @@ void MMAPV1DatabaseCatalogEntry::appendExtraStats(OperationContext* opCtx,
     if (isEmpty()) {
         output->appendNumber("fileSize", 0);
     } else {
-        output->appendNumber("fileSize", _extentManager->fileSize() / scale);
+        output->appendNumber("fileSize", _extentManager.fileSize() / scale);
         output->appendNumber("nsSizeMB",
                              static_cast<int>(_namespaceIndex.fileLength() / (1024 * 1024)));
 
         int freeListSize = 0;
         int64_t freeListSpace = 0;
-        _extentManager->freeListStats(opCtx, &freeListSize, &freeListSpace);
+        _extentManager.freeListStats(opCtx, &freeListSize, &freeListSpace);
 
         BSONObjBuilder extentFreeList(output->subobjStart("extentFreeList"));
         extentFreeList.append("num", freeListSize);
@@ -425,7 +418,7 @@ void MMAPV1DatabaseCatalogEntry::appendExtraStats(OperationContext* opCtx,
         extentFreeList.done();
 
         {
-            const DataFileVersion version = _extentManager->getFileFormat(opCtx);
+            const DataFileVersion version = _extentManager.getFileFormat(opCtx);
 
             BSONObjBuilder dataFileVersion(output->subobjStart("dataFileVersion"));
             dataFileVersion.append("major", version.majorRaw());
@@ -436,48 +429,34 @@ void MMAPV1DatabaseCatalogEntry::appendExtraStats(OperationContext* opCtx,
 }
 
 bool MMAPV1DatabaseCatalogEntry::isOlderThan24(OperationContext* opCtx) const {
-    if (_extentManager->numFiles() == 0)
+    if (_extentManager.numFiles() == 0)
         return false;
 
-    const DataFileVersion version = _extentManager->getFileFormat(opCtx);
+    const DataFileVersion version = _extentManager.getFileFormat(opCtx);
     fassert(40109, version.isCompatibleWithCurrentCode());
 
     return !version.is24IndexClean();
 }
 
 void MMAPV1DatabaseCatalogEntry::markIndexSafe24AndUp(OperationContext* opCtx) {
-    if (_extentManager->numFiles() == 0)
+    if (_extentManager.numFiles() == 0)
         return;
 
-    DataFileVersion version = _extentManager->getFileFormat(opCtx);
+    DataFileVersion version = _extentManager.getFileFormat(opCtx);
     fassert(40110, version.isCompatibleWithCurrentCode());
 
     if (version.is24IndexClean())
         return;  // nothing to do
 
     version.setIs24IndexClean();
-    _extentManager->setFileFormat(opCtx, version);
-}
-
-void MMAPV1DatabaseCatalogEntry::markCollationFeatureAsInUse(OperationContext* opCtx) {
-    if (_extentManager->numFiles() == 0)
-        return;
-
-    DataFileVersion version = _extentManager->getFileFormat(opCtx);
-    fassert(40150, version.isCompatibleWithCurrentCode());
-
-    if (version.getMayHaveCollationMetadata())
-        return;
-
-    version.setMayHaveCollationMetadata();
-    _extentManager->setFileFormat(opCtx, version);
+    _extentManager.setFileFormat(opCtx, version);
 }
 
 Status MMAPV1DatabaseCatalogEntry::currentFilesCompatible(OperationContext* opCtx) const {
-    if (_extentManager->numFiles() == 0)
+    if (_extentManager.numFiles() == 0)
         return Status::OK();
 
-    return _extentManager->getOpenFile(0)->getHeader()->version.isCompatibleWithCurrentCode();
+    return _extentManager.getOpenFile(0)->getHeader()->version.isCompatibleWithCurrentCode();
 }
 
 void MMAPV1DatabaseCatalogEntry::getCollectionNamespaces(std::list<std::string>* tofill) const {
@@ -489,51 +468,29 @@ void MMAPV1DatabaseCatalogEntry::_ensureSystemCollection(OperationContext* txn, 
     if (details) {
         return;
     }
-
-    if (storageGlobalParams.readOnly) {
-        severe() << "Missing system collection '" << ns << "' for database '" << name() << "'";
-        fassertFailed(34372);
-    }
-
     _namespaceIndex.add_ns(txn, ns, DiskLoc(), false);
 }
 
 void MMAPV1DatabaseCatalogEntry::_init(OperationContext* txn) {
-    // We wrap the WUOW in an optional as we can't create it if we are in RO mode.
-    boost::optional<WriteUnitOfWork> wunit;
-    if (!storageGlobalParams.readOnly) {
-        wunit.emplace(txn);
-    }
+    WriteUnitOfWork wunit(txn);
 
     // Upgrade freelist
     const NamespaceString oldFreeList(name(), "$freelist");
     NamespaceDetails* freeListDetails = _namespaceIndex.details(oldFreeList.ns());
     if (freeListDetails) {
-        if (storageGlobalParams.readOnly) {
-            severe() << "Legacy storage format detected, but server was started with the "
-                        "--queryableBackupMode command line parameter.";
-            fassertFailedNoTrace(34373);
-        }
-
         if (!freeListDetails->firstExtent.isNull()) {
-            _extentManager->freeExtents(
+            _extentManager.freeExtents(
                 txn, freeListDetails->firstExtent, freeListDetails->lastExtent);
         }
 
         _namespaceIndex.kill_ns(txn, oldFreeList.ns());
     }
 
-    DataFileVersion version = _extentManager->getFileFormat(txn);
+    DataFileVersion version = _extentManager.getFileFormat(txn);
     if (version.isCompatibleWithCurrentCode().isOK() && !version.mayHave30Freelist()) {
-        if (storageGlobalParams.readOnly) {
-            severe() << "Legacy storage format detected, but server was started with the "
-                        "--queryableBackupMode command line parameter.";
-            fassertFailedNoTrace(34374);
-        }
-
         // Any DB that can be opened and written to gets this flag set.
         version.setMayHave30Freelist();
-        _extentManager->setFileFormat(txn, version);
+        _extentManager.setFileFormat(txn, version);
     }
 
     const NamespaceString nsi(name(), "system.indexes");
@@ -546,11 +503,9 @@ void MMAPV1DatabaseCatalogEntry::_init(OperationContext* txn) {
     _ensureSystemCollection(txn, nsi.toString());
 
     if (isSystemNamespacesGoingToBeNew) {
-        invariant(!storageGlobalParams.readOnly);
         txn->recoveryUnit()->registerChange(new EntryInsertion(nsn.toString(), this));
     }
     if (isSystemIndexesGoingToBeNew) {
-        invariant(!storageGlobalParams.readOnly);
         txn->recoveryUnit()->registerChange(new EntryInsertion(nsi.toString(), this));
     }
 
@@ -571,7 +526,7 @@ void MMAPV1DatabaseCatalogEntry::_init(OperationContext* txn) {
         NamespaceDetailsRSV1MetaData* md =
             new NamespaceDetailsRSV1MetaData(nsn.toString(), nsDetails);
         nsEntry->recordStore.reset(
-            new SimpleRecordStoreV1(txn, nsn.toString(), md, _extentManager.get(), false));
+            new SimpleRecordStoreV1(txn, nsn.toString(), md, &_extentManager, false));
     }
 
     if (!indexEntry) {
@@ -581,7 +536,7 @@ void MMAPV1DatabaseCatalogEntry::_init(OperationContext* txn) {
             new NamespaceDetailsRSV1MetaData(nsi.toString(), indexDetails);
 
         indexEntry->recordStore.reset(
-            new SimpleRecordStoreV1(txn, nsi.toString(), md, _extentManager.get(), true));
+            new SimpleRecordStoreV1(txn, nsi.toString(), md, &_extentManager, true));
     }
 
     RecordId indexNamespaceId;
@@ -609,9 +564,7 @@ void MMAPV1DatabaseCatalogEntry::_init(OperationContext* txn) {
                                                        this));
     }
 
-    if (!storageGlobalParams.readOnly) {
-        wunit->commit();
-    }
+    wunit.commit();
 
     // Now put everything in the cache of namespaces. None of the operations below do any
     // transactional operations.
@@ -671,14 +624,14 @@ Status MMAPV1DatabaseCatalogEntry::createCollection(OperationContext* txn,
     if (allocateDefaultSpace) {
         RecordStoreV1Base* rs = _getRecordStore(ns);
         if (options.initialNumExtents > 0) {
-            int size = _massageExtentSize(_extentManager.get(), options.cappedSize);
+            int size = _massageExtentSize(&_extentManager, options.cappedSize);
             for (int i = 0; i < options.initialNumExtents; i++) {
                 rs->increaseStorageSize(txn, size, false);
             }
         } else if (!options.initialExtentSizes.empty()) {
             for (size_t i = 0; i < options.initialExtentSizes.size(); i++) {
                 int size = options.initialExtentSizes[i];
-                size = _massageExtentSize(_extentManager.get(), size);
+                size = _massageExtentSize(&_extentManager, size);
                 rs->increaseStorageSize(txn, size, false);
             }
         } else if (options.capped) {
@@ -686,18 +639,14 @@ Status MMAPV1DatabaseCatalogEntry::createCollection(OperationContext* txn,
             do {
                 // Must do this at least once, otherwise we leave the collection with no
                 // extents, which is invalid.
-                int sz = _massageExtentSize(_extentManager.get(),
-                                            options.cappedSize - rs->storageSize(txn));
+                int sz =
+                    _massageExtentSize(&_extentManager, options.cappedSize - rs->storageSize(txn));
                 sz &= 0xffffff00;
                 rs->increaseStorageSize(txn, sz, false);
             } while (rs->storageSize(txn) < options.cappedSize);
         } else {
-            rs->increaseStorageSize(txn, _extentManager->initialSize(128), false);
+            rs->increaseStorageSize(txn, _extentManager.initialSize(128), false);
         }
-    }
-
-    if (!options.collation.isEmpty()) {
-        markCollationFeatureAsInUse(txn);
     }
 
     return Status::OK();
@@ -743,10 +692,10 @@ void MMAPV1DatabaseCatalogEntry::_insertInCache(OperationContext* txn,
 
     if (details->isCapped) {
         entry->recordStore.reset(new CappedRecordStoreV1(
-            txn, NULL, ns, md.release(), _extentManager.get(), nss.coll() == "system.indexes"));
+            txn, NULL, ns, md.release(), &_extentManager, nss.coll() == "system.indexes"));
     } else {
         entry->recordStore.reset(new SimpleRecordStoreV1(
-            txn, ns, md.release(), _extentManager.get(), nss.coll() == "system.indexes"));
+            txn, ns, md.release(), &_extentManager, nss.coll() == "system.indexes"));
     }
 }
 
@@ -902,4 +851,46 @@ CollectionOptions MMAPV1DatabaseCatalogEntry::getCollectionOptions(OperationCont
     }
     return options;
 }
+
+Status MMAPV1DatabaseCatalogEntry::requireDataFileCompatibilityWithPriorRelease(
+    OperationContext* txn) {
+    if (_extentManager.numFiles() == 0) {
+        return Status::OK();
+    }
+
+    // Determine whether collation metadata is present in the catalog.
+    DataFileVersion version = _extentManager.getFileFormat(txn);
+    if (!version.getMayHaveCollationMetadata()) {
+        // Since the feature bit isn't set, we can be sure that the collation feature is not in use.
+        return Status::OK();
+    }
+
+    std::list<std::string> collectionNamespaces;
+    getCollectionNamespaces(&collectionNamespaces);
+
+    bool hasCollationMetadata = false;
+    for (auto&& collectionNamespace : collectionNamespaces) {
+        log() << "Checking collection '" << collectionNamespace << "' for collation metadata...";
+        if (_collections[collectionNamespace]->catalogEntry->hasCollationMetadata(
+                txn, collectionNamespace)) {
+            hasCollationMetadata = true;
+        }
+        log() << "Done checking collection '" << collectionNamespace << "' for collation metadata";
+    }
+
+    if (hasCollationMetadata) {
+        return {ErrorCodes::MustUpgrade,
+                "The data files use the collation feature, "
+                "which is not supported by this version of mongod"};
+    }
+
+    // Clear the collation feature bit.
+    version.clearMayHaveCollationMetadata();
+    WriteUnitOfWork wunit(txn);
+    _extentManager.setFileFormat(txn, version);
+    wunit.commit();
+
+    return Status::OK();
+}
+
 }  // namespace mongo

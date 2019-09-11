@@ -28,33 +28,28 @@
 
 #pragma once
 
+#include <map>
 #include <string>
 #include <vector>
 
 #include "mongo/base/disallow_copying.h"
 #include "mongo/bson/oid.h"
-#include "mongo/db/namespace_string.h"
-#include "mongo/db/s/active_migrations_registry.h"
 #include "mongo/db/s/migration_destination_manager.h"
-#include "mongo/executor/task_executor.h"
-#include "mongo/executor/thread_pool_task_executor.h"
-#include "mongo/stdx/functional.h"
+#include "mongo/db/s/migration_source_manager.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/stdx/mutex.h"
-#include "mongo/stdx/unordered_map.h"
+#include "mongo/util/concurrency/ticketholder.h"
 
 namespace mongo {
 
 class BSONObj;
 class BSONObjBuilder;
 struct ChunkVersion;
+class Client;
 class CollectionMetadata;
-class CollectionShardingState;
 class ConnectionString;
 class OperationContext;
-class ScopedCollectionMetadata;
 class ServiceContext;
-class ShardIdentityType;
 class Status;
 
 namespace repl {
@@ -62,20 +57,12 @@ class OpTime;
 }  // namespace repl
 
 /**
- * Contains the global sharding state for a running mongod. There is one instance of this object per
- * service context and it is never destroyed for the lifetime of the context.
+ * Represents the sharding state for the running instance. One per instance.
  */
 class ShardingState {
     MONGO_DISALLOW_COPYING(ShardingState);
 
 public:
-    using GlobalInitFunc =
-        stdx::function<Status(OperationContext*, const ConnectionString&, StringData)>;
-
-    // Signature for the callback function used by the MetadataManager to inform the
-    // sharding subsystem that there is range cleanup work to be done.
-    using RangeDeleterCleanupNotificationFunc = stdx::function<void(const NamespaceString&)>;
-
     ShardingState();
     ~ShardingState();
 
@@ -96,6 +83,10 @@ public:
 
     std::string getShardName();
 
+    MigrationSourceManager* migrationSourceManager() {
+        return &_migrationSourceManager;
+    }
+
     MigrationDestinationManager* migrationDestinationManager() {
         return &_migrationDestManager;
     }
@@ -103,24 +94,12 @@ public:
     /**
      * Initializes sharding state and begins authenticating outgoing connections and handling shard
      * versions. If this is not run before sharded operations occur auth will not work and versions
-     * will not be tracked. This method is deprecated and is mainly used for initialization from
-     * mongos metadata commands like moveChunk, splitChunk, mergeChunk and setShardVersion.
+     * will not be tracked.
      *
      * Throws if initialization fails for any reason and the sharding state object becomes unusable
      * afterwards. Any sharding state operations afterwards will fail.
-     *
-     * Note that this will also try to connect to the config servers and will block until it
-     * succeeds.
      */
-    void initializeFromConfigConnString(OperationContext* txn,
-                                        const std::string& configSvr,
-                                        const std::string shardName);
-
-    /**
-     * Initializes the sharding state of this server from the shard identity document argument.
-     */
-    Status initializeFromShardIdentity(OperationContext* txn,
-                                       const ShardIdentityType& shardIdentity);
+    void initialize(OperationContext* txn, const std::string& configSvr);
 
     /**
      * Shuts down sharding machinery on the shard.
@@ -133,21 +112,46 @@ public:
      */
     Status updateConfigServerOpTimeFromMetadata(OperationContext* txn);
 
-    CollectionShardingState* getNS(const std::string& ns, OperationContext* txn);
+    /**
+     * Assigns a shard name to this MongoD instance.
+     * TODO: The only reason we need this method and cannot merge it together with the initialize
+     * call is the setShardVersion request being sent by the config coordinator to the config server
+     * instances. This is the only command, which does not include shard name and once we get rid of
+     * the legacy style config servers, we can merge these methods.
+     *
+     * Throws an error if shard name has always been set and the newly specified value does not
+     * match what was previously installed.
+     */
+    void setShardName(const std::string& shardName);
 
     /**
-     * Iterates through all known sharded collections and marks them (in memory only) as not sharded
-     * so that no filtering will be happening for slaveOk queries.
+     * Clears the collection metadata cache after step down.
      */
-    void markCollectionsNotShardedAtStepdown();
+    void clearCollectionMetadata();
+
+    bool hasVersion(const std::string& ns);
+
+    ChunkVersion getVersion(const std::string& ns);
 
     /**
-     * Refreshes the local metadata based on whether the expected version is higher than what we
-     * have cached.
+     * If the metadata for 'ns' at this shard is at or above the requested version,
+     * 'reqShardVersion', returns OK and fills in 'latestShardVersion' with the latest shard
+     * version. The latter is always greater or equal than 'reqShardVersion' if in the same epoch.
+     *
+     * Otherwise, falls back to refreshMetadataNow.
+     *
+     * This call blocks if there are more than _configServerTickets threads currently refreshing
+     * metadata (currently set to 3).
+     *
+     * Locking Note:
+     *   + Must NOT be called with the write lock because this call may go into the network,
+     *     and deadlocks may occur with shard-as-a-config.  Therefore, nothing here guarantees
+     *     that 'latestShardVersion' is indeed the current one on return.
      */
-    Status onStaleShardVersion(OperationContext* txn,
-                               const NamespaceString& nss,
-                               const ChunkVersion& expectedVersion);
+    Status refreshMetadataIfNeeded(OperationContext* txn,
+                                   const std::string& ns,
+                                   const ChunkVersion& reqShardVersion,
+                                   ChunkVersion* latestShardVersion);
 
     /**
      * Refreshes collection metadata by asking the config server for the latest information.
@@ -172,95 +176,117 @@ public:
      * @return latestShardVersion the version that is now stored for this collection
      */
     Status refreshMetadataNow(OperationContext* txn,
-                              const NamespaceString& nss,
+                              const std::string& ns,
                               ChunkVersion* latestShardVersion);
 
     void appendInfo(OperationContext* txn, BSONObjBuilder& b);
 
     bool needCollectionMetadata(OperationContext* txn, const std::string& ns);
 
-    /**
-     * Updates the config server field of the shardIdentity document with the given connection
-     * string.
-     *
-     * Note: this can return NotMaster error.
-     */
-    Status updateShardIdentityConfigString(OperationContext* txn,
-                                           const std::string& newConnectionString);
+    std::shared_ptr<CollectionMetadata> getCollectionMetadata(const std::string& ns);
 
     /**
-     * If there are no migrations running on this shard, registers an active migration with the
-     * specified arguments and returns a ScopedRegisterDonateChunk, which must be signaled by the
-     * caller before it goes out of scope.
-     *
-     * If there is an active migration already running on this shard and it has the exact same
-     * arguments, returns a ScopedRegisterDonateChunk, which can be used to join the existing one.
-     *
-     * Othwerwise returns a ConflictingOperationInProgress error.
+     * Swaps the current metadata for the namespace with 'newMetadata', which must not be null. May
+     * only be called when the collection distributed lock and the collection X lock are both held.
      */
-    StatusWith<ScopedRegisterDonateChunk> registerDonateChunk(const MoveChunkRequest& args);
+    void exchangeCollectionMetadata(OperationContext* txn,
+                                    const NamespaceString& nss,
+                                    std::unique_ptr<CollectionMetadata> newMetadata);
+
+    // chunk migrate and split support
 
     /**
-     * If there are no migrations running on this shard, registers an active receive operation with
-     * the specified session id and returns a ScopedRegisterReceiveChunk, which will unregister it
-     * when it goes out of scope.
+     * Creates and installs a new chunk metadata for a given collection by "forgetting" about
+     * one of its chunks.  The new metadata uses the provided version, which has to be higher
+     * than the current metadata's shard version.
      *
-     * Otherwise returns a ConflictingOperationInProgress error.
-     */
-    StatusWith<ScopedRegisterReceiveChunk> registerReceiveChunk(const NamespaceString& nss,
-                                                                const ChunkRange& chunkRange,
-                                                                const ShardId& fromShardId);
-
-    /**
-     * If a migration has been previously registered through a call to registerDonateChunk returns
-     * that namespace. Otherwise returns boost::none.
+     * One exception: if the forgotten chunk is the last one in this shard for the collection,
+     * version has to be 0.
      *
-     * This method can be called without any locks, but once the namespace is fetched it needs to be
-     * re-checked after acquiring some intent lock on that namespace.
-     */
-    boost::optional<NamespaceString> getActiveDonateChunkNss();
-
-    /**
-     * Get a migration status report from the migration registry. If no migration is active, this
-     * returns an empty BSONObj.
+     * If it runs successfully, clients need to grab the new version to access the collection.
      *
-     * Takes an IS lock on the namespace of the active migration, if one is active.
-     */
-    BSONObj getActiveMigrationStatusReport(OperationContext* txn);
-
-    /**
-     * For testing only. Mock the initialization method used by initializeFromConfigConnString and
-     * initializeFromShardIdentity after all checks are performed.
-     */
-    void setGlobalInitMethodForTest(GlobalInitFunc func);
-
-    /**
-     * If started with --shardsvr, initializes sharding awareness from the shardIdentity document
-     * on disk, if there is one.
-     * If started with --shardsvr in queryableBackupMode, initializes sharding awareness from the
-     * shardIdentity document passed through the --overrideShardIdentity startup parameter.
+     * LOCKING NOTE:
+     * Only safe to do inside the
      *
-     * If returns true, the ShardingState::_globalInit method was called, meaning all the core
-     * classes for sharding were initialized, but no networking calls were made yet (with the
-     * exception of the duplicate ShardRegistry reload in ShardRegistry::startup() (see
-     * SERVER-26123). Outgoing networking calls to cluster members can now be made.
+     * @param ns the collection
+     * @param min max the chunk to eliminate from the current metadata
+     * @param version at which the new metadata should be at
      */
-    StatusWith<bool> initializeShardingAwarenessIfNeeded(OperationContext* txn);
+    void donateChunk(OperationContext* txn,
+                     const std::string& ns,
+                     const BSONObj& min,
+                     const BSONObj& max,
+                     ChunkVersion version);
 
     /**
-     * Check if a command is one of the whitelisted commands that can be accepted with shardVersion
-     * information before this node is sharding aware, because the command initializes sharding
-     * awareness.
+     * Creates and installs new chunk metadata for a given collection by reclaiming a previously
+     * donated chunk.  The previous metadata's shard version has to be provided.
+     *
+     * If it runs successfully, clients that became stale by the previous donateChunk will be
+     * able to access the collection again.
+     *
+     * Note: If a migration has aborted but not yet unregistered a pending chunk, replacing the
+     * metadata may leave the chunk as pending - this is not dangerous and should be rare, but
+     * will require a stepdown to fully recover.
+     *
+     * @param ns the collection
+     * @param prevMetadata the previous metadata before we donated a chunk
      */
-    static bool commandInitializesShardingAwareness(const std::string& commandName) {
-        return _commandsThatInitializeShardingAwareness.find(commandName) !=
-            _commandsThatInitializeShardingAwareness.end();
-    }
+    void undoDonateChunk(OperationContext* txn,
+                         const std::string& ns,
+                         std::shared_ptr<CollectionMetadata> prevMetadata);
+
+    /**
+     * Remembers a chunk range between 'min' and 'max' as a range which will have data migrated
+     * into it.  This data can then be protected against cleanup of orphaned data.
+     *
+     * Overlapping pending ranges will be removed, so it is only safe to use this when you know
+     * your metadata view is definitive, such as at the start of a migration.
+     *
+     * @return false with errMsg if the range is owned by this shard
+     */
+    bool notePending(OperationContext* txn,
+                     const std::string& ns,
+                     const BSONObj& min,
+                     const BSONObj& max,
+                     const OID& epoch,
+                     std::string* errMsg);
+
+    /**
+     * Stops tracking a chunk range between 'min' and 'max' that previously was having data
+     * migrated into it.  This data is no longer protected against cleanup of orphaned data.
+     *
+     * To avoid removing pending ranges of other operations, ensure that this is only used when
+     * a migration is still active.
+     * TODO: Because migrations may currently be active when a collection drops, an epoch is
+     * necessary to ensure the pending metadata change is still applicable.
+     *
+     * @return false with errMsg if the range is owned by the shard or the epoch of the metadata
+     * has changed
+     */
+    bool forgetPending(OperationContext* txn,
+                       const std::string& ns,
+                       const BSONObj& min,
+                       const BSONObj& max,
+                       const OID& epoch,
+                       std::string* errMsg);
+
+    bool inCriticalMigrateSection();
+
+    /**
+     * @return true if we are NOT in the critical section
+     */
+    bool waitTillNotInCriticalSection(int maxSecondsToWait);
+
+    /**
+     * TESTING ONLY
+     * Uninstalls the metadata for a given collection.
+     */
+    void resetMetadata(const std::string& ns);
 
 private:
-    // Map from a namespace into the sharding state for each collection we have
-    typedef stdx::unordered_map<std::string, std::unique_ptr<CollectionShardingState>>
-        CollectionShardingStateMap;
+    // Map from a namespace into the metadata we need for each collection on this shard
+    typedef std::map<std::string, std::shared_ptr<CollectionMetadata>> CollectionMetadataMap;
 
     // Progress of the sharding state initialization
     enum class InitializationState : uint32_t {
@@ -294,9 +320,8 @@ private:
      * terminated.
      *
      * @param configSvr Connection string of the config server to use.
-     * @param shardName the name of the shard in config.shards
      */
-    void _initializeImpl(ConnectionString configSvr, std::string shardName);
+    void _initializeImpl(ConnectionString configSvr);
 
     /**
      * Must be called only when the current state is kInitializing. Sets the current state to
@@ -308,8 +333,7 @@ private:
      * Blocking method, which waits for the initialization state to become kInitialized or kError
      * and returns the initialization status.
      */
-    Status _waitForInitialization(Date_t deadline);
-    Status _waitForInitialization_inlock(Date_t deadline, stdx::unique_lock<stdx::mutex>& lk);
+    Status _waitForInitialization(OperationContext* txn);
 
     /**
      * Simple wrapper to cast the initialization state atomic uint64 to InitializationState value
@@ -323,17 +347,20 @@ private:
     void _setInitializationState_inlock(InitializationState newState);
 
     /**
-     * Refreshes collection metadata by asking the config server for the latest information and
-     * returns the latest version at the time the reload was done. This call does network I/O and
-     * should never be called with a lock.
+     * Refreshes collection metadata by asking the config server for the latest information. May or
+     * may not be based on a requested version.
      */
-    ChunkVersion _refreshMetadata(OperationContext* opCtx, const NamespaceString& nss);
+    Status _refreshMetadata(OperationContext* txn,
+                            const std::string& ns,
+                            const ChunkVersion& reqShardVersion,
+                            bool useRequestedVersion,
+                            ChunkVersion* latestShardVersion);
+
+    // Manages the state of the migration donor shard
+    MigrationSourceManager _migrationSourceManager;
 
     // Manages the state of the migration recipient shard
     MigrationDestinationManager _migrationDestManager;
-
-    // Tracks the active move chunk operations running on this shard
-    ActiveMigrationsRegistry _activeMigrationsRegistry;
 
     // Protects state below
     stdx::mutex _mutex;
@@ -350,20 +377,11 @@ private:
     // Sets the shard name for this host (comes through setShardVersion)
     std::string _shardName;
 
-    // Cache of collection metadata on this shard. It is not safe to look-up values from this map
-    // without holding some form of collection lock. It is only safe to add/remove values when
-    // holding X lock on the respective namespace.
-    CollectionShardingStateMap _collections;
+    // Protects from hitting the config server from too many threads at once
+    TicketHolder _configServerTickets;
 
-    // The id for the cluster this shard belongs to.
-    OID _clusterId;
-
-    // A whitelist of sharding commands that are allowed when running with --shardsvr but not yet
-    // shard aware, because they initialize sharding awareness.
-    static const std::set<std::string> _commandsThatInitializeShardingAwareness;
-
-    // Function for initializing the external sharding state components not owned here.
-    GlobalInitFunc _globalInit;
+    // Cache of collection metadata on this shard
+    CollectionMetadataMap _collMetadata;
 };
 
 }  // namespace mongo

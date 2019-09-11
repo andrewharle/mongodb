@@ -85,8 +85,7 @@ public:
             return Status(ErrorCodes::BadValue,
                           str::stream() << "journalCommitInterval must be between 1 and "
                                         << StorageGlobalParams::kMaxJournalCommitIntervalMs
-                                        << ", but attempted to set to: "
-                                        << potentialNewValue);
+                                        << ", but attempted to set to: " << potentialNewValue);
         }
 
         return Status::OK();

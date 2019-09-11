@@ -32,8 +32,8 @@
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/repl/last_vote.h"
 #include "mongo/db/repl/replication_coordinator_external_state_impl.h"
-#include "mongo/db/repl/storage_interface_mock.h"
 #include "mongo/db/service_context.h"
+#include "mongo/stdx/memory.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo {
@@ -47,9 +47,7 @@ class ReplicaSetTest : public mongo::unittest::Test {
 protected:
     void setUp() {
         auto txn = makeOpCtx();
-        _storageInterface = stdx::make_unique<repl::StorageInterfaceMock>();
-        _replCoordExternalState.reset(
-            new repl::ReplicationCoordinatorExternalStateImpl(_storageInterface.get()));
+        _replCoordExternalState.reset(new repl::ReplicationCoordinatorExternalStateImpl());
     }
 
     void tearDown() {
@@ -58,20 +56,14 @@ protected:
         client.dropCollection("local.replset.election");
 
         _replCoordExternalState.reset();
-        _storageInterface.reset();
     }
 
     repl::ReplicationCoordinatorExternalStateImpl* getReplCoordExternalState() {
         return _replCoordExternalState.get();
     }
 
-    repl::StorageInterface& getStorageInterface() {
-        return *_storageInterface;
-    }
-
 private:
     std::unique_ptr<repl::ReplicationCoordinatorExternalStateImpl> _replCoordExternalState;
-    std::unique_ptr<repl::StorageInterface> _storageInterface;
 };
 
 TEST_F(ReplicaSetTest, ReplCoordExternalStateStoresLastVoteWithNewTerm) {

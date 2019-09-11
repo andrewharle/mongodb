@@ -43,7 +43,6 @@ namespace rpc {
 namespace {
 const char kOKField[] = "ok";
 const char kCodeField[] = "code";
-const char kCodeNameField[] = "codeName";
 const char kErrorField[] = "errmsg";
 
 // similar to appendCommandStatus (duplicating logic here to avoid cyclic library
@@ -69,7 +68,6 @@ BSONObj augmentReplyWithStatus(const Status& status, const BSONObj& reply) {
 
     if (!reply.hasField(kCodeField)) {
         bob.append(kCodeField, status.code());
-        bob.append(kCodeNameField, ErrorCodes::errorString(status.code()));
     }
 
     return bob.obj();

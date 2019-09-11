@@ -1,5 +1,7 @@
 /**
  * Tests that long-running operations show up in currentOp and report the locks they are holding.
+ *
+ * @tags: [requires_parallel_shell]
  */
 (function() {
     "use strict";
@@ -17,17 +19,16 @@
     assert.soon(
         function() {
             return db.currentOp({
-                         ns: coll.getFullName(),
-                         "locks.Global": "w",
-                         "waitingForLock": true,
-                     }).inprog.length === 1;
+                ns: coll.getFullName(),
+                "locks.Global": "w",
+                "waitingForLock": true,
+            }).inprog.length === 1;
         },
         function() {
             return "Failed to find blocked insert in currentOp() output: " + tojson(db.currentOp());
         });
 
     // Unlock the server and make sure the write finishes.
-    const fsyncResponse = assert.commandWorked(db.fsyncUnlock());
-    assert.eq(fsyncResponse.lockCount, 0);
+    assert.commandWorked(db.fsyncUnlock());
     awaitInsertShell();
 }());

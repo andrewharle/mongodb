@@ -35,7 +35,7 @@
 #include "mongo/db/exec/filter.h"
 #include "mongo/db/exec/scoped_timer.h"
 #include "mongo/db/exec/working_set_common.h"
-#include "mongo/db/s/metadata_manager.h"
+#include "mongo/db/s/collection_metadata.h"
 #include "mongo/s/shard_key_pattern.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/util/log.h"
@@ -51,10 +51,10 @@ using stdx::make_unique;
 const char* ShardFilterStage::kStageType = "SHARDING_FILTER";
 
 ShardFilterStage::ShardFilterStage(OperationContext* opCtx,
-                                   ScopedCollectionMetadata metadata,
+                                   const shared_ptr<CollectionMetadata>& metadata,
                                    WorkingSet* ws,
                                    PlanStage* child)
-    : PlanStage(kStageType, opCtx), _ws(ws), _metadata(std::move(metadata)) {
+    : PlanStage(kStageType, opCtx), _ws(ws), _metadata(metadata) {
     _children.emplace_back(child);
 }
 
@@ -64,7 +64,12 @@ bool ShardFilterStage::isEOF() {
     return child()->isEOF();
 }
 
-PlanStage::StageState ShardFilterStage::doWork(WorkingSetID* out) {
+PlanStage::StageState ShardFilterStage::work(WorkingSetID* out) {
+    ++_commonStats.works;
+
+    // Adds the amount of time taken by work() to executionTimeMillis.
+    ScopedTimer timer(&_commonStats.executionTimeMillis);
+
     // If we've returned as many results as we're limited to, isEOF will be true.
     if (isEOF()) {
         return PlanStage::IS_EOF;
@@ -91,7 +96,7 @@ PlanStage::StageState ShardFilterStage::doWork(WorkingSetID* out) {
                                   "query planning has failed");
 
                     // Fail loudly and cleanly in production, fatally in debug
-                    error() << redact(status);
+                    error() << status.toString();
                     dassert(false);
 
                     _ws->free(*out);
@@ -101,7 +106,8 @@ PlanStage::StageState ShardFilterStage::doWork(WorkingSetID* out) {
 
                 // Skip this document with a warning - no shard key should not be possible
                 // unless manually inserting data into a shard
-                warning() << "no shard key found in document " << redact(member->obj.value()) << " "
+                warning() << "no shard key found in document " << member->obj.value().toString()
+                          << " "
                           << "for shard key pattern " << _metadata->getKeyPattern() << ", "
                           << "document may have been inserted manually into shard";
             }
@@ -115,7 +121,12 @@ PlanStage::StageState ShardFilterStage::doWork(WorkingSetID* out) {
 
         // If we're here either we have shard state and our doc passed, or we have no shard
         // state.  Either way, we advance.
+        ++_commonStats.advanced;
         return status;
+    } else if (PlanStage::NEED_TIME == status) {
+        ++_commonStats.needTime;
+    } else if (PlanStage::NEED_YIELD == status) {
+        ++_commonStats.needYield;
     }
 
     return status;

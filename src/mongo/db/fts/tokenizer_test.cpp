@@ -28,8 +28,6 @@
 *    it in the license file.
 */
 
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/fts/fts_spec.h"
 #include "mongo/db/fts/tokenizer.h"
 #include "mongo/unittest/unittest.h"

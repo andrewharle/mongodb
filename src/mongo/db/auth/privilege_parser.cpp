@@ -87,9 +87,7 @@ bool ParsedResource::isValid(std::string* errMsg) const {
         *errMsg = stream() << cluster.name() << " must be true when specified";
         return false;
     }
-    if (isDbSet() &&
-        (!NamespaceString::validDBName(getDb(), NamespaceString::DollarInDbNameBehavior::Allow) &&
-         !getDb().empty())) {
+    if (isDbSet() && (!NamespaceString::validDBName(getDb()) && !getDb().empty())) {
         *errMsg = stream() << getDb() << " is not a valid database name";
         return false;
     }
@@ -394,21 +392,20 @@ const ParsedResource& ParsedPrivilege::getResource() const {
     return _resource;
 }
 
-Status ParsedPrivilege::parsedPrivilegeToPrivilege(const ParsedPrivilege& parsedPrivilege,
-                                                   Privilege* result,
-                                                   std::vector<std::string>* unrecognizedActions) {
-    std::string errmsg;
-    if (!parsedPrivilege.isValid(&errmsg)) {
-        return Status(ErrorCodes::FailedToParse, errmsg);
+bool ParsedPrivilege::parsedPrivilegeToPrivilege(const ParsedPrivilege& parsedPrivilege,
+                                                 Privilege* result,
+                                                 std::string* errmsg) {
+    if (!parsedPrivilege.isValid(errmsg)) {
+        return false;
     }
 
     // Build actions
     ActionSet actions;
     const vector<std::string>& parsedActions = parsedPrivilege.getActions();
-    Status status =
-        ActionSet::parseActionSetFromStringVector(parsedActions, &actions, unrecognizedActions);
+    Status status = ActionSet::parseActionSetFromStringVector(parsedActions, &actions);
     if (!status.isOK()) {
-        return status;
+        *errmsg = status.reason();
+        return false;
     }
 
     // Build resource
@@ -436,7 +433,7 @@ Status ParsedPrivilege::parsedPrivilegeToPrivilege(const ParsedPrivilege& parsed
     }
 
     *result = Privilege(resource, actions);
-    return Status::OK();
+    return true;
 }
 
 bool ParsedPrivilege::privilegeToParsedPrivilege(const Privilege& privilege,

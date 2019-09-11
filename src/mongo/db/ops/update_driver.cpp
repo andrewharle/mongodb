@@ -109,12 +109,10 @@ Status UpdateDriver::parse(const BSONObj& updateExpr, const bool multi) {
         // Check whether there is indeed a list of mods under this modifier.
         if (outerModElem.type() != Object) {
             return Status(ErrorCodes::FailedToParse,
-                          str::stream() << "Modifiers operate on fields but we found type "
+                          str::stream() << "Modifiers operate on fields but we found a "
                                         << typeName(outerModElem.type())
                                         << " instead. For example: {$mod: {<field>: ...}}"
-                                        << " not {"
-                                        << outerModElem.toString()
-                                        << "}");
+                                        << " not {" << outerModElem.toString() << "}");
         }
 
         // Check whether there are indeed mods under this modifier.
@@ -122,9 +120,7 @@ Status UpdateDriver::parse(const BSONObj& updateExpr, const bool multi) {
             return Status(ErrorCodes::FailedToParse,
                           str::stream() << "'" << outerModElem.fieldName()
                                         << "' is empty. You must specify a field like so: "
-                                           "{"
-                                        << outerModElem.fieldName()
-                                        << ": {<field>: ...}}");
+                                           "{" << outerModElem.fieldName() << ": {<field>: ...}}");
         }
 
         BSONObjIterator innerIter(outerModElem.embeddedObject());
@@ -150,9 +146,7 @@ inline Status UpdateDriver::addAndParse(const modifiertable::ModifierType type,
     if (elem.eoo()) {
         return Status(ErrorCodes::FailedToParse,
                       str::stream() << "'" << elem.fieldName() << "' has no value in : " << elem
-                                    << " which is not allowed for any $"
-                                    << type
-                                    << " mod.");
+                                    << " which is not allowed for any $" << type << " mod.");
     }
 
     unique_ptr<ModifierInterface> mod(modifiertable::makeUpdateMod(type));
@@ -173,16 +167,14 @@ inline Status UpdateDriver::addAndParse(const modifiertable::ModifierType type,
     return Status::OK();
 }
 
-Status UpdateDriver::populateDocumentWithQueryFields(OperationContext* txn,
-                                                     const BSONObj& query,
+Status UpdateDriver::populateDocumentWithQueryFields(const BSONObj& query,
                                                      const vector<FieldRef*>* immutablePaths,
                                                      mutablebson::Document& doc) const {
-    // We canonicalize the query to collapse $and/$or, and the namespace is not needed.  Also,
+    // We canonicalize the query to collapse $and/$or, and the first arg (ns) is not needed.  Also,
     // because this is for the upsert case, where we insert a new document if one was not found, the
     // $where/$text clauses do not make sense, hence empty ExtensionsCallback.
-    auto qr = stdx::make_unique<QueryRequest>(NamespaceString(""));
-    qr->setFilter(query);
-    auto statusWithCQ = CanonicalQuery::canonicalize(txn, std::move(qr), ExtensionsCallbackNoop());
+    auto statusWithCQ =
+        CanonicalQuery::canonicalize(NamespaceString(""), query, ExtensionsCallbackNoop());
     if (!statusWithCQ.isOK()) {
         return statusWithCQ.getStatus();
     }
@@ -190,6 +182,13 @@ Status UpdateDriver::populateDocumentWithQueryFields(OperationContext* txn,
 
     return populateDocumentWithQueryFields(*cq, immutablePaths, doc);
 }
+
+namespace {
+
+const FieldRef idPath("_id");
+const vector<FieldRef*> emptyImmutablePaths;
+
+}  // namespace
 
 Status UpdateDriver::populateDocumentWithQueryFields(const CanonicalQuery& query,
                                                      const vector<FieldRef*>* immutablePathsPtr,
@@ -200,13 +199,12 @@ Status UpdateDriver::populateDocumentWithQueryFields(const CanonicalQuery& query
     if (isDocReplacement()) {
         FieldRefSet pathsToExtract;
 
-        // TODO: Refactor update logic, make _id just another immutable field
-        static const FieldRef idPath("_id");
-        static const vector<FieldRef*> emptyImmutablePaths;
         const vector<FieldRef*>& immutablePaths =
             immutablePathsPtr ? *immutablePathsPtr : emptyImmutablePaths;
 
         pathsToExtract.fillFrom(immutablePaths);
+
+        // TODO: Refactor update logic, make _id just another immutable field
         pathsToExtract.insert(&idPath);
 
         // Extract only immutable fields from replacement-style
@@ -281,8 +279,7 @@ Status UpdateDriver::update(StringData matchedField,
             if (!targetFields->insert(execInfo.fieldRef[i], &other)) {
                 return Status(ErrorCodes::ConflictingUpdateOperators,
                               str::stream() << "Cannot update '" << other->dottedField()
-                                            << "' and '"
-                                            << execInfo.fieldRef[i]->dottedField()
+                                            << "' and '" << execInfo.fieldRef[i]->dottedField()
                                             << "' at the same time");
             }
 
@@ -367,14 +364,6 @@ void UpdateDriver::setModOptions(ModifierInterface::Options modOpts) {
     _modOptions = modOpts;
 }
 
-void UpdateDriver::setCollator(const CollatorInterface* collator) {
-    for (auto&& mod : _mods) {
-        mod->setCollator(collator);
-    }
-
-    _modOptions.collator = collator;
-}
-
 ModifierInterface::ExecInfo::UpdateContext UpdateDriver::context() const {
     return _context;
 }
@@ -396,8 +385,7 @@ BSONObj UpdateDriver::makeOplogEntryQuery(const BSONObj& doc, bool multi) const 
     } else {
         uassert(16980,
                 str::stream() << "Multi-update operations require all documents to "
-                                 "have an '_id' field. "
-                              << doc.toString(),
+                                 "have an '_id' field. " << doc.toString(false, false),
                 !multi);
         return doc;
     }

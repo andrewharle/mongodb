@@ -10,8 +10,12 @@
     var adminUser = {
         user: "admin",
         pwd: "a",
-        roles:
-            ["readWriteAnyDatabase", "dbAdminAnyDatabase", "userAdminAnyDatabase", "clusterAdmin"]
+        roles: [
+            "readWriteAnyDatabase",
+            "dbAdminAnyDatabase",
+            "userAdminAnyDatabase",
+            "clusterAdmin"
+        ]
     };
 
     var test1User = {
@@ -28,8 +32,12 @@
         assert.writeOK(collection.insert(obj));
     }
 
-    var cluster = new ShardingTest(
-        {name: "authmr", shards: 1, mongos: 1, other: {keyFile: "jstests/libs/key1"}});
+    var cluster = new ShardingTest({
+        name: "authmr",
+        shards: 1,
+        mongos: 1,
+        other: {extraOptions: {keyFile: "jstests/libs/key1"}}
+    });
 
     // Set up the test data.
     (function() {

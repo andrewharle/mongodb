@@ -71,10 +71,7 @@
 
     var secondaries = replTest.getSecondaries();
 
-    var majorityWriteConcerns = [
-        {w: 2, wtimeout: 30000},
-        {w: 'majority', wtimeout: 30000},
-    ];
+    var majorityWriteConcerns = [{w: 2, wtimeout: 30000}, {w: 'majority', wtimeout: 30000}, ];
 
     function testMajorityWriteConcerns(wc) {
         jsTest.log("Testing " + tojson(wc));

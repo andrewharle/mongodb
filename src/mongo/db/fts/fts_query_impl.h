@@ -65,15 +65,10 @@ public:
         return _termsForBounds;
     }
 
-    /**
-     * Returns a BSON object with the following format:
-     * {
-     *   terms: <array of positive terms>,
-     *   negatedTerms: <array of negative terms>,
-     *   phrases: <array of positive phrases>,
-     *   negatedPhrases: <array of negative phrases>
-     * }
-     */
+    std::string toString() const;
+
+    std::string debugString() const;
+
     BSONObj toBSON() const;
 
 private:

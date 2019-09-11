@@ -49,8 +49,6 @@ class CollectionInfoCache {
 public:
     CollectionInfoCache(Collection* collection);
 
-    ~CollectionInfoCache();
-
     /**
      * Get the PlanCache for this collection.
      */
@@ -132,8 +130,6 @@ private:
      * when index composition changes.
      */
     void rebuildIndexData(OperationContext* txn);
-
-    bool _hasTTLIndex = false;
 };
 
 }  // namespace mongo

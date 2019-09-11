@@ -42,7 +42,8 @@ namespace mongo {
 namespace logger {
 
 template <typename E>
-LogDomain<E>::LogDomain() : _abortOnFailure(false) {}
+LogDomain<E>::LogDomain()
+    : _abortOnFailure(false) {}
 
 template <typename E>
 LogDomain<E>::~LogDomain() {

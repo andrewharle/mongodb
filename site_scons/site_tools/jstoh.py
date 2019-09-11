@@ -1,55 +1,55 @@
 import os
 import sys
 
-
 def jsToHeader(target, source):
 
     outFile = target
 
-    h = [
-        '#include "mongo/base/string_data.h"',
-        '#include "mongo/scripting/engine.h"',
-        'namespace mongo {',
-        'namespace JSFiles{',
-    ]
+    h =  ['#include "mongo/base/string_data.h"'
+        ,'namespace mongo {'
+        ,'struct JSFile{ const char* name; const StringData& source; };'
+        ,'namespace JSFiles{'
+         ]
 
-    def lineToChars(s):
-        return ','.join(str(ord(c)) for c in (s.rstrip() + '\n')) + ','
+    def cppEscape(s):
+        s = s.rstrip()
+        s = s.replace( '\\', '\\\\' )
+        s = s.replace( '"', r'\"' )
+        return s
 
     for s in source:
         filename = str(s)
         objname = os.path.split(filename)[1].split('.')[0]
         stringname = '_jscode_raw_' + objname
 
-        h.append('constexpr char ' + stringname + "[] = {")
+        h.append('const StringData ' + stringname + " = ")
 
-        with open(filename, 'r') as f:
-            for line in f:
-                h.append(lineToChars(line))
+        for l in open( filename, 'r' ):
+            h.append( '"' + cppEscape(l) + r'\n" ' )
 
-        h.append("0};")
-        # symbols aren't exported w/o this
-        h.append('extern const JSFile %s;' % objname)
-        h.append('const JSFile %s = { "%s", StringData(%s, sizeof(%s) - 1) };' %
-                 (objname, filename.replace('\\', '/'), stringname, stringname))
+        h.append(";")
+        h.append('extern const JSFile %s;'%objname) #symbols aren't exported w/o this
+        h.append('const JSFile %s = { "%s", %s };'%(objname, filename.replace('\\', '/'), stringname))
 
     h.append("} // namespace JSFiles")
     h.append("} // namespace mongo")
     h.append("")
 
-    text = '\n'.join(h)
+    text = '\n'.join(h);
 
     print "writing: %s" % outFile
-    with open(outFile, 'wb') as out:
-        try:
-            out.write(text)
-        finally:
-            out.close()
+    out = open( outFile, 'wb' )
+    try:
+        out.write( text )
+    finally:
+        out.close()
 
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
         print "Must specify [target] [source] "
-        sys.exit(1)
+        sys.exit(1);
 
     jsToHeader(sys.argv[1], sys.argv[2:])
+
+

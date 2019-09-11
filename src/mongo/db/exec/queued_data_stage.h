@@ -49,7 +49,7 @@ class QueuedDataStage final : public PlanStage {
 public:
     QueuedDataStage(OperationContext* opCtx, WorkingSet* ws);
 
-    StageState doWork(WorkingSetID* out) final;
+    StageState work(WorkingSetID* out) final;
 
     bool isEOF() final;
 

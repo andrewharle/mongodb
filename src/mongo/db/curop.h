@@ -32,29 +32,106 @@
 #pragma once
 
 #include "mongo/base/disallow_copying.h"
-#include "mongo/db/commands.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/server_options.h"
 #include "mongo/platform/atomic_word.h"
-#include "mongo/util/net/message.h"
+#include "mongo/util/concurrency/spin_lock.h"
 #include "mongo/util/progress_meter.h"
+#include "mongo/util/thread_safe_string.h"
 #include "mongo/util/time_support.h"
+#include "mongo/util/net/message.h"
 
 namespace mongo {
 
 class Client;
+class Command;
 class CurOp;
 class OperationContext;
-struct PlanSummaryStats;
+
+/**
+ * stores a copy of a bson obj in a fixed size buffer
+ * if its too big for the buffer, says "too big"
+ * useful for keeping a copy around indefinitely without wasting a lot of space or doing malloc
+ */
+class CachedBSONObjBase {
+public:
+    static BSONObj _tooBig;  // { $msg : "query not recording (too large)" }
+};
+
+template <size_t BUFFER_SIZE>
+class CachedBSONObj : public CachedBSONObjBase {
+public:
+    enum { TOO_BIG_SENTINEL = 1 };
+
+    CachedBSONObj() {
+        _size = (int*)_buf;
+        reset();
+    }
+
+    void reset(int sz = 0) {
+        _lock.lock();
+        _reset(sz);
+        _lock.unlock();
+    }
+
+    void set(const BSONObj& o) {
+        scoped_spinlock lk(_lock);
+        size_t sz = o.objsize();
+        if (sz > sizeof(_buf)) {
+            _reset(TOO_BIG_SENTINEL);
+        } else {
+            memcpy(_buf, o.objdata(), sz);
+        }
+    }
+
+    int size() const {
+        return *_size;
+    }
+    bool have() const {
+        return size() > 0;
+    }
+    bool tooBig() const {
+        return size() == TOO_BIG_SENTINEL;
+    }
+
+    BSONObj get() const {
+        scoped_spinlock lk(_lock);
+        return _get();
+    }
+
+    void append(BSONObjBuilder& b, StringData name) const {
+        scoped_spinlock lk(_lock);
+        BSONObj temp = _get();
+        b.append(name, temp);
+    }
+
+private:
+    /** you have to be locked when you call this */
+    BSONObj _get() const {
+        int sz = size();
+        if (sz == 0)
+            return BSONObj();
+        if (sz == TOO_BIG_SENTINEL)
+            return _tooBig;
+        return BSONObj(_buf).copy();
+    }
+
+    /** you have to be locked when you call this */
+    void _reset(int sz) {
+        _size[0] = sz;
+    }
+
+    mutable SpinLock _lock;
+    int* _size;
+    char _buf[BUFFER_SIZE];
+};
 
 /* lifespan is different than CurOp because of recursives with DBDirectClient */
 class OpDebug {
 public:
     OpDebug() = default;
 
-    std::string report(Client* client,
-                       const CurOp& curop,
-                       const SingleThreadedLockStats& lockStats) const;
+    std::string report(const CurOp& curop, const SingleThreadedLockStats& lockStats) const;
 
     /**
      * Appends information about the current operation to "builder"
@@ -66,11 +143,6 @@ public:
                 const SingleThreadedLockStats& lockStats,
                 BSONObjBuilder& builder) const;
 
-    /**
-     * Copies relevant plan summary metrics to this OpDebug instance.
-     */
-    void setPlanSummaryMetrics(const PlanSummaryStats& planSummaryStats);
-
     // -------------------
 
     // basic options
@@ -81,6 +153,7 @@ public:
     // Similarly, the return value will be dbGetMore for both OP_GET_MORE and getMore command.
     LogicalOp logicalOp{LogicalOp::opInvalid};  // only set this through setNetworkOp_inlock()
     bool iscommand{false};
+    BSONObj query{};
     BSONObj updateobj{};
 
     // detailed options
@@ -93,6 +166,9 @@ public:
     long long keysExamined{-1};
     long long docsExamined{-1};
 
+    // indicates short circuited code path on an update to make the update faster
+    bool idhack{false};
+
     bool hasSortStage{false};  // true if the query plan involves an in-memory sort
 
     // True if the plan came from the multi-planner (not from the plan cache and not a query with a
@@ -104,29 +180,41 @@ public:
 
     long long nMatched{-1};   // number of records that match the query
     long long nModified{-1};  // number of records written (no no-ops)
+    long long nmoved{-1};     // updates resulted in a move (moves are expensive)
     long long ninserted{-1};
     long long ndeleted{-1};
+    bool fastmod{false};
     bool fastmodinsert{false};  // upsert of an $operation. builds a default object
     bool upsert{false};         // true if the update actually did an insert
     bool cursorExhausted{
         false};  // true if the cursor has been closed at end a find/getMore operation
-
-    // The following metrics are initialized with 0 rather than -1 in order to simplify use by the
-    // CRUD path.
-    long long nmoved{0};        // updates resulted in a move (moves are expensive)
-    long long keysInserted{0};  // Number of index keys inserted.
-    long long keysDeleted{0};   // Number of index keys removed.
+    int keyUpdates{0};
     long long writeConflicts{0};
 
-    BSONObj execStats;  // Owned here.
+    // New Query Framework debugging/profiling info
+    // TODO: should this really be an opaque BSONObj?  Not sure.
+    CachedBSONObj<4096> execStats;
 
     // error handling
     ExceptionInfo exceptionInfo;
 
     // response info
-    long long executionTimeMicros{0};
+    int executionTime{0};
     long long nreturned{-1};
     int responseLength{-1};
+
+private:
+    /**
+     * Returns true if this OpDebug instance was generated by a find command. Returns false for
+     * OP_QUERY find and all other operations.
+     */
+    bool isFindCommand() const;
+
+    /**
+     * Returns true if this OpDebug instance was generated by a find command. Returns false for
+     * OP_GET_MORE and all other operations.
+     */
+    bool isGetMoreCommand() const;
 };
 
 /**
@@ -164,31 +252,13 @@ public:
     ~CurOp();
 
     bool haveQuery() const {
-        return !_query.isEmpty();
+        return _query.have();
     }
-
-    /**
-     * The BSONObj returned may not be owned by CurOp. Callers should call getOwned() if they plan
-     * to reference beyond the lifetime of this CurOp instance.
-     */
     BSONObj query() const {
-        return _query;
+        return _query.get();
     }
-
-    /**
-     * The BSONObj returned may not be owned by CurOp. Callers should call getOwned() if they plan
-     * to reference beyond the lifetime of this CurOp instance.
-     */
-    BSONObj collation() const {
-        return _collation;
-    }
-
-    /**
-     * Returns an owned BSONObj representing the original command. Used only by the getMore
-     * command.
-     */
-    BSONObj originatingCommand() const {
-        return _originatingCommand;
+    void appendQuery(BSONObjBuilder& b, StringData name) const {
+        _query.append(b, name);
     }
 
     void enter_inlock(const char* ns, int dbProfileLevel);
@@ -231,19 +301,11 @@ public:
         return _ns;
     }
 
-    /**
-     * Returns true iff the elapsed time of this operation is such that it should be profiled.
-     * Uses total time if the operation is done, current elapsed time otherwise.
-     */
-    bool shouldDBProfile() {
+    bool shouldDBProfile(int ms) const {
         if (_dbprofile <= 0)
             return false;
 
-        if (_dbprofile >= 2)
-            return true;
-
-        long long opMicros = isDone() ? totalTimeMicros() : elapsedMicros();
-        return opMicros >= serverGlobalParams.slowMS * 1000LL;
+        return _dbprofile >= 2 || ms >= serverGlobalParams.slowMS;
     }
 
     /**
@@ -278,6 +340,36 @@ public:
     }
 
     //
+    // Methods for controlling CurOp "max time".
+    //
+
+    /**
+     * Sets the amount of time operation this should be allowed to run, units of microseconds.
+     * The special value 0 is "allow to run indefinitely".
+     */
+    void setMaxTimeMicros(uint64_t maxTimeMicros);
+
+    /**
+     * Returns true if a time limit has been set on this operation, and false otherwise.
+     */
+    bool isMaxTimeSet() const;
+
+    /**
+     * Checks whether this operation has been running longer than its time limit.  Returns
+     * false if not, or if the operation has no time limit.
+     */
+    bool maxTimeHasExpired();
+
+    /**
+     * Returns the number of microseconds remaining for this operation's time limit, or the
+     * special value 0 if the operation has no time limit.
+     *
+     * Calling this method is more expensive than calling its sibling "maxTimeHasExpired()",
+     * since an accurate measure of remaining time needs to be calculated.
+     */
+    uint64_t getRemainingMaxTimeMicros() const;
+
+    //
     // Methods for getting/setting elapsed time. Note that the observed elapsed time may be
     // negative, if the system time has been reset during the course of this operation.
     //
@@ -293,44 +385,26 @@ public:
     void done() {
         _end = curTimeMicros64();
     }
-    bool isDone() const {
-        return _end > 0;
-    }
 
     long long totalTimeMicros() {
         massert(12601, "CurOp not marked done yet", _end);
         return _end - startTime();
     }
-
+    int totalTimeMillis() {
+        return (int)(totalTimeMicros() / 1000);
+    }
     long long elapsedMicros() {
         return curTimeMicros64() - startTime();
     }
-
+    int elapsedMillis() {
+        return (int)(elapsedMicros() / 1000);
+    }
     int elapsedSeconds() {
-        return static_cast<int>(elapsedMicros() / (1000 * 1000));
+        return elapsedMillis() / 1000;
     }
 
-    /**
-     * 'query' must be either an owned BSONObj or guaranteed to outlive the OperationContext it is
-     * associated with.
-     */
     void setQuery_inlock(const BSONObj& query) {
-        _query = query;
-    }
-
-    /**
-     * 'collation' must be either an owned BSONObj or guaranteed to outlive the OperationContext it
-     * is associated with.
-     */
-    void setCollation_inlock(const BSONObj& collation) {
-        _collation = collation;
-    }
-
-    /**
-     * Sets the original command object. Used only by the getMore command.
-     */
-    void setOriginatingCommand_inlock(const BSONObj& commandObj) {
-        _originatingCommand = commandObj.getOwned();
+        _query.set(query);
     }
 
     Command* getCommand() const {
@@ -339,11 +413,6 @@ public:
     void setCommand_inlock(Command* command) {
         _command = command;
     }
-
-    /**
-     * Returns whether the current operation is a read, write, or command.
-     */
-    Command::ReadWriteType getReadWriteType() const;
 
     /**
      * Appends information about this CurOp to "builder".
@@ -442,9 +511,7 @@ private:
     bool _isCommand{false};
     int _dbprofile{0};  // 0=off, 1=slow, 2=all
     std::string _ns;
-    BSONObj _query;
-    BSONObj _collation;
-    BSONObj _originatingCommand;  // Used by getMore to display original command.
+    CachedBSONObj<512> _query;  // CachedBSONObj is thread safe
     OpDebug _debug;
     std::string _message;
     ProgressMeter _progressMeter;
@@ -455,6 +522,58 @@ private:
     // so this should be 30000 in that case
     long long _expectedLatencyMs{0};
 
+    // Time limit for this operation.  0 if the operation has no time limit.
+    uint64_t _maxTimeMicros{0u};
+
     std::string _planSummary;
+
+    /** Nested class that implements tracking of a time limit for a CurOp object. */
+    class MaxTimeTracker {
+        MONGO_DISALLOW_COPYING(MaxTimeTracker);
+
+    public:
+        /** Newly-constructed MaxTimeTracker objects have the time limit disabled. */
+        MaxTimeTracker() = default;
+
+        /** Returns whether or not time tracking is enabled. */
+        bool isEnabled() const {
+            return _enabled;
+        }
+
+        /**
+         * Enables time tracking.  The time limit is set to be "durationMicros" microseconds
+         * from "startEpochMicros" (units of microseconds since the epoch).
+         *
+         * "durationMicros" must be nonzero.
+         */
+        void setTimeLimit(uint64_t startEpochMicros, uint64_t durationMicros);
+
+        /**
+         * Checks whether the time limit has been hit.  Returns false if not, or if time
+         * tracking is disabled.
+         */
+        bool checkTimeLimit();
+
+        /**
+         * Returns the number of microseconds remaining for the time limit, or the special
+         * value 0 if time tracking is disabled.
+         *
+         * Calling this method is more expensive than calling its sibling "checkInterval()",
+         * since an accurate measure of remaining time needs to be calculated.
+         */
+        uint64_t getRemainingMicros() const;
+
+    private:
+        // Whether or not time tracking is enabled for this operation.
+        bool _enabled{false};
+
+        // Point in time at which the time limit is hit.  Units of microseconds since the
+        // epoch.
+        uint64_t _targetEpochMicros{0};
+
+        // Approximate point in time at which the time limit is hit.   Units of milliseconds
+        // since the server process was started.
+        int64_t _approxTargetServerMillis{0};
+    } _maxTimeTracker;
 };
-}  // namespace mongo
+}

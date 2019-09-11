@@ -28,7 +28,6 @@
 
 #include "mongo/db/fts/fts_spec.h"
 
-#include "mongo/db/bson/dotted_path_support.h"
 #include "mongo/util/mongoutils/str.h"
 #include "mongo/util/stringutils.h"
 
@@ -44,8 +43,6 @@ namespace fts {
 using std::map;
 using std::string;
 using namespace mongoutils;
-
-namespace dps = ::mongo::dotted_path_support;
 
 namespace {
 void _addFTSStuff(BSONObjBuilder* b) {
@@ -173,7 +170,7 @@ void FTSSpec::_scoreDocumentV1(const BSONObj& obj, TermFrequencyMap* term_freqs)
     for (Weights::const_iterator i = _weights.begin(); i != _weights.end(); i++) {
         const char* leftOverName = i->first.c_str();
         // name of field
-        BSONElement e = dps::extractElementAtPath(obj, leftOverName);
+        BSONElement e = obj.getFieldDottedOrArray(leftOverName);
         // weight associated to name of field
         double weight = i->second;
 
@@ -184,7 +181,7 @@ void FTSSpec::_scoreDocumentV1(const BSONObj& obj, TermFrequencyMap* term_freqs)
             while (j.more()) {
                 BSONElement x = j.next();
                 if (leftOverName[0] && x.isABSONObj())
-                    x = dps::extractElementAtPath(x.Obj(), leftOverName);
+                    x = x.Obj().getFieldDotted(leftOverName);
                 if (x.type() == String)
                     _scoreStringV1(tools, x.valuestr(), term_freqs, weight);
             }
@@ -194,7 +191,7 @@ void FTSSpec::_scoreDocumentV1(const BSONObj& obj, TermFrequencyMap* term_freqs)
     }
 }
 
-StatusWith<BSONObj> FTSSpec::_fixSpecV1(const BSONObj& spec) {
+BSONObj FTSSpec::_fixSpecV1(const BSONObj& spec) {
     map<string, int> m;
 
     BSONObj keyPattern;
@@ -241,13 +238,7 @@ StatusWith<BSONObj> FTSSpec::_fixSpecV1(const BSONObj& spec) {
     {
         BSONObjBuilder b;
         for (map<string, int>::iterator i = m.begin(); i != m.end(); ++i) {
-            if (i->second <= 0 || i->second >= MAX_WORD_WEIGHT) {
-                return {ErrorCodes::CannotCreateIndex,
-                        str::stream() << "text index weight must be in the exclusive interval (0,"
-                                      << MAX_WORD_WEIGHT
-                                      << ") but found: "
-                                      << i->second};
-            }
+            uassert(17365, "score for word too high", i->second > 0 && i->second < MAX_WORD_WEIGHT);
             b.append(i->first, i->second);
         }
         weights = b.obj();
@@ -283,10 +274,9 @@ StatusWith<BSONObj> FTSSpec::_fixSpecV1(const BSONObj& spec) {
             version = e.numberInt();
         } else if (str::equals(e.fieldName(), "textIndexVersion")) {
             textIndexVersion = e.numberInt();
-            if (textIndexVersion != 1) {
-                return {ErrorCodes::CannotCreateIndex,
-                        str::stream() << "bad textIndexVersion: " << textIndexVersion};
-            }
+            uassert(17366,
+                    str::stream() << "bad textIndexVersion: " << textIndexVersion,
+                    textIndexVersion == 1);
         } else {
             b.append(e);
         }

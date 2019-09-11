@@ -28,9 +28,7 @@
 
 #include "mongo/db/query/parsed_projection.h"
 
-#include "mongo/db/query/query_request.h"
-
-#include "mongo/bson/simple_bsonobj_comparator.h"
+#include "mongo/db/query/lite_parsed_query.h"
 
 namespace mongo {
 
@@ -56,6 +54,9 @@ Status ParsedProjection::make(const BSONObj& spec,
     IncludeExclude includeExclude = IncludeExclude::kUninitialized;
 
     bool requiresDocument = false;
+
+    bool includeID = true;
+
     bool hasIndexKeyProjection = false;
 
     bool wantGeoNearPoint = false;
@@ -65,13 +66,12 @@ Status ParsedProjection::make(const BSONObj& spec,
     // Until we see a positional or elemMatch operator we're normal.
     ArrayOpType arrayOpType = ARRAY_OP_NORMAL;
 
-    // Fill out the returned obj.
-    unique_ptr<ParsedProjection> pp(new ParsedProjection());
-    pp->_hasId = true;
+    BSONObjIterator it(spec);
+    while (it.more()) {
+        BSONElement e = it.next();
 
-    for (auto&& elem : spec) {
-        if (Object == elem.type()) {
-            BSONObj obj = elem.embeddedObject();
+        if (Object == e.type()) {
+            BSONObj obj = e.embeddedObject();
             if (1 != obj.nFields()) {
                 return Status(ErrorCodes::BadValue, ">1 field in obj: " + obj.toString());
             }
@@ -100,7 +100,6 @@ Status ParsedProjection::make(const BSONObj& spec,
 
                 // Projections with $slice aren't covered.
                 requiresDocument = true;
-                pp->_arrayFields.push_back(elem.fieldNameStringData());
             } else if (mongoutils::str::equals(e2.fieldName(), "$elemMatch")) {
                 // Validate $elemMatch arguments and dependencies.
                 if (Object != e2.type()) {
@@ -113,7 +112,7 @@ Status ParsedProjection::make(const BSONObj& spec,
                                   "Cannot specify positional operator and $elemMatch.");
                 }
 
-                if (mongoutils::str::contains(elem.fieldName(), '.')) {
+                if (mongoutils::str::contains(e.fieldName(), '.')) {
                     return Status(ErrorCodes::BadValue,
                                   "Cannot use $elemMatch projection on a nested field.");
                 }
@@ -121,27 +120,21 @@ Status ParsedProjection::make(const BSONObj& spec,
                 arrayOpType = ARRAY_OP_ELEM_MATCH;
 
                 // Create a MatchExpression for the elemMatch.
-                BSONObj elemMatchObj = elem.wrap();
-                invariant(elemMatchObj.isOwned());
+                BSONObj elemMatchObj = e.wrap();
+                verify(elemMatchObj.isOwned());
 
-                // We pass a null pointer instead of threading through the CollatorInterface. This
-                // is ok because the parsed MatchExpression is not used after being created. We are
-                // only parsing here in order to ensure that the elemMatch projection is valid.
-                //
                 // TODO: Is there a faster way of validating the elemMatchObj?
-                const CollatorInterface* collator = nullptr;
                 StatusWithMatchExpression statusWithMatcher =
-                    MatchExpressionParser::parse(elemMatchObj, extensionsCallback, collator);
+                    MatchExpressionParser::parse(elemMatchObj, extensionsCallback);
                 if (!statusWithMatcher.isOK()) {
                     return statusWithMatcher.getStatus();
                 }
 
                 // Projections with $elemMatch aren't covered.
                 requiresDocument = true;
-                pp->_arrayFields.push_back(elem.fieldNameStringData());
             } else if (mongoutils::str::equals(e2.fieldName(), "$meta")) {
                 // Field for meta must be top level.  We can relax this at some point.
-                if (mongoutils::str::contains(elem.fieldName(), '.')) {
+                if (mongoutils::str::contains(e.fieldName(), '.')) {
                     return Status(ErrorCodes::BadValue, "field for $meta cannot be nested");
                 }
 
@@ -151,64 +144,57 @@ Status ParsedProjection::make(const BSONObj& spec,
                     return Status(ErrorCodes::BadValue, "unexpected argument to $meta in proj");
                 }
 
-                if (e2.valuestr() != QueryRequest::metaTextScore &&
-                    e2.valuestr() != QueryRequest::metaRecordId &&
-                    e2.valuestr() != QueryRequest::metaIndexKey &&
-                    e2.valuestr() != QueryRequest::metaGeoNearDistance &&
-                    e2.valuestr() != QueryRequest::metaGeoNearPoint &&
-                    e2.valuestr() != QueryRequest::metaSortKey) {
+                if (e2.valuestr() != LiteParsedQuery::metaTextScore &&
+                    e2.valuestr() != LiteParsedQuery::metaRecordId &&
+                    e2.valuestr() != LiteParsedQuery::metaIndexKey &&
+                    e2.valuestr() != LiteParsedQuery::metaGeoNearDistance &&
+                    e2.valuestr() != LiteParsedQuery::metaGeoNearPoint &&
+                    e2.valuestr() != LiteParsedQuery::metaSortKey) {
                     return Status(ErrorCodes::BadValue, "unsupported $meta operator: " + e2.str());
                 }
 
                 // This clobbers everything else.
-                if (e2.valuestr() == QueryRequest::metaIndexKey) {
+                if (e2.valuestr() == LiteParsedQuery::metaIndexKey) {
                     hasIndexKeyProjection = true;
-                } else if (e2.valuestr() == QueryRequest::metaGeoNearDistance) {
+                } else if (e2.valuestr() == LiteParsedQuery::metaGeoNearDistance) {
                     wantGeoNearDistance = true;
-                } else if (e2.valuestr() == QueryRequest::metaGeoNearPoint) {
+                } else if (e2.valuestr() == LiteParsedQuery::metaGeoNearPoint) {
                     wantGeoNearPoint = true;
-                } else if (e2.valuestr() == QueryRequest::metaSortKey) {
+                } else if (e2.valuestr() == LiteParsedQuery::metaSortKey) {
                     wantSortKey = true;
                 }
 
                 // Of the $meta projections, only sortKey can be covered.
-                if (e2.valuestr() != QueryRequest::metaSortKey) {
+                if (e2.valuestr() != LiteParsedQuery::metaSortKey) {
                     requiresDocument = true;
                 }
-                pp->_metaFields.push_back(elem.fieldNameStringData());
             } else {
                 return Status(ErrorCodes::BadValue,
-                              string("Unsupported projection option: ") + elem.toString());
+                              string("Unsupported projection option: ") + e.toString());
             }
-        } else if (mongoutils::str::equals(elem.fieldName(), "_id") && !elem.trueValue()) {
-            pp->_hasId = false;
+        } else if (mongoutils::str::equals(e.fieldName(), "_id") && !e.trueValue()) {
+            includeID = false;
         } else {
             // Projections of dotted fields aren't covered.
-            if (mongoutils::str::contains(elem.fieldName(), '.')) {
+            if (mongoutils::str::contains(e.fieldName(), '.')) {
                 requiresDocument = true;
-            }
-
-            if (elem.trueValue()) {
-                pp->_includedFields.push_back(elem.fieldNameStringData());
-            } else {
-                pp->_excludedFields.push_back(elem.fieldNameStringData());
             }
 
             // If we haven't specified an include/exclude, initialize includeExclude. We expect
             // further include/excludes to match it.
             if (includeExclude == IncludeExclude::kUninitialized) {
                 includeExclude =
-                    elem.trueValue() ? IncludeExclude::kInclude : IncludeExclude::kExclude;
-            } else if ((includeExclude == IncludeExclude::kInclude && !elem.trueValue()) ||
-                       (includeExclude == IncludeExclude::kExclude && elem.trueValue())) {
+                    e.trueValue() ? IncludeExclude::kInclude : IncludeExclude::kExclude;
+            } else if ((includeExclude == IncludeExclude::kInclude && !e.trueValue()) ||
+                       (includeExclude == IncludeExclude::kExclude && e.trueValue())) {
                 return Status(ErrorCodes::BadValue,
                               "Projection cannot have a mix of inclusion and exclusion.");
             }
         }
 
-        if (_isPositionalOperator(elem.fieldName())) {
+        if (_isPositionalOperator(e.fieldName())) {
             // Validate the positional op.
-            if (!elem.trueValue()) {
+            if (!e.trueValue()) {
                 return Status(ErrorCodes::BadValue,
                               "Cannot exclude array elements with the positional operator.");
             }
@@ -223,24 +209,23 @@ Status ParsedProjection::make(const BSONObj& spec,
                               "Cannot specify positional operator and $elemMatch.");
             }
 
-            std::string after = mongoutils::str::after(elem.fieldName(), ".$");
+            std::string after = mongoutils::str::after(e.fieldName(), ".$");
             if (mongoutils::str::contains(after, ".$")) {
                 mongoutils::str::stream ss;
-                ss << "Positional projection '" << elem.fieldName() << "' contains "
+                ss << "Positional projection '" << e.fieldName() << "' contains "
                    << "the positional operator more than once.";
                 return Status(ErrorCodes::BadValue, ss);
             }
 
-            std::string matchfield = mongoutils::str::before(elem.fieldName(), '.');
+            std::string matchfield = mongoutils::str::before(e.fieldName(), '.');
             if (!_hasPositionalOperatorMatch(query, matchfield)) {
                 mongoutils::str::stream ss;
-                ss << "Positional projection '" << elem.fieldName() << "' does not "
+                ss << "Positional projection '" << e.fieldName() << "' does not "
                    << "match the query document.";
                 return Status(ErrorCodes::BadValue, ss);
             }
 
             arrayOpType = ARRAY_OP_POSITIONAL;
-            pp->_arrayFields.push_back(elem.fieldNameStringData());
         }
     }
 
@@ -251,13 +236,14 @@ Status ParsedProjection::make(const BSONObj& spec,
         requiresDocument = true;
     }
 
-    pp->_isInclusionProjection = (includeExclude == IncludeExclude::kInclude);
+    // Fill out the returned obj.
+    unique_ptr<ParsedProjection> pp(new ParsedProjection());
 
     // The positional operator uses the MatchDetails from the query
     // expression to know which array element was matched.
     pp->_requiresMatchDetails = arrayOpType == ARRAY_OP_POSITIONAL;
 
-    // Save the raw spec.  It should be owned by the QueryRequest.
+    // Save the raw spec.  It should be owned by the LiteParsedQuery.
     verify(spec.isOwned());
     pp->_source = spec;
     pp->_returnKey = hasIndexKeyProjection;
@@ -271,7 +257,7 @@ Status ParsedProjection::make(const BSONObj& spec,
     // If it's possible to compute the projection in a covered fashion, populate _requiredFields
     // so the planner can perform projection analysis.
     if (!pp->_requiresDocument) {
-        if (pp->_hasId) {
+        if (includeID) {
             pp->_requiredFields.push_back("_id");
         }
 
@@ -282,15 +268,14 @@ Status ParsedProjection::make(const BSONObj& spec,
         while (srcIt.more()) {
             BSONElement elt = srcIt.next();
             // We've already handled the _id field before entering this loop.
-            if (pp->_hasId && mongoutils::str::equals(elt.fieldName(), "_id")) {
+            if (includeID && mongoutils::str::equals(elt.fieldName(), "_id")) {
                 continue;
             }
             // $meta sortKey should not be checked as a part of _requiredFields, since it can
             // potentially produce a covered projection as long as the sort key is covered.
             if (BSONType::Object == elt.type()) {
-                dassert(
-                    SimpleBSONObjComparator::kInstance.evaluate(elt.Obj() == BSON("$meta"
-                                                                                  << "sortKey")));
+                dassert(elt.Obj() == BSON("$meta"
+                                          << "sortKey"));
                 continue;
             }
             if (elt.trueValue()) {
@@ -306,69 +291,6 @@ Status ParsedProjection::make(const BSONObj& spec,
 
     *out = pp.release();
     return Status::OK();
-}
-
-namespace {
-
-bool isPrefixOf(StringData first, StringData second) {
-    if (first.size() >= second.size()) {
-        return false;
-    }
-
-    return second.startsWith(first) && second[first.size()] == '.';
-}
-
-}  // namespace
-
-bool ParsedProjection::isFieldRetainedExactly(StringData path) const {
-    // If a path, or a parent or child of the path, is contained in _metaFields or in _arrayFields,
-    // our output likely does not preserve that field.
-    for (auto&& metaField : _metaFields) {
-        if (path == metaField || isPrefixOf(path, metaField) || isPrefixOf(metaField, path)) {
-            return false;
-        }
-    }
-
-    for (auto&& arrayField : _arrayFields) {
-        if (path == arrayField || isPrefixOf(path, arrayField) || isPrefixOf(arrayField, path)) {
-            return false;
-        }
-    }
-
-    if (path == "_id" || isPrefixOf("_id", path)) {
-        return _hasId;
-    }
-
-    if (!_isInclusionProjection) {
-        // If we are an exclusion projection, and the path, or a parent or child of the path, is
-        // contained in _excludedFields, our output likely does not preserve that field.
-        for (auto&& excluded : _excludedFields) {
-            if (path == excluded || isPrefixOf(excluded, path) || isPrefixOf(path, excluded)) {
-                return false;
-            }
-        }
-    } else {
-        // If we are an inclusion projection, we may include parents of this path, but we cannot
-        // include children.
-        bool fieldIsIncluded = false;
-        // In a projection with several statements, the last one takes precedence. For example, the
-        // projection {a: 1, a.b: 1} preserves 'a.b', but not 'a'.
-        // TODO SERVER-6527: Simplify this when projections are no longer order-dependent.
-        for (auto&& included : _includedFields) {
-            if (path == included || isPrefixOf(included, path)) {
-                fieldIsIncluded = true;
-            } else if (isPrefixOf(path, included)) {
-                fieldIsIncluded = false;
-            }
-        }
-
-        if (!fieldIsIncluded) {
-            return false;
-        }
-    }
-
-
-    return true;
 }
 
 // static
@@ -393,7 +315,8 @@ bool ParsedProjection::_hasPositionalOperatorMatch(const MatchExpression* const 
         const char* pathRawData = queryPath.rawData();
         // We have to make a distinction between match expressions that are
         // initialized with an empty field/path name "" and match expressions
-        // for which the path is not meaningful (eg. $where).
+        // for which the path is not meaningful (eg. $where and the internal
+        // expression type ALWAYS_FALSE).
         if (!pathRawData) {
             return false;
         }

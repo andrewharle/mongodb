@@ -28,7 +28,6 @@
 #pragma once
 
 #include <bitset>
-#include <initializer_list>
 #include <vector>
 
 #include "mongo/base/status.h"
@@ -81,13 +80,10 @@ public:
     // an int bitmask of the actions.
     static Status parseActionSetFromString(const std::string& actionsString, ActionSet* result);
 
-    // Takes a vector of action type std::string representations and writes into *result an
-    // ActionSet of all valid actions encountered.
-    // If it encounters any actions that it doesn't recognize, will put those into
-    // *unrecognizedActions, while still returning the valid actions in *result, and returning OK.
+    // Takes a vector of action type std::string representations and returns an ActionSet of the
+    // actions.
     static Status parseActionSetFromStringVector(const std::vector<std::string>& actionsVector,
-                                                 ActionSet* result,
-                                                 std::vector<std::string>* unrecognizedActions);
+                                                 ActionSet* result);
 
 private:
     // bitmask of actions this privilege grants

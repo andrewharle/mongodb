@@ -31,12 +31,11 @@
 #include <map>
 
 #include "mongo/base/init.h"
-#include "mongo/db/bson/dotted_path_support.h"
-#include "mongo/db/client.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/replication_executor.h"
 #include "mongo/db/repl/replication_executor_test_fixture.h"
+#include "mongo/db/repl/storage_interface_mock.h"
 #include "mongo/executor/network_interface_mock.h"
 #include "mongo/executor/task_executor_test_common.h"
 #include "mongo/stdx/functional.h"
@@ -53,16 +52,17 @@ namespace repl {
 namespace {
 
 using executor::NetworkInterfaceMock;
+using executor::RemoteCommandResponse;
 using unittest::assertGet;
-
-namespace dps = ::mongo::dotted_path_support;
 
 const int64_t prngSeed = 1;
 
 MONGO_INITIALIZER(ReplExecutorCommonTests)(InitializerContext*) {
     mongo::executor::addTestsForExecutor(
-        "ReplicationExecutorCommon", [](std::unique_ptr<executor::NetworkInterfaceMock>* net) {
-            return stdx::make_unique<ReplicationExecutor>(net->release(), prngSeed);
+        "ReplicationExecutorCommon",
+        [](std::unique_ptr<executor::NetworkInterfaceMock>* net) {
+            return stdx::make_unique<ReplicationExecutor>(
+                net->release(), new StorageInterfaceMock(), prngSeed);
         });
     return Status::OK();
 }
@@ -74,21 +74,17 @@ TEST_F(ReplicationExecutorTest, ScheduleDBWorkAndExclusiveWorkConcurrently) {
     Status status1 = getDetectableErrorStatus();
     OperationContext* txn = nullptr;
     using CallbackData = ReplicationExecutor::CallbackArgs;
-    ASSERT_OK(executor
-                  .scheduleDBWork([&](const CallbackData& cbData) {
-                      status1 = cbData.status;
-                      txn = cbData.txn;
-                      barrier.countDownAndWait();
-                      if (cbData.status != ErrorCodes::CallbackCanceled)
-                          cbData.executor->shutdown();
-                  })
-                  .getStatus());
-    ASSERT_OK(executor
-                  .scheduleWorkWithGlobalExclusiveLock(
-                      [&](const CallbackData& cbData) { barrier.countDownAndWait(); })
-                  .getStatus());
-    executor.startup();
-    executor.join();
+    ASSERT_OK(executor.scheduleDBWork([&](const CallbackData& cbData) {
+        status1 = cbData.status;
+        txn = cbData.txn;
+        barrier.countDownAndWait();
+        if (cbData.status != ErrorCodes::CallbackCanceled)
+            cbData.executor->shutdown();
+    }).getStatus());
+    ASSERT_OK(executor.scheduleWorkWithGlobalExclusiveLock([&](const CallbackData& cbData) {
+        barrier.countDownAndWait();
+    }).getStatus());
+    executor.run();
     ASSERT_OK(status1);
     ASSERT(txn);
 }
@@ -100,22 +96,15 @@ TEST_F(ReplicationExecutorTest, ScheduleDBWorkWithCollectionLock) {
     OperationContext* txn = nullptr;
     bool collectionIsLocked = false;
     using CallbackData = ReplicationExecutor::CallbackArgs;
-    ASSERT_OK(executor
-                  .scheduleDBWork(
-                      [&](const CallbackData& cbData) {
-                          status1 = cbData.status;
-                          txn = cbData.txn;
-                          collectionIsLocked = txn
-                              ? txn->lockState()->isCollectionLockedForMode(nss.ns(), MODE_X)
-                              : false;
-                          if (cbData.status != ErrorCodes::CallbackCanceled)
-                              cbData.executor->shutdown();
-                      },
-                      nss,
-                      MODE_X)
-                  .getStatus());
-    executor.startup();
-    executor.join();
+    ASSERT_OK(executor.scheduleDBWork([&](const CallbackData& cbData) {
+        status1 = cbData.status;
+        txn = cbData.txn;
+        collectionIsLocked =
+            txn ? txn->lockState()->isCollectionLockedForMode(nss.ns(), MODE_X) : false;
+        if (cbData.status != ErrorCodes::CallbackCanceled)
+            cbData.executor->shutdown();
+    }, nss, MODE_X).getStatus());
+    executor.run();
     ASSERT_OK(status1);
     ASSERT(txn);
     ASSERT_TRUE(collectionIsLocked);
@@ -127,17 +116,14 @@ TEST_F(ReplicationExecutorTest, ScheduleExclusiveLockOperation) {
     OperationContext* txn = nullptr;
     bool lockIsW = false;
     using CallbackData = ReplicationExecutor::CallbackArgs;
-    ASSERT_OK(executor
-                  .scheduleWorkWithGlobalExclusiveLock([&](const CallbackData& cbData) {
-                      status1 = cbData.status;
-                      txn = cbData.txn;
-                      lockIsW = txn ? txn->lockState()->isW() : false;
-                      if (cbData.status != ErrorCodes::CallbackCanceled)
-                          cbData.executor->shutdown();
-                  })
-                  .getStatus());
-    executor.startup();
-    executor.join();
+    ASSERT_OK(executor.scheduleWorkWithGlobalExclusiveLock([&](const CallbackData& cbData) {
+        status1 = cbData.status;
+        txn = cbData.txn;
+        lockIsW = txn ? txn->lockState()->isW() : false;
+        if (cbData.status != ErrorCodes::CallbackCanceled)
+            cbData.executor->shutdown();
+    }).getStatus());
+    executor.run();
     ASSERT_OK(status1);
     ASSERT(txn);
     ASSERT_TRUE(lockIsW);
@@ -147,26 +133,21 @@ TEST_F(ReplicationExecutorTest, ShutdownBeforeRunningSecondExclusiveLockOperatio
     ReplicationExecutor& executor = getReplExecutor();
     using CallbackData = ReplicationExecutor::CallbackArgs;
     Status status1 = getDetectableErrorStatus();
-    ASSERT_OK(executor
-                  .scheduleWorkWithGlobalExclusiveLock([&](const CallbackData& cbData) {
-                      status1 = cbData.status;
-                      if (cbData.status != ErrorCodes::CallbackCanceled)
-                          cbData.executor->shutdown();
-                  })
-                  .getStatus());
+    ASSERT_OK(executor.scheduleWorkWithGlobalExclusiveLock([&](const CallbackData& cbData) {
+        status1 = cbData.status;
+        if (cbData.status != ErrorCodes::CallbackCanceled)
+            cbData.executor->shutdown();
+    }).getStatus());
     // Second db work item is invoked by the main executor thread because the work item is
     // moved from the exclusive lock queue to the ready work item queue when the first callback
     // cancels the executor.
     Status status2 = getDetectableErrorStatus();
-    ASSERT_OK(executor
-                  .scheduleWorkWithGlobalExclusiveLock([&](const CallbackData& cbData) {
-                      status2 = cbData.status;
-                      if (cbData.status != ErrorCodes::CallbackCanceled)
-                          cbData.executor->shutdown();
-                  })
-                  .getStatus());
-    executor.startup();
-    executor.join();
+    ASSERT_OK(executor.scheduleWorkWithGlobalExclusiveLock([&](const CallbackData& cbData) {
+        status2 = cbData.status;
+        if (cbData.status != ErrorCodes::CallbackCanceled)
+            cbData.executor->shutdown();
+    }).getStatus());
+    executor.run();
     ASSERT_OK(status1);
     ASSERT_EQUALS(ErrorCodes::CallbackCanceled, status2.code());
 }
@@ -175,22 +156,21 @@ TEST_F(ReplicationExecutorTest, CancelBeforeRunningFutureWork) {
     ReplicationExecutor& executor = getReplExecutor();
     using CallbackData = ReplicationExecutor::CallbackArgs;
     Status status1 = getDetectableErrorStatus();
-    auto cbhWithStatus = executor.scheduleWorkAt(
-        executor.now() + Milliseconds(1000), [&](const CallbackData& cbData) {
-            status1 = cbData.status;
-            if (cbData.status != ErrorCodes::CallbackCanceled)
-                cbData.executor->shutdown();
-        });
+    auto cbhWithStatus =
+        executor.scheduleWorkAt(executor.now() + Milliseconds(1000),
+                                [&](const CallbackData& cbData) {
+                                    status1 = cbData.status;
+                                    if (cbData.status != ErrorCodes::CallbackCanceled)
+                                        cbData.executor->shutdown();
+                                });
     ASSERT_OK(cbhWithStatus.getStatus());
 
-    ASSERT_EQUALS(1,
-                  dps::extractElementAtPath(executor.getDiagnosticBSON(), "queues.sleepers").Int());
-    ASSERT_EQUALS(0, dps::extractElementAtPath(executor.getDiagnosticBSON(), "queues.ready").Int());
+    ASSERT_EQUALS(1, executor.getDiagnosticBSON().getFieldDotted("queues.sleepers").Int());
+    ASSERT_EQUALS(0, executor.getDiagnosticBSON().getFieldDotted("queues.ready").Int());
     executor.cancel(cbhWithStatus.getValue());
 
-    ASSERT_EQUALS(0,
-                  dps::extractElementAtPath(executor.getDiagnosticBSON(), "queues.sleepers").Int());
-    ASSERT_EQUALS(1, dps::extractElementAtPath(executor.getDiagnosticBSON(), "queues.ready").Int());
+    ASSERT_EQUALS(0, executor.getDiagnosticBSON().getFieldDotted("queues.sleepers").Int());
+    ASSERT_EQUALS(1, executor.getDiagnosticBSON().getFieldDotted("queues.ready").Int());
 }
 
 // Equivalent to EventChainAndWaitingTest::onGo
@@ -209,7 +189,7 @@ TEST_F(ReplicationExecutorTest, ScheduleCallbackOnFutureEvent) {
 
     // Wait for a future event.
     executor.onEvent(ping, fn);
-    ASSERT_EQUALS(0, dps::extractElementAtPath(executor.getDiagnosticBSON(), "queues.ready").Int());
+    ASSERT_EQUALS(0, executor.getDiagnosticBSON().getFieldDotted("queues.ready").Int());
     executor.signalEvent(ping);
     executor.waitForEvent(pong);
 }
@@ -286,25 +266,6 @@ TEST_F(ReplicationExecutorTest, ScheduleCallbackAtAFutureTime) {
     executor.waitForEvent(finishEvent);
 }
 
-TEST_F(ReplicationExecutorTest, CallbacksAreInvokedOnClientThreads) {
-    launchExecutorThread();
-    getNet()->exitNetwork();
-
-    ReplicationExecutor& executor = getReplExecutor();
-    auto status = getDetectableErrorStatus();
-    bool haveClientInCallback = false;
-    auto fn = [&haveClientInCallback, &status](const ReplicationExecutor::CallbackArgs& cbData) {
-        status = cbData.status;
-        haveClientInCallback = haveClient();
-    };
-
-    ASSERT_NOT_OK(status);
-    auto cb = unittest::assertGet(executor.scheduleWork(fn));
-    executor.wait(cb);
-
-    ASSERT_OK(status);
-    ASSERT_TRUE(haveClientInCallback);
-}
 
 TEST_F(ReplicationExecutorTest, TestForCancelRace) {
     launchExecutorThread();
@@ -321,24 +282,25 @@ TEST_F(ReplicationExecutorTest, TestForCancelRace) {
         enterCallback.countDownAndWait();
         // This barrier lets the test code keep us in the callback until it has run the cancel.
         runCallback.countDownAndWait();
-        firstEventCanceled = !cbData.response.status.isOK();
+        firstEventCanceled = !cbData.response.getStatus().isOK();
         firstEventDone = true;
     };
 
     // First, schedule a network event to run.
     const executor::RemoteCommandRequest request(
-        HostAndPort("test1", 1234), "mydb", BSON("nothing" << 0), nullptr);
+        HostAndPort("test1", 1234), "mydb", BSON("nothing" << 0));
     auto firstCallback = assertGet(executor.scheduleRemoteCommand(request, fn));
 
     // Now let the request happen.
     // We need to run the network on another thread, because the test
     // fixture will hang waiting for the callbacks to complete.
     auto timeThread = stdx::thread([this] {
-        executor::NetworkInterfaceMock::InNetworkGuard guard(getNet());
+        getNet()->enterNetwork();
         ASSERT(getNet()->hasReadyRequests());
         auto noi = getNet()->getNextReadyRequest();
-        getNet()->scheduleSuccessfulResponse(noi, {});
+        getNet()->scheduleResponse(noi, getNet()->now(), RemoteCommandResponse());
         getNet()->runReadyNetworkOperations();
+        getNet()->exitNetwork();
     });
 
     // Wait until we're in the callback.
@@ -349,7 +311,7 @@ TEST_F(ReplicationExecutorTest, TestForCancelRace) {
     bool secondEventCanceled = false;
     auto fn2 = [&executor, &secondEventDone, &secondEventCanceled](
         const executor::TaskExecutor::RemoteCommandCallbackArgs& cbData) {
-        secondEventCanceled = !cbData.response.status.isOK();
+        secondEventCanceled = !cbData.response.getStatus().isOK();
         secondEventDone = true;
     };
     auto secondCallback = assertGet(executor.scheduleRemoteCommand(request, fn2));
@@ -370,12 +332,13 @@ TEST_F(ReplicationExecutorTest, TestForCancelRace) {
 
     // Run the network thread, which should run the second request.
     {
-        executor::NetworkInterfaceMock::InNetworkGuard guard(getNet());
+        getNet()->enterNetwork();
         // The second request should be ready.
         ASSERT(getNet()->hasReadyRequests()) << "Second request is not ready (cancelled?)";
         auto noi = getNet()->getNextReadyRequest();
-        getNet()->scheduleSuccessfulResponse(noi, {});
+        getNet()->scheduleResponse(noi, getNet()->now(), RemoteCommandResponse());
         getNet()->runReadyNetworkOperations();
+        getNet()->exitNetwork();
     }
 
     // The second callback should have run without being canceled.

@@ -33,7 +33,6 @@
 #include <type_traits>
 
 #include "mongo/base/status_with.h"
-#include "mongo/db/wire_version.h"
 
 namespace mongo {
 class BSONObj;
@@ -109,34 +108,19 @@ StatusWith<StringData> toString(ProtocolSet protocols);
 StatusWith<ProtocolSet> parseProtocolSet(StringData repr);
 
 /**
- * Validates client and server wire version. The server is returned from isMaster, and the client is
- * from WireSpec.instance().
- */
-Status validateWireVersion(const WireVersionInfo client, const WireVersionInfo server);
-
-/**
- * Struct to pass around information about protocol set and wire version.
- */
-struct ProtocolSetAndWireVersionInfo {
-    ProtocolSet protocolSet;
-    WireVersionInfo version;
-};
-
-/**
  * Determines the ProtocolSet of a remote server from an isMaster reply.
  */
-StatusWith<ProtocolSetAndWireVersionInfo> parseProtocolSetFromIsMasterReply(
-    const BSONObj& isMasterReply);
+StatusWith<ProtocolSet> parseProtocolSetFromIsMasterReply(const BSONObj& isMasterReply);
 
 /**
  * Returns true if wire version supports OP_COMMAND in mongod (not mongos).
  */
-bool supportsWireVersionForOpCommandInMongod(const WireVersionInfo version);
+bool supportsWireVersionForOpCommandInMongod(int minWireVersion, int maxWireVersion);
 
 /**
   * Computes supported protocols from wire versions.
   */
-ProtocolSet computeProtocolSet(const WireVersionInfo version);
+ProtocolSet computeProtocolSet(int minWireVersion, int maxWireVersion);
 
 }  // namespace rpc
 }  // namespace mongo

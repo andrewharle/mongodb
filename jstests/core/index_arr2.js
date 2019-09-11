@@ -7,7 +7,10 @@ function test(withIndex) {
     t.drop();
 
     // insert a bunch of items to force queries to use the index.
-    newObject = {_id: 1, a: [{b: {c: 1}}]};
+    newObject = {
+        _id: 1,
+        a: [{b: {c: 1}}]
+    };
 
     now = (new Date()).getTime() / 1000;
     for (created = now - NUM; created <= now; created++) {
@@ -17,7 +20,9 @@ function test(withIndex) {
     }
 
     // change the last M items.
-    query = {'created': {'$gte': now - M}};
+    query = {
+        'created': {'$gte': now - M}
+    };
 
     Z = t.find(query).count();
 

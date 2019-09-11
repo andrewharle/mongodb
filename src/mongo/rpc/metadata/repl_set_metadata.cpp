@@ -31,7 +31,6 @@
 #include "mongo/bson/util/bson_check.h"
 #include "mongo/bson/util/bson_extract.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/db/repl/bson_extract_optime.h"
 #include "mongo/rpc/metadata.h"
 
 namespace mongo {
@@ -53,7 +52,9 @@ const char kTermFieldName[] = "term";
 
 }  // unnamed namespace
 
+#ifndef _MSC_EXTENSIONS
 const int ReplSetMetadata::kNoPrimary;
+#endif  // _MSC_EXTENSIONS
 
 ReplSetMetadata::ReplSetMetadata(long long term,
                                  OpTime committedOpTime,
@@ -89,16 +90,13 @@ StatusWith<ReplSetMetadata> ReplSetMetadata::readFromMetadata(const BSONObj& met
     if (!status.isOK())
         return status;
 
-    // We provide a default because these fields will be removed in SERVER-27668.
     long long primaryIndex;
-    status = bsonExtractIntegerFieldWithDefault(
-        replMetadataObj, kPrimaryIndexFieldName, -1, &primaryIndex);
+    status = bsonExtractIntegerField(replMetadataObj, kPrimaryIndexFieldName, &primaryIndex);
     if (!status.isOK())
         return status;
 
     long long syncSourceIndex;
-    status = bsonExtractIntegerFieldWithDefault(
-        replMetadataObj, kSyncSourceIndexFieldName, -1, &syncSourceIndex);
+    status = bsonExtractIntegerField(replMetadataObj, kSyncSourceIndexFieldName, &syncSourceIndex);
     if (!status.isOK())
         return status;
 
@@ -109,13 +107,12 @@ StatusWith<ReplSetMetadata> ReplSetMetadata::readFromMetadata(const BSONObj& met
 
     repl::OpTime lastOpCommitted;
     status = bsonExtractOpTimeField(replMetadataObj, kLastOpCommittedFieldName, &lastOpCommitted);
-    // We check for NoSuchKey because these fields will be removed in SERVER-27668.
-    if (!status.isOK() && status != ErrorCodes::NoSuchKey)
+    if (!status.isOK())
         return status;
 
     repl::OpTime lastOpVisible;
     status = bsonExtractOpTimeField(replMetadataObj, kLastOpVisibleFieldName, &lastOpVisible);
-    if (!status.isOK() && status != ErrorCodes::NoSuchKey)
+    if (!status.isOK())
         return status;
 
     return ReplSetMetadata(
@@ -134,19 +131,6 @@ Status ReplSetMetadata::writeToMetadata(BSONObjBuilder* builder) const {
     replMetadataBuilder.doneFast();
 
     return Status::OK();
-}
-
-std::string ReplSetMetadata::toString() const {
-    str::stream output;
-    output << "ReplSetMetadata";
-    output << " Config Version: " << _configVersion;
-    output << " Replicaset ID: " << _replicaSetId;
-    output << " Term: " << _currentTerm;
-    output << " Primary Index: " << _currentPrimaryIndex;
-    output << " Sync Source Index: " << _currentSyncSourceIndex;
-    output << " Last Op Committed: " << _lastOpCommitted.toString();
-    output << " Last Op Visible: " << _lastOpVisible.toString();
-    return output;
 }
 
 }  // namespace rpc

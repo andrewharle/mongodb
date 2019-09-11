@@ -10,19 +10,20 @@
     s.adminCommand({enablesharding: "test"});
     s.ensurePrimaryShard('test', 'shard0001');
     s.adminCommand({shardcollection: "test.foo", key: {num: 1}});
-
-    // Ensure that the second mongos will see the movePrimary
-    s.configRS.awaitLastOpCommitted();
+    if (s.configRS) {
+        // Ensure that the second mongos will see the movePrimary
+        s.configRS.awaitLastOpCommitted();
+    }
 
     assert(sh.getBalancerState(), "A1");
 
-    s.stopBalancer();
+    sh.stopBalancer();
     assert(!sh.getBalancerState(), "A2");
 
-    s.startBalancer();
+    sh.startBalancer();
     assert(sh.getBalancerState(), "A3");
 
-    s.stopBalancer();
+    sh.stopBalancer();
     assert(!sh.getBalancerState(), "A4");
 
     s.config.databases.find().forEach(printjson);
@@ -30,7 +31,7 @@
     a = s.getDB("test").foo;
     b = s2.getDB("test").foo;
 
-    primary = s.getPrimaryShard("test").getDB("test").foo;
+    primary = s.getServer("test").getDB("test").foo;
     secondary = s.getOther(primary.name).getDB("test").foo;
 
     a.save({num: 1});
@@ -49,7 +50,7 @@
     s.adminCommand({
         movechunk: "test.foo",
         find: {num: 3},
-        to: s.getOther(s.getPrimaryShard("test")).name,
+        to: s.getOther(s.getServer("test")).name,
         _waitForDelete: true
     });
 
@@ -106,7 +107,7 @@
     print("GOING TO MOVE");
     assert(a.findOne({num: 1}), "pre move 1");
     s.printCollectionInfo("test.foo");
-    myto = s.getOther(s.getPrimaryShard("test")).name;
+    myto = s.getOther(s.getServer("test")).name;
     print("counts before move: " + tojson(s.shardCounts("foo")));
     s.adminCommand({movechunk: "test.foo", find: {num: 1}, to: myto, _waitForDelete: true});
     print("counts after move: " + tojson(s.shardCounts("foo")));
@@ -139,7 +140,7 @@
     s.adminCommand({
         movechunk: "test.foo",
         find: {num: 3},
-        to: s.getOther(s.getPrimaryShard("test")).name,
+        to: s.getOther(s.getServer("test")).name,
         _waitForDelete: true
     });
     s.printShardingStatus();
@@ -179,7 +180,7 @@
     s.adminCommand({
         movechunk: "test2.foo",
         find: {num: 3},
-        to: s.getOther(s.getPrimaryShard("test2")).name,
+        to: s.getOther(s.getServer("test2")).name,
         _waitForDelete: true
     });
 

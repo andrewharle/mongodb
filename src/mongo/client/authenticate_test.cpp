@@ -63,10 +63,10 @@ public:
           _nonce("7ca422a24f326f2a"),
           _requests(),
           _responses() {
-        _runCommandCallback = [this](RemoteCommandRequest request,
-                                     RunCommandResultHandler handler) {
-            runCommand(std::move(request), handler);
-        };
+        _runCommandCallback =
+            [this](RemoteCommandRequest request, RunCommandResultHandler handler) {
+                runCommand(std::move(request), handler);
+            };
 
         // create our digest
         md5digest d;
@@ -87,12 +87,12 @@ public:
         ASSERT(!_requests.empty());
         RemoteCommandRequest expected = _requests.front();
         ASSERT(expected.dbname == request.dbname);
-        ASSERT_BSONOBJ_EQ(expected.cmdObj, request.cmdObj);
+        ASSERT_EQ(expected.cmdObj, request.cmdObj);
         _requests.pop();
 
         // Then pop a response and call the handler
         ASSERT(!_responses.empty());
-        handler(_responses.front());
+        handler(StatusWith<RemoteCommandResponse>(_responses.front()));
         _responses.pop();
     }
 
@@ -107,7 +107,7 @@ public:
     }
 
     void pushRequest(StringData dbname, const BSONObj& cmd) {
-        _requests.emplace(_mockHost, dbname.toString(), cmd, nullptr);
+        _requests.emplace(_mockHost, dbname.toString(), cmd);
     }
 
     BSONObj loadMongoCRConversation() {
@@ -130,11 +130,7 @@ public:
                     << "MONGODB-CR"
                     << "db"
                     << "admin"
-                    << "user"
-                    << _username
-                    << "pwd"
-                    << _password
-                    << "digest"
+                    << "user" << _username << "pwd" << _password << "digest"
                     << "true");
     }
 
@@ -144,8 +140,7 @@ public:
         pushRequest("$external",
                     BSON("authenticate" << 1 << "mechanism"
                                         << "MONGODB-X509"
-                                        << "user"
-                                        << _username));
+                                        << "user" << _username));
 
         // 2. Client receives 'ok'
         pushResponse(BSON("ok" << 1));
@@ -155,8 +150,7 @@ public:
                     << "MONGODB-X509"
                     << "db"
                     << "$external"
-                    << "user"
-                    << _username);
+                    << "user" << _username);
     }
 
 

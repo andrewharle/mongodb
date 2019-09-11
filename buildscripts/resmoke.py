@@ -54,18 +54,10 @@ def _execute_suite(suite, logging_config):
             logger.info("Skipping %ss, no tests to run", group.test_kind)
             continue
 
-        archive = None
-        if resmokelib.config.ARCHIVE_FILE:
-            archive = resmokelib.utils.archival.Archival(
-                archival_json_file=resmokelib.config.ARCHIVE_FILE,
-                limit_size_mb=resmokelib.config.ARCHIVE_LIMIT_MB,
-                limit_files=resmokelib.config.ARCHIVE_LIMIT_TESTS,
-                logger=logger)
         group_config = suite.get_executor_config().get(group.test_kind, {})
         executor = resmokelib.testing.executor.TestGroupExecutor(logger,
                                                                  group,
                                                                  logging_config,
-                                                                 archive_instance=archive,
                                                                  **group_config)
 
         try:
@@ -81,9 +73,6 @@ def _execute_suite(suite, logging_config):
                              group.test_kind, suite.get_name())
             suite.return_code = 2
             return False
-        finally:
-            if archive:
-                archive.exit()
 
 
 def _log_summary(logger, suites, time_taken):
@@ -123,21 +112,6 @@ def _dump_suite_config(suite, logging_config):
     return "\n".join(sb)
 
 
-def find_suites_by_test(suites):
-    """
-    Looks up what other resmoke suites run the tests specified in the suites
-    parameter. Returns a dict keyed by test name, value is array of suite names.
-    """
-
-    memberships = {}
-    test_membership = resmokelib.parser.create_test_membership_map()
-    for suite in suites:
-        for group in suite.test_groups:
-            for test in group.tests:
-                memberships[test] = test_membership[test]
-    return memberships
-
-
 def main():
     start_time = time.time()
 
@@ -163,14 +137,6 @@ def main():
     # Register a signal handler or Windows event object so we can write the report file if the task
     # times out.
     resmokelib.sighandler.register(resmoke_logger, suites)
-
-    # Run the suite finder after the test suite parsing is complete.
-    if values.find_suites:
-        suites_by_test = find_suites_by_test(suites)
-        for test in sorted(suites_by_test):
-            suite_names = suites_by_test[test]
-            resmoke_logger.info("%s will be run by the following suite(s): %s", test, suite_names)
-        sys.exit(0)
 
     try:
         for suite in suites:

@@ -1,5 +1,6 @@
-/**
- *    Copyright (C) 2017 MongoDB Inc.
+// message.h
+
+/*    Copyright 2009 10gen Inc.
  *
  *    This program is free software: you can redistribute it and/or  modify
  *    it under the terms of the GNU Affero General Public License, version 3,
@@ -17,24 +18,30 @@
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
+ *    must comply with the GNU Affero General Public License in all respects
+ *    for all of the code used other than as permitted herein. If you modify
+ *    file(s) with this exception, you may extend this exception to your
+ *    version of the file(s), but you are not obligated to do so. If you do not
+ *    wish to do so, delete this exception statement from your version. If you
+ *    delete this exception statement from all source files in the program,
+ *    then also delete it in the license file.
  */
 
 #pragma once
 
 #include <cstdint>
+#include <vector>
 
 #include "mongo/base/data_type_endian.h"
 #include "mongo/base/data_view.h"
+#include "mongo/base/disallow_copying.h"
 #include "mongo/base/encoded_value_storage.h"
-#include "mongo/base/static_assert.h"
+#include "mongo/platform/atomic_word.h"
+#include "mongo/util/allocator.h"
 #include "mongo/util/mongoutils/str.h"
+#include "mongo/util/net/hostandport.h"
+#include "mongo/util/net/sock.h"
+#include "mongo/util/print.h"
 
 namespace mongo {
 
@@ -43,7 +50,12 @@ namespace mongo {
  */
 const size_t MaxMessageSizeBytes = 48 * 1000 * 1000;
 
-enum NetworkOp : int32_t {
+class Message;
+class MessagingPort;
+
+typedef uint32_t MSGID;
+
+enum NetworkOp {
     opInvalid = 0,
     opReply = 1,     /* reply. responseTo is set. */
     dbMsg = 1000,    /* generic msg command followed by a std::string */
@@ -58,7 +70,6 @@ enum NetworkOp : int32_t {
     // dbCommandReply_DEPRECATED = 2009, //
     dbCommand = 2010,
     dbCommandReply = 2011,
-    dbCompressed = 2012,
 };
 
 enum class LogicalOp {
@@ -71,10 +82,9 @@ enum class LogicalOp {
     opDelete,
     opKillCursors,
     opCommand,
-    opCompressed,
 };
 
-inline LogicalOp networkOpToLogicalOp(NetworkOp networkOp) {
+static inline LogicalOp networkOpToLogicalOp(NetworkOp networkOp) {
     switch (networkOp) {
         case dbMsg:
             return LogicalOp::opMsg;
@@ -92,14 +102,14 @@ inline LogicalOp networkOpToLogicalOp(NetworkOp networkOp) {
             return LogicalOp::opKillCursors;
         case dbCommand:
             return LogicalOp::opCommand;
-        case dbCompressed:
-            return LogicalOp::opCompressed;
         default:
             int op = int(networkOp);
             massert(34348, str::stream() << "cannot translate opcode " << op, !op);
             return LogicalOp::opInvalid;
     }
 }
+
+bool doesOpGetAResponse(int op);
 
 inline const char* networkOpToString(NetworkOp networkOp) {
     switch (networkOp) {
@@ -125,8 +135,6 @@ inline const char* networkOpToString(NetworkOp networkOp) {
             return "command";
         case dbCommandReply:
             return "commandReply";
-        case dbCompressed:
-            return "compressed";
         default:
             int op = static_cast<int>(networkOp);
             massert(16141, str::stream() << "cannot translate opcode " << op, !op);
@@ -154,19 +162,37 @@ inline const char* logicalOpToString(LogicalOp logicalOp) {
             return "killcursors";
         case LogicalOp::opCommand:
             return "command";
-        case LogicalOp::opCompressed:
-            return "compressed";
         default:
             MONGO_UNREACHABLE;
     }
 }
 
-namespace MSGHEADER {
+inline bool opIsWrite(int op) {
+    switch (op) {
+        case 0:
+        case opReply:
+        case dbMsg:
+        case dbQuery:
+        case dbGetMore:
+        case dbKillCursors:
+            return false;
 
+        case dbUpdate:
+        case dbInsert:
+        case dbDelete:
+            return true;
+
+        default:
+            PRINT(op);
+            verify(0);
+            return "";
+    }
+}
+
+namespace MSGHEADER {
 #pragma pack(1)
-/**
- * See http://dochub.mongodb.org/core/mongowireprotocol
- */
+/* see http://dochub.mongodb.org/core/mongowireprotocol
+*/
 struct Layout {
     int32_t messageLength;  // total message size, including this
     int32_t requestID;      // identifier for this message
@@ -190,11 +216,11 @@ public:
         return data().read<LittleEndian<int32_t>>(offsetof(Layout, messageLength));
     }
 
-    int32_t getRequestMsgId() const {
+    int32_t getRequestID() const {
         return data().read<LittleEndian<int32_t>>(offsetof(Layout, requestID));
     }
 
-    int32_t getResponseToMsgId() const {
+    int32_t getResponseTo() const {
         return data().read<LittleEndian<int32_t>>(offsetof(Layout, responseTo));
     }
 
@@ -226,11 +252,11 @@ public:
         data().write(tagLittleEndian(value), offsetof(Layout, messageLength));
     }
 
-    void setRequestMsgId(int32_t value) {
+    void setRequestID(int32_t value) {
         data().write(tagLittleEndian(value), offsetof(Layout, requestID));
     }
 
-    void setResponseToMsgId(int32_t value) {
+    void setResponseTo(int32_t value) {
         data().write(tagLittleEndian(value), offsetof(Layout, responseTo));
     }
 
@@ -247,7 +273,7 @@ private:
 class Value : public EncodedValueStorage<Layout, ConstView, View> {
 public:
     Value() {
-        MONGO_STATIC_ASSERT(sizeof(Value) == sizeof(Layout));
+        static_assert(sizeof(Value) == sizeof(Layout), "sizeof(Value) == sizeof(Layout)");
     }
 
     Value(ZeroInitTag_t zit) : EncodedValueStorage<Layout, ConstView, View>(zit) {}
@@ -256,7 +282,6 @@ public:
 }  // namespace MSGHEADER
 
 namespace MsgData {
-
 #pragma pack(1)
 struct Layout {
     MSGHEADER::Layout header;
@@ -276,12 +301,12 @@ public:
         return header().getMessageLength();
     }
 
-    int32_t getId() const {
-        return header().getRequestMsgId();
+    MSGID getId() const {
+        return header().getRequestID();
     }
 
-    int32_t getResponseToMsgId() const {
-        return header().getResponseToMsgId();
+    MSGID getResponseTo() const {
+        return header().getResponseTo();
     }
 
     NetworkOp getNetworkOp() const {
@@ -301,7 +326,7 @@ public:
     }
 
     int64_t getCursor() const {
-        verify(getResponseToMsgId() > 0);
+        verify(getResponseTo() > 0);
         verify(getNetworkOp() == opReply);
         return ConstDataView(data() + sizeof(int32_t)).read<LittleEndian<int64_t>>();
     }
@@ -334,12 +359,12 @@ public:
         return header().setMessageLength(value);
     }
 
-    void setId(int32_t value) {
-        return header().setRequestMsgId(value);
+    void setId(MSGID value) {
+        return header().setRequestID(value);
     }
 
-    void setResponseToMsgId(int32_t value) {
-        return header().setResponseToMsgId(value);
+    void setResponseTo(MSGID value) {
+        return header().setResponseTo(value);
     }
 
     void setOperation(int value) {
@@ -364,28 +389,42 @@ private:
 class Value : public EncodedValueStorage<Layout, ConstView, View> {
 public:
     Value() {
-        MONGO_STATIC_ASSERT(sizeof(Value) == sizeof(Layout));
+        static_assert(sizeof(Value) == sizeof(Layout), "sizeof(Value) == sizeof(Layout)");
     }
 
     Value(ZeroInitTag_t zit) : EncodedValueStorage<Layout, ConstView, View>(zit) {}
 };
 
 const int MsgDataHeaderSize = sizeof(Value) - 4;
-
 inline int ConstView::dataLen() const {
     return getLen() - MsgDataHeaderSize;
 }
-
 }  // namespace MsgData
 
 class Message {
+    MONGO_DISALLOW_COPYING(Message);
+
 public:
+    // we assume here that a vector with initial size 0 does no allocation (0 is the default, but
+    // wanted to make it explicit).
     Message() = default;
-    explicit Message(SharedBuffer data) : _buf(std::move(data)) {}
+
+    Message(void* data, bool freeIt) : _buf(reinterpret_cast<char*>(data)), _freeIt(freeIt) {}
+
+    Message(Message&& r) : _buf(r._buf), _data(std::move(r._data)), _freeIt(r._freeIt) {
+        r._buf = nullptr;
+        r._freeIt = false;
+    }
+
+    ~Message() {
+        reset();
+    }
+
+    SockAddr _from;
 
     MsgData::View header() const {
         verify(!empty());
-        return _buf.get();
+        return _buf ? _buf : _data[0].first;
     }
 
     NetworkOp operation() const {
@@ -398,28 +437,110 @@ public:
     }
 
     bool empty() const {
-        return !_buf;
+        return !_buf && _data.empty();
     }
 
     int size() const {
+        int res = 0;
         if (_buf) {
-            return MsgData::ConstView(_buf.get()).getLen();
+            res = MsgData::ConstView(_buf).getLen();
+        } else {
+            for (MsgVec::const_iterator it = _data.begin(); it != _data.end(); ++it) {
+                res += it->second;
+            }
         }
-        return 0;
+        return res;
     }
 
     int dataSize() const {
         return size() - sizeof(MSGHEADER::Value);
     }
 
+    // concat multiple buffers - noop if <2 buffers already, otherwise can be expensive copy
+    // can get rid of this if we make response handling smarter
+    void concat() {
+        if (_buf || empty()) {
+            return;
+        }
+
+        verify(_freeIt);
+        int totalSize = 0;
+        for (std::vector<std::pair<char*, int>>::const_iterator i = _data.begin(); i != _data.end();
+             ++i) {
+            totalSize += i->second;
+        }
+        char* buf = (char*)mongoMalloc(totalSize);
+        char* p = buf;
+        for (std::vector<std::pair<char*, int>>::const_iterator i = _data.begin(); i != _data.end();
+             ++i) {
+            memcpy(p, i->first, i->second);
+            p += i->second;
+        }
+        reset();
+        _setData(buf, true);
+    }
+
+    Message& operator=(Message&& r) {
+        // This implementation was originally written using an auto_ptr-style fake move. When
+        // converting to a real move assignment, checking for self-assignment was the simplest way
+        // to ensure correctness.
+        if (&r == this)
+            return *this;
+
+        if (!empty()) {
+            reset();
+        }
+
+        _buf = r._buf;
+        _data = std::move(r._data);
+        _freeIt = r._freeIt;
+
+        r._buf = nullptr;
+        r._freeIt = false;
+        return *this;
+    }
+
     void reset() {
-        _buf = {};
+        if (_freeIt) {
+            if (_buf) {
+                std::free(_buf);
+            }
+            for (std::vector<std::pair<char*, int>>::const_iterator i = _data.begin();
+                 i != _data.end();
+                 ++i) {
+                std::free(i->first);
+            }
+        }
+        _buf = nullptr;
+        _data.clear();
+        _freeIt = false;
+    }
+
+    // use to add a buffer
+    // assumes message will free everything
+    void appendData(char* d, int size) {
+        if (size <= 0) {
+            return;
+        }
+        if (empty()) {
+            MsgData::View md = d;
+            md.setLen(size);  // can be updated later if more buffers added
+            _setData(md.view2ptr(), true);
+            return;
+        }
+        verify(_freeIt);
+        if (_buf) {
+            _data.push_back(std::make_pair(_buf, MsgData::ConstView(_buf).getLen()));
+            _buf = 0;
+        }
+        _data.push_back(std::make_pair(d, size));
+        header().setLen(header().getLen() + size);
     }
 
     // use to set first buffer if empty
-    void setData(SharedBuffer buf) {
+    void setData(char* d, bool freeIt) {
         verify(empty());
-        _buf = std::move(buf);
+        _setData(d, freeIt);
     }
     void setData(int operation, const char* msgtxt) {
         setData(operation, msgtxt, strlen(msgtxt) + 1);
@@ -427,39 +548,41 @@ public:
     void setData(int operation, const char* msgdata, size_t len) {
         verify(empty());
         size_t dataLen = len + sizeof(MsgData::Value) - 4;
-        _buf = SharedBuffer::allocate(dataLen);
-        MsgData::View d = _buf.get();
-        if (len)
-            memcpy(d.data(), msgdata, len);
+        MsgData::View d = reinterpret_cast<char*>(mongoMalloc(dataLen));
+        memcpy(d.data(), msgdata, len);
         d.setLen(dataLen);
         d.setOperation(operation);
+        _setData(d.view2ptr(), true);
+    }
+
+    bool doIFreeIt() {
+        return _freeIt;
     }
 
     char* buf() {
-        return _buf.get();
+        return _buf;
     }
 
-    const char* buf() const {
-        return _buf.get();
-    }
+    void send(MessagingPort& p, const char* context);
 
     std::string toString() const;
 
-    SharedBuffer sharedBuffer() {
-        return _buf;
-    }
-
-    ConstSharedBuffer sharedBuffer() const {
-        return _buf;
-    }
-
 private:
-    SharedBuffer _buf;
+    void _setData(char* d, bool freeIt) {
+        _freeIt = freeIt;
+        _buf = d;
+    }
+    // if just one buffer, keep it in _buf, otherwise keep a sequence of buffers in _data
+    char* _buf{nullptr};
+    // byte buffer(s) - the first must contain at least a full MsgData unless using _buf for storage
+    // instead
+    typedef std::vector<std::pair<char*, int>> MsgVec;
+    MsgVec _data{};
+    bool _freeIt{false};
 };
 
-/**
- * Returns an always incrementing value to be used to assign to the next received network message.
- */
-int32_t nextMessageId();
+
+MSGID nextMessageId();
+
 
 }  // namespace mongo

@@ -36,11 +36,11 @@ namespace mongo {
 namespace repl {
 namespace {
 
-constexpr StringData kCandidateIndexFieldName = "candidateIndex"_sd;
-constexpr StringData kTermFieldName = "term"_sd;
-constexpr StringData kIdFieldName = "_id"_sd;
+const std::string kCandidateIndexFieldName = "candidateIndex";
+const std::string kTermFieldName = "term";
+const std::string kIdFieldName = "_id";
 
-constexpr StringData kLegalFieldNames[] = {kCandidateIndexFieldName, kTermFieldName, kIdFieldName};
+const std::string kLegalFieldNames[] = {kCandidateIndexFieldName, kTermFieldName, kIdFieldName};
 
 }  // namespace
 

@@ -32,7 +32,6 @@
 
 #include "mongo/db/storage/mmap_v1/aligned_builder.h"
 
-#include "mongo/base/static_assert.h"
 #include "mongo/util/debug_util.h"
 #include "mongo/util/log.h"
 
@@ -46,7 +45,7 @@ AlignedBuilder::AlignedBuilder(unsigned initSize) {
     uassert(13584, "out of memory AlignedBuilder", _p._allocationAddress);
 }
 
-MONGO_STATIC_ASSERT(sizeof(void*) == sizeof(size_t));
+static_assert(sizeof(void*) == sizeof(size_t), "sizeof(void*) == sizeof(size_t)");
 
 /** reset for a re-use. shrinks if > 128MB */
 void AlignedBuilder::reset() {

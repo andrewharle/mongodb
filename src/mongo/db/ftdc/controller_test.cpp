@@ -68,22 +68,21 @@ public:
             BSONObjBuilder b2;
 
             b2.appendDate(kFTDCCollectStartField,
-                          getGlobalServiceContext()->getPreciseClockSource()->now());
+                          getGlobalServiceContext()->getClockSource()->now());
 
             {
                 BSONObjBuilder subObjBuilder(b2.subobjStart(name()));
 
                 subObjBuilder.appendDate(kFTDCCollectStartField,
-                                         getGlobalServiceContext()->getPreciseClockSource()->now());
+                                         getGlobalServiceContext()->getClockSource()->now());
 
                 generateDocument(subObjBuilder, _counter);
 
                 subObjBuilder.appendDate(kFTDCCollectEndField,
-                                         getGlobalServiceContext()->getPreciseClockSource()->now());
+                                         getGlobalServiceContext()->getClockSource()->now());
             }
 
-            b2.appendDate(kFTDCCollectEndField,
-                          getGlobalServiceContext()->getPreciseClockSource()->now());
+            b2.appendDate(kFTDCCollectEndField, getGlobalServiceContext()->getClockSource()->now());
 
             _docs.emplace_back(b2.obj());
         }
@@ -202,7 +201,7 @@ TEST(FTDCControllerTest, TestFull) {
 
     auto alog = files[0];
 
-    ValidateDocumentList(alog, allDocs, FTDCValidationMode::kStrict);
+    ValidateDocumentList(alog, allDocs);
 }
 
 // Test we can start and stop the controller in quick succession, make sure it succeeds without
@@ -254,7 +253,7 @@ TEST(FTDCControllerTest, TestStartAsDisabled) {
 
     ASSERT_EQUALS(files0.size(), 0UL);
 
-    ASSERT_OK(c.setEnabled(true));
+    c.setEnabled(true);
 
     c1Ptr->setSignalOnCount(50);
 
@@ -274,7 +273,7 @@ TEST(FTDCControllerTest, TestStartAsDisabled) {
 
     auto alog = files[0];
 
-    ValidateDocumentList(alog, allDocs, FTDCValidationMode::kStrict);
+    ValidateDocumentList(alog, allDocs);
 }
 
 }  // namespace mongo

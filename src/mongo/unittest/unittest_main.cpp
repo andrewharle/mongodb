@@ -35,7 +35,6 @@
 #include "mongo/util/signal_handlers_synchronous.h"
 
 int main(int argc, char** argv, char** envp) {
-    ::mongo::clearSignalMask();
     ::mongo::setupSynchronousSignalHandlers();
     ::mongo::runGlobalInitializersOrDie(argc, argv, envp);
     return ::mongo::unittest::Suite::run(std::vector<std::string>(), "", 1);

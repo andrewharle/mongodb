@@ -38,11 +38,7 @@
 #include "mongo/base/disallow_copying.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/service_context.h"
-#include "mongo/platform/atomic_word.h"
-#include "mongo/util/decorable.h"
 #include "mongo/util/net/sock.h"
-#include "mongo/util/net/ssl_types.h"
 #include "mongo/util/time_support.h"
 
 #include <openssl/err.h>
@@ -74,45 +70,23 @@ public:
 };
 
 struct SSLConfiguration {
+    SSLConfiguration() : serverSubjectName(""), clientSubjectName("") {}
+    SSLConfiguration(const std::string& serverSubjectName,
+                     const std::string& clientSubjectName,
+                     const Date_t& serverCertificateExpirationDate)
+        : serverSubjectName(serverSubjectName),
+          clientSubjectName(clientSubjectName),
+          serverCertificateExpirationDate(serverCertificateExpirationDate) {}
+
     bool isClusterMember(StringData subjectName) const;
-    bool isClusterMember(const SSLX509Name& subjectName) const;
     BSONObj getServerStatusBSON() const;
-    SSLX509Name serverSubjectName;
-    SSLX509Name clientSubjectName;
+    std::string serverSubjectName;
+    std::string clientSubjectName;
     Date_t serverCertificateExpirationDate;
     bool hasCA = false;
 };
 
-/**
- * Stores information about a globally unique OID.
- */
-class ASN1OID {
-public:
-    ASN1OID(std::string identifier, std::string shortDescription, std::string longDescription)
-        : identifier(std::move(identifier)),
-          shortDescription(std::move(shortDescription)),
-          longDescription(std::move(longDescription)) {}
-
-    std::string identifier;        // An OID
-    std::string shortDescription;  // A brief description of the entity associated with the OID
-    std::string longDescription;   // A long form description of the entity associated with the OID
-};
-const ASN1OID mongodbRolesOID("1.3.6.1.4.1.34601.2.1.1",
-                              "MongoRoles",
-                              "Sequence of MongoDB Database Roles");
-
-/**
- * Counts of negogtiated version used by TLS connections.
- */
-struct TLSVersionCounts {
-    AtomicInt64 tls10;
-    AtomicInt64 tls11;
-    AtomicInt64 tls12;
-
-    static TLSVersionCounts& get();
-};
-
-class SSLManagerInterface : public Decorable<SSLManagerInterface> {
+class SSLManagerInterface {
 public:
     static std::unique_ptr<SSLManagerInterface> create(const SSLParams& params, bool isServer);
 
@@ -141,8 +115,14 @@ public:
      * SocketException upon failure. New code should prefer the version that returns
      * a StatusWith instead.
      */
-    virtual SSLPeerInfo parseAndValidatePeerCertificateDeprecated(
+    virtual std::string parseAndValidatePeerCertificateDeprecated(
         const SSLConnection* conn, const std::string& remoteHost) = 0;
+
+    /**
+     * Cleans up SSL thread local memory; use at thread exit
+     * to avoid memory leaks
+     */
+    virtual void cleanupThreadLocals() = 0;
 
     /**
      * Gets the SSLConfiguration containing all information about the current SSL setup
@@ -187,10 +167,9 @@ public:
      * Fetches a peer certificate and validates it if it exists. If validation fails, but weak
      * validation is enabled, boost::none will be returned. If validation fails, and invalid
      * certificates are not allowed, a non-OK status will be returned. If validation is successful,
-     * an engaged optional containing the certificate's subject name, and any roles acquired by
-     * X509 authorization will be returned.
+     * an engaged optional containing the certificate's subject name will be returned.
      */
-    virtual StatusWith<boost::optional<SSLPeerInfo>> parseAndValidatePeerCertificate(
+    virtual StatusWith<boost::optional<std::string>> parseAndValidatePeerCertificate(
         SSL* ssl, const std::string& remoteHost) = 0;
 };
 
@@ -205,11 +184,5 @@ extern bool isSSLServer;
  * "EndStartupOptionStorage" as a prerequisite.
  */
 const SSLParams& getSSLGlobalParams();
-
-/**
- * Peeks at a fragment of a client issued TLS handshake packet. Returns a TLS alert
- * packet if the client has selected a protocol which has been disabled by the server.
- */
-boost::optional<std::array<std::uint8_t, 7>> checkTLSRequest(ConstDataRange cdr);
 }
 #endif  // #ifdef MONGO_CONFIG_SSL

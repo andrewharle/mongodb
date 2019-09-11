@@ -30,12 +30,10 @@
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kStorage
 
-#include "mongo/platform/basic.h"
-
-#include "mongo/db/storage/wiredtiger/wiredtiger_recovery_unit.h"
-
+#include "mongo/base/checked_cast.h"
 #include "mongo/base/init.h"
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/storage/wiredtiger/wiredtiger_recovery_unit.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_session_cache.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_util.h"
 #include "mongo/stdx/condition_variable.h"
@@ -43,7 +41,6 @@
 #include "mongo/util/concurrency/ticketholder.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
-#include "mongo/util/scopeguard.h"
 #include "mongo/util/stacktrace.h"
 
 namespace mongo {
@@ -56,6 +53,7 @@ AtomicUInt64 nextSnapshotId{1};
 
 WiredTigerRecoveryUnit::WiredTigerRecoveryUnit(WiredTigerSessionCache* sc)
     : _sessionCache(sc),
+      _session(NULL),
       _inUnitOfWork(false),
       _active(false),
       _mySnapshotId(nextSnapshotId.fetchAndAdd(1)),
@@ -64,6 +62,10 @@ WiredTigerRecoveryUnit::WiredTigerRecoveryUnit(WiredTigerSessionCache* sc)
 WiredTigerRecoveryUnit::~WiredTigerRecoveryUnit() {
     invariant(!_inUnitOfWork);
     _abort();
+    if (_session) {
+        _sessionCache->releaseSession(_session);
+        _session = NULL;
+    }
 }
 
 void WiredTigerRecoveryUnit::reportState(BSONObjBuilder* b) const {
@@ -112,7 +114,7 @@ void WiredTigerRecoveryUnit::_abort() {
              it != end;
              ++it) {
             Change* change = *it;
-            LOG(2) << "CUSTOM ROLLBACK " << redact(demangleName(typeid(*change)));
+            LOG(2) << "CUSTOM ROLLBACK " << demangleName(typeid(*change));
             change->rollback();
         }
         _changes.clear();
@@ -160,6 +162,11 @@ void WiredTigerRecoveryUnit::registerChange(Change* change) {
     _changes.push_back(change);
 }
 
+WiredTigerRecoveryUnit* WiredTigerRecoveryUnit::get(OperationContext* txn) {
+    invariant(txn);
+    return checked_cast<WiredTigerRecoveryUnit*>(txn->recoveryUnit());
+}
+
 void WiredTigerRecoveryUnit::assertInActiveTxn() const {
     fassert(28575, _active);
 }
@@ -168,17 +175,12 @@ WiredTigerSession* WiredTigerRecoveryUnit::getSession(OperationContext* opCtx) {
     if (!_active) {
         _txnOpen(opCtx);
     }
-    return _session.get();
+    return _session;
 }
 
 WiredTigerSession* WiredTigerRecoveryUnit::getSessionNoTxn(OperationContext* opCtx) {
     _ensureSession();
-    WiredTigerSession* session = _session.get();
-
-    // Dropping the queued idents might block session, which is not desired for fastpath workflow
-    // like FTDC thread. Disable dropping of queued idents for such sessions.
-    session->dropQueuedIdentsAtSessionEndAllowed(false);
-    return session;
+    return _session;
 }
 
 void WiredTigerRecoveryUnit::abandonSnapshot() {

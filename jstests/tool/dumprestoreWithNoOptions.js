@@ -24,7 +24,11 @@ db.dropDatabase();
 
 var defaultFlags = {};
 
-var options = {capped: true, size: 4096, autoIndexId: true};
+var options = {
+    capped: true,
+    size: 4096,
+    autoIndexId: true
+};
 db.createCollection('capped', options);
 assert.eq(1, db.capped.getIndexes().length, "auto index not created");
 var cappedOptions = db.capped.exists().options;
@@ -54,7 +58,11 @@ assert.eq(defaultFlags,
 // Dump/restore single DB
 
 db.dropDatabase();
-var options = {capped: true, size: 4096, autoIndexId: true};
+var options = {
+    capped: true,
+    size: 4096,
+    autoIndexId: true
+};
 db.createCollection('capped', options);
 assert.eq(1, db.capped.getIndexes().length, "auto index not created");
 var cappedOptions = db.capped.exists().options;
@@ -84,7 +92,11 @@ assert.eq(defaultFlags,
 // Dump/restore single collection
 
 db.dropDatabase();
-var options = {capped: true, size: 4096, autoIndexId: true};
+var options = {
+    capped: true,
+    size: 4096,
+    autoIndexId: true
+};
 db.createCollection('capped', options);
 assert.eq(1, db.capped.getIndexes().length, "auto index not created");
 var cappedOptions = db.capped.exists().options;

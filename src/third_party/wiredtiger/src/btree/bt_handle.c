@@ -460,11 +460,9 @@ __btree_conf(WT_SESSION_IMPL *session, WT_CKPT *ckpt)
 	WT_RET(__wt_rwlock_init(session, &btree->ovfl_lock));
 	WT_RET(__wt_spin_init(session, &btree->flush_lock, "btree flush"));
 
+	btree->checkpointing = WT_CKPT_OFF;		/* Not checkpointing */
 	btree->modified = false;			/* Clean */
-
-	btree->checkpointing = WT_CKPT_OFF;	/* Not checkpointing */
-	btree->write_gen = ckpt->write_gen;	/* Write generation */
-	btree->checkpoint_gen = S2C(session)->txn_global.checkpoint_gen;
+	btree->write_gen = ckpt->write_gen;		/* Write generation */
 
 	return (0);
 }

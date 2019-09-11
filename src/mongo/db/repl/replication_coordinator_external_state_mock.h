@@ -38,14 +38,10 @@
 #include "mongo/db/repl/last_vote.h"
 #include "mongo/db/repl/replication_coordinator_external_state.h"
 #include "mongo/stdx/condition_variable.h"
-#include "mongo/stdx/mutex.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/util/net/hostandport.h"
 
 namespace mongo {
-
-class ServiceContext;
-
 namespace repl {
 
 class ReplicationCoordinatorExternalStateMock : public ReplicationCoordinatorExternalState {
@@ -56,25 +52,17 @@ public:
 
     ReplicationCoordinatorExternalStateMock();
     virtual ~ReplicationCoordinatorExternalStateMock();
-    virtual void startThreads(const ReplSettings& settings) override;
-    virtual void startInitialSync(OnInitialSyncFinishedFn finished) override;
-    virtual void startSteadyStateReplication(OperationContext* txn,
-                                             ReplicationCoordinator* replCoord) override;
-    virtual void stopDataReplication(OperationContext* txn) override;
-    virtual void runOnInitialSyncThread(stdx::function<void(OperationContext* txn)> run) override;
-    virtual bool isInitialSyncFlagSet(OperationContext* txn) override;
-
+    virtual void startThreads(const ReplSettings& settings,
+                              ReplicationCoordinator* replCoord) override;
     virtual void startMasterSlave(OperationContext*);
-    virtual void shutdown(OperationContext* txn);
-    virtual executor::TaskExecutor* getTaskExecutor() const override;
-    virtual OldThreadPool* getDbWorkThreadPool() const override;
-    virtual Status runRepairOnLocalDB(OperationContext* txn) override;
-    virtual Status initializeReplSetStorage(OperationContext* txn, const BSONObj& config);
-    void onDrainComplete(OperationContext* txn) override;
+    virtual void shutdown(OperationContext*);
+    virtual Status initializeReplSetStorage(OperationContext* txn,
+                                            const BSONObj& config,
+                                            bool updateReplOpTime);
     OpTime onTransitionToPrimary(OperationContext* txn, bool isV1ElectionProtocol) override;
     virtual void forwardSlaveProgress();
     virtual OID ensureMe(OperationContext*);
-    virtual bool isSelf(const HostAndPort& host, ServiceContext* ctx);
+    virtual bool isSelf(const HostAndPort& host);
     virtual HostAndPort getClientHostAndPort(const OperationContext* txn);
     virtual StatusWith<BSONObj> loadLocalConfigDocument(OperationContext* txn);
     virtual Status storeLocalConfigDocument(OperationContext* txn, const BSONObj& config);
@@ -85,10 +73,12 @@ public:
     virtual void cleanUpLastApplyBatch(OperationContext* txn);
     virtual void closeConnections();
     virtual void killAllUserOperations(OperationContext* txn);
-    virtual void shardingOnStepDownHook();
+    virtual void clearShardingState();
+    virtual void recoverShardingState(OperationContext* txn);
     virtual void signalApplierToChooseNewSyncSource();
-    virtual void stopProducer();
-    virtual void startProducerIfStopped();
+    virtual void signalApplierToCancelFetcher();
+    virtual OperationContext* createOperationContext(const std::string& threadName);
+    virtual void dropAllTempCollections(OperationContext* txn);
     virtual void dropAllSnapshots();
     virtual void updateCommittedSnapshot(SnapshotName newCommitPoint);
     virtual void createSnapshot(OperationContext* txn, SnapshotName name);
@@ -97,20 +87,6 @@ public:
     virtual void notifyOplogMetadataWaiters();
     virtual double getElectionTimeoutOffsetLimitFraction() const;
     virtual bool isReadCommittedSupportedByStorageEngine(OperationContext* txn) const;
-    virtual StatusWith<OpTime> multiApply(OperationContext* txn,
-                                          MultiApplier::Operations ops,
-                                          MultiApplier::ApplyOperationFn applyOperation) override;
-    virtual Status multiSyncApply(MultiApplier::OperationPtrs* ops) override;
-    virtual Status multiInitialSyncApply(MultiApplier::OperationPtrs* ops,
-                                         const HostAndPort& source,
-                                         AtomicUInt32* fetchCount) override;
-    virtual std::unique_ptr<OplogBuffer> makeInitialSyncOplogBuffer(
-        OperationContext* txn) const override;
-    virtual std::unique_ptr<OplogBuffer> makeSteadyStateOplogBuffer(
-        OperationContext* txn) const override;
-    virtual bool shouldUseDataReplicatorInitialSync() const override;
-    virtual std::size_t getOplogFetcherSteadyStateMaxFetcherRestarts() const override;
-    virtual std::size_t getOplogFetcherInitialSyncMaxFetcherRestarts() const override;
 
     /**
      * Adds "host" to the list of hosts that this mock will match when responding to "isSelf"
@@ -163,6 +139,11 @@ public:
     void setStoreLocalLastVoteDocumentToHang(bool hang);
 
     /**
+     * Returns true if applier was signaled to cancel fetcher.
+     */
+    bool isApplierSignaledToCancelFetcher() const;
+
+    /**
      * Returns true if startThreads() has been called.
      */
     bool threadsStarted() const;
@@ -176,21 +157,6 @@ public:
      * Sets if we are taking snapshots for read concern majority use.
      */
     void setAreSnapshotsEnabled(bool val);
-
-    /**
-     * Noop
-     */
-    virtual void setupNoopWriter(Seconds waitTime);
-
-    /**
-     * Noop
-     */
-    virtual void startNoopWriter(OpTime lastKnownOpTime);
-
-    /**
-     * Noop
-     */
-    virtual void stopNoopWriter();
 
 private:
     StatusWith<BSONObj> _localRsConfigDocument;
@@ -208,6 +174,7 @@ private:
     stdx::condition_variable _shouldHangLastVoteCondVar;
     bool _storeLocalConfigDocumentShouldHang;
     bool _storeLocalLastVoteDocumentShouldHang;
+    bool _isApplierSignaledToCancelFetcher;
     bool _connectionsClosed;
     HostAndPort _clientHostAndPort;
     bool _threadsStarted;

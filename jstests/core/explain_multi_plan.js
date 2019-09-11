@@ -49,12 +49,13 @@
     });
 
     assert.doesNotThrow(function() {
-        coll.explain("allPlansExecution").group({
-            key: {a: 1},
-            cond: {a: {$gte: 1}},
-            reduce: function(curr, result) {},
-            initial: {}
-        });
+        coll.explain("allPlansExecution")
+            .group({
+                key: {a: 1},
+                cond: {a: {$gte: 1}},
+                reduce: function(curr, result) {},
+                initial: {}
+            });
     });
 
     // SERVER-21376: Make sure the 'rejectedPlans' field is filled in appropriately.

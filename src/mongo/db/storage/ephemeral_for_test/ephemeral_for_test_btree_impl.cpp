@@ -35,8 +35,8 @@
 #include <set>
 
 #include "mongo/db/catalog/index_catalog_entry.h"
-#include "mongo/db/storage/ephemeral_for_test/ephemeral_for_test_recovery_unit.h"
 #include "mongo/db/storage/index_entry_comparison.h"
+#include "mongo/db/storage/ephemeral_for_test/ephemeral_for_test_recovery_unit.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/util/mongoutils/str.h"
 
@@ -189,8 +189,9 @@ public:
     }
 
     virtual void fullValidate(OperationContext* txn,
+                              bool full,
                               long long* numKeysOut,
-                              ValidateResults* fullResults) const {
+                              BSONObjBuilder* output) const {
         // TODO check invariants?
         *numKeysOut = _data->size();
     }
@@ -258,22 +259,13 @@ public:
         boost::optional<IndexKeyEntry> seek(const BSONObj& key,
                                             bool inclusive,
                                             RequestedInfo parts) override {
-            if (key.isEmpty()) {
-                _it = inclusive ? _data.begin() : _data.end();
-                _isEOF = (_it == _data.end());
-                if (_isEOF) {
-                    return {};
-                }
-            } else {
-                const BSONObj query = stripFieldNames(key);
-                locate(query, _forward == inclusive ? RecordId::min() : RecordId::max());
-                _lastMoveWasRestore = false;
-                if (_isEOF)
-                    return {};
-                dassert(inclusive ? compareKeys(_it->key, query) >= 0
-                                  : compareKeys(_it->key, query) > 0);
-            }
-
+            const BSONObj query = stripFieldNames(key);
+            locate(query, _forward == inclusive ? RecordId::min() : RecordId::max());
+            _lastMoveWasRestore = false;
+            if (_isEOF)
+                return {};
+            dassert(inclusive ? compareKeys(_it->key, query) >= 0
+                              : compareKeys(_it->key, query) > 0);
             return *_it;
         }
 

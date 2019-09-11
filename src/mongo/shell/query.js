@@ -29,7 +29,6 @@ DBQuery.prototype.help = function() {
     print("\t.limit(<n>)");
     print("\t.skip(<n>)");
     print("\t.batchSize(<n>) - sets the number of docs to return per getMore");
-    print("\t.collation({...})");
     print("\t.hint({...})");
     print("\t.readConcern(<level>)");
     print("\t.readPref(<mode>, <tagset>)");
@@ -85,7 +84,9 @@ DBQuery.prototype._ensureSpecial = function() {
     if (this._special)
         return;
 
-    var n = {query: this._query};
+    var n = {
+        query: this._query
+    };
     this._query = n;
     this._special = true;
 };
@@ -114,14 +115,10 @@ DBQuery.prototype._exec = function() {
             var canAttachReadPref = true;
             var findCmd = this._convertToCommand(canAttachReadPref);
             var cmdRes = this._db.runReadCommand(findCmd, null, this._options);
-            this._cursor = new DBCommandCursor(cmdRes._mongo, cmdRes, this._batchSize);
+            this._cursor = new DBCommandCursor(this._mongo, cmdRes, this._batchSize);
         } else {
             if (this._special && this._query.readConcern) {
                 throw new Error("readConcern requires use of read commands");
-            }
-
-            if (this._special && this._query.collation) {
-                throw new Error("collation requires use of read commands");
             }
 
             this._cursor = this._mongo.find(this._ns,
@@ -160,12 +157,7 @@ DBQuery.prototype._convertToCommand = function(canAttachReadPref) {
     }
 
     if (this._batchSize) {
-        if (this._batchSize < 0) {
-            cmd["batchSize"] = -this._batchSize;
-            cmd["singleBatch"] = true;
-        } else {
-            cmd["batchSize"] = this._batchSize;
-        }
+        cmd["batchSize"] = this._batchSize;
     }
 
     if (this._limit) {
@@ -224,10 +216,6 @@ DBQuery.prototype._convertToCommand = function(canAttachReadPref) {
 
     if ("readConcern" in this._query) {
         cmd["readConcern"] = this._query.readConcern;
-    }
-
-    if ("collation" in this._query) {
-        cmd["collation"] = this._query.collation;
     }
 
     if ((this._options & DBQuery.Option.tailable) != 0) {
@@ -341,7 +329,9 @@ DBQuery.prototype.toArray = function() {
 };
 
 DBQuery.prototype._convertToCountCmd = function(applySkipLimit) {
-    var cmd = {count: this._collection.getName()};
+    var cmd = {
+        count: this._collection.getName()
+    };
 
     if (this._query) {
         if (this._special) {
@@ -354,9 +344,6 @@ DBQuery.prototype._convertToCountCmd = function(applySkipLimit) {
             }
             if (this._query.readConcern) {
                 cmd.readConcern = this._query.readConcern;
-            }
-            if (this._query.collation) {
-                cmd.collation = this._query.collation;
             }
         } else {
             cmd.query = this._query;
@@ -468,13 +455,11 @@ DBQuery.prototype.maxTimeMS = function(maxTimeMS) {
 };
 
 DBQuery.prototype.readConcern = function(level) {
-    var readConcernObj = {level: level};
+    var readConcernObj = {
+        level: level
+    };
 
     return this._addSpecial("readConcern", readConcernObj);
-};
-
-DBQuery.prototype.collation = function(collationSpec) {
-    return this._addSpecial("collation", collationSpec);
 };
 
 /**
@@ -487,7 +472,9 @@ DBQuery.prototype.collation = function(collationSpec) {
  * @return this cursor
  */
 DBQuery.prototype.readPref = function(mode, tagSet) {
-    var readPrefObj = {mode: mode};
+    var readPrefObj = {
+        mode: mode
+    };
 
     if (tagSet) {
         readPrefObj.tags = tagSet;
@@ -751,7 +738,10 @@ DBCommandCursor.prototype.close = function() {
  */
 DBCommandCursor.prototype._runGetMoreCommand = function() {
     // Construct the getMore command.
-    var getMoreCmd = {getMore: this._cursorid, collection: this._collName};
+    var getMoreCmd = {
+        getMore: this._cursorid,
+        collection: this._collName
+    };
 
     if (this._batchSize) {
         getMoreCmd["batchSize"] = this._batchSize;
@@ -907,35 +897,4 @@ QueryPlan.prototype.getPlans = function() {
 QueryPlan.prototype.clearPlans = function() {
     this._cursor._collection.getPlanCache().clearPlansByQuery(this._cursor);
     return;
-};
-
-const QueryHelpers = {
-    _applyCountOptions: function _applyCountOptions(query, options) {
-        const opts = Object.extend({}, options || {});
-
-        if (typeof opts.skip == 'number') {
-            query.skip(opts.skip);
-        }
-
-        if (typeof opts.limit == 'number') {
-            query.limit(opts.limit);
-        }
-
-        if (typeof opts.maxTimeMS == 'number') {
-            query.maxTimeMS(opts.maxTimeMS);
-        }
-
-        if (opts.hint) {
-            query.hint(opts.hint);
-        }
-
-        if (typeof opts.readConcern == 'string') {
-            query.readConcern(opts.readConcern);
-        }
-
-        if (typeof opts.collation == 'object') {
-            query.collation(opts.collation);
-        }
-        return query;
-    }
 };

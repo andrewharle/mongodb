@@ -176,9 +176,9 @@ void ConnectionImpl::cancelTimeout() {
 void ConnectionImpl::setup(Milliseconds timeout, SetupCallback cb) {
     _setupCallback = std::move(cb);
 
-    _timer.setTimeout(timeout, [this] {
-        _setupCallback(this, Status(ErrorCodes::NetworkInterfaceExceededTimeLimit, "timeout"));
-    });
+    _timer.setTimeout(
+        timeout,
+        [this] { _setupCallback(this, Status(ErrorCodes::ExceededTimeLimit, "timeout")); });
 
     _setupQueue.push_back(this);
 
@@ -196,9 +196,9 @@ void ConnectionImpl::setup(Milliseconds timeout, SetupCallback cb) {
 void ConnectionImpl::refresh(Milliseconds timeout, RefreshCallback cb) {
     _refreshCallback = std::move(cb);
 
-    _timer.setTimeout(timeout, [this] {
-        _refreshCallback(this, Status(ErrorCodes::NetworkInterfaceExceededTimeLimit, "timeout"));
-    });
+    _timer.setTimeout(
+        timeout,
+        [this] { _refreshCallback(this, Status(ErrorCodes::ExceededTimeLimit, "timeout")); });
 
     _refreshQueue.push_back(this);
 

@@ -30,7 +30,7 @@
 
 #include "mongo/db/storage/mmap_v1/catalog/namespace_details_rsv1_metadata.h"
 
-#include "mongo/base/static_assert.h"
+
 #include "mongo/db/operation_context.h"
 
 namespace mongo {
@@ -38,8 +38,10 @@ namespace mongo {
 using std::unique_ptr;
 using std::numeric_limits;
 
-MONGO_STATIC_ASSERT(RecordStoreV1Base::Buckets ==
-                    NamespaceDetails::SmallBuckets + NamespaceDetails::LargeBuckets);
+static_assert(RecordStoreV1Base::Buckets ==
+                  NamespaceDetails::SmallBuckets + NamespaceDetails::LargeBuckets,
+              "RecordStoreV1Base::Buckets == NamespaceDetails::SmallBuckets + "
+              "NamespaceDetails::LargeBuckets");
 
 NamespaceDetailsRSV1MetaData::NamespaceDetailsRSV1MetaData(StringData ns, NamespaceDetails* details)
     : _ns(ns.toString()), _details(details) {}

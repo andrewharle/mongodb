@@ -33,7 +33,6 @@
 #include "mongo/db/ops/field_checker.h"
 #include "mongo/db/ops/log_builder.h"
 #include "mongo/db/ops/path_support.h"
-#include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
@@ -78,13 +77,11 @@ Status ModifierCompare::init(const BSONElement& modExpr, const Options& opts, bo
     if (foundDollar && foundCount > 1) {
         return Status(ErrorCodes::BadValue,
                       str::stream() << "Too many positional (i.e. '$') elements found in path '"
-                                    << _updatePath.dottedField()
-                                    << "'");
+                                    << _updatePath.dottedField() << "'");
     }
 
     // Store value for later.
     _val = modExpr;
-    _collator = opts.collator;
     return Status::OK();
 }
 
@@ -136,8 +133,7 @@ Status ModifierCompare::prepare(mutablebson::Element root,
             execInfo->indexOfArrayWithNewElement[0] = _preparedState->idxFound;
         }
     } else {
-        const int compareVal =
-            _preparedState->elemFound.compareWithBSONElement(_val, _collator, false);
+        const int compareVal = _preparedState->elemFound.compareWithBSONElement(_val, false);
         execInfo->noOp = (compareVal == 0) ||
             ((_mode == ModifierCompare::MAX) ? (compareVal > 0) : (compareVal < 0));
     }

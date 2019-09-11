@@ -29,24 +29,17 @@
 #pragma once
 
 #include <boost/optional.hpp>
-#include <cstddef>
 
 #include "mongo/base/disallow_copying.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/repl/member_state.h"
-#include "mongo/db/repl/multiapplier.h"
-#include "mongo/db/repl/oplog_buffer.h"
 #include "mongo/db/repl/optime.h"
-#include "mongo/stdx/functional.h"
 #include "mongo/util/time_support.h"
 
 namespace mongo {
 
 class BSONObj;
 class OID;
-class OldThreadPool;
 class OperationContext;
-class ServiceContext;
 class SnapshotName;
 class Status;
 struct HostAndPort;
@@ -58,11 +51,7 @@ namespace repl {
 class LastVote;
 class ReplSettings;
 class ReplicationCoordinator;
-class ReplicationExecutor;
 
-using OnInitialSyncFinishedFn = stdx::function<void(OperationContext* txn)>;
-using StartInitialSyncFn = stdx::function<void(OnInitialSyncFinishedFn callback)>;
-using StartSteadyReplicationFn = stdx::function<void()>;
 /**
  * This class represents the interface the ReplicationCoordinator uses to interact with the
  * rest of the system.  All functionality of the ReplicationCoordinatorImpl that would introduce
@@ -77,39 +66,11 @@ public:
     virtual ~ReplicationCoordinatorExternalState();
 
     /**
-     * Starts the journal listener, and snapshot threads
+     * Starts the background sync, producer, and sync source feedback threads
      *
      * NOTE: Only starts threads if they are not already started,
      */
-    virtual void startThreads(const ReplSettings& settings) = 0;
-
-    /**
-     * Starts an initial sync, and calls "finished" when done,
-     * for replica set member.
-     *
-     * NOTE: Use either this (and below function) or the Master/Slave version, but not both.
-     */
-    virtual void startInitialSync(OnInitialSyncFinishedFn finished) = 0;
-
-    /**
-     * Returns true if an incomplete initial sync is detected.
-     */
-    virtual bool isInitialSyncFlagSet(OperationContext* txn) = 0;
-
-    /**
-     * Starts steady state sync for replica set member.
-     *
-     * NOTE: Use either this or the Master/Slave version, but not both.
-     */
-    virtual void startSteadyStateReplication(OperationContext* txn,
-                                             ReplicationCoordinator* replCoord) = 0;
-
-    virtual void runOnInitialSyncThread(stdx::function<void(OperationContext* txn)> run) = 0;
-
-    /**
-     * Stops the data replication threads = bgsync, applier, reporter.
-     */
-    virtual void stopDataReplication(OperationContext* txn) = 0;
+    virtual void startThreads(const ReplSettings& settings, ReplicationCoordinator* replCoord) = 0;
 
     /**
      * Starts the Master/Slave threads and sets up logOp
@@ -123,33 +84,13 @@ public:
     virtual void shutdown(OperationContext* txn) = 0;
 
     /**
-     * Returns task executor for scheduling tasks to be run asynchronously.
+     * Creates the oplog, writes the first entry and stores the replica set config document.  Sets
+     * replCoord last optime if 'updateReplOpTime' is true.
      */
-    virtual executor::TaskExecutor* getTaskExecutor() const = 0;
+    virtual Status initializeReplSetStorage(OperationContext* txn,
+                                            const BSONObj& config,
+                                            bool updateReplOpTime) = 0;
 
-    /**
-     * Returns shared db worker thread pool for collection cloning.
-     */
-    virtual OldThreadPool* getDbWorkThreadPool() const = 0;
-
-    /**
-     * Runs the repair database command on the "local" db, if the storage engine is MMapV1.
-     * Note: Used after initial sync to compact the database files.
-     */
-    virtual Status runRepairOnLocalDB(OperationContext* txn) = 0;
-
-    /**
-     * Creates the oplog, writes the first entry and stores the replica set config document.
-     */
-    virtual Status initializeReplSetStorage(OperationContext* txn, const BSONObj& config) = 0;
-
-    /**
-     * Called when a node on way to becoming a primary is ready to leave drain mode. It is called
-     * outside of the global X lock and the replication coordinator mutex.
-     *
-     * Throws on errors.
-     */
-    virtual void onDrainComplete(OperationContext* txn) = 0;
 
     /**
      * Called as part of the process of transitioning to primary and run with the global X lock and
@@ -183,7 +124,7 @@ public:
     /**
      * Returns true if "host" is one of the network identities of this node.
      */
-    virtual bool isSelf(const HostAndPort& host, ServiceContext* ctx) = 0;
+    virtual bool isSelf(const HostAndPort& host) = 0;
 
     /**
      * Gets the replica set config document from local storage, or returns an error.
@@ -230,8 +171,8 @@ public:
     virtual HostAndPort getClientHostAndPort(const OperationContext* txn) = 0;
 
     /**
-     * Closes all connections in the given TransportLayer except those marked with the
-     * keepOpen property, which should just be connections used for heartbeating.
+     * Closes all connections except those marked with the keepOpen property, which should
+     * just be connections used for heartbeating.
      * This is used during stepdown, and transition out of primary.
      */
     virtual void closeConnections() = 0;
@@ -243,11 +184,19 @@ public:
     virtual void killAllUserOperations(OperationContext* txn) = 0;
 
     /**
-     * Resets any active sharding metadata on this server and stops any sharding-related threads
-     * (such as the balancer). It is called after stepDown to ensure that if the node becomes
-     * primary again in the future it will recover its state from a clean slate.
+     * Clears all cached sharding metadata on this server.  This is called after stepDown to
+     * ensure that if the node becomes primary again in the future it will reload an up-to-date
+     * version of the sharding data.
      */
-    virtual void shardingOnStepDownHook() = 0;
+    virtual void clearShardingState() = 0;
+
+    /**
+     * Called when the instance transitions to primary in order to notify a potentially sharded
+     * host to recover its sharding state.
+     *
+     * Throws on errors.
+     */
+    virtual void recoverShardingState(OperationContext* txn) = 0;
 
     /**
      * Notifies the bgsync and syncSourceFeedback threads to choose a new sync source.
@@ -255,14 +204,23 @@ public:
     virtual void signalApplierToChooseNewSyncSource() = 0;
 
     /**
-     * Notifies the bgsync to stop fetching data.
+     * Notifies the bgsync to cancel the current oplog fetcher.
      */
-    virtual void stopProducer() = 0;
+    virtual void signalApplierToCancelFetcher() = 0;
 
     /**
-     * Start bgsync's producer if it's stopped.
+     * Returns an OperationContext, owned by the caller, that may be used in methods of
+     * the same instance that require an OperationContext.
      */
-    virtual void startProducerIfStopped() = 0;
+    virtual OperationContext* createOperationContext(const std::string& threadName) = 0;
+
+    /**
+     * Drops all temporary collections on all databases except "local".
+     *
+     * The implementation may assume that the caller has acquired the global exclusive lock
+     * for "txn".
+     */
+    virtual void dropAllTempCollections(OperationContext* txn) = 0;
 
     /**
      * Drops all snapshots and clears the "committed" snapshot.
@@ -306,73 +264,6 @@ public:
      * Returns true if the current storage engine supports read committed.
      */
     virtual bool isReadCommittedSupportedByStorageEngine(OperationContext* txn) const = 0;
-
-    /**
-     * Applies the operations described in the oplog entries contained in "ops" using the
-     * "applyOperation" function.
-     */
-    virtual StatusWith<OpTime> multiApply(OperationContext* txn,
-                                          MultiApplier::Operations ops,
-                                          MultiApplier::ApplyOperationFn applyOperation) = 0;
-
-    /**
-     * Used by multiApply() to writes operations to database during steady state replication.
-     */
-    virtual Status multiSyncApply(MultiApplier::OperationPtrs* ops) = 0;
-
-    /**
-     * Used by multiApply() to writes operations to database during initial sync. `fetchCount` is a
-     * pointer to a counter that is incremented every time we fetch a missing document.
-     *
-     */
-    virtual Status multiInitialSyncApply(MultiApplier::OperationPtrs* ops,
-                                         const HostAndPort& source,
-                                         AtomicUInt32* fetchCount) = 0;
-
-    /**
-     * This function creates an oplog buffer of the type specified at server startup.
-     */
-    virtual std::unique_ptr<OplogBuffer> makeInitialSyncOplogBuffer(
-        OperationContext* txn) const = 0;
-
-    /**
-     * Creates an oplog buffer suitable for steady state replication.
-     */
-    virtual std::unique_ptr<OplogBuffer> makeSteadyStateOplogBuffer(
-        OperationContext* txn) const = 0;
-
-    /**
-     * Returns true if the user specified to use the new version for initial sync.
-     */
-    virtual bool shouldUseDataReplicatorInitialSync() const = 0;
-
-    /**
-     * Returns maximum number of times that the oplog fetcher will consecutively restart the oplog
-     * tailing query on non-cancellation errors during steady state replication.
-     */
-    virtual std::size_t getOplogFetcherSteadyStateMaxFetcherRestarts() const = 0;
-
-    /**
-     * Returns maximum number of times that the oplog fetcher will consecutively restart the oplog
-     * tailing query on non-cancellation errors during initial sync.
-     */
-    virtual std::size_t getOplogFetcherInitialSyncMaxFetcherRestarts() const = 0;
-
-    /*
-     * Creates noop writer instance. Setting the _noopWriter member is not protected by a guard,
-     * hence it must be called before multi-threaded operations start.
-     */
-    virtual void setupNoopWriter(Seconds waitTime) = 0;
-
-    /*
-     * Starts periodic noop writes to oplog.
-     */
-    virtual void startNoopWriter(OpTime) = 0;
-
-    /*
-     * Stops periodic noop writes to oplog.
-     */
-    virtual void stopNoopWriter() = 0;
 };
 
 }  // namespace repl

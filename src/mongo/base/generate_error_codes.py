@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/python
 
 #    Copyright 2012 10gen Inc.
 #
@@ -300,7 +300,6 @@ class cpp_generator(base_generator):
  */
 #pragma once
 #include <string>
-#include <cstdint>
 #include "mongo/base/string_data.h"
 namespace mongo {
     /**
@@ -311,9 +310,7 @@ namespace mongo {
      */
     class ErrorCodes {
     public:
-        // Explicitly 32-bits wide so that non-symbolic values,
-        // like uassert codes, are valid.
-        enum Error : std::int32_t {
+        enum Error {
             %(error_code_enum_declarations)s,
             MaxError
         };

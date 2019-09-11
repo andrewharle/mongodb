@@ -77,8 +77,8 @@ logger::LogstreamBuilder log() {
     return LogstreamBuilder(unittestOutput, getThreadName(), logger::LogSeverity::Log());
 }
 
-MONGO_INITIALIZER_WITH_PREREQUISITES(UnitTestOutput, ("GlobalLogManager", "default"))
-(InitializerContext*) {
+MONGO_INITIALIZER_WITH_PREREQUISITES(UnitTestOutput,
+                                     ("GlobalLogManager", "default"))(InitializerContext*) {
     unittestOutput->attachAppender(logger::MessageLogDomain::AppenderAutoPtr(
         new logger::ConsoleAppender<logger::MessageLogDomain::Event>(
             new logger::MessageEventDetailsEncoder)));
@@ -128,33 +128,6 @@ public:
 
 Result* Result::cur = 0;
 
-namespace {
-
-/**
- * This unsafe scope guard allows exceptions in its destructor. Thus, if it goes out of scope when
- * an exception is active and the guard function also throws an exception, the program will call
- * std::terminate. This should only be used in unittests where termination on exception is okay.
- */
-template <typename F>
-class UnsafeScopeGuard {
-public:
-    UnsafeScopeGuard(F fun) : _fun(fun) {}
-
-    ~UnsafeScopeGuard() noexcept(false) {
-        _fun();
-    }
-
-private:
-    F _fun;
-};
-
-template <typename F>
-inline UnsafeScopeGuard<F> MakeUnsafeScopeGuard(F fun) {
-    return UnsafeScopeGuard<F>(std::move(fun));
-}
-
-}  // namespace
-
 Test::Test() : _isCapturingLogMessages(false) {}
 
 Test::~Test() {
@@ -165,7 +138,6 @@ Test::~Test() {
 
 void Test::run() {
     setUp();
-    auto guard = MakeUnsafeScopeGuard([this] { tearDown(); });
 
     // An uncaught exception does not prevent the tear down from running. But
     // such an event still constitutes an error. To test this behavior we use a
@@ -174,8 +146,14 @@ void Test::run() {
     try {
         _doTest();
     } catch (FixtureExceptionForTesting&) {
+        tearDown();
         return;
+    } catch (TestAssertionFailureException&) {
+        tearDown();
+        throw;
     }
+
+    tearDown();
 }
 
 void Test::setUp() {}
@@ -461,7 +439,6 @@ TestAssertionFailure::~TestAssertionFailure() BOOST_NOEXCEPT_IF(false) {
     if (!_stream.str().empty()) {
         _exception.setMessage(_exception.getMessage() + " " + _stream.str());
     }
-    error() << "Throwing exception: " << _exception;
     throw _exception;
 }
 

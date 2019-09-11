@@ -3,7 +3,9 @@ t = db.datasize3;
 t.drop();
 
 function run(options) {
-    var c = {dataSize: "test.datasize3"};
+    var c = {
+        dataSize: "test.datasize3"
+    };
     if (options)
         Object.extend(c, options);
     return db.runCommand(c);

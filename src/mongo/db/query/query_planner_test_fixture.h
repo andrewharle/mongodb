@@ -34,12 +34,9 @@
 #include <vector>
 
 #include "mongo/base/owned_pointer_vector.h"
-#include "mongo/db/index/multikey_paths.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/json.h"
-#include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/query_solution.h"
-#include "mongo/db/query/query_test_service_context.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo {
@@ -47,8 +44,6 @@ namespace mongo {
 class QueryPlannerTest : public mongo::unittest::Test {
 protected:
     void setUp();
-
-    OperationContext* txn();
 
     //
     // Build up test.
@@ -64,16 +59,6 @@ protected:
 
     void addIndex(BSONObj keyPattern, MatchExpression* filterExpr);
 
-    void addIndex(BSONObj keyPattern, const MultikeyPaths& multikeyPaths);
-
-    void addIndex(BSONObj keyPattern, const CollatorInterface* collator);
-
-    void addIndex(BSONObj keyPattern,
-                  MatchExpression* filterExpr,
-                  const CollatorInterface* collator);
-
-    void addIndex(BSONObj keyPattern, const CollatorInterface* collator, StringData indexName);
-
     //
     // Execute planner.
     //
@@ -82,15 +67,15 @@ protected:
 
     void runQuerySortProj(const BSONObj& query, const BSONObj& sort, const BSONObj& proj);
 
-    void runQuerySkipNToReturn(const BSONObj& query, long long skip, long long ntoreturn);
+    void runQuerySkipLimit(const BSONObj& query, long long skip, long long limit);
 
     void runQueryHint(const BSONObj& query, const BSONObj& hint);
 
-    void runQuerySortProjSkipNToReturn(const BSONObj& query,
-                                       const BSONObj& sort,
-                                       const BSONObj& proj,
-                                       long long skip,
-                                       long long ntoreturn);
+    void runQuerySortProjSkipLimit(const BSONObj& query,
+                                   const BSONObj& sort,
+                                   const BSONObj& proj,
+                                   long long skip,
+                                   long long limit);
 
     void runQuerySortHint(const BSONObj& query, const BSONObj& sort, const BSONObj& hint);
 
@@ -99,12 +84,12 @@ protected:
                             const BSONObj& minObj,
                             const BSONObj& maxObj);
 
-    void runQuerySortProjSkipNToReturnHint(const BSONObj& query,
-                                           const BSONObj& sort,
-                                           const BSONObj& proj,
-                                           long long skip,
-                                           long long ntoreturn,
-                                           const BSONObj& hint);
+    void runQuerySortProjSkipLimitHint(const BSONObj& query,
+                                       const BSONObj& sort,
+                                       const BSONObj& proj,
+                                       long long skip,
+                                       long long limit,
+                                       const BSONObj& hint);
 
     void runQuerySnapshot(const BSONObj& query);
 
@@ -112,7 +97,7 @@ protected:
                       const BSONObj& sort,
                       const BSONObj& proj,
                       long long skip,
-                      long long ntoreturn,
+                      long long limit,
                       const BSONObj& hint,
                       const BSONObj& minObj,
                       const BSONObj& maxObj,
@@ -126,11 +111,11 @@ protected:
 
     void runInvalidQuerySortProj(const BSONObj& query, const BSONObj& sort, const BSONObj& proj);
 
-    void runInvalidQuerySortProjSkipNToReturn(const BSONObj& query,
-                                              const BSONObj& sort,
-                                              const BSONObj& proj,
-                                              long long skip,
-                                              long long ntoreturn);
+    void runInvalidQuerySortProjSkipLimit(const BSONObj& query,
+                                          const BSONObj& sort,
+                                          const BSONObj& proj,
+                                          long long skip,
+                                          long long limit);
 
     void runInvalidQueryHint(const BSONObj& query, const BSONObj& hint);
 
@@ -139,18 +124,18 @@ protected:
                                    const BSONObj& minObj,
                                    const BSONObj& maxObj);
 
-    void runInvalidQuerySortProjSkipNToReturnHint(const BSONObj& query,
-                                                  const BSONObj& sort,
-                                                  const BSONObj& proj,
-                                                  long long skip,
-                                                  long long ntoreturn,
-                                                  const BSONObj& hint);
+    void runInvalidQuerySortProjSkipLimitHint(const BSONObj& query,
+                                              const BSONObj& sort,
+                                              const BSONObj& proj,
+                                              long long skip,
+                                              long long limit,
+                                              const BSONObj& hint);
 
     void runInvalidQueryFull(const BSONObj& query,
                              const BSONObj& sort,
                              const BSONObj& proj,
                              long long skip,
-                             long long ntoreturn,
+                             long long limit,
                              const BSONObj& hint,
                              const BSONObj& minObj,
                              const BSONObj& maxObj,
@@ -161,8 +146,6 @@ protected:
      * version goes through find command parsing, and will be planned like a find command.
      */
     void runQueryAsCommand(const BSONObj& cmdObj);
-
-    void runInvalidQueryAsCommand(const BSONObj& cmdObj);
 
     //
     // Introspect solutions.
@@ -200,8 +183,7 @@ protected:
     /**
      * Helper function to parse a MatchExpression.
      */
-    static std::unique_ptr<MatchExpression> parseMatchExpression(
-        const BSONObj& obj, const CollatorInterface* collator = nullptr);
+    static std::unique_ptr<MatchExpression> parseMatchExpression(const BSONObj& obj);
 
     //
     // Data members.
@@ -209,8 +191,6 @@ protected:
 
     static const NamespaceString nss;
 
-    QueryTestServiceContext serviceContext;
-    ServiceContext::UniqueOperationContext opCtx;
     BSONObj queryObj;
     std::unique_ptr<CanonicalQuery> cq;
     QueryPlannerParams params;

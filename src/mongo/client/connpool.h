@@ -33,7 +33,6 @@
 #include <stack>
 
 #include "mongo/client/dbclientinterface.h"
-#include "mongo/client/mongo_uri.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/background.h"
 #include "mongo/util/concurrency/mutex.h"
@@ -66,17 +65,9 @@ public:
           _type(ConnectionString::INVALID),
           _maxPoolSize(kPoolSizeUnlimited),
           _checkedOut(0),
-          _badConns(0),
           _parentDestroyed(false) {}
 
     ~PoolForHost();
-
-    /**
-     * Returns the number of connections in this pool that went bad.
-     */
-    int getNumBadConns() const {
-        return _badConns;
-    }
 
     /**
      * Returns the maximum number of connections stored in the pool
@@ -111,7 +102,7 @@ public:
      * Returns the number of open connections in this pool.
      */
     int openConnections() const {
-        return numInUse() + numAvailable();
+        return _checkedOut + (int)_pool.size();
     }
 
     void createdOne(DBClientBase* base);
@@ -159,7 +150,7 @@ private:
     struct StoredConnection {
         StoredConnection(DBClientBase* c);
 
-        bool ok();
+        bool ok(time_t now);
 
         DBClientBase* conn;
         time_t when;
@@ -178,9 +169,6 @@ private:
 
     // The number of currently active connections from this pool
     int _checkedOut;
-
-    // The number of connections that we did not reuse because they went bad.
-    int _badConns;
 
     // Whether our parent DBConnectionPool object is in destruction
     bool _parentDestroyed;
@@ -254,13 +242,6 @@ public:
 
     DBClientBase* get(const std::string& host, double socketTimeout = 0);
     DBClientBase* get(const ConnectionString& host, double socketTimeout = 0);
-    DBClientBase* get(const MongoURI& uri, double socketTimeout = 0);
-
-    /**
-     * Gets the number of connections available in the pool.
-     */
-    int getNumAvailableConns(const std::string& host, double socketTimeout = 0) const;
-    int getNumBadConns(const std::string& host, double socketTimeout = 0) const;
 
     void release(const std::string& host, DBClientBase* c);
 
@@ -372,7 +353,6 @@ public:
         */
     explicit ScopedDbConnection(const std::string& host, double socketTimeout = 0);
     explicit ScopedDbConnection(const ConnectionString& host, double socketTimeout = 0);
-    explicit ScopedDbConnection(const MongoURI& host, double socketTimeout = 0);
 
     ScopedDbConnection() : _host(""), _conn(0), _socketTimeout(0) {}
 

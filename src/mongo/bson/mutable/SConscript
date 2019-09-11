@@ -20,7 +20,6 @@ env.Library(
         'mutable_bson_test_utils.cpp',
     ],
     LIBDEPS=[
-        '$BUILD_DIR/mongo/db/query/collation/collator_interface_mock',
         '$BUILD_DIR/mongo/unittest/unittest',
         'mutable_bson',
     ],
@@ -43,7 +42,6 @@ env.CppUnitTest(
         'mutable_bson_algo_test.cpp',
     ],
     LIBDEPS=[
-        '$BUILD_DIR/mongo/db/query/collation/collator_interface_mock',
         'mutable_bson',
         'mutable_bson_test_utils',
     ],

@@ -34,6 +34,14 @@
 
 namespace mongo {
 
+StatusWithMatchExpression ExtensionsCallback::parseWhere(BSONElement where) const {
+    return {Status(ErrorCodes::NoMatchParseContext, "no context for parsing $where")};
+}
+
+StatusWithMatchExpression ExtensionsCallback::parseText(BSONElement text) const {
+    return {Status(ErrorCodes::NoMatchParseContext, "no context for parsing $text")};
+}
+
 StatusWith<TextMatchExpressionBase::TextParams>
 ExtensionsCallback::extractTextMatchExpressionParams(BSONElement text) {
     TextMatchExpressionBase::TextParams params;

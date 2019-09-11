@@ -6,7 +6,6 @@ from __future__ import absolute_import
 
 import os
 import os.path
-import threading
 import unittest
 
 from .. import config
@@ -53,8 +52,6 @@ class TestCase(unittest.TestCase):
         self.fixture = None
         self.return_code = None
 
-        self.is_configured = False
-
     def long_name(self):
         """
         Returns the path to the test, relative to the current working directory.
@@ -79,14 +76,10 @@ class TestCase(unittest.TestCase):
     def shortDescription(self):
         return "%s %s" % (self.test_kind, self.test_name)
 
-    def configure(self, fixture, *args, **kwargs):
+    def configure(self, fixture):
         """
         Stores 'fixture' as an attribute for later use during execution.
         """
-        if self.is_configured:
-            raise RuntimeError("configure can only be called once")
-
-        self.is_configured = True
         self.fixture = fixture
 
     def run_test(self):
@@ -106,14 +99,7 @@ class TestCase(unittest.TestCase):
         Runs the specified process.
         """
 
-        if config.INTERNAL_EXECUTOR_NAME is not None:
-            self.logger.info("Starting %s under executor %s...\n%s",
-                    self.shortDescription(),
-                    config.INTERNAL_EXECUTOR_NAME,
-                    process.as_command())
-        else:
-            self.logger.info("Starting %s...\n%s", self.shortDescription(), process.as_command())
-
+        self.logger.info("Starting %s...\n%s", self.shortDescription(), process.as_command())
         process.start()
         self.logger.info("%s started with pid %s.", self.shortDescription(), process.pid)
 
@@ -183,8 +169,8 @@ class CPPIntegrationTestCase(TestCase):
         self.program_executable = program_executable
         self.program_options = utils.default_if_none(program_options, {}).copy()
 
-    def configure(self, fixture, *args, **kwargs):
-        TestCase.configure(self, fixture, *args, **kwargs)
+    def configure(self, fixture):
+        TestCase.configure(self, fixture)
 
         self.program_options["connectionString"] = self.fixture.get_internal_connection_string()
 
@@ -227,8 +213,8 @@ class DBTestCase(TestCase):
         self.dbtest_suite = dbtest_suite
         self.dbtest_options = utils.default_if_none(dbtest_options, {}).copy()
 
-    def configure(self, fixture, *args, **kwargs):
-        TestCase.configure(self, fixture, *args, **kwargs)
+    def configure(self, fixture):
+        TestCase.configure(self, fixture)
 
         # If a dbpath was specified, then use it as a container for all other dbpaths.
         dbpath_prefix = self.dbtest_options.pop("dbpath", DBTestCase._get_dbpath_prefix())
@@ -286,30 +272,13 @@ class JSTestCase(TestCase):
     """
     A jstest to execute.
     """
-    # A wrapper for the thread class that lets us propagate exceptions.
-    class ExceptionThread(threading.Thread):
-        def __init__(self, my_target, my_args):
-            threading.Thread.__init__(self, target=my_target, args=my_args)
-            self.err = None
-
-        def run(self):
-            try:
-                threading.Thread.run(self)
-            except Exception as self.err:
-                raise
-            else:
-                self.err = None
-
-        def _get_exception(self):
-            return self.err
-
-    DEFAULT_CLIENT_NUM = 1
 
     def __init__(self,
                  logger,
                  js_filename,
                  shell_executable=None,
                  shell_options=None,
+                 use_connection_string=False,
                  test_kind="JSTest"):
         "Initializes the JSTestCase with the JS file to run."
 
@@ -320,10 +289,10 @@ class JSTestCase(TestCase):
 
         self.js_filename = js_filename
         self.shell_options = utils.default_if_none(shell_options, {}).copy()
-        self.num_clients = JSTestCase.DEFAULT_CLIENT_NUM
+        self.use_connection_string = use_connection_string
 
-    def configure(self, fixture, num_clients=DEFAULT_CLIENT_NUM, *args, **kwargs):
-        TestCase.configure(self, fixture, *args, **kwargs)
+    def configure(self, fixture):
+        TestCase.configure(self, fixture)
 
         if self.fixture.port is not None:
             self.shell_options["port"] = self.fixture.port
@@ -350,31 +319,11 @@ class JSTestCase(TestCase):
 
         utils.rmtree(data_dir, ignore_errors=True)
 
-        self.num_clients = num_clients
-
         try:
             os.makedirs(data_dir)
         except os.error:
             # Directory already exists.
             pass
-
-        process_kwargs = self.shell_options.get("process_kwargs", {}).copy()
-
-        if process_kwargs \
-            and "env_vars" in process_kwargs \
-            and "KRB5_CONFIG" in process_kwargs["env_vars"] \
-            and "KRB5CCNAME" not in process_kwargs["env_vars"]:
-            # Use a job-specific credential cache for JavaScript tests involving Kerberos.
-            krb5_dir = os.path.join(data_dir, "krb5")
-
-            try:
-                os.makedirs(krb5_dir)
-            except os.error:
-                pass
-
-            process_kwargs["env_vars"]["KRB5CCNAME"] = "DIR:" + krb5_dir
-
-        self.shell_options["process_kwargs"] = process_kwargs
 
     def _get_data_dir(self, global_vars):
         """
@@ -391,64 +340,26 @@ class JSTestCase(TestCase):
                             config.MONGO_RUNNER_SUBDIR)
 
     def run_test(self):
-        threads = []
         try:
-            # Don't thread if there is only one client.
-            if self.num_clients == 1:
-                shell = self._make_process(self.logger)
-                self._execute(shell)
-            else:
-                # If there are multiple clients, make a new thread for each client.
-                for i in xrange(self.num_clients):
-                    t = self.ExceptionThread(my_target=self._run_test_in_thread, my_args=[i])
-                    t.start()
-                    threads.append(t)
+            shell = self._make_process()
+            self._execute(shell)
         except self.failureException:
             raise
         except:
             self.logger.exception("Encountered an error running jstest %s.", self.basename())
             raise
-        finally:
-            for t in threads:
-                t.join()
-            for t in threads:
-                if t._get_exception() is not None:
-                    raise t._get_exception()
 
-    def _make_process(self, logger=None, thread_id=0):
-        # Since _make_process() is called by each thread, we make a shallow copy of the mongo shell
-        # options to avoid modifying the shared options for the JSTestCase.
-        shell_options = self.shell_options.copy()
-        global_vars = shell_options["global_vars"].copy()
-        test_data = global_vars["TestData"].copy()
+    def _make_process(self):
+        connection_string = None
+        if self.use_connection_string:
+            connection_string = self.fixture.get_driver_connection_url()
 
-        # We set a property on TestData to mark the main test when multiple clients are going to run
-        # concurrently in case there is logic within the test that must execute only once. We also
-        # set a property on TestData to indicate how many clients are going to run the test so they
-        # can avoid executing certain logic when there may be other operations running concurrently.
-        is_main_test = thread_id == 0
-        test_data["isMainTest"] = is_main_test
-        test_data["numTestClients"] = self.num_clients
-
-        global_vars["TestData"] = test_data
-        shell_options["global_vars"] = global_vars
-
-        # If logger is none, it means that it's not running in a thread and thus logger should be
-        # set to self.logger.
-        logger = utils.default_if_none(logger, self.logger)
         return core.programs.mongo_shell_program(
-            logger,
+            self.logger,
             executable=self.shell_executable,
             filename=self.js_filename,
-            connection_string=self.fixture.get_driver_connection_url(),
-            **shell_options)
-
-    def _run_test_in_thread(self, thread_id):
-        # Make a logger for each thread.
-        logger = logging.loggers.new_logger(self.test_kind + ':' + str(thread_id),
-                                            parent=self.logger)
-        shell = self._make_process(logger, thread_id)
-        self._execute(shell)
+            connection_string=connection_string,
+            **self.shell_options)
 
 
 class MongosTestCase(TestCase):
@@ -469,12 +380,12 @@ class MongosTestCase(TestCase):
         TestCase.__init__(self, logger, "mongos", self.mongos_executable)
         self.options = mongos_options.copy()
 
-    def configure(self, fixture, *args, **kwargs):
+    def configure(self, fixture):
         """
         Ensures the --test option is present in the mongos options.
         """
 
-        TestCase.configure(self, fixture, *args, **kwargs)
+        TestCase.configure(self, fixture)
         # Always specify test option to ensure the mongos will terminate.
         if "test" not in self.options:
             self.options["test"] = ""

@@ -47,7 +47,7 @@ class ShardedClusterFixture(interface.Fixture):
         the mongod and mongos processes.
         """
 
-        interface.Fixture.__init__(self, logger, job_num, dbpath_prefix=dbpath_prefix)
+        interface.Fixture.__init__(self, logger, job_num)
 
         if "dbpath" in mongod_options:
             raise ValueError("Cannot specify mongod_options.dbpath")
@@ -62,7 +62,12 @@ class ShardedClusterFixture(interface.Fixture):
         self.enable_sharding = utils.default_if_none(enable_sharding, [])
         self.auth_options = auth_options
 
-        self._dbpath_prefix = os.path.join(self._dbpath_prefix, config.FIXTURE_SUBDIR)
+        # Command line options override the YAML configuration.
+        dbpath_prefix = utils.default_if_none(config.DBPATH_PREFIX, dbpath_prefix)
+        dbpath_prefix = utils.default_if_none(dbpath_prefix, config.DEFAULT_DBPATH_PREFIX)
+        self._dbpath_prefix = os.path.join(dbpath_prefix,
+                                           "job%d" % (self.job_num),
+                                           config.FIXTURE_SUBDIR)
 
         self.configsvr = None
         self.mongos = None
@@ -103,7 +108,11 @@ class ShardedClusterFixture(interface.Fixture):
         self.port = self.mongos.port
 
         client = utils.new_mongo_client(port=self.port)
-        self._auth_to_db(client)
+        if self.auth_options is not None:
+            auth_db = client[self.auth_options["authenticationDatabase"]]
+            auth_db.authenticate(self.auth_options["username"],
+                                 password=self.auth_options["password"],
+                                 mechanism=self.auth_options["authenticationMechanism"])
 
         # Inform mongos about each of the shards
         for shard in self.shards:
@@ -114,21 +123,7 @@ class ShardedClusterFixture(interface.Fixture):
             self.logger.info("Enabling sharding for '%s' database...", db_name)
             client.admin.command({"enablesharding": db_name})
 
-    def _auth_to_db(self, client):
-        """Authenticate client for the 'authenticationDatabase'."""
-        if self.auth_options is not None:
-            auth_db = client[self.auth_options["authenticationDatabase"]]
-            auth_db.authenticate(self.auth_options["username"],
-                                 password=self.auth_options["password"],
-                                 mechanism=self.auth_options["authenticationMechanism"])
-
-    def _stop_balancer(self, timeout_ms=60000):
-        """Stop the balancer."""
-        client = utils.new_mongo_client(port=self.port)
-        self._auth_to_db(client)
-        client.admin.command({"balancerStop": 1}, maxTimeMS=timeout_ms)
-
-    def _do_teardown(self):
+    def teardown(self):
         """
         Shuts down the sharded cluster.
         """
@@ -136,10 +131,8 @@ class ShardedClusterFixture(interface.Fixture):
         success = True  # Still a success even if nothing is running.
 
         if not running_at_start:
-            self.logger.info(
-                "Sharded cluster was expected to be running in _do_teardown(), but wasn't.")
-
-        self._stop_balancer()
+            self.logger.info("Sharded cluster was expected to be running in teardown(), but"
+                             " wasn't.")
 
         if self.configsvr is not None:
             if running_at_start:
@@ -161,8 +154,6 @@ class ShardedClusterFixture(interface.Fixture):
 
         if running_at_start:
             self.logger.info("Stopping shards...")
-
-
         for shard in self.shards:
             success = shard.teardown() and success
         if running_at_start:
@@ -222,7 +213,6 @@ class ShardedClusterFixture(interface.Fixture):
         mongod_logger = logging.loggers.new_logger(logger_name, parent=self.logger)
 
         mongod_options = copy.deepcopy(self.mongod_options)
-        mongod_options["shardsvr"] = ""
         mongod_options["dbpath"] = os.path.join(self._dbpath_prefix, "shard%d" % (index))
 
         return standalone.MongoDFixture(mongod_logger,
@@ -245,7 +235,7 @@ class ShardedClusterFixture(interface.Fixture):
         if self.separate_configsvr:
             mongos_options["configdb"] = self.configsvr.get_internal_connection_string()
         else:
-            mongos_options["configdb"] = "localhost:%d" % (self.shards[0].port)
+            mongos_options["configdb"] = "%s:%d" % (socket.gethostname(), self.shards[0].port)
 
         return _MongoSFixture(mongos_logger,
                               self.job_num,
@@ -287,6 +277,9 @@ class _MongoSFixture(interface.Fixture):
         self.mongos = None
 
     def setup(self):
+        if "chunkSize" not in self.mongos_options:
+            self.mongos_options["chunkSize"] = 50
+
         if "port" not in self.mongos_options:
             self.mongos_options["port"] = core.network.PortAllocator.next_fixture_port(self.job_num)
         self.port = self.mongos_options["port"]
@@ -334,14 +327,13 @@ class _MongoSFixture(interface.Fixture):
 
         self.logger.info("Successfully contacted the mongos on port %d.", self.port)
 
-    def _do_teardown(self):
+    def teardown(self):
         running_at_start = self.is_running()
         success = True  # Still a success even if nothing is running.
 
         if not running_at_start and self.port is not None:
-            self.logger.info(
-                "mongos on port %d was expected to be running in _do_teardown(), but wasn't.",
-                self.port)
+            self.logger.info("mongos on port %d was expected to be running in teardown(), but"
+                             " wasn't." % (self.port))
 
         if self.mongos is not None:
             if running_at_start:
@@ -368,7 +360,7 @@ class _MongoSFixture(interface.Fixture):
         if self.mongos is None:
             raise ValueError("Must call setup() before calling get_internal_connection_string()")
 
-        return "localhost:%d" % self.port
+        return "%s:%d" % (socket.gethostname(), self.port)
 
     def get_driver_connection_url(self):
         return "mongodb://" + self.get_internal_connection_string()

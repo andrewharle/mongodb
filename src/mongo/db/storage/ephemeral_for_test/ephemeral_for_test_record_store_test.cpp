@@ -28,9 +28,8 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/storage/ephemeral_for_test/ephemeral_for_test_record_store.h"
+
 
 #include "mongo/db/storage/ephemeral_for_test/ephemeral_for_test_recovery_unit.h"
 #include "mongo/db/storage/record_store_test_harness.h"

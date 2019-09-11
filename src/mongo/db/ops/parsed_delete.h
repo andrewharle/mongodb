@@ -84,9 +84,9 @@ public:
     const DeleteRequest* getRequest() const;
 
     /**
-     * Get the YieldPolicy, adjusted for $isolated and GodMode.
+     * Is this delete allowed to yield?
      */
-    PlanExecutor::YieldPolicy yieldPolicy() const;
+    bool canYield() const;
 
     /**
      * Is this update supposed to be isolated?

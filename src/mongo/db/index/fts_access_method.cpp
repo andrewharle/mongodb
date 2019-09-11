@@ -34,9 +34,7 @@ namespace mongo {
 FTSAccessMethod::FTSAccessMethod(IndexCatalogEntry* btreeState, SortedDataInterface* btree)
     : IndexAccessMethod(btreeState, btree), _ftsSpec(btreeState->descriptor()->infoObj()) {}
 
-void FTSAccessMethod::doGetKeys(const BSONObj& obj,
-                                BSONObjSet* keys,
-                                MultikeyPaths* multikeyPaths) const {
+void FTSAccessMethod::getKeys(const BSONObj& obj, BSONObjSet* keys) const {
     ExpressionKeysPrivate::getFTSKeys(obj, _ftsSpec, keys);
 }
 

@@ -25,14 +25,12 @@
 
     // Migrate the middle chunk to another shard
     assert.commandWorked(s.s0.adminCommand(
-        {movechunk: "test.data", find: {_id: 50}, to: s.getOther(s.getPrimaryShard("test")).name}));
+        {movechunk: "test.data", find: {_id: 50}, to: s.getOther(s.getServer("test")).name}));
 
     // Check that we get results rather than an error
-    var result = d.data
-                     .aggregate({$group: {_id: '$_id', i: {$first: '$i'}}},
-                                {$group: {_id: '$i', avg_id: {$avg: '$_id'}}},
-                                {$sort: {_id: 1}})
-                     .toArray();
+    var result = d.data.aggregate({$group: {_id: '$_id', i: {$first: '$i'}}},
+                                  {$group: {_id: '$i', avg_id: {$avg: '$_id'}}},
+                                  {$sort: {_id: 1}}).toArray();
     var expected = [
         {"_id": 0, "avg_id": 45},
         {"_id": 1, "avg_id": 46},

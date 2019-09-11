@@ -35,7 +35,6 @@
 namespace mongo {
 
 class AlignedBuilder;
-class ClockSource;
 class JSectHeader;
 
 namespace dur {
@@ -52,13 +51,13 @@ extern bool okToCleanUp;
 void journalCleanup(bool log = false);
 
 /** assure journal/ dir exists. throws */
-void journalMakeDir(ClockSource* cs, int64_t serverStartMs);
+void journalMakeDir();
 
 /**
  * Generates the next sequence number for use in the journal, guaranteed to be greater than all
  * prior sequence numbers.
  */
-uint64_t generateNextSeqNumber(ClockSource* cs, int64_t serverStartMs);
+uint64_t generateNextSeqNumber();
 
 /**
  * Informs the journaling system that all writes on or before the passed in sequence number have
@@ -76,7 +75,7 @@ unsigned long long journalReadLSN();
 
 /** never throws.
     @param anyFiles by default we only look at j._* files. If anyFiles is true, return true
-           if there are any files in the journal directory. checkForUncleanShutdown() uses this to
+           if there are any files in the journal directory. acquirePathLock() uses this to
            make sure that the journal directory is mounted.
     @return true if there are any journal files in the journal dir.
 */

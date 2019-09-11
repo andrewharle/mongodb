@@ -30,9 +30,6 @@
 
 #include "mongo/executor/remote_command_request.h"
 
-#include <ostream>
-
-#include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/mongoutils/str.h"
 
@@ -56,28 +53,24 @@ RemoteCommandRequest::RemoteCommandRequest(RequestId requestId,
                                            const std::string& theDbName,
                                            const BSONObj& theCmdObj,
                                            const BSONObj& metadataObj,
-                                           OperationContext* txn,
                                            Milliseconds timeoutMillis)
     : id(requestId),
       target(theTarget),
       dbname(theDbName),
       metadata(metadataObj),
       cmdObj(theCmdObj),
-      txn(txn),
       timeout(timeoutMillis) {}
 
 RemoteCommandRequest::RemoteCommandRequest(const HostAndPort& theTarget,
                                            const std::string& theDbName,
                                            const BSONObj& theCmdObj,
                                            const BSONObj& metadataObj,
-                                           OperationContext* txn,
                                            Milliseconds timeoutMillis)
     : RemoteCommandRequest(requestIdCounter.addAndFetch(1),
                            theTarget,
                            theDbName,
                            theCmdObj,
                            metadataObj,
-                           txn,
                            timeoutMillis) {}
 
 std::string RemoteCommandRequest::toString() const {
@@ -92,24 +85,5 @@ std::string RemoteCommandRequest::toString() const {
     return out;
 }
 
-bool RemoteCommandRequest::operator==(const RemoteCommandRequest& rhs) const {
-    if (this == &rhs) {
-        return true;
-    }
-    return target == rhs.target && dbname == rhs.dbname &&
-        SimpleBSONObjComparator::kInstance.evaluate(cmdObj == rhs.cmdObj) &&
-        SimpleBSONObjComparator::kInstance.evaluate(metadata == rhs.metadata) &&
-        timeout == rhs.timeout;
-}
-
-bool RemoteCommandRequest::operator!=(const RemoteCommandRequest& rhs) const {
-    return !(*this == rhs);
-}
-
 }  // namespace executor
-
-std::ostream& operator<<(std::ostream& os, const executor::RemoteCommandRequest& request) {
-    return os << request.toString();
-}
-
 }  // namespace mongo

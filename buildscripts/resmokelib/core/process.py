@@ -163,12 +163,12 @@ class Process(object):
                 if return_code == win32con.STILL_ACTIVE:
                     raise
 
-    def stop(self, kill=False):
+    def stop(self):
         """Terminate the process."""
         if sys.platform == "win32":
 
             # Attempt to cleanly shutdown mongod.
-            if not kill and len(self.args) > 0 and self.args[0].find("mongod") != -1:
+            if len(self.args) > 0 and self.args[0].find("mongod") != -1:
                 mongo_signal_handle = None
                 try:
                     mongo_signal_handle = win32event.OpenEvent(
@@ -214,10 +214,7 @@ class Process(object):
                     raise
         else:
             try:
-                if kill:
-                    self._process.kill()
-                else:
-                    self._process.terminate()
+                self._process.terminate()
             except OSError as err:
                 # ESRCH (errno=3) is received when the process has already died.
                 if err.errno != 3:

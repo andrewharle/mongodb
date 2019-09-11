@@ -34,10 +34,10 @@
 #include <vector>
 
 #include "mongo/base/disallow_copying.h"
-#include "mongo/db/index/multikey_paths.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/query/stage_types.h"
 #include "mongo/util/time_support.h"
+#include "mongo/util/net/listen.h"  // for Listener::getElapsedTimeMillis()
 
 namespace mongo {
 
@@ -209,7 +209,7 @@ struct CollectionScanStats : public SpecificStats {
 };
 
 struct CountStats : public SpecificStats {
-    CountStats() : nCounted(0), nSkipped(0), recordStoreCount(false) {}
+    CountStats() : nCounted(0), nSkipped(0), trivialCount(false) {}
 
     SpecificStats* clone() const final {
         CountStats* specific = new CountStats(*this);
@@ -222,8 +222,9 @@ struct CountStats : public SpecificStats {
     // The number of results we skipped over.
     long long nSkipped;
 
-    // True if we computed the count via Collection::numRecords().
-    bool recordStoreCount;
+    // A "trivial count" is one that we can answer by calling numRecords() on the
+    // collection, without actually going through any query logic.
+    bool trivialCount;
 };
 
 struct CountScanStats : public SpecificStats {
@@ -239,9 +240,6 @@ struct CountScanStats : public SpecificStats {
         CountScanStats* specific = new CountScanStats(*this);
         // BSON objects have to be explicitly copied.
         specific->keyPattern = keyPattern.getOwned();
-        specific->collation = collation.getOwned();
-        specific->startKey = startKey.getOwned();
-        specific->endKey = endKey.getOwned();
         return specific;
     }
 
@@ -249,25 +247,9 @@ struct CountScanStats : public SpecificStats {
 
     BSONObj keyPattern;
 
-    BSONObj collation;
-
-    // The starting/ending key(s) of the index scan.
-    // startKey and endKey contain the fields of keyPattern, with values
-    // that match the corresponding index bounds.
-    BSONObj startKey;
-    BSONObj endKey;
-    // Whether or not those keys are inclusive or exclusive bounds.
-    bool startKeyInclusive;
-    bool endKeyInclusive;
-
     int indexVersion;
 
-    // Set to true if the index used for the count scan is multikey.
     bool isMultiKey;
-
-    // Represents which prefixes of the indexed field(s) cause the index to be multikey.
-    MultikeyPaths multiKeyPaths;
-
     bool isPartial;
     bool isSparse;
     bool isUnique;
@@ -294,7 +276,6 @@ struct DistinctScanStats : public SpecificStats {
         DistinctScanStats* specific = new DistinctScanStats(*this);
         // BSON objects have to be explicitly copied.
         specific->keyPattern = keyPattern.getOwned();
-        specific->collation = collation.getOwned();
         specific->indexBounds = indexBounds.getOwned();
         return specific;
     }
@@ -304,18 +285,10 @@ struct DistinctScanStats : public SpecificStats {
 
     BSONObj keyPattern;
 
-    BSONObj collation;
-
     // Properties of the index used for the distinct scan.
     std::string indexName;
     int indexVersion = 0;
-
-    // Set to true if the index used for the distinct scan is multikey.
     bool isMultiKey = false;
-
-    // Represents which prefixes of the indexed field(s) cause the index to be multikey.
-    MultikeyPaths multiKeyPaths;
-
     bool isPartial = false;
     bool isSparse = false;
     bool isUnique = false;
@@ -397,14 +370,12 @@ struct IndexScanStats : public SpecificStats {
           dupsTested(0),
           dupsDropped(0),
           seenInvalidated(0),
-          keysExamined(0),
-          seeks(0) {}
+          keysExamined(0) {}
 
     SpecificStats* clone() const final {
         IndexScanStats* specific = new IndexScanStats(*this);
         // BSON objects have to be explicitly copied.
         specific->keyPattern = keyPattern.getOwned();
-        specific->collation = collation.getOwned();
         specific->indexBounds = indexBounds.getOwned();
         return specific;
     }
@@ -416,8 +387,6 @@ struct IndexScanStats : public SpecificStats {
     std::string indexName;
 
     BSONObj keyPattern;
-
-    BSONObj collation;
 
     int indexVersion;
 
@@ -432,10 +401,6 @@ struct IndexScanStats : public SpecificStats {
     // index properties
     // Whether this index is over a field that contain array values.
     bool isMultiKey;
-
-    // Represents which prefixes of the indexed field(s) cause the index to be multikey.
-    MultikeyPaths multiKeyPaths;
-
     bool isPartial;
     bool isSparse;
     bool isUnique;
@@ -448,9 +413,6 @@ struct IndexScanStats : public SpecificStats {
 
     // Number of entries retrieved from the index during the scan.
     size_t keysExamined;
-
-    // Number of times the index cursor is re-positioned during the execution of the scan.
-    size_t seeks;
 };
 
 struct LimitStats : public SpecificStats {
@@ -481,7 +443,7 @@ struct MultiPlanStats : public SpecificStats {
 };
 
 struct OrStats : public SpecificStats {
-    OrStats() : dupsTested(0), dupsDropped(0), recordIdsForgotten(0) {}
+    OrStats() : dupsTested(0), dupsDropped(0), locsForgotten(0) {}
 
     SpecificStats* clone() const final {
         OrStats* specific = new OrStats(*this);
@@ -492,7 +454,7 @@ struct OrStats : public SpecificStats {
     size_t dupsDropped;
 
     // How many calls to invalidate(...) actually removed a RecordId from our deduping map?
-    size_t recordIdsForgotten;
+    size_t locsForgotten;
 };
 
 struct ProjectionStats : public SpecificStats {
@@ -585,8 +547,9 @@ struct IntervalStats {
     bool inclusiveMaxDistanceAllowed = false;
 };
 
-struct NearStats : public SpecificStats {
-    NearStats() : indexVersion(0) {}
+class NearStats : public SpecificStats {
+public:
+    NearStats() {}
 
     SpecificStats* clone() const final {
         return new NearStats(*this);
@@ -594,8 +557,6 @@ struct NearStats : public SpecificStats {
 
     std::vector<IntervalStats> intervalStats;
     std::string indexName;
-    // btree index version, not geo index version
-    int indexVersion;
     BSONObj keyPattern;
 };
 
@@ -604,6 +565,7 @@ struct UpdateStats : public SpecificStats {
         : nMatched(0),
           nModified(0),
           isDocReplacement(false),
+          fastmod(false),
           fastmodinsert(false),
           inserted(false),
           nInvalidateSkips(0) {}
@@ -620,6 +582,11 @@ struct UpdateStats : public SpecificStats {
 
     // True iff this is a doc-replacement style update, as opposed to a $mod update.
     bool isDocReplacement;
+
+    // A 'fastmod' update is an in-place update that does not have to modify
+    // any indices. It's "fast" because the only work needed is changing the bits
+    // inside the document.
+    bool fastmod;
 
     // A 'fastmodinsert' is an insert resulting from an {upsert: true} update
     // which is a doc-replacement style update. It's "fast" because we don't need
@@ -639,7 +606,7 @@ struct UpdateStats : public SpecificStats {
 };
 
 struct TextStats : public SpecificStats {
-    TextStats() : parsedTextQuery(), textIndexVersion(0) {}
+    TextStats() : parsedTextQuery() {}
 
     SpecificStats* clone() const final {
         TextStats* specific = new TextStats(*this);
@@ -650,8 +617,6 @@ struct TextStats : public SpecificStats {
 
     // Human-readable form of the FTSQuery associated with the text stage.
     BSONObj parsedTextQuery;
-
-    int textIndexVersion;
 
     // Index keys that precede the "text" index key.
     BSONObj indexPrefix;

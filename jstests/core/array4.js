@@ -5,7 +5,9 @@ t.drop();
 t.insert({"a": ["1", "2", "3"]});
 t.insert({"a": ["2", "1"]});
 
-var x = {'a.0': /1/};
+var x = {
+    'a.0': /1/
+};
 
 assert.eq(t.count(x), 1);
 

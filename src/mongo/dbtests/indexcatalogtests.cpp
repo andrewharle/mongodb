@@ -16,29 +16,24 @@
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/collection_catalog_entry.h"
 #include "mongo/db/catalog/index_catalog.h"
-#include "mongo/db/client.h"
 #include "mongo/db/db.h"
 #include "mongo/db/db_raii.h"
+#include "mongo/db/dbhelpers.h"
 #include "mongo/db/index/index_descriptor.h"
+#include "mongo/db/operation_context_impl.h"
 #include "mongo/dbtests/dbtests.h"
 
 namespace IndexCatalogTests {
-namespace {
-const auto kIndexVersion = IndexDescriptor::IndexVersion::kV2;
-}  // namespace
 
 static const char* const _ns = "unittests.indexcatalog";
 
 class IndexIteratorTests {
 public:
     IndexIteratorTests() {
-        const ServiceContext::UniqueOperationContext txnPtr = cc().makeOperationContext();
-        OperationContext& txn = *txnPtr;
+        OperationContextImpl txn;
         ScopedTransaction transaction(&txn, MODE_IX);
         Lock::DBLock lk(txn.lockState(), nsToDatabaseSubstring(_ns), MODE_X);
         OldClientContext ctx(&txn, _ns);
@@ -51,8 +46,7 @@ public:
     }
 
     ~IndexIteratorTests() {
-        const ServiceContext::UniqueOperationContext txnPtr = cc().makeOperationContext();
-        OperationContext& txn = *txnPtr;
+        OperationContextImpl txn;
         ScopedTransaction transaction(&txn, MODE_IX);
         Lock::DBLock lk(txn.lockState(), nsToDatabaseSubstring(_ns), MODE_X);
         OldClientContext ctx(&txn, _ns);
@@ -63,8 +57,7 @@ public:
     }
 
     void run() {
-        const ServiceContext::UniqueOperationContext txnPtr = cc().makeOperationContext();
-        OperationContext& txn = *txnPtr;
+        OperationContextImpl txn;
         OldClientWriteContext ctx(&txn, _ns);
 
         int numFinishedIndexesStart = _catalog->numIndexesReady(&txn);
@@ -106,8 +99,7 @@ private:
 class RefreshEntry {
 public:
     RefreshEntry() {
-        const ServiceContext::UniqueOperationContext txnPtr = cc().makeOperationContext();
-        OperationContext& txn = *txnPtr;
+        OperationContextImpl txn;
         ScopedTransaction transaction(&txn, MODE_IX);
         Lock::DBLock lk(txn.lockState(), nsToDatabaseSubstring(_ns), MODE_X);
         OldClientContext ctx(&txn, _ns);
@@ -120,8 +112,7 @@ public:
     }
 
     ~RefreshEntry() {
-        const ServiceContext::UniqueOperationContext txnPtr = cc().makeOperationContext();
-        OperationContext& txn = *txnPtr;
+        OperationContextImpl txn;
         ScopedTransaction transaction(&txn, MODE_IX);
         Lock::DBLock lk(txn.lockState(), nsToDatabaseSubstring(_ns), MODE_X);
         OldClientContext ctx(&txn, _ns);
@@ -132,18 +123,15 @@ public:
     }
 
     void run() {
-        const ServiceContext::UniqueOperationContext txnPtr = cc().makeOperationContext();
-        OperationContext& txn = *txnPtr;
+        OperationContextImpl txn;
         OldClientWriteContext ctx(&txn, _ns);
         const std::string indexName = "x_1";
 
-        ASSERT_OK(dbtests::createIndexFromSpec(
-            &txn,
-            _ns,
-            BSON("name" << indexName << "ns" << _ns << "key" << BSON("x" << 1) << "v"
-                        << static_cast<int>(kIndexVersion)
-                        << "expireAfterSeconds"
-                        << 5)));
+        ASSERT_OK(dbtests::createIndexFromSpec(&txn,
+                                               _ns,
+                                               BSON("name" << indexName << "ns" << _ns << "key"
+                                                           << BSON("x" << 1) << "expireAfterSeconds"
+                                                           << 5)));
 
         const IndexDescriptor* desc = _catalog->findIndexByName(&txn, indexName);
         ASSERT(desc);

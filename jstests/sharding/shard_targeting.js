@@ -4,10 +4,9 @@
 // BSONObj itself as the query to target shards, which could return wrong
 // shards if the shard key happens to be one of the fields in the command object.
 (function() {
-    'use strict';
 
-    var s = new ShardingTest({shards: 2});
-    assert.commandWorked(s.s0.adminCommand({enablesharding: "test"}));
+    var s = new ShardingTest({name: "shard_targeting", shards: 2});
+    s.adminCommand({enablesharding: "test"});
     s.ensurePrimaryShard('test', 'shard0001');
 
     var db = s.getDB("test");
@@ -25,7 +24,7 @@
         db.foo.insert({count: "" + i});  // chunk ["", MaxKey]
     }
 
-    var theOtherShard = s.getOther(s.getPrimaryShard("test")).name;
+    var theOtherShard = s.getOther(s.getServer("test")).name;
     s.printShardingStatus();
 
     // Count documents on both shards
@@ -40,7 +39,6 @@
     // Target mapreduce command
     //
     db.foo.drop();
-
     // Shard key is the same with command name.
     s.shardColl("foo", {mapReduce: 1}, {mapReduce: ""});
 

@@ -45,8 +45,8 @@ class BSONObjBuilder;
  */
 class SHA1Block {
 public:
-    static constexpr size_t kHashLength = 20;
-    using HashType = std::array<std::uint8_t, kHashLength>;
+    static const size_t kHashLength;  // 20
+    using HashType = std::array<uint8_t, 20>;
 
     SHA1Block() = default;
     SHA1Block(HashType rawHash);
@@ -79,11 +79,9 @@ public:
                             size_t inputLen,
                             SHA1Block* const output);
 
-    const uint8_t* data() const& {
+    const uint8_t* data() const {
         return _hash.data();
     }
-
-    uint8_t* data() const&& = delete;
 
     size_t size() const {
         return _hash.size();

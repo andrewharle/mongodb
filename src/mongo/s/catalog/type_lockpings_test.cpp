@@ -26,8 +26,6 @@
  *    then also delete it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
 #include "mongo/base/status_with.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/s/catalog/type_lockpings.h"

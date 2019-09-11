@@ -55,7 +55,7 @@ void MultiIteratorStage::addIterator(unique_ptr<RecordCursor> it) {
     _iterators.push_back(std::move(it));
 }
 
-PlanStage::StageState MultiIteratorStage::doWork(WorkingSetID* out) {
+PlanStage::StageState MultiIteratorStage::work(WorkingSetID* out) {
     if (_collection == NULL) {
         Status status(ErrorCodes::InternalError, "MultiIteratorStage died on null collection");
         *out = WorkingSetCommon::allocateStatusMember(_ws, status);
@@ -90,9 +90,9 @@ PlanStage::StageState MultiIteratorStage::doWork(WorkingSetID* out) {
 
     *out = _ws->allocate();
     WorkingSetMember* member = _ws->get(*out);
-    member->recordId = record->id;
+    member->loc = record->id;
     member->obj = {getOpCtx()->recoveryUnit()->getSnapshotId(), record->data.releaseToBson()};
-    _ws->transitionToRecordIdAndObj(*out);
+    _ws->transitionToLocAndObj(*out);
     return PlanStage::ADVANCED;
 }
 

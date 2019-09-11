@@ -31,14 +31,13 @@
 #include <cmath>
 #include <string>
 
-#include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/db/fts/fts_spec.h"
+#include "mongo/db/index_names.h"
 #include "mongo/db/index/2d_common.h"
 #include "mongo/db/index/btree_key_generator.h"
 #include "mongo/db/index/expression_keys_private.h"
 #include "mongo/db/index/expression_params.h"
 #include "mongo/db/index/s2_common.h"
-#include "mongo/db/index_names.h"
 #include "mongo/db/jsobj.h"
 
 namespace mongo {
@@ -61,15 +60,8 @@ void getKeysForUpgradeChecking(const BSONObj& infoObj, const BSONObj& doc, BSONO
         ExpressionKeysPrivate::getHaystackKeys(doc, geoField, otherFields, bucketSize, keys);
     } else if (IndexNames::GEO_2DSPHERE == type) {
         S2IndexingParams params;
-        // TODO SERVER-22251: If the index has a collator, it should be passed here, or the keys
-        // generated will be wrong.
-        CollatorInterface* collator = nullptr;
-        ExpressionParams::initialize2dsphereParams(infoObj, collator, &params);
-
-        // There's no need to compute the prefixes of the indexed fields that cause the index to be
-        // multikey when checking if any index key is too large.
-        MultikeyPaths* multikeyPaths = nullptr;
-        ExpressionKeysPrivate::getS2Keys(doc, keyPattern, params, keys, multikeyPaths);
+        ExpressionParams::parse2dsphereParams(infoObj, &params);
+        ExpressionKeysPrivate::getS2Keys(doc, keyPattern, params, keys);
     } else if (IndexNames::TEXT == type) {
         fts::FTSSpec spec(infoObj);
         ExpressionKeysPrivate::getFTSKeys(doc, spec, keys);
@@ -78,11 +70,8 @@ void getKeysForUpgradeChecking(const BSONObj& infoObj, const BSONObj& doc, BSONO
         int version;
         std::string field;
         ExpressionParams::parseHashParams(infoObj, &seed, &version, &field);
-        // TODO SERVER-22251: If the index has a collator, it should be passed here, or the keys
-        // generated will be wrong.
-        CollatorInterface* collator = nullptr;
         ExpressionKeysPrivate::getHashKeys(
-            doc, field, seed, version, infoObj["sparse"].trueValue(), collator, keys);
+            doc, field, seed, version, infoObj["sparse"].trueValue(), keys);
     } else {
         invariant(IndexNames::BTREE == type);
 
@@ -96,13 +85,9 @@ void getKeysForUpgradeChecking(const BSONObj& infoObj, const BSONObj& doc, BSONO
         }
 
         // XXX: do we care about version
-        // TODO: change nullptr to a collator, if a collation spec is given.
-        BtreeKeyGeneratorV1 keyGen(fieldNames, fixed, infoObj["sparse"].trueValue(), nullptr);
+        BtreeKeyGeneratorV1 keyGen(fieldNames, fixed, infoObj["sparse"].trueValue());
 
-        // There's no need to compute the prefixes of the indexed fields that cause the index to be
-        // multikey when checking if any index key is too large.
-        MultikeyPaths* multikeyPaths = nullptr;
-        keyGen.getKeys(doc, keys, multikeyPaths);
+        keyGen.getKeys(doc, keys);
     }
 }
 
@@ -195,7 +180,7 @@ int keyV1Size(const BSONObj& obj) {
 }  // namespace
 
 bool isAnyIndexKeyTooLarge(const BSONObj& index, const BSONObj& doc) {
-    BSONObjSet keys = SimpleBSONObjComparator::kInstance.makeBSONObjSet();
+    BSONObjSet keys;
     getKeysForUpgradeChecking(index, doc, &keys);
 
     int largestKeySize = 0;

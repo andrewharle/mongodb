@@ -11,7 +11,10 @@ if (db.adminCommand("buildinfo").bits == 64) {
     x = 0;
     while (true) {
         var result;
-        n = {_id: x, a: []};
+        n = {
+            _id: x,
+            a: []
+        };
         for (i = 0; i < 14 + x; i++)
             n.a.push(s);
         try {

@@ -11,7 +11,9 @@ var iterations = _isWindows() ? 2500 : 5000;
 
 // fill db
 for (var i = 1; i <= iterations; i++) {
-    var obj = {txt: txt};
+    var obj = {
+        txt: txt
+    };
     asdf.save(obj);
 
     var obj2 = {
@@ -34,7 +36,7 @@ var stats = db.runCommand({collstats: "asdf"});
 // basic
 // testing of the collstats command at the same time
 assert(stats.count == iterations);
-assert(stats.size < 140433012 * 5 && stats.size > 1000000);
+assert(stats.size<140433012 * 5 && stats.size> 1000000);
 assert(stats.numExtents < 20);
 assert(stats.nindexes == 1);
 

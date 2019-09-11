@@ -57,18 +57,24 @@ IndexIteratorStage::IndexIteratorStage(OperationContext* txn,
     invariant(_collection);  // It is illegal to use this stage without a collection.
 }
 
-PlanStage::StageState IndexIteratorStage::doWork(WorkingSetID* out) {
+PlanStage::StageState IndexIteratorStage::work(WorkingSetID* out) {
+    ++_commonStats.works;
+
+    // Adds the amount of time taken by work() to executionTimeMillis.
+    ScopedTimer timer(&_commonStats.executionTimeMillis);
+
     if (auto entry = _cursor->next()) {
         if (!entry->key.isOwned())
             entry->key = entry->key.getOwned();
 
         WorkingSetID id = _ws->allocate();
         WorkingSetMember* member = _ws->get(id);
-        member->recordId = entry->loc;
+        member->loc = entry->loc;
         member->keyData.push_back(IndexKeyDatum(_keyPattern, entry->key, _iam));
-        _ws->transitionToRecordIdAndIdx(id);
+        _ws->transitionToLocAndIdx(id);
 
         *out = id;
+        ++_commonStats.advanced;
         return PlanStage::ADVANCED;
     }
 

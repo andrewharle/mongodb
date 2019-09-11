@@ -62,7 +62,10 @@ var DB;
         // The server selection spec mandates that the key is '$query', but
         // the shell has historically used 'query'. The server accepts both,
         // so we maintain the existing behavior
-        var cmdObjWithReadPref = {query: clonedCmdObj, $readPreference: readPref};
+        var cmdObjWithReadPref = {
+            query: clonedCmdObj,
+            $readPreference: readPref
+        };
         return cmdObjWithReadPref;
     };
 
@@ -230,40 +233,9 @@ var DB;
             options.flags = flags;
         }
 
-        var cmd = {create: name};
-        Object.extend(cmd, options);
-
-        return this._dbCommand(cmd);
-    };
-
-    /**
-     * Command to create a view based on the specified aggregation pipeline.
-     * Usage: db.createView(name, viewOn, pipeline: [{ $operator: {...}}, ... ])
-     *
-     *  @param name String - name of the new view to create
-     *  @param viewOn String - name of the backing view or collection
-     *  @param pipeline [{ $operator: {...}}, ... ] - the aggregation pipeline that defines the view
-     *  @param options { } - options on the view, e.g., collations
-     */
-    DB.prototype.createView = function(name, viewOn, pipeline, opt) {
-        var options = opt || {};
-
-        var cmd = {create: name};
-
-        if (viewOn == undefined) {
-            throw Error("Must specify a backing view or collection");
-        }
-
-        // Since we allow a single stage pipeline to be specified as an object
-        // in aggregation, we need to account for that here for consistency.
-        if (pipeline != undefined) {
-            if (!Array.isArray(pipeline)) {
-                pipeline = [pipeline];
-            }
-        }
-        options.pipeline = pipeline;
-        options.viewOn = viewOn;
-
+        var cmd = {
+            create: name
+        };
         Object.extend(cmd, options);
 
         return this._dbCommand(cmd);
@@ -316,7 +288,9 @@ var DB;
             return "shutdown command only works with the admin database; try 'use admin'";
         }
 
-        var cmd = {'shutdown': 1};
+        var cmd = {
+            'shutdown': 1
+        };
         opts = opts || {};
         for (var o in opts) {
             cmd[o] = opts[o];
@@ -331,7 +305,7 @@ var DB;
         } catch (e) {
             // we expect the command to not return a response, as the server will shut down
             // immediately.
-            if (isNetworkError(e)) {
+            if (e.message.indexOf("error doing query: failed") >= 0) {
                 print('server should be down...');
                 return;
             }
@@ -404,19 +378,10 @@ var DB;
       * @return Object returned has member ok set to true if operation succeeds, false otherwise.
       * See also: db.clone()
     */
-    DB.prototype.copyDatabase = function(
-        fromdb, todb, fromhost, username, password, mechanism, slaveOk) {
+    DB.prototype.copyDatabase = function(fromdb, todb, fromhost, username, password, mechanism) {
         assert(isString(fromdb) && fromdb.length);
         assert(isString(todb) && todb.length);
         fromhost = fromhost || "";
-        if ((typeof username === "boolean") && (typeof password === "undefined") &&
-            (typeof mechanism === "undefined") && (typeof slaveOk === "undefined")) {
-            slaveOk = username;
-            username = undefined;
-        }
-        if (typeof slaveOk !== "boolean") {
-            slaveOk = false;
-        }
 
         if (!mechanism) {
             mechanism = this._getDefaultAuthenticationMechanism();
@@ -425,14 +390,13 @@ var DB;
 
         // Check for no auth or copying from localhost
         if (!username || !password || fromhost == "") {
-            return this._adminCommand(
-                {copydb: 1, fromhost: fromhost, fromdb: fromdb, todb: todb, slaveOk: slaveOk});
+            return this._adminCommand({copydb: 1, fromhost: fromhost, fromdb: fromdb, todb: todb});
         }
 
         // Use the copyDatabase native helper for SCRAM-SHA-1
         if (mechanism == "SCRAM-SHA-1") {
             return this.getMongo().copyDatabaseWithSCRAM(
-                fromdb, todb, fromhost, username, password, slaveOk);
+                fromdb, todb, fromhost, username, password);
         }
 
         // Fall back to MONGODB-CR
@@ -444,8 +408,7 @@ var DB;
             todb: todb,
             username: username,
             nonce: n.nonce,
-            key: this.__pwHash(n.nonce, username, password),
-            slaveOk: slaveOk,
+            key: this.__pwHash(n.nonce, username, password)
         });
     };
 
@@ -467,7 +430,6 @@ var DB;
         print("\tdb.commandHelp(name) returns the help for the command");
         print("\tdb.copyDatabase(fromdb, todb, fromhost)");
         print("\tdb.createCollection(name, { size : ..., capped : ..., max : ... } )");
-        print("\tdb.createView(name, viewOn, [ { $operator: {...}}, ... ], { viewOptions } )");
         print("\tdb.createUser(userDocument)");
         print("\tdb.currentOp() displays currently executing operations in the db");
         print("\tdb.dropDatabase()");
@@ -569,7 +531,9 @@ var DB;
             throw errorObject;
         }
 
-        var cmd = {profile: level};
+        var cmd = {
+            profile: level
+        };
         if (isNumber(slowms))
             cmd["slowms"] = slowms;
         return assert.commandWorked(this._dbCommand(cmd));
@@ -602,9 +566,11 @@ var DB;
     DB.prototype.eval = function(jsfunction) {
         print("WARNING: db.eval is deprecated");
 
-        var cmd = {$eval: jsfunction};
+        var cmd = {
+            $eval: jsfunction
+        };
         if (arguments.length > 1) {
-            cmd.args = Array.from(arguments).slice(1);
+            cmd.args = argumentsToArray(arguments).slice(1);
         }
 
         var res = this._dbCommand(cmd);
@@ -730,14 +696,14 @@ var DB;
             throw _getErrorWithCode(ret, "getlasterror failed: " + tojson(res));
         return res.err;
     };
-    DB.prototype.getLastErrorObj = function(w, wtimeout, j) {
-        var cmd = {getlasterror: 1};
+    DB.prototype.getLastErrorObj = function(w, wtimeout) {
+        var cmd = {
+            getlasterror: 1
+        };
         if (w) {
             cmd.w = w;
             if (wtimeout)
                 cmd.wtimeout = wtimeout;
-            if (j != null)
-                cmd.j = j;
         }
         var res = this.runCommand(cmd);
 
@@ -807,7 +773,7 @@ var DB;
             throw _getErrorWithCode(res, "listCollections failed: " + tojson(res));
         }
 
-        return new DBCommandCursor(res._mongo, res).toArray().sort(compareOn("name"));
+        return new DBCommandCursor(this._mongo, res).toArray().sort(compareOn("name"));
     };
 
     /**
@@ -859,7 +825,9 @@ var DB;
                 q["$all"] = true;
         }
 
-        var commandObj = {"currentOp": 1};
+        var commandObj = {
+            "currentOp": 1
+        };
         Object.extend(commandObj, q);
         var res = this.adminCommand(commandObj);
         if (commandUnsupported(res)) {
@@ -1113,7 +1081,9 @@ var DB;
     };
 
     DB.prototype.serverStatus = function(options) {
-        var cmd = {serverStatus: 1};
+        var cmd = {
+            serverStatus: 1
+        };
         if (options) {
             Object.extend(cmd, options);
         }
@@ -1230,7 +1200,10 @@ var DB;
     /////////////////////////////////////////////
     ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-    var _defaultWriteConcern = {w: 'majority', wtimeout: 10 * 60 * 1000};
+    var _defaultWriteConcern = {
+        w: 'majority',
+        wtimeout: 60 * 1000
+    };
 
     function getUserObjString(userObj) {
         var pwd = userObj.pwd;
@@ -1264,7 +1237,9 @@ var DB;
 
     DB.prototype.createUser = function(userObj, writeConcern) {
         var name = userObj["user"];
-        var cmdObj = {createUser: name};
+        var cmdObj = {
+            createUser: name
+        };
         cmdObj = Object.extend(cmdObj, userObj);
         delete cmdObj["user"];
 
@@ -1324,7 +1299,9 @@ var DB;
     };
 
     DB.prototype.updateUser = function(name, updateObject, writeConcern) {
-        var cmdObj = {updateUser: name};
+        var cmdObj = {
+            updateUser: name
+        };
         cmdObj = Object.extend(cmdObj, updateObject);
         cmdObj['writeConcern'] = writeConcern ? writeConcern : _defaultWriteConcern;
         this._modifyCommandToDigestPasswordIfNecessary(cmdObj, name);
@@ -1435,7 +1412,10 @@ var DB;
     DB.prototype._authOrThrow = function() {
         var params;
         if (arguments.length == 2) {
-            params = {user: arguments[0], pwd: arguments[1]};
+            params = {
+                user: arguments[0],
+                pwd: arguments[1]
+            };
         } else if (arguments.length == 1) {
             if (typeof(arguments[0]) != "object")
                 throw Error("Single-argument form of auth expects a parameter object");
@@ -1510,7 +1490,9 @@ var DB;
         if (typeof username != "string") {
             throw Error("User name for getUser shell helper must be a string");
         }
-        var cmdObj = {usersInfo: username};
+        var cmdObj = {
+            usersInfo: username
+        };
         Object.extend(cmdObj, args);
 
         var res = this.runCommand(cmdObj);
@@ -1525,7 +1507,9 @@ var DB;
     };
 
     DB.prototype.getUsers = function(args) {
-        var cmdObj = {usersInfo: 1};
+        var cmdObj = {
+            usersInfo: 1
+        };
         Object.extend(cmdObj, args);
         var res = this.runCommand(cmdObj);
         if (!res.ok) {
@@ -1544,7 +1528,9 @@ var DB;
 
     DB.prototype.createRole = function(roleObj, writeConcern) {
         var name = roleObj["role"];
-        var cmdObj = {createRole: name};
+        var cmdObj = {
+            createRole: name
+        };
         cmdObj = Object.extend(cmdObj, roleObj);
         delete cmdObj["role"];
         cmdObj["writeConcern"] = writeConcern ? writeConcern : _defaultWriteConcern;
@@ -1558,7 +1544,9 @@ var DB;
     };
 
     DB.prototype.updateRole = function(name, updateObject, writeConcern) {
-        var cmdObj = {updateRole: name};
+        var cmdObj = {
+            updateRole: name
+        };
         cmdObj = Object.extend(cmdObj, updateObject);
         cmdObj['writeConcern'] = writeConcern ? writeConcern : _defaultWriteConcern;
         var res = this.runCommand(cmdObj);
@@ -1650,7 +1638,9 @@ var DB;
         if (typeof rolename != "string") {
             throw Error("Role name for getRole shell helper must be a string");
         }
-        var cmdObj = {rolesInfo: rolename};
+        var cmdObj = {
+            rolesInfo: rolename
+        };
         Object.extend(cmdObj, args);
         var res = this.runCommand(cmdObj);
         if (!res.ok) {
@@ -1664,7 +1654,9 @@ var DB;
     };
 
     DB.prototype.getRoles = function(args) {
-        var cmdObj = {rolesInfo: 1};
+        var cmdObj = {
+            rolesInfo: 1
+        };
         Object.extend(cmdObj, args);
         var res = this.runCommand(cmdObj);
         if (!res.ok) {

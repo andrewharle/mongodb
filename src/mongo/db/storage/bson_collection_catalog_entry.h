@@ -34,7 +34,6 @@
 #include <vector>
 
 #include "mongo/db/catalog/collection_catalog_entry.h"
-#include "mongo/db/index/multikey_paths.h"
 
 namespace mongo {
 
@@ -58,11 +57,7 @@ public:
 
     virtual void getAllIndexes(OperationContext* txn, std::vector<std::string>* names) const;
 
-    virtual void getReadyIndexes(OperationContext* txn, std::vector<std::string>* names) const;
-
-    virtual bool isIndexMultikey(OperationContext* txn,
-                                 StringData indexName,
-                                 MultikeyPaths* multikeyPaths) const;
+    virtual bool isIndexMultikey(OperationContext* txn, StringData indexName) const;
 
     virtual RecordId getIndexHead(OperationContext* txn, StringData indexName) const;
 
@@ -86,11 +81,8 @@ public:
         RecordId head;
         bool multikey;
 
-        // If non-empty, 'multikeyPaths' is a vector with size equal to the number of elements in
-        // the index key pattern. Each element in the vector is an ordered set of positions
-        // (starting at 0) into the corresponding indexed field that represent what prefixes of the
-        // indexed field cause the index to be multikey.
-        MultikeyPaths multikeyPaths;
+        // Set to true if the index metadata has path-level multikey information.
+        bool hasMultikeyPaths = false;
     };
 
     struct MetaData {

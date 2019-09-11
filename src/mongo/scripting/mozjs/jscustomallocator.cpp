@@ -29,12 +29,12 @@
 #include "mongo/platform/basic.h"
 
 #include <cstddef>
-#include <jscustomallocator.h>
 #include <type_traits>
+#include <jscustomallocator.h>
 
 #include "mongo/config.h"
-#include "mongo/scripting/mozjs/implscope.h"
 #include "mongo/util/concurrency/threadlocal.h"
+#include "mongo/scripting/mozjs/implscope.h"
 
 #ifdef __linux__
 #include <malloc.h>
@@ -44,10 +44,6 @@
 #include <malloc.h>
 #else
 #define MONGO_NO_MALLOC_USABLE_SIZE
-#endif
-
-#if !defined(__has_feature)
-#define __has_feature(x) 0
 #endif
 
 /**
@@ -118,8 +114,9 @@ void* wrap_alloc(T&& func, void* ptr, size_t bytes) {
 
     if (mb && (tb + bytes > mb)) {
         auto scope = mongo::mozjs::MozJSImplScope::getThreadScope();
-        if (scope)
-            scope->setOOM();
+        invariant(scope);
+
+        scope->setOOM();
 
         // We fall through here because we want to let spidermonkey continue
         // with whatever it was doing.  Calling setOOM will fail the top level
@@ -127,39 +124,9 @@ void* wrap_alloc(T&& func, void* ptr, size_t bytes) {
     }
 
 #ifdef MONGO_NO_MALLOC_USABLE_SIZE
-    ptr = ptr ? static_cast<char*>(ptr) - kMaxAlign : nullptr;
-#endif
-
-#ifdef MONGO_NO_MALLOC_USABLE_SIZE
-    void* p = func(ptr, bytes + kMaxAlign);
+    void* p = func(ptr ? static_cast<char*>(ptr) - kMaxAlign : nullptr, bytes + kMaxAlign);
 #else
     void* p = func(ptr, bytes);
-#endif
-
-#if __has_feature(address_sanitizer)
-    {
-        auto handles = mongo::mozjs::MozJSImplScope::ASANHandles::getThreadASANHandles();
-
-        if (handles) {
-            if (bytes) {
-                if (ptr) {
-                    // realloc
-                    if (ptr != p) {
-                        // actually moved the allocation
-                        handles->removePointer(ptr);
-                        handles->addPointer(p);
-                    }
-                    // else we didn't need to realloc, don't have to register
-                } else {
-                    // malloc/calloc
-                    handles->addPointer(p);
-                }
-            } else {
-                // free
-                handles->removePointer(ptr);
-            }
-        }
-    }
 #endif
 
     if (!p) {
@@ -222,13 +189,10 @@ void js_free(void* p) {
         mongo::sm::total_bytes = tb - current;
     }
 
-    mongo::sm::wrap_alloc(
-        [](void* ptr, size_t b) {
-            std::free(ptr);
-            return nullptr;
-        },
-        p,
-        0);
+    mongo::sm::wrap_alloc([](void* ptr, size_t b) {
+        std::free(ptr);
+        return nullptr;
+    }, p, 0);
 }
 
 void* js_realloc(void* p, size_t bytes) {

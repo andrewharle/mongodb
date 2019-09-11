@@ -43,8 +43,9 @@
 #include "mongo/db/catalog/index_create.h"
 #include "mongo/db/client.h"
 #include "mongo/db/db_raii.h"
-#include "mongo/db/instance.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/instance.h"
+#include "mongo/db/operation_context_impl.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/util/log.h"
 #include "mongo/util/scopeguard.h"
@@ -127,7 +128,7 @@ void checkNS(OperationContext* txn, const std::list<std::string>& nsToCheck) {
             indexer.commit();
             wunit.commit();
         } catch (const DBException& e) {
-            error() << "Index rebuilding did not complete: " << redact(e);
+            error() << "Index rebuilding did not complete: " << e.toString();
             log() << "note: restart the server with --noIndexBuildRetry to skip index rebuilds";
             // If anything went wrong, leave the indexes partially built so that we pick them up
             // again on restart.
@@ -164,9 +165,9 @@ void restartInProgressIndexesFromLastShutdown(OperationContext* txn) {
         }
         checkNS(txn, collNames);
     } catch (const DBException& e) {
-        error() << "Index verification did not complete: " << redact(e);
+        error() << "Index verification did not complete: " << e.toString();
         fassertFailedNoTrace(18643);
     }
-    LOG(1) << "checking complete";
+    LOG(1) << "checking complete" << endl;
 }
 }

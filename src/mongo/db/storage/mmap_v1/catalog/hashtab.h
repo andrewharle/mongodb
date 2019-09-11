@@ -28,10 +28,9 @@
 
 #pragma once
 
-#include "mongo/base/static_assert.h"
-#include "mongo/db/operation_context.h"
 #include "mongo/db/storage/mmap_v1/catalog/namespace.h"
 #include "mongo/db/storage/mmap_v1/catalog/namespace_details.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/stdx/functional.h"
 
 namespace mongo {
@@ -117,7 +116,7 @@ private:
     };
 #pragma pack()
 
-    MONGO_STATIC_ASSERT(sizeof(Node) == 628);
+    static_assert(sizeof(Node) == 628, "sizeof(Node) == 628");
 
 
     int _find(const Namespace& k, bool& found) const;

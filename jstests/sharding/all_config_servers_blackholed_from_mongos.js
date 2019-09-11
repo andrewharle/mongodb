@@ -4,6 +4,7 @@
     'use strict';
 
     var st = new ShardingTest({
+        name: 'all_config_servers_blackholed_from_mongos',
         shards: 2,
         mongos: 1,
         useBridge: true,
@@ -27,14 +28,13 @@
     // This shouldn't stall
     jsTest.log('Doing read operation on the sharded collection');
     assert.throws(function() {
-        testDB.ShardedColl.find({}).maxTimeMS(15000).itcount();
+        testDB.ShardedColl.find({}).itcount();
     });
 
     // This should fail, because the primary is not available
     jsTest.log('Doing write operation on a new database and collection');
     assert.writeError(st.s.getDB('NonExistentDB')
-                          .TestColl.insert({_id: 0, value: 'This value will never be inserted'},
-                                           {maxTimeMS: 15000}));
+                          .TestColl.insert({_id: 0, value: 'This value will never be inserted'}));
 
     st.stop();
 

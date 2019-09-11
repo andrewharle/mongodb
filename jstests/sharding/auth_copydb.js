@@ -1,8 +1,7 @@
 // Tests the copydb command on mongos with auth
-(function() {
-    'use strict';
+var runTest = function() {
 
-    var st = new ShardingTest({shards: 1, mongos: 1, other: {keyFile: 'jstests/libs/key1'}});
+    var st = new ShardingTest({shards: 1, mongos: 1, keyFile: "jstests/libs/key1"});
     var mongos = st.s0;
     var destAdminDB = mongos.getDB('admin');
     var destTestDB = mongos.getDB('test');
@@ -37,4 +36,7 @@
     assert.eq(1, destTestDB.foo.findOne().a);
 
     st.stop();
-})();
+
+};
+
+runTest();

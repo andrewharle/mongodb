@@ -33,6 +33,7 @@
 #include "mongo/config.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/scopeguard.h"
 
 #ifndef MONGO_CONFIG_SSL
 #error This file should only be included in SSL-enabled builds
@@ -69,13 +70,14 @@ namespace mongo {
 SHA1Block SHA1Block::computeHash(const uint8_t* input, size_t inputLen) {
     HashType output;
 
-    std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> digestCtx(EVP_MD_CTX_new(),
-                                                                      EVP_MD_CTX_free);
+    EVP_MD_CTX digestCtx;
+    EVP_MD_CTX_init(&digestCtx);
+    ON_BLOCK_EXIT(EVP_MD_CTX_cleanup, &digestCtx);
 
     fassert(40379,
-            EVP_DigestInit_ex(digestCtx.get(), EVP_sha1(), NULL) == 1 &&
-                EVP_DigestUpdate(digestCtx.get(), input, inputLen) == 1 &&
-                EVP_DigestFinal_ex(digestCtx.get(), output.data(), NULL) == 1);
+            EVP_DigestInit_ex(&digestCtx, EVP_sha1(), NULL) == 1 &&
+                EVP_DigestUpdate(&digestCtx, input, inputLen) == 1 &&
+                EVP_DigestFinal_ex(&digestCtx, output.data(), NULL) == 1);
     return SHA1Block(output);
 }
 

@@ -10,7 +10,6 @@ env.Library(
     ],
     LIBDEPS = [
         "$BUILD_DIR/mongo/base",
-        "$BUILD_DIR/mongo/db/bson/dotted_path_support",
         "$BUILD_DIR/mongo/db/service_context",
     ],
 )
@@ -78,25 +77,12 @@ env.Library(
         "text_or.cpp",
         "update.cpp",
         "working_set_common.cpp",
-        "write_stage_common.cpp",
     ],
     LIBDEPS = [
         "scoped_timer",
         "working_set",
         "$BUILD_DIR/mongo/base",
-        "$BUILD_DIR/mongo/db/bson/dotted_path_support",
-        "$BUILD_DIR/mongo/db/concurrency/write_conflict_exception",
-        "$BUILD_DIR/mongo/db/commands",
-        "$BUILD_DIR/mongo/db/curop",
-        "$BUILD_DIR/mongo/db/fts/base",
-        "$BUILD_DIR/mongo/db/index/index_descriptor",
-        "$BUILD_DIR/mongo/db/index/key_generator",
         "$BUILD_DIR/mongo/db/ops/update_driver",
-        "$BUILD_DIR/mongo/db/pipeline/pipeline",
-        "$BUILD_DIR/mongo/db/repl/repl_coordinator_global",
-        "$BUILD_DIR/mongo/scripting/scripting",
-        "$BUILD_DIR/mongo/db/storage/storage_options",
-        "$BUILD_DIR/mongo/s/common",
         '$BUILD_DIR/third_party/s2/s2',
     ],
     LIBDEPS_TAGS=[
@@ -114,8 +100,9 @@ env.CppUnitTest(
         "exec",
         "$BUILD_DIR/mongo/db/serveronly",
         "$BUILD_DIR/mongo/dbtests/mocklib",
-        "$BUILD_DIR/mongo/util/clock_source_mock",
+        "$BUILD_DIR/mongo/util/ntservice_mock",
     ],
+    NO_CRUTCH = True,
 )
 
 env.CppUnitTest(
@@ -127,10 +114,9 @@ env.CppUnitTest(
         "exec",
         "$BUILD_DIR/mongo/db/serveronly",
         "$BUILD_DIR/mongo/dbtests/mocklib",
-        "$BUILD_DIR/mongo/db/query/collation/collator_factory_mock",
-        "$BUILD_DIR/mongo/db/query/collation/collator_interface_mock",
-        "$BUILD_DIR/mongo/util/clock_source_mock",
+        "$BUILD_DIR/mongo/util/ntservice_mock",
     ],
+    NO_CRUTCH = True,
 )
 
 env.CppUnitTest(
@@ -139,8 +125,9 @@ env.CppUnitTest(
         "projection_exec_test.cpp",
     ],
     LIBDEPS = [
-        "$BUILD_DIR/mongo/db/query/collation/collator_interface_mock",
-        "$BUILD_DIR/mongo/db/serveronly",
         "exec",
+        "$BUILD_DIR/mongo/db/serveronly",
+        "$BUILD_DIR/mongo/util/ntservice_mock",
     ],
+    NO_CRUTCH = True,
 )

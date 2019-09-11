@@ -72,7 +72,12 @@ var $config = (function() {
             assertWhenOwnColl.eq(indexesCount, this.nIndexes);
         }
 
-        return {init: init, collectionSetup: collectionSetup, compact: compact, query: query};
+        return {
+            init: init,
+            collectionSetup: collectionSetup,
+            compact: compact,
+            query: query
+        };
     })();
 
     var transitions = {
@@ -87,27 +92,12 @@ var $config = (function() {
         dropCollections(db, pattern);
     };
 
-    var skip = function skip(cluster) {
-        if (cluster.isRunningWiredTigerLSM()) {
-            // There is a known hang during concurrent FSM workloads with the compact command used
-            // with wiredTiger LSM variants. Bypass this command for the wiredTiger LSM variant
-            // until a fix is available for WT-2523.
-            return {
-                skip: true,
-                msg: 'WT-2523: compact command can cause hang using WT LSM index during ' +
-                    'concurrent workloads'
-            };
-        }
-        return {skip: false};
-    };
-
     return {
         threadCount: 15,
         iterations: 10,
         states: states,
         transitions: transitions,
         teardown: teardown,
-        data: data,
-        skip: skip
+        data: data
     };
 })();

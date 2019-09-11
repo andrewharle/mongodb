@@ -36,33 +36,13 @@ namespace mongo {
 
 using std::string;
 
-MessagingPortMock::MessagingPortMock() : AbstractMessagingPort(), _x509PeerInfo() {}
+MessagingPortMock::MessagingPortMock() : AbstractMessagingPort() {}
 MessagingPortMock::~MessagingPortMock() {}
 
-void MessagingPortMock::setTimeout(Milliseconds millis) {}
 
-void MessagingPortMock::shutdown() {}
-
-bool MessagingPortMock::call(Message& toSend, Message& response) {
-    return true;
-}
-
-bool MessagingPortMock::recv(Message& m) {
-    return true;
-}
-
-void MessagingPortMock::reply(Message& received, Message& response, int32_t responseToMsgId) {}
 void MessagingPortMock::reply(Message& received, Message& response) {}
 
-void MessagingPortMock::say(Message& toSend, int responseTo) {}
-void MessagingPortMock::say(const Message& toSend) {}
-
-bool MessagingPortMock::connect(SockAddr& farEnd) {
-    return true;
-}
-
-void MessagingPortMock::send(const char* data, int len, const char* context) {}
-void MessagingPortMock::send(const std::vector<std::pair<char*, int>>& data, const char* context) {}
+void MessagingPortMock::reply(Message& received, Message& response, MSGID responseTo) {}
 
 HostAndPort MessagingPortMock::remote() const {
     return _remote;
@@ -78,49 +58,6 @@ SockAddr MessagingPortMock::remoteAddr() const {
 
 SockAddr MessagingPortMock::localAddr() const {
     return SockAddr{};
-}
-
-bool MessagingPortMock::isStillConnected() const {
-    return true;
-}
-
-void MessagingPortMock::setLogLevel(logger::LogSeverity logLevel) {}
-
-void MessagingPortMock::clearCounters() {}
-
-long long MessagingPortMock::getBytesIn() const {
-    return 0;
-}
-
-long long MessagingPortMock::getBytesOut() const {
-    return 0;
-}
-
-
-uint64_t MessagingPortMock::getSockCreationMicroSec() const {
-    return 0;
-}
-
-void MessagingPortMock::setX509PeerInfo(SSLPeerInfo x509PeerInfo) {}
-
-const SSLPeerInfo& MessagingPortMock::getX509PeerInfo() const {
-    return _x509PeerInfo;
-}
-
-void MessagingPortMock::setConnectionId(const long long connectionId) {}
-
-long long MessagingPortMock::connectionId() const {
-    return 42;
-}
-
-void MessagingPortMock::setTag(const AbstractMessagingPort::Tag tag) {}
-
-AbstractMessagingPort::Tag MessagingPortMock::getTag() const {
-    return 0;
-}
-
-bool MessagingPortMock::secure(SSLManagerInterface* ssl, const std::string& remoteHost) {
-    return true;
 }
 
 void MessagingPortMock::setRemote(const HostAndPort& remote) {

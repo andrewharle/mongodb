@@ -36,9 +36,8 @@
 #include "mongo/base/string_data.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/db/server_options.h"
-#include "mongo/util/assert_util.h"
 #include "mongo/util/mongoutils/str.h"
-#include "mongo/util/stringutils.h"
+#include "mongo/util/assert_util.h"
 
 namespace mongo {
 
@@ -95,9 +94,7 @@ void HostAndPort::append(StringBuilder& ss) const {
     } else {
         ss << host();
     }
-    if (host().find('/') == std::string::npos) {
-        ss << ':' << port();
-    }
+    ss << ':' << port();
 }
 
 bool HostAndPort::empty() const {
@@ -126,18 +123,11 @@ Status HostAndPort::initialize(StringData s) {
         hostPart = s.substr(openBracketPos + 1, closeBracketPos - openBracketPos - 1);
         // prevent accidental assignment of port to the value of the final portion of hostPart
         if (colonPos < closeBracketPos) {
-            // If the last colon is inside the brackets, then there must not be a port.
-            if (s.size() != closeBracketPos + 1) {
-                return Status(ErrorCodes::FailedToParse,
-                              str::stream() << "missing colon after ']' before the port in "
-                                            << s.toString());
-            }
             colonPos = std::string::npos;
         } else if (colonPos != closeBracketPos + 1) {
             return Status(ErrorCodes::FailedToParse,
                           str::stream() << "Extraneous characters between ']' and pre-port ':'"
-                                        << " in "
-                                        << s.toString());
+                                        << " in " << s.toString());
         }
     } else if (closeBracketPos != std::string::npos) {
         return Status(ErrorCodes::FailedToParse,
@@ -152,8 +142,7 @@ Status HostAndPort::initialize(StringData s) {
     if (hostPart.empty()) {
         return Status(ErrorCodes::FailedToParse,
                       str::stream() << "Empty host component parsing HostAndPort from \""
-                                    << escape(s.toString())
-                                    << "\"");
+                                    << escape(s.toString()) << "\"");
     }
 
     int port;
@@ -163,12 +152,11 @@ Status HostAndPort::initialize(StringData s) {
         if (!status.isOK()) {
             return status;
         }
-        if (port <= 0 || port > 65535) {
+        if (port <= 0) {
             return Status(ErrorCodes::FailedToParse,
                           str::stream() << "Port number " << port
                                         << " out of range parsing HostAndPort from \""
-                                        << escape(s.toString())
-                                        << "\"");
+                                        << escape(s.toString()) << "\"");
         }
     } else {
         port = -1;
@@ -187,10 +175,10 @@ StringBuilderImpl<Allocator>& operator<<(StringBuilderImpl<Allocator>& os, const
     return os << hp.toString();
 }
 
+template StringBuilderImpl<TrivialAllocator>& operator<<(StringBuilderImpl<TrivialAllocator>&,
+                                                         const HostAndPort&);
 template StringBuilderImpl<StackAllocator>& operator<<(StringBuilderImpl<StackAllocator>&,
                                                        const HostAndPort&);
-template StringBuilderImpl<SharedBufferAllocator>& operator<<(
-    StringBuilderImpl<SharedBufferAllocator>&, const HostAndPort&);
 
 }  // namespace mongo
 

@@ -35,8 +35,8 @@
 #include "mongo/bson/util/builder.h"
 #include "mongo/client/dbclientinterface.h"
 #include "mongo/db/auth/action_set.h"
-#include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/resource_pattern.h"
+#include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/cloner.h"
@@ -44,12 +44,14 @@
 #include "mongo/db/commands/copydb.h"
 #include "mongo/db/commands/rename_collection.h"
 #include "mongo/db/db.h"
+#include "mongo/db/dbhelpers.h"
 #include "mongo/db/index_builder.h"
 #include "mongo/db/instance.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/ops/insert.h"
 #include "mongo/db/repl/isself.h"
+#include "mongo/db/operation_context_impl.h"
+#include "mongo/db/ops/insert.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/util/log.h"
 
@@ -68,16 +70,15 @@ public:
         return false;
     }
 
-
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
-        return true;
+    virtual bool isWriteCommandForConfigServer() const {
+        return false;
     }
 
     virtual std::string parseNs(const std::string& dbname, const BSONObj& cmdObj) const {
         return parseNsFullyQualified(dbname, cmdObj);
     }
 
-    virtual Status checkAuthForCommand(Client* client,
+    virtual Status checkAuthForCommand(ClientBasic* client,
                                        const std::string& dbname,
                                        const BSONObj& cmdObj) {
         std::string ns = parseNs(dbname, cmdObj);
@@ -122,7 +123,7 @@ public:
 
         {
             HostAndPort h(fromhost);
-            if (repl::isSelf(h, txn->getServiceContext())) {
+            if (repl::isSelf(h)) {
                 errmsg = "can't cloneCollection from self";
                 return false;
             }
@@ -142,13 +143,13 @@ public:
         bool copyIndexes = copyIndexesSpec.isBoolean() ? copyIndexesSpec.boolean() : true;
 
         log() << "cloneCollection.  db:" << dbname << " collection:" << collection
-              << " from: " << fromhost << " query: " << redact(query) << " "
-              << (copyIndexes ? "" : ", not copying indexes");
+              << " from: " << fromhost << " query: " << query << " "
+              << (copyIndexes ? "" : ", not copying indexes") << endl;
 
         Cloner cloner;
         unique_ptr<DBClientConnection> myconn;
         myconn.reset(new DBClientConnection());
-        if (!myconn->connect(HostAndPort(fromhost), StringData(), errmsg))
+        if (!myconn->connect(HostAndPort(fromhost), errmsg))
             return false;
 
         cloner.setConnection(myconn.release());

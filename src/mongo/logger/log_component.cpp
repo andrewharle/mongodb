@@ -29,8 +29,8 @@
 
 #include "mongo/logger/log_component.h"
 
+
 #include "mongo/base/init.h"
-#include "mongo/base/static_assert.h"
 #include "mongo/util/assert_util.h"
 
 namespace mongo {
@@ -42,12 +42,20 @@ namespace {
 // Lazily evaluated in LogComponent::getDottedName().
 std::string _dottedNames[LogComponent::kNumLogComponents + 1];
 
+/**
+ * Returns StringData created from a string literal
+ */
+template <size_t N>
+StringData createStringData(const char(&val)[N]) {
+    return StringData(val, StringData::LiteralTag());
+}
+
 //
 // Fully initialize _dottedNames before we enter multithreaded execution.
 //
 
-MONGO_INITIALIZER_WITH_PREREQUISITES(SetupDottedNames, MONGO_NO_PREREQUISITES)
-(InitializerContext* context) {
+MONGO_INITIALIZER_WITH_PREREQUISITES(SetupDottedNames,
+                                     MONGO_NO_PREREQUISITES)(InitializerContext* context) {
     for (int i = 0; i <= int(LogComponent::kNumLogComponents); ++i) {
         logger::LogComponent component = static_cast<logger::LogComponent::Value>(i);
         component.getDottedName();
@@ -61,11 +69,11 @@ MONGO_INITIALIZER_WITH_PREREQUISITES(SetupDottedNames, MONGO_NO_PREREQUISITES)
 // Children always come after parent component.
 // This makes it unnecessary to compute children of each component
 // when setting/clearing log severities in LogComponentSettings.
-#define DECLARE_LOG_COMPONENT_PARENT(CHILD, PARENT)        \
-    case (CHILD):                                          \
-        do {                                               \
-            MONGO_STATIC_ASSERT(int(CHILD) > int(PARENT)); \
-            return (PARENT);                               \
+#define DECLARE_LOG_COMPONENT_PARENT(CHILD, PARENT)                              \
+    case (CHILD):                                                                \
+        do {                                                                     \
+            static_assert(int(CHILD) > int(PARENT), "int(CHILD) > int(PARENT)"); \
+            return (PARENT);                                                     \
         } while (0)
 
 LogComponent LogComponent::parent() const {
@@ -86,43 +94,41 @@ LogComponent LogComponent::parent() const {
 StringData LogComponent::toStringData() const {
     switch (_value) {
         case kDefault:
-            return "default"_sd;
+            return createStringData("default");
         case kAccessControl:
-            return "accessControl"_sd;
+            return createStringData("accessControl");
         case kCommand:
-            return "command"_sd;
+            return createStringData("command");
         case kControl:
-            return "control"_sd;
+            return createStringData("control");
         case kExecutor:
-            return "executor"_sd;
+            return createStringData("executor");
         case kGeo:
-            return "geo"_sd;
+            return createStringData("geo");
         case kIndex:
-            return "index"_sd;
+            return createStringData("index");
         case kNetwork:
-            return "network"_sd;
+            return createStringData("network");
         case kQuery:
-            return "query"_sd;
+            return createStringData("query");
         case kReplication:
-            return "replication"_sd;
+            return createStringData("replication");
         case kSharding:
-            return "sharding"_sd;
+            return createStringData("sharding");
         case kStorage:
-            return "storage"_sd;
+            return createStringData("storage");
         case kJournal:
-            return "journal"_sd;
+            return createStringData("journal");
         case kWrite:
-            return "write"_sd;
+            return createStringData("write");
         case kFTDC:
-            return "ftdc"_sd;
+            return createStringData("ftdc");
         case kASIO:
-            return "asio"_sd;
+            return createStringData("asio");
         case kBridge:
-            return "bridge"_sd;
-        case kTracking:
-            return "tracking"_sd;
+            return createStringData("bridge");
         case kNumLogComponents:
-            return "total"_sd;
+            return createStringData("total");
             // No default. Compiler should complain if there's a log component that's not handled.
     }
     invariant(false);
@@ -158,43 +164,41 @@ std::string LogComponent::getDottedName() const {
 StringData LogComponent::getNameForLog() const {
     switch (_value) {
         case kDefault:
-            return "-       "_sd;
+            return createStringData("-       ");
         case kAccessControl:
-            return "ACCESS  "_sd;
+            return createStringData("ACCESS  ");
         case kCommand:
-            return "COMMAND "_sd;
+            return createStringData("COMMAND ");
         case kControl:
-            return "CONTROL "_sd;
+            return createStringData("CONTROL ");
         case kExecutor:
-            return "EXECUTOR"_sd;
+            return createStringData("EXECUTOR");
         case kGeo:
-            return "GEO     "_sd;
+            return createStringData("GEO     ");
         case kIndex:
-            return "INDEX   "_sd;
+            return createStringData("INDEX   ");
         case kNetwork:
-            return "NETWORK "_sd;
+            return createStringData("NETWORK ");
         case kQuery:
-            return "QUERY   "_sd;
+            return createStringData("QUERY   ");
         case kReplication:
-            return "REPL    "_sd;
+            return createStringData("REPL    ");
         case kSharding:
-            return "SHARDING"_sd;
+            return createStringData("SHARDING");
         case kStorage:
-            return "STORAGE "_sd;
+            return createStringData("STORAGE ");
         case kJournal:
-            return "JOURNAL "_sd;
+            return createStringData("JOURNAL ");
         case kWrite:
-            return "WRITE   "_sd;
+            return createStringData("WRITE   ");
         case kFTDC:
-            return "FTDC    "_sd;
+            return createStringData("FTDC    ");
         case kASIO:
-            return "ASIO    "_sd;
+            return createStringData("ASIO    ");
         case kBridge:
-            return "BRIDGE  "_sd;
-        case kTracking:
-            return "TRACKING"_sd;
+            return createStringData("BRIDGE  ");
         case kNumLogComponents:
-            return "TOTAL   "_sd;
+            return createStringData("TOTAL   ");
             // No default. Compiler should complain if there's a log component that's not handled.
     }
     invariant(false);

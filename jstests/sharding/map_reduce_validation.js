@@ -13,7 +13,7 @@ assert.commandFailed(testDB.runCommand(
     {mapReduce: 'user', map: mapFunc, reduce: reduceFunc, out: {inline: 1, sharded: true}}));
 
 testDB.bar.insert({i: 1});
-assert.commandFailedWithCode(testDB.runCommand({
+assert.commandFailed(testDB.runCommand({
     mapReduce: 'bar',
     map: function() {
         emit(this.i, this.i * 3);
@@ -22,10 +22,9 @@ assert.commandFailedWithCode(testDB.runCommand({
         return Array.sum(values);
     },
     out: {replace: "foo", db: "admin"}
-}),
-                             ErrorCodes.CommandNotSupported);
+}));
 
-assert.commandFailedWithCode(testDB.runCommand({
+assert.commandFailed(testDB.runCommand({
     mapReduce: 'bar',
     map: function() {
         emit(this.i, this.i * 3);
@@ -34,8 +33,7 @@ assert.commandFailedWithCode(testDB.runCommand({
         return Array.sum(values);
     },
     out: {replace: "foo", db: "config"}
-}),
-                             ErrorCodes.CommandNotSupported);
+}));
 
 assert.commandWorked(testDB.runCommand({
     mapReduce: 'bar',

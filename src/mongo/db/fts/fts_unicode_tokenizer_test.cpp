@@ -26,8 +26,6 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/fts/fts_language.h"
 #include "mongo/db/fts/fts_unicode_tokenizer.h"
 #include "mongo/unittest/unittest.h"

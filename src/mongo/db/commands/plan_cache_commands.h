@@ -64,7 +64,7 @@ public:
              std::string& errmsg,
              BSONObjBuilder& result);
 
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override;
+    virtual bool isWriteCommandForConfigServer() const;
 
     virtual bool slaveOk() const;
 
@@ -77,7 +77,7 @@ public:
      * - planCacheRead
      * - planCacheWrite
      */
-    virtual Status checkAuthForCommand(Client* client,
+    virtual Status checkAuthForCommand(ClientBasic* client,
                                        const std::string& dbname,
                                        const BSONObj& cmdObj);
     /**

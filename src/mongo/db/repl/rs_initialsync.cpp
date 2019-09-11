@@ -32,8 +32,6 @@
 
 #include "mongo/db/repl/rs_initialsync.h"
 
-#include <memory>
-
 #include "mongo/bson/timestamp.h"
 #include "mongo/bson/util/bson_extract.h"
 #include "mongo/db/auth/authorization_manager.h"
@@ -42,29 +40,24 @@
 #include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/client.h"
 #include "mongo/db/cloner.h"
-#include "mongo/db/commands/list_collections_filter.h"
-#include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/db_raii.h"
+#include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/dbhelpers.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/op_observer.h"
+#include "mongo/db/operation_context_impl.h"
+#include "mongo/db/operation_context_impl.h"
 #include "mongo/db/repl/bgsync.h"
 #include "mongo/db/repl/initial_sync.h"
-#include "mongo/db/repl/initial_syncer.h"
+#include "mongo/db/repl/minvalid.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/oplogreader.h"
 #include "mongo/db/repl/repl_client_info.h"
-#include "mongo/db/repl/replication_coordinator_external_state.h"
 #include "mongo/db/repl/replication_coordinator_global.h"
-#include "mongo/db/repl/storage_interface.h"
-#include "mongo/db/server_parameters.h"
-#include "mongo/db/service_context.h"
-#include "mongo/stdx/memory.h"
 #include "mongo/util/exit.h"
 #include "mongo/util/fail_point_service.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
-#include "mongo/util/net/socket_exception.h"
-#include "mongo/util/scopeguard.h"
 
 namespace mongo {
 namespace repl {
@@ -73,9 +66,13 @@ namespace {
 using std::list;
 using std::string;
 
-const auto kInitialSyncMaxConnectRetries = 10;
+// Failpoint which fails initial sync and leaves on oplog entry in the buffer.
+MONGO_FP_DECLARE(failInitSyncWithBufferedEntriesLeft);
 
-MONGO_EXPORT_SERVER_PARAMETER(num3Dot2InitialSyncAttempts, int, 10);
+// Failpoint which causes the initial sync function to hang before copying databases.
+MONGO_FP_DECLARE(initialSyncHangBeforeCopyingDatabases);
+
+MONGO_FP_DECLARE(initialSyncHangBeforeOplogVisibility);
 
 /**
  * Truncates the oplog (removes any documents) and resets internal variables that were
@@ -87,9 +84,8 @@ MONGO_EXPORT_SERVER_PARAMETER(num3Dot2InitialSyncAttempts, int, 10);
 void truncateAndResetOplog(OperationContext* txn,
                            ReplicationCoordinator* replCoord,
                            BackgroundSync* bgsync) {
-
     // Add field to minvalid document to tell us to restart initial sync if we crash
-    StorageInterface::get(txn)->setInitialSyncFlag(txn);
+    setInitialSyncFlag(txn);
 
     AutoGetDb autoDb(txn, "local", MODE_X);
     massert(28585, "no local database found", autoDb.getDb());
@@ -102,9 +98,8 @@ void truncateAndResetOplog(OperationContext* txn,
     // We must clear the sync source blacklist after calling stop()
     // because the bgsync thread, while running, may update the blacklist.
     replCoord->resetMyLastOpTimes();
-    bgsync->stop(true);
-    bgsync->startProducerIfStopped();
-    bgsync->clearBuffer(txn);
+    bgsync->stop();
+    bgsync->clearBuffer();
 
     replCoord->clearSyncSourceBlacklist();
 
@@ -118,6 +113,60 @@ void truncateAndResetOplog(OperationContext* txn,
         wunit.commit();
     }
     MONGO_WRITE_CONFLICT_RETRY_LOOP_END(txn, "truncate", collection->ns().ns());
+}
+
+/**
+ * Confirms that the "admin" database contains a supported version of the auth
+ * data schema.  Terminates the process if the "admin" contains clearly incompatible
+ * auth data.
+ */
+void checkAdminDatabasePostClone(OperationContext* txn, Database* adminDb) {
+    // Assumes txn holds MODE_X or MODE_S lock on "admin" database.
+    if (!adminDb) {
+        return;
+    }
+    Collection* const usersCollection =
+        adminDb->getCollection(AuthorizationManager::usersCollectionNamespace);
+    const bool hasUsers =
+        usersCollection && !Helpers::findOne(txn, usersCollection, BSONObj(), false).isNull();
+    Collection* const adminVersionCollection =
+        adminDb->getCollection(AuthorizationManager::versionCollectionNamespace);
+    BSONObj authSchemaVersionDocument;
+    if (!adminVersionCollection ||
+        !Helpers::findOne(txn,
+                          adminVersionCollection,
+                          AuthorizationManager::versionDocumentQuery,
+                          authSchemaVersionDocument)) {
+        if (!hasUsers) {
+            // It's OK to have no auth version document if there are no user documents.
+            return;
+        }
+        severe() << "During initial sync, found documents in "
+                 << AuthorizationManager::usersCollectionNamespace
+                 << " but could not find an auth schema version document in "
+                 << AuthorizationManager::versionCollectionNamespace;
+        severe() << "This indicates that the primary of this replica set was not successfully "
+                    "upgraded to schema version " << AuthorizationManager::schemaVersion26Final
+                 << ", which is the minimum supported schema version in this version of MongoDB";
+        fassertFailedNoTrace(28620);
+    }
+    long long foundSchemaVersion;
+    Status status = bsonExtractIntegerField(authSchemaVersionDocument,
+                                            AuthorizationManager::schemaVersionFieldName,
+                                            &foundSchemaVersion);
+    if (!status.isOK()) {
+        severe() << "During initial sync, found malformed auth schema version document: " << status
+                 << "; document: " << authSchemaVersionDocument;
+        fassertFailedNoTrace(28618);
+    }
+    if ((foundSchemaVersion != AuthorizationManager::schemaVersion26Final) &&
+        (foundSchemaVersion != AuthorizationManager::schemaVersion28SCRAM)) {
+        severe() << "During initial sync, found auth schema version " << foundSchemaVersion
+                 << ", but this version of MongoDB only supports schema versions "
+                 << AuthorizationManager::schemaVersion26Final << " and "
+                 << AuthorizationManager::schemaVersion28SCRAM;
+        fassertFailedNoTrace(28619);
+    }
 }
 
 bool _initialSyncClone(OperationContext* txn,
@@ -150,12 +199,12 @@ bool _initialSyncClone(OperationContext* txn,
     Status status = cloner.copyDb(txn, db, host, options, nullptr, collections);
     if (!status.isOK()) {
         log() << "initial sync: error while " << (dataPass ? "cloning " : "indexing ") << db
-              << ".  " << redact(status);
+              << ".  " << status.toString();
         return false;
     }
 
     if (dataPass && (db == "admin")) {
-        fassertNoTrace(28619, checkAdminDatabase(txn, dbHolder().get(txn, db)));
+        checkAdminDatabasePostClone(txn, dbHolder().get(txn, db));
     }
     return true;
 }
@@ -167,21 +216,16 @@ bool _initialSyncClone(OperationContext* txn,
  * @param r      the oplog reader.
  * @return if applying the oplog succeeded.
  */
-bool _initialSyncApplyOplog(OperationContext* txn,
-                            repl::InitialSync* syncer,
-                            OplogReader* r,
-                            BackgroundSync* bgsync) {
+bool _initialSyncApplyOplog(OperationContext* ctx, repl::InitialSync* syncer, OplogReader* r) {
     const OpTime startOpTime = getGlobalReplicationCoordinator()->getMyLastAppliedOpTime();
     BSONObj lastOp;
 
     // If the fail point is set, exit failing.
     if (MONGO_FAIL_POINT(failInitSyncWithBufferedEntriesLeft)) {
         log() << "adding fake oplog entry to buffer.";
-        bgsync->pushTestOpToBuffer(
-            txn,
-            BSON("ts" << startOpTime.getTimestamp() << "t" << startOpTime.getTerm() << "v" << 1
-                      << "op"
-                      << "n"));
+        BackgroundSync::get()->pushTestOpToBuffer(BSON(
+            "ts" << startOpTime.getTimestamp() << "t" << startOpTime.getTerm() << "v" << 1 << "op"
+                 << "n"));
         return false;
     }
 
@@ -222,7 +266,7 @@ bool _initialSyncApplyOplog(OperationContext* txn,
     // apply till stopOpTime
     try {
         LOG(2) << "Applying oplog entries from " << startOpTime << " until " << stopOpTime;
-        syncer->oplogApplication(txn, stopOpTime);
+        syncer->oplogApplication(ctx, stopOpTime);
 
         if (inShutdown()) {
             return false;
@@ -235,7 +279,6 @@ bool _initialSyncApplyOplog(OperationContext* txn,
 
     return true;
 }
-
 
 /**
  * Do the initial sync for this member.  There are several steps to this process:
@@ -262,32 +305,29 @@ bool _initialSyncApplyOplog(OperationContext* txn,
  * ErrorCode::InitialSyncOplogSourceMissing if the node fails to find an sync source, Status::OK
  * if everything worked, and ErrorCode::InitialSyncFailure for all other error cases.
  */
-Status _initialSync(OperationContext* txn, BackgroundSync* bgsync) {
+Status _initialSync() {
     log() << "initial sync pending";
 
-    txn->setReplicatedWrites(false);
-    DisableDocumentValidation validationDisabler(txn);
+    BackgroundSync* bgsync(BackgroundSync::get());
+    OperationContextImpl txn;
+    txn.setReplicatedWrites(false);
+    DisableDocumentValidation validationDisabler(&txn);
     ReplicationCoordinator* replCoord(getGlobalReplicationCoordinator());
 
     // reset state for initial sync
-    truncateAndResetOplog(txn, replCoord, bgsync);
+    truncateAndResetOplog(&txn, replCoord, bgsync);
 
     OplogReader r;
 
-    std::size_t currentRetry = 0;
     while (r.getHost().empty()) {
         // We must prime the sync source selector so that it considers all candidates regardless
         // of oplog position, by passing in null OpTime as the last op fetched time.
-        r.connectToSyncSource(txn, OpTime(), OpTime(), replCoord);
-
+        r.connectToSyncSource(&txn, OpTime(), OpTime(), replCoord);
         if (r.getHost().empty()) {
             std::string msg =
-                "No valid sync source found in current replica set to do an initial sync.";
-            if (++currentRetry >= kInitialSyncMaxConnectRetries) {
-                return Status(ErrorCodes::InitialSyncOplogSourceMissing, msg);
-            }
-            LOG(1) << msg << ", retry " << currentRetry << " of " << kInitialSyncMaxConnectRetries;
-            sleepsecs(1);
+                "no valid sync sources found in current replset to do an initial sync";
+            log() << msg;
+            return Status(ErrorCodes::InitialSyncOplogSourceMissing, msg);
         }
 
         if (inShutdown()) {
@@ -295,28 +335,63 @@ Status _initialSync(OperationContext* txn, BackgroundSync* bgsync) {
         }
     }
 
-    InitialSync init(bgsync, multiInitialSyncApply_abortOnFailure);
+    InitialSync init(bgsync, multiInitialSyncApply);
     init.setHostname(r.getHost().toString());
 
     BSONObj lastOp = r.getLastOp(rsOplogName);
     if (lastOp.isEmpty()) {
         std::string msg = "initial sync couldn't read remote oplog";
+        log() << msg;
         sleepsecs(15);
         return Status(ErrorCodes::InitialSyncFailure, msg);
     }
+    OpTime firstLastOpTime = fassertStatusOK(40420, OpTime::parseFromOplogEntry(lastOp));
+
+    log() << "initial sync ensuring correct oplog visibility. Starting at "
+          << firstLastOpTime.toBSON();
+
+    if (MONGO_FAIL_POINT(initialSyncHangBeforeOplogVisibility)) {
+        // This log output is used in js tests so please leave it.
+        log() << "initial sync - initialSyncHangBeforeOplogVisibility fail point "
+                 "enabled. Blocking until fail point is disabled.";
+        while (MONGO_FAIL_POINT(initialSyncHangBeforeOplogVisibility) && !inShutdown()) {
+            mongo::sleepsecs(1);
+        }
+        log() << "initial sync - initialSyncHangBeforeOplogVisibility fail point disabled.";
+    }
+
+    // We do a forward scan starting at the lastOp we just fetched to ensure that all operations
+    // with earlier OpTimes are committed. This will block until all earlier oplog entries are
+    // visible and should either throw a socket exception or return lastOp.
+    BSONObjBuilder gte;
+    gte.append("$gte", firstLastOpTime.getTimestamp());
+    BSONObjBuilder queryBob;
+    queryBob.append("ts", gte.done());
+    const BSONObj& query = queryBob.done();
+    BSONObj lastOpConfirm = r.findOne(rsOplogName.c_str(), query, QueryOption_OplogReplay);
+    invariant(!lastOpConfirm.isEmpty());
+
+    OpTime lastOpConfirmTime = fassertStatusOK(40421, OpTime::parseFromOplogEntry(lastOpConfirm));
+    if (lastOpConfirmTime != firstLastOpTime) {
+        return Status(ErrorCodes::InitialSyncFailure,
+                      str::stream()
+                          << "Last op was not confirmed. last op: " << firstLastOpTime.toBSON()
+                          << ". confirmation: " << lastOpConfirmTime.toBSON());
+    }
 
     log() << "initial sync drop all databases";
-    dropAllDatabasesExceptLocal(txn);
+    dropAllDatabasesExceptLocal(&txn);
+
+    log() << "initial sync clone all databases";
 
     if (MONGO_FAIL_POINT(initialSyncHangBeforeCopyingDatabases)) {
-        log() << "initial sync - initialSyncHangBeforeCopyingDatabases fail point enabled. "
-                 "Blocking until fail point is disabled.";
-        while (MONGO_FAIL_POINT(initialSyncHangBeforeCopyingDatabases)) {
+        // This log output is used in js tests so please leave it.
+        log() << "initial sync - initialSyncHangBeforeCopyingDatabases fail point "
+                 "enabled. Blocking until fail point is disabled.";
+        while (MONGO_FAIL_POINT(initialSyncHangBeforeCopyingDatabases) && !inShutdown()) {
             mongo::sleepsecs(1);
         }
     }
-
-    log() << "initial sync clone all databases";
 
     list<string> dbs = r.conn()->getDatabaseNames();
     {
@@ -335,42 +410,25 @@ Status _initialSync(OperationContext* txn, BackgroundSync* bgsync) {
         CloneOptions options;
         options.fromDB = db;
         log() << "fetching and creating collections for " << db;
-        std::list<BSONObj> initialCollections = r.conn()->getCollectionInfos(
-            options.fromDB, ListCollectionsFilter::makeTypeCollectionFilter());  // may uassert
+        std::list<BSONObj> initialCollections =
+            r.conn()->getCollectionInfos(options.fromDB);  // may uassert
         auto fetchStatus = cloner.filterCollectionsForClone(options, initialCollections);
         if (!fetchStatus.isOK()) {
             return fetchStatus.getStatus();
         }
         auto collections = fetchStatus.getValue();
 
-        std::vector<Cloner::CreateCollectionParams> createCollectionParams;
-        for (auto&& collection : collections) {
-            Cloner::CreateCollectionParams params;
-            params.collectionName = collection["name"].String();
-            params.collectionInfo = collection;
+        ScopedTransaction transaction(&txn, MODE_IX);
+        Lock::DBLock dbWrite(txn.lockState(), db, MODE_X);
 
-            if (auto idIndex = collection["idIndex"]) {
-                params.idIndexSpec = idIndex.Obj();
-            } else {
-                const NamespaceString nss(options.fromDB, params.collectionName);
-                auto indexSpecs = r.conn()->getIndexSpecs(nss.ns(), QueryOption_SlaveOk);
-                params.idIndexSpec = Cloner::getIdIndexSpec(indexSpecs);
-            }
-
-            createCollectionParams.push_back(params);
-        }
-
-        ScopedTransaction transaction(txn, MODE_IX);
-        Lock::DBLock dbWrite(txn->lockState(), db, MODE_X);
-
-        auto createStatus = cloner.createCollectionsForDb(txn, createCollectionParams, db);
+        auto createStatus = cloner.createCollectionsForDb(&txn, collections, db);
         if (!createStatus.isOK()) {
             return createStatus;
         }
         collectionsPerDb.emplace(db, std::move(collections));
     }
     for (auto&& dbCollsPair : collectionsPerDb) {
-        if (!_initialSyncClone(txn,
+        if (!_initialSyncClone(&txn,
                                cloner,
                                r.conn()->getServerAddress(),
                                dbCollsPair.first,
@@ -383,17 +441,14 @@ Status _initialSync(OperationContext* txn, BackgroundSync* bgsync) {
     log() << "initial sync data copy, starting syncup";
 
     // prime oplog, but don't need to actually apply the op as the cloned data already reflects it.
-    fassertStatusOK(
-        40142,
-        StorageInterface::get(txn)->insertDocument(txn, NamespaceString(rsOplogName), lastOp));
-    OpTime lastOptime = OplogEntry(lastOp).getOpTime();
-    ReplClientInfo::forClient(txn->getClient()).setLastOp(lastOptime);
+    OpTime lastOptime = writeOpsToOplog(&txn, {lastOp});
+    ReplClientInfo::forClient(txn.getClient()).setLastOp(lastOptime);
     replCoord->setMyLastAppliedOpTime(lastOptime);
     setNewTimestamp(lastOptime.getTimestamp());
 
     std::string msg = "oplog sync 1 of 3";
     log() << msg;
-    if (!_initialSyncApplyOplog(txn, &init, &r, bgsync)) {
+    if (!_initialSyncApplyOplog(&txn, &init, &r)) {
         return Status(ErrorCodes::InitialSyncFailure,
                       str::stream() << "initial sync failed: " << msg);
     }
@@ -404,7 +459,7 @@ Status _initialSync(OperationContext* txn, BackgroundSync* bgsync) {
     // TODO: replace with "tail" instance below, since we don't need to retry/reclone missing docs.
     msg = "oplog sync 2 of 3";
     log() << msg;
-    if (!_initialSyncApplyOplog(txn, &init, &r, bgsync)) {
+    if (!_initialSyncApplyOplog(&txn, &init, &r)) {
         return Status(ErrorCodes::InitialSyncFailure,
                       str::stream() << "initial sync failed: " << msg);
     }
@@ -413,7 +468,7 @@ Status _initialSync(OperationContext* txn, BackgroundSync* bgsync) {
     msg = "initial sync building indexes";
     log() << msg;
     for (auto&& dbCollsPair : collectionsPerDb) {
-        if (!_initialSyncClone(txn,
+        if (!_initialSyncClone(&txn,
                                cloner,
                                r.conn()->getServerAddress(),
                                dbCollsPair.first,
@@ -431,14 +486,14 @@ Status _initialSync(OperationContext* txn, BackgroundSync* bgsync) {
     log() << msg;
 
     InitialSync tail(bgsync, multiSyncApply);  // Use the non-initial sync apply code
-    if (!_initialSyncApplyOplog(txn, &tail, &r, bgsync)) {
+    if (!_initialSyncApplyOplog(&txn, &tail, &r)) {
         return Status(ErrorCodes::InitialSyncFailure,
                       str::stream() << "initial sync failed: " << msg);
     }
 
     // ---------
 
-    Status status = getGlobalAuthorizationManager()->initialize(txn);
+    Status status = getGlobalAuthorizationManager()->initialize(&txn);
     if (!status.isOK()) {
         warning() << "Failed to reinitialize auth data after initial sync. " << status;
         return status;
@@ -448,7 +503,8 @@ Status _initialSync(OperationContext* txn, BackgroundSync* bgsync) {
 
     // Initial sync is now complete.
     // Clear the initial sync flag -- cannot be done under a db lock, or recursive.
-    StorageInterface::get(txn)->clearInitialSyncFlag(txn);
+    clearInitialSyncFlag(&txn);
+    BackgroundSync::get()->setInitialSyncRequestedFlag(false);
 
     // Clear maint. mode.
     while (replCoord->getMaintenanceMode()) {
@@ -458,100 +514,30 @@ Status _initialSync(OperationContext* txn, BackgroundSync* bgsync) {
     log() << "initial sync done";
     return Status::OK();
 }
-
-stdx::mutex _initialSyncMutex;
-const auto kInitialSyncRetrySleepDuration = Seconds{5};
 }  // namespace
 
-Status checkAdminDatabase(OperationContext* txn, Database* adminDb) {
-    // Assumes txn holds MODE_X or MODE_S lock on "admin" database.
-    if (!adminDb) {
-        return Status::OK();
-    }
-    Collection* const usersCollection =
-        adminDb->getCollection(AuthorizationManager::usersCollectionNamespace);
-    const bool hasUsers =
-        usersCollection && !Helpers::findOne(txn, usersCollection, BSONObj(), false).isNull();
-    Collection* const adminVersionCollection =
-        adminDb->getCollection(AuthorizationManager::versionCollectionNamespace);
-    BSONObj authSchemaVersionDocument;
-    if (!adminVersionCollection ||
-        !Helpers::findOne(txn,
-                          adminVersionCollection,
-                          AuthorizationManager::versionDocumentQuery,
-                          authSchemaVersionDocument)) {
-        if (!hasUsers) {
-            // It's OK to have no auth version document if there are no user documents.
-            return Status::OK();
-        }
-        std::string msg = str::stream()
-            << "During initial sync, found documents in "
-            << AuthorizationManager::usersCollectionNamespace.ns()
-            << " but could not find an auth schema version document in "
-            << AuthorizationManager::versionCollectionNamespace.ns() << ".  "
-            << "This indicates that the primary of this replica set was not successfully "
-               "upgraded to schema version "
-            << AuthorizationManager::schemaVersion26Final
-            << ", which is the minimum supported schema version in this version of MongoDB";
-        return {ErrorCodes::AuthSchemaIncompatible, msg};
-    }
-    long long foundSchemaVersion;
-    Status status = bsonExtractIntegerField(authSchemaVersionDocument,
-                                            AuthorizationManager::schemaVersionFieldName,
-                                            &foundSchemaVersion);
-    if (!status.isOK()) {
-        std::string msg = str::stream()
-            << "During initial sync, found malformed auth schema version document: "
-            << status.toString() << "; document: " << authSchemaVersionDocument;
-        return {ErrorCodes::AuthSchemaIncompatible, msg};
-    }
-    if ((foundSchemaVersion != AuthorizationManager::schemaVersion26Final) &&
-        (foundSchemaVersion != AuthorizationManager::schemaVersion28SCRAM)) {
-        std::string msg = str::stream()
-            << "During initial sync, found auth schema version " << foundSchemaVersion
-            << ", but this version of MongoDB only supports schema versions "
-            << AuthorizationManager::schemaVersion26Final << " and "
-            << AuthorizationManager::schemaVersion28SCRAM;
-        return {ErrorCodes::AuthSchemaIncompatible, msg};
-    }
+void syncDoInitialSync() {
+    static const int maxFailedAttempts = 10;
 
-    return Status::OK();
-}
-
-void syncDoInitialSync(OperationContext* txn,
-                       ReplicationCoordinatorExternalState* replicationCoordinatorExternalState) {
-    stdx::unique_lock<stdx::mutex> lk(_initialSyncMutex, stdx::defer_lock);
-    if (!lk.try_lock()) {
-        uasserted(34474, "Initial Sync Already Active.");
-    }
-
-    std::unique_ptr<BackgroundSync> bgsync;
     {
-        log() << "Starting replication fetcher thread for initial sync";
-        bgsync = stdx::make_unique<BackgroundSync>(
-            replicationCoordinatorExternalState,
-            replicationCoordinatorExternalState->makeInitialSyncOplogBuffer(txn));
-        bgsync->startup(txn);
-        createOplog(txn);
+        OperationContextImpl txn;
+        createOplog(&txn);
     }
-    ON_BLOCK_EXIT([txn, &bgsync]() {
-        log() << "Stopping replication fetcher thread for initial sync";
-        bgsync->shutdown(txn);
-        bgsync->join(txn);
-    });
 
     int failedAttempts = 0;
-    while (failedAttempts < num3Dot2InitialSyncAttempts) {
+    while (failedAttempts < maxFailedAttempts) {
         try {
             // leave loop when successful
-            Status status = _initialSync(txn, bgsync.get());
+            Status status = _initialSync();
             if (status.isOK()) {
                 break;
-            } else {
-                error() << status;
+            }
+            if (status == ErrorCodes::InitialSyncOplogSourceMissing) {
+                sleepsecs(1);
+                return;
             }
         } catch (const DBException& e) {
-            error() << redact(e);
+            error() << e;
             // Return if in shutdown
             if (inShutdown()) {
                 return;
@@ -562,16 +548,18 @@ void syncDoInitialSync(OperationContext* txn,
             return;
         }
 
-        error() << "initial sync attempt failed, "
-                << (num3Dot2InitialSyncAttempts - ++failedAttempts) << " attempts remaining";
-        sleepmillis(durationCount<Milliseconds>(kInitialSyncRetrySleepDuration));
+        error() << "initial sync attempt failed, " << (maxFailedAttempts - ++failedAttempts)
+                << " attempts remaining";
+        sleepsecs(5);
     }
 
     // No need to print a stack
-    if (failedAttempts >= num3Dot2InitialSyncAttempts) {
+    if (failedAttempts >= maxFailedAttempts) {
         severe() << "The maximum number of retries have been exhausted for initial sync.";
         fassertFailedNoTrace(16233);
     }
+
+    log() << "initial sync succeeded after " << (failedAttempts + 1) << " attempt(s).";
 }
 
 }  // namespace repl

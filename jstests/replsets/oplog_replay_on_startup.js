@@ -58,7 +58,7 @@
             assert.writeOK(oplog.insert({
                 ts: ts(num),
                 t: term,
-                h: 1,
+                h: NumberLong(1),
                 op: 'i',
                 ns: ns,
                 o: {_id: num},
@@ -114,6 +114,11 @@
                 // This is supposed to test that we reach secondary, not that we stay there.
                 assert(isMaster.ismaster || isMaster.secondary,
                        'not PRIMARY or SECONDARY: ' + tojson(isMaster));
+
+                // Wait for node to become primary. This is nesessary to avoid the find below
+                // failing with "NotMasterOrSecondary" errors if it happens to run while the
+                // node is in drain mode while becoming primary.
+                conn = rst.getPrimary();
                 break;
 
             case 'RECOVERING':
@@ -129,7 +134,7 @@
                 break;
 
             default:
-                doassert(`expectedState ${expectedState} is not supported`);
+                doassert('expectedState ' + expectedState + ' is not supported');
         }
 
         // Ensure the oplog has the entries it should have and none that it shouldn't.

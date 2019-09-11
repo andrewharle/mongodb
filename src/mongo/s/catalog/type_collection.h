@@ -56,15 +56,10 @@ public:
     static const BSONField<OID> epoch;
     static const BSONField<Date_t> updatedAt;
     static const BSONField<BSONObj> keyPattern;
-    static const BSONField<BSONObj> defaultCollation;
     static const BSONField<bool> unique;
 
     /**
      * Constructs a new DatabaseType object from BSON. Also does validation of the contents.
-     *
-     * Dropped collections accumulate in the collections list, through 3.6, so that
-     * mongos <= 3.4.x, when it retrieves the list from the config server, can delete its
-     * cache entries for dropped collections.  See SERVER-27475, SERVER-27474
      */
     static StatusWith<CollectionType> fromBSON(const BSONObj& source);
 
@@ -111,13 +106,6 @@ public:
     }
     void setKeyPattern(const KeyPattern& keyPattern);
 
-    const BSONObj& getDefaultCollation() const {
-        return _defaultCollation;
-    }
-    void setDefaultCollation(const BSONObj& collation) {
-        _defaultCollation = collation.getOwned();
-    }
-
     bool getUnique() const {
         return _unique.get_value_or(false);
     }
@@ -144,9 +132,6 @@ private:
 
     // Sharding key. Required, if collection is not dropped.
     boost::optional<KeyPattern> _keyPattern;
-
-    // Optional collection default collation. If empty, implies simple collation.
-    BSONObj _defaultCollation;
 
     // Optional uniqueness of the sharding key. If missing, implies false.
     boost::optional<bool> _unique;

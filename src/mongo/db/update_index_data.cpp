@@ -28,9 +28,9 @@
 *    it in the license file.
 */
 
-#include "mongo/db/update_index_data.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/db/field_ref.h"
+#include "mongo/db/update_index_data.h"
 
 namespace mongo {
 
@@ -149,31 +149,8 @@ bool getCanonicalIndexField(StringData fullName, string* out) {
             while (j + 1 < fullName.size() && isdigit(fullName[j + 1]))
                 j++;
 
-            if (j + 1 == fullName.size()) {
+            if (j + 1 == fullName.size() || fullName[j + 1] == '.') {
                 // only digits found, skip forward
-                i = j;
-                modified = true;
-                continue;
-            }
-
-            // Check for consecutive digits separated by a period.
-            if (fullName[j + 1] == '.') {
-                // Peek ahead to see if the next set of characters are also numeric.
-                size_t k = j + 2;
-                while (k < fullName.size() && isdigit(fullName[k])) {
-                    k++;
-                }
-
-                // The second set of digits may end at the end of the path or a '.'.
-                if (k == fullName.size() || fullName[k] == '.') {
-                    // Found consecutive numerical path components. Since this implies a numeric
-                    // field name, return the prefix as the canonical index field. This is meant to
-                    // fix SERVER-37058.
-                    modified = true;
-                    break;
-                }
-
-                // Only one numerical path component, skip forward.
                 i = j;
                 modified = true;
                 continue;

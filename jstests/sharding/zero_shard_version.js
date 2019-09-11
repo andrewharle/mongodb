@@ -29,8 +29,6 @@
     assert.commandWorked(
         testDB_s1.adminCommand({moveChunk: 'test.user', find: {x: 0}, to: 'shard0000'}));
 
-    st.configRS.awaitLastOpCommitted();
-
     // Official config:
     // shard0: 2|0|a, [-inf, inf)
     // shard1: 0|0|a
@@ -94,8 +92,6 @@
     assert.commandWorked(
         testDB_s1.adminCommand({moveChunk: 'test.user', find: {x: -1}, to: 'shard0000'}));
 
-    st.configRS.awaitLastOpCommitted();
-
     // Official config:
     // shard0: 2|0|b, [-inf, 0)
     // shard1: 2|1|b, [0, inf)
@@ -156,8 +152,6 @@
 
     assert.commandWorked(
         testDB_s1.adminCommand({moveChunk: 'test.user', find: {x: 0}, to: 'shard0000'}));
-
-    st.configRS.awaitLastOpCommitted();
 
     // Official config:
     // shard0: 2|0|c, [-inf, inf)

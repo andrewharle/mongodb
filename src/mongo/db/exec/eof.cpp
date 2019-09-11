@@ -50,7 +50,10 @@ bool EOFStage::isEOF() {
     return true;
 }
 
-PlanStage::StageState EOFStage::doWork(WorkingSetID* out) {
+PlanStage::StageState EOFStage::work(WorkingSetID* out) {
+    ++_commonStats.works;
+    // Adds the amount of time taken by work() to executionTimeMillis.
+    ScopedTimer timer(&_commonStats.executionTimeMillis);
     return PlanStage::IS_EOF;
 }
 

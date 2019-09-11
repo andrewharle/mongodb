@@ -56,13 +56,14 @@
         // Start a mongod with system-wide defaults for engine-specific index options.
         var conn = MongoRunner.runMongod({
             dbpath: dbpath,
-            noCleanData: true,
-            [engine + 'IndexConfigString']: systemWideConfigString,
+            noCleanData: true, [engine + 'IndexConfigString']: systemWideConfigString,
         });
         assert.neq(null, conn, 'mongod was unable to start up');
 
         var testDB = conn.getDB('test');
-        var cmdObj = {create: 'coll'};
+        var cmdObj = {
+            create: 'coll'
+        };
 
         // Apply collection-wide defaults for engine-specific index options if any were
         // specified.
@@ -77,10 +78,12 @@
         assert.commandWorked(testDB.coll.createIndex({a: 1}, {name: 'without_options'}));
 
         // Create an index that specifies engine-specific index options.
-        assert.commandWorked(testDB.coll.createIndex({b: 1}, {
-            name: 'with_options',
-            storageEngine: {[engine]: {configString: indexSpecificConfigString}}
-        }));
+        assert.commandWorked(testDB.coll.createIndex(
+            {b: 1},
+            {
+              name: 'with_options',
+              storageEngine: {[engine]: {configString: indexSpecificConfigString}}
+            }));
 
         var collStats = testDB.runCommand({collStats: 'coll'});
         assert.commandWorked(collStats);

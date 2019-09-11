@@ -37,7 +37,7 @@
 
 namespace mongo {
 
-constexpr size_t SHA1Block::kHashLength;
+const size_t SHA1Block::kHashLength = 20;
 
 SHA1Block::SHA1Block(HashType hash) : _hash(std::move(hash)) {}
 

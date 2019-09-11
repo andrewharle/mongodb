@@ -30,11 +30,7 @@
 
 #include "mongo/platform/basic.h"
 
-#include <ostream>
-
 #include "mongo/db/namespace_string.h"
-
-#include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
 
@@ -72,12 +68,11 @@ const string escapeTable[256] = {
 
 const char kConfigCollection[] = "admin.system.version";
 
-constexpr auto listCollectionsCursorCol = "$cmd.listCollections"_sd;
-constexpr auto listIndexesCursorNSPrefix = "$cmd.listIndexes."_sd;
+const StringData listIndexesCursorNSPrefix("$cmd.listIndexes.", StringData::LiteralTag());
 
 }  // namespace
 
-bool legalClientSystemNS(StringData ns) {
+bool legalClientSystemNS(StringData ns, bool write) {
     if (ns == "local.system.replset")
         return true;
 
@@ -96,40 +91,18 @@ bool legalClientSystemNS(StringData ns) {
     if (ns.find(".system.js") != string::npos)
         return true;
 
-    if (nsToCollectionSubstring(ns) == NamespaceString::kSystemDotViewsCollectionName)
-        return true;
-
     return false;
 }
-
-constexpr StringData NamespaceString::kAdminDb;
-constexpr StringData NamespaceString::kLocalDb;
-constexpr StringData NamespaceString::kConfigDb;
-constexpr StringData NamespaceString::kSystemDotViewsCollectionName;
 
 const NamespaceString NamespaceString::kConfigCollectionNamespace(kConfigCollection);
 
 bool NamespaceString::isListCollectionsCursorNS() const {
-    return coll() == listCollectionsCursorCol;
+    return coll() == StringData("$cmd.listCollections", StringData::LiteralTag());
 }
 
 bool NamespaceString::isListIndexesCursorNS() const {
     return coll().size() > listIndexesCursorNSPrefix.size() &&
         coll().startsWith(listIndexesCursorNSPrefix);
-}
-
-NamespaceString NamespaceString::makeListCollectionsNSS(StringData dbName) {
-    NamespaceString nss(dbName, listCollectionsCursorCol);
-    dassert(nss.isValid());
-    dassert(nss.isListCollectionsCursorNS());
-    return nss;
-}
-
-NamespaceString NamespaceString::makeListIndexesNSS(StringData dbName, StringData collectionName) {
-    NamespaceString nss(dbName, str::stream() << listIndexesCursorNSPrefix << collectionName);
-    dassert(nss.isValid());
-    dassert(nss.isListIndexesCursorNS());
-    return nss;
 }
 
 NamespaceString NamespaceString::getTargetNSForListIndexes() const {
@@ -147,11 +120,6 @@ string NamespaceString::escapeDbName(const StringData dbname) {
         escapedDbName += escapeTable[c];
     }
     return escapedDbName;
-}
-
-
-std::ostream& operator<<(std::ostream& stream, const NamespaceString& nss) {
-    return stream << nss.toString();
 }
 
 }  // namespace mongo

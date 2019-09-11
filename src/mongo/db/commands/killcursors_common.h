@@ -41,8 +41,7 @@ class KillCursorsCmdBase : public Command {
 public:
     KillCursorsCmdBase() : Command("killCursors") {}
 
-
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    bool isWriteCommandForConfigServer() const final {
         return false;
     }
 
@@ -66,7 +65,7 @@ public:
         return true;
     }
 
-    Status checkAuthForCommand(Client* client,
+    Status checkAuthForCommand(ClientBasic* client,
                                const std::string& dbname,
                                const BSONObj& cmdObj) final;
 

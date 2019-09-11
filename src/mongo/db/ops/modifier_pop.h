@@ -64,8 +64,6 @@ public:
 
     virtual Status log(LogBuilder* logBuilder) const;
 
-    virtual void setCollator(const CollatorInterface* collator){};
-
 private:
     // Access to each component of fieldName that's the target of this mod.
     FieldRef _fieldRef;

@@ -30,12 +30,11 @@
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kDefault
 
-#include "mongo/db/matcher/expression_geo.h"
-#include "mongo/bson/simple_bsonobj_comparator.h"
-#include "mongo/db/geo/geoparser.h"
 #include "mongo/platform/basic.h"
-#include "mongo/util/log.h"
+#include "mongo/db/matcher/expression_geo.h"
+#include "mongo/db/geo/geoparser.h"
 #include "mongo/util/mongoutils/str.h"
+#include "mongo/util/log.h"
 
 namespace mongo {
 
@@ -81,7 +80,7 @@ Status GeoExpression::parseQuery(const BSONObj& obj) {
         BSONElement elt = geoIt.next();
         if (str::equals(elt.fieldName(), "$uniqueDocs")) {
             // Deprecated "$uniqueDocs" field
-            warning() << "deprecated $uniqueDocs option: " << redact(obj);
+            warning() << "deprecated $uniqueDocs option: " << obj.toString() << endl;
         } else {
             // The element must be a geo specifier. "$box", "$center", "$geometry", etc.
             geoContainer.reset(new GeometryContainer());
@@ -134,8 +133,8 @@ Status GeoExpression::parseFrom(const BSONObj& obj) {
     if (GeoExpression::INTERSECT == predicate) {
         if (!geoContainer->supportsProject(SPHERE)) {
             return Status(ErrorCodes::BadValue,
-                          str::stream() << "$geoIntersect not supported with provided geometry: "
-                                        << obj);
+                          str::stream()
+                              << "$geoIntersect not supported with provided geometry: " << obj);
         }
         geoContainer->projectInto(SPHERE);
     }
@@ -197,10 +196,6 @@ bool GeoNearExpression::parseLegacyQuery(const BSONObj& obj) {
             uassert(16896, "$maxDistance must be non-negative", maxDistance >= 0.0);
         } else if (equals(e.fieldName(), "$uniqueDocs")) {
             warning() << "ignoring deprecated option $uniqueDocs";
-        } else {
-            // In a query document, $near queries can have no non-geo sibling parameters.
-            uasserted(34413,
-                      str::stream() << "invalid argument in geo near query: " << e.fieldName());
         }
     }
 
@@ -220,8 +215,7 @@ Status GeoNearExpression::parseNewQuery(const BSONObj& obj) {
         return Status(ErrorCodes::BadValue,
                       mongoutils::str::stream()
                           << "geo near accepts just one argument when querying for a GeoJSON "
-                          << "point. Extra field found: "
-                          << objIt.next());
+                          << "point. Extra field found: " << objIt.next());
     }
 
     // Parse "new" near:
@@ -233,8 +227,8 @@ Status GeoNearExpression::parseNewQuery(const BSONObj& obj) {
     BSONObj::MatchType matchType = static_cast<BSONObj::MatchType>(e.getGtLtOp());
     if (BSONObj::opNEAR != matchType) {
         return Status(ErrorCodes::BadValue,
-                      mongoutils::str::stream() << "invalid geo near query operator: "
-                                                << e.fieldName());
+                      mongoutils::str::stream()
+                          << "invalid geo near query operator: " << e.fieldName());
     }
 
     // Iterate over the argument.
@@ -249,9 +243,7 @@ Status GeoNearExpression::parseNewQuery(const BSONObj& obj) {
                     return Status(ErrorCodes::BadValue,
                                   str::stream()
                                       << "invalid point in geo near query $geometry argument: "
-                                      << embeddedObj
-                                      << "  "
-                                      << status.reason());
+                                      << embeddedObj << "  " << status.reason());
                 }
                 uassert(16681,
                         "$near requires geojson point, given " + embeddedObj.toString(),
@@ -266,10 +258,6 @@ Status GeoNearExpression::parseNewQuery(const BSONObj& obj) {
             uassert(16899, "$maxDistance must be a number", e.isNumber());
             maxDistance = e.Number();
             uassert(16900, "$maxDistance must be non-negative", maxDistance >= 0.0);
-        } else {
-            // Return an error if a bad argument was passed inside the query document.
-            return Status(ErrorCodes::BadValue,
-                          str::stream() << "invalid argument in geo near query: " << e.fieldName());
         }
     }
 
@@ -332,7 +320,7 @@ Status GeoMatchExpression::init(StringData path,
                                 const BSONObj& rawObj) {
     _query.reset(query);
     _rawObj = rawObj;
-    return setPath(path);
+    return initPath(path);
 }
 
 bool GeoMatchExpression::matchesSingleElement(const BSONElement& e) const {
@@ -364,11 +352,7 @@ bool GeoMatchExpression::matchesSingleElement(const BSONElement& e) const {
 
 void GeoMatchExpression::debugString(StringBuilder& debug, int level) const {
     _debugAddSpace(debug, level);
-
-    BSONObjBuilder builder;
-    serialize(&builder);
-    debug << "GEO raw = " << builder.obj().toString();
-
+    debug << "GEO raw = " << _rawObj.toString();
     MatchExpression::TagData* td = getTag();
     if (NULL != td) {
         debug << " ";
@@ -377,10 +361,8 @@ void GeoMatchExpression::debugString(StringBuilder& debug, int level) const {
     debug << "\n";
 }
 
-void GeoMatchExpression::serialize(BSONObjBuilder* out) const {
-    BSONObjBuilder subobj(out->subobjStart(path()));
-    subobj.appendElements(_rawObj);
-    subobj.doneFast();
+void GeoMatchExpression::toBSON(BSONObjBuilder* out) const {
+    out->appendElements(_rawObj);
 }
 
 bool GeoMatchExpression::equivalent(const MatchExpression* other) const {
@@ -392,7 +374,7 @@ bool GeoMatchExpression::equivalent(const MatchExpression* other) const {
     if (path() != realOther->path())
         return false;
 
-    return SimpleBSONObjComparator::kInstance.evaluate(_rawObj == realOther->_rawObj);
+    return _rawObj == realOther->_rawObj;
 }
 
 std::unique_ptr<MatchExpression> GeoMatchExpression::shallowClone() const {
@@ -415,7 +397,7 @@ Status GeoNearMatchExpression::init(StringData path,
                                     const BSONObj& rawObj) {
     _query.reset(query);
     _rawObj = rawObj;
-    return setPath(path);
+    return initPath(path);
 }
 
 bool GeoNearMatchExpression::matchesSingleElement(const BSONElement& e) const {
@@ -436,10 +418,8 @@ void GeoNearMatchExpression::debugString(StringBuilder& debug, int level) const 
     debug << "\n";
 }
 
-void GeoNearMatchExpression::serialize(BSONObjBuilder* out) const {
-    BSONObjBuilder subobj(out->subobjStart(path()));
-    subobj.appendElements(_rawObj);
-    subobj.doneFast();
+void GeoNearMatchExpression::toBSON(BSONObjBuilder* out) const {
+    out->appendElements(_rawObj);
 }
 
 bool GeoNearMatchExpression::equivalent(const MatchExpression* other) const {
@@ -451,7 +431,7 @@ bool GeoNearMatchExpression::equivalent(const MatchExpression* other) const {
     if (path() != realOther->path())
         return false;
 
-    return SimpleBSONObjComparator::kInstance.evaluate(_rawObj == realOther->_rawObj);
+    return _rawObj == realOther->_rawObj;
 }
 
 std::unique_ptr<MatchExpression> GeoNearMatchExpression::shallowClone() const {

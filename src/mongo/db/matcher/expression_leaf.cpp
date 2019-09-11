@@ -31,22 +31,21 @@
 #include "mongo/db/matcher/expression_leaf.h"
 
 #include <cmath>
+#include <unordered_map>
 #include <pcrecpp.h>
 
-#include "mongo/bson/bsonelement_comparator.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonmisc.h"
 #include "mongo/config.h"
 #include "mongo/db/field_ref.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/matcher/path.h"
-#include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
 
-Status LeafMatchExpression::setPath(StringData path) {
+Status LeafMatchExpression::initPath(StringData path) {
     _path = path;
     return _elementPath.init(_path);
 }
@@ -74,13 +73,7 @@ bool ComparisonMatchExpression::equivalent(const MatchExpression* other) const {
     const ComparisonMatchExpression* realOther =
         static_cast<const ComparisonMatchExpression*>(other);
 
-    if (!CollatorInterface::collatorsMatch(_collator, realOther->_collator)) {
-        return false;
-    }
-
-    const StringData::ComparatorInterface* stringComparator = nullptr;
-    BSONElementComparator eltCmp(BSONElementComparator::FieldNamesMode::kIgnore, stringComparator);
-    return path() == realOther->path() && eltCmp.evaluate(_rhs == realOther->_rhs);
+    return path() == realOther->path() && _rhs.valuesEqual(realOther->_rhs);
 }
 
 
@@ -106,11 +99,13 @@ Status ComparisonMatchExpression::init(StringData path, const BSONElement& rhs) 
             return Status(ErrorCodes::BadValue, "bad match type for ComparisonMatchExpression");
     }
 
-    return setPath(path);
+    return initPath(path);
 }
 
 
 bool ComparisonMatchExpression::matchesSingleElement(const BSONElement& e) const {
+    // log() << "\t ComparisonMatchExpression e: " << e << " _rhs: " << _rhs << "\n"
+    //<< toString() << std::endl;
 
     if (e.canonicalType() != _rhs.canonicalType()) {
         // some special cases
@@ -148,7 +143,9 @@ bool ComparisonMatchExpression::matchesSingleElement(const BSONElement& e) const
         }
     }
 
-    int x = compareElementValues(e, _rhs, _collator);
+    int x = compareElementValues(e, _rhs);
+
+    // log() << "\t\t" << x << endl;
 
     switch (matchType()) {
         case LT:
@@ -188,7 +185,8 @@ void ComparisonMatchExpression::debugString(StringBuilder& debug, int level) con
             debug << "$gte";
             break;
         default:
-            invariant(false);
+            debug << " UNKNOWN - should be impossible";
+            break;
     }
     debug << " " << _rhs.toString(false);
 
@@ -201,7 +199,7 @@ void ComparisonMatchExpression::debugString(StringBuilder& debug, int level) con
     debug << "\n";
 }
 
-void ComparisonMatchExpression::serialize(BSONObjBuilder* out) const {
+void ComparisonMatchExpression::toBSON(BSONObjBuilder* out) const {
     std::string opString = "";
     switch (matchType()) {
         case LT:
@@ -220,7 +218,8 @@ void ComparisonMatchExpression::serialize(BSONObjBuilder* out) const {
             opString = "$gte";
             break;
         default:
-            invariant(false);
+            opString = " UNKNOWN - should be impossible";
+            break;
     }
 
     out->append(path(), BSON(opString << _rhs));
@@ -286,19 +285,20 @@ Status RegexMatchExpression::init(StringData path, StringData regex, StringData 
     _flags = options.toString();
     _re.reset(new pcrecpp::RE(_regex.c_str(), flags2options(_flags.c_str())));
 
-    return setPath(path);
+    return initPath(path);
 }
 
 bool RegexMatchExpression::matchesSingleElement(const BSONElement& e) const {
+    // log() << "RegexMatchExpression::matchesSingleElement _regex: " << _regex << " e: " << e <<
+    // std::endl;
     switch (e.type()) {
         case String:
-        case Symbol: {
-            // String values stored in documents can contain embedded NUL bytes. We construct a
-            // pcrecpp::StringPiece instance using the full length of the string to avoid truncating
-            // 'data' early.
-            pcrecpp::StringPiece data(e.valuestr(), e.valuestrsize() - 1);
-            return _re->PartialMatch(data);
-        }
+        case Symbol:
+            // TODO
+            // if (rm._prefix.empty())
+            return _re->PartialMatch(e.valuestr());
+        // else
+        // return !strncmp(e.valuestr(), rm._prefix.c_str(), rm._prefix.size());
         case RegEx:
             return _regex == e.regex() && _flags == e.regexFlags();
         default:
@@ -318,18 +318,7 @@ void RegexMatchExpression::debugString(StringBuilder& debug, int level) const {
     debug << "\n";
 }
 
-void RegexMatchExpression::serialize(BSONObjBuilder* out) const {
-    BSONObjBuilder regexBuilder(out->subobjStart(path()));
-    regexBuilder.append("$regex", _regex);
-
-    if (!_flags.empty()) {
-        regexBuilder.append("$options", _flags);
-    }
-
-    regexBuilder.doneFast();
-}
-
-void RegexMatchExpression::serializeToBSONTypeRegex(BSONObjBuilder* out) const {
+void RegexMatchExpression::toBSON(BSONObjBuilder* out) const {
     out->appendRegex(path(), _regex, _flags);
 }
 
@@ -344,7 +333,7 @@ Status ModMatchExpression::init(StringData path, int divisor, int remainder) {
         return Status(ErrorCodes::BadValue, "divisor cannot be 0");
     _divisor = divisor;
     _remainder = remainder;
-    return setPath(path);
+    return initPath(path);
 }
 
 bool ModMatchExpression::matchesSingleElement(const BSONElement& e) const {
@@ -364,7 +353,7 @@ void ModMatchExpression::debugString(StringBuilder& debug, int level) const {
     debug << "\n";
 }
 
-void ModMatchExpression::serialize(BSONObjBuilder* out) const {
+void ModMatchExpression::toBSON(BSONObjBuilder* out) const {
     out->append(path(), BSON("$mod" << BSON_ARRAY(_divisor << _remainder)));
 }
 
@@ -381,7 +370,7 @@ bool ModMatchExpression::equivalent(const MatchExpression* other) const {
 // ------------------
 
 Status ExistsMatchExpression::init(StringData path) {
-    return setPath(path);
+    return initPath(path);
 }
 
 bool ExistsMatchExpression::matchesSingleElement(const BSONElement& e) const {
@@ -399,7 +388,7 @@ void ExistsMatchExpression::debugString(StringBuilder& debug, int level) const {
     debug << "\n";
 }
 
-void ExistsMatchExpression::serialize(BSONObjBuilder* out) const {
+void ExistsMatchExpression::toBSON(BSONObjBuilder* out) const {
     out->append(path(), BSON("$exists" << true));
 }
 
@@ -416,28 +405,31 @@ bool ExistsMatchExpression::equivalent(const MatchExpression* other) const {
 
 const std::string TypeMatchExpression::kMatchesAllNumbersAlias = "number";
 
-const stdx::unordered_map<std::string, BSONType> TypeMatchExpression::typeAliasMap = {
-    {typeName(NumberDouble), NumberDouble},
-    {typeName(String), String},
-    {typeName(Object), Object},
-    {typeName(Array), Array},
-    {typeName(BinData), BinData},
-    {typeName(Undefined), Undefined},
-    {typeName(jstOID), jstOID},
-    {typeName(Bool), Bool},
-    {typeName(Date), Date},
-    {typeName(jstNULL), jstNULL},
-    {typeName(RegEx), RegEx},
-    {typeName(DBRef), DBRef},
-    {typeName(Code), Code},
-    {typeName(Symbol), Symbol},
-    {typeName(CodeWScope), CodeWScope},
-    {typeName(NumberInt), NumberInt},
-    {typeName(bsonTimestamp), bsonTimestamp},
-    {typeName(NumberLong), NumberLong},
-    {typeName(NumberDecimal), NumberDecimal},
-    {typeName(MaxKey), MaxKey},
-    {typeName(MinKey), MinKey}};
+const std::unordered_map<std::string, BSONType> TypeMatchExpression::typeAliasMap = {
+    {"double", NumberDouble},
+#ifdef MONGO_CONFIG_EXPERIMENTAL_DECIMAL_SUPPORT
+    {"decimal", NumberDecimal},
+#endif
+    {"string", String},
+    {"object", Object},
+    {"array", Array},
+    {"binData", BinData},
+    {"undefined", Undefined},
+    {"objectId", jstOID},
+    {"bool", Bool},
+    {"date", Date},
+    {"null", jstNULL},
+    {"regex", RegEx},
+    {"dbPointer", DBRef},
+    {"javascript", Code},
+    {"symbol", Symbol},
+    {"javascriptWithScope", CodeWScope},
+    {"int", NumberInt},
+    {"timestamp", bsonTimestamp},
+    {"long", NumberLong},
+    {"decimal", NumberDecimal},
+    {"maxKey", MaxKey},
+    {"minKey", MinKey}};
 
 Status TypeMatchExpression::initWithBSONType(StringData path, int type) {
     if (!isValidBSONType(type)) {
@@ -498,13 +490,7 @@ bool TypeMatchExpression::matches(const MatchableDocument* doc, MatchDetails* de
 
 void TypeMatchExpression::debugString(StringBuilder& debug, int level) const {
     _debugAddSpace(debug, level);
-    debug << _path << " type: ";
-    if (matchesAllNumbers()) {
-        debug << kMatchesAllNumbersAlias;
-    } else {
-        debug << _type;
-    }
-
+    debug << _path << " type: " << _type;
     MatchExpression::TagData* td = getTag();
     if (NULL != td) {
         debug << " ";
@@ -513,12 +499,8 @@ void TypeMatchExpression::debugString(StringBuilder& debug, int level) const {
     debug << "\n";
 }
 
-void TypeMatchExpression::serialize(BSONObjBuilder* out) const {
-    if (matchesAllNumbers()) {
-        out->append(path(), BSON("$type" << kMatchesAllNumbersAlias));
-    } else {
-        out->append(path(), BSON("$type" << _type));
-    }
+void TypeMatchExpression::toBSON(BSONObjBuilder* out) const {
+    out->append(path(), BSON("$type" << _type));
 }
 
 bool TypeMatchExpression::equivalent(const MatchExpression* other) const {
@@ -539,141 +521,27 @@ bool TypeMatchExpression::equivalent(const MatchExpression* other) const {
 }
 
 
-// -----------
+// --------
 
-Status InMatchExpression::init(StringData path) {
-    return setPath(path);
+ArrayFilterEntries::ArrayFilterEntries() {
+    _hasNull = false;
+    _hasEmptyArray = false;
 }
 
-std::unique_ptr<MatchExpression> InMatchExpression::shallowClone() const {
-    auto next = stdx::make_unique<InMatchExpression>();
-    next->init(path());
-    next->setCollator(_collator);
-    if (getTag()) {
-        next->setTag(getTag()->clone());
-    }
-    next->_hasNull = _hasNull;
-    next->_hasEmptyArray = _hasEmptyArray;
-    next->_equalitySet = _equalitySet;
-    next->_originalEqualityVector = _originalEqualityVector;
-    for (auto&& regex : _regexes) {
-        std::unique_ptr<RegexMatchExpression> clonedRegex(
-            static_cast<RegexMatchExpression*>(regex->shallowClone().release()));
-        next->_regexes.push_back(std::move(clonedRegex));
-    }
-    return std::move(next);
+ArrayFilterEntries::~ArrayFilterEntries() {
+    for (unsigned i = 0; i < _regexes.size(); i++)
+        delete _regexes[i];
+    _regexes.clear();
 }
 
-bool InMatchExpression::matchesSingleElement(const BSONElement& e) const {
-    if (_hasNull && e.eoo()) {
-        return true;
-    }
-    if (_equalitySet.find(e) != _equalitySet.end()) {
-        return true;
-    }
-    for (auto&& regex : _regexes) {
-        if (regex->matchesSingleElement(e)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-void InMatchExpression::debugString(StringBuilder& debug, int level) const {
-    _debugAddSpace(debug, level);
-    debug << path() << " $in ";
-    debug << "[ ";
-    for (auto&& equality : _equalitySet) {
-        debug << equality.toString(false) << " ";
-    }
-    for (auto&& regex : _regexes) {
-        regex->shortDebugString(debug);
-        debug << " ";
-    }
-    debug << "]";
-    MatchExpression::TagData* td = getTag();
-    if (NULL != td) {
-        debug << " ";
-        td->debugString(&debug);
-    }
-    debug << "\n";
-}
-
-void InMatchExpression::serialize(BSONObjBuilder* out) const {
-    BSONObjBuilder inBob(out->subobjStart(path()));
-    BSONArrayBuilder arrBob(inBob.subarrayStart("$in"));
-    for (auto&& _equality : _equalitySet) {
-        arrBob.append(_equality);
-    }
-    for (auto&& _regex : _regexes) {
-        BSONObjBuilder regexBob;
-        _regex->serializeToBSONTypeRegex(&regexBob);
-        arrBob.append(regexBob.obj().firstElement());
-    }
-    arrBob.doneFast();
-    inBob.doneFast();
-}
-
-bool InMatchExpression::equivalent(const MatchExpression* other) const {
-    if (matchType() != other->matchType()) {
-        return false;
-    }
-    const InMatchExpression* realOther = static_cast<const InMatchExpression*>(other);
-    if (path() != realOther->path()) {
-        return false;
-    }
-    if (_hasNull != realOther->_hasNull) {
-        return false;
-    }
-    if (_regexes.size() != realOther->_regexes.size()) {
-        return false;
-    }
-    for (size_t i = 0; i < _regexes.size(); ++i) {
-        if (!_regexes[i]->equivalent(realOther->_regexes[i].get())) {
-            return false;
-        }
-    }
-    if (!CollatorInterface::collatorsMatch(_collator, realOther->_collator)) {
-        return false;
-    }
-    // We use an element-wise comparison to check equivalence of '_equalitySet'.  Unfortunately, we
-    // can't use BSONElementSet::operator==(), as it does not use the comparator object the set is
-    // initialized with (and as such, it is not collation-aware).
-    if (_equalitySet.size() != realOther->_equalitySet.size()) {
-        return false;
-    }
-    auto thisEqIt = _equalitySet.begin();
-    auto otherEqIt = realOther->_equalitySet.begin();
-    for (; thisEqIt != _equalitySet.end(); ++thisEqIt, ++otherEqIt) {
-        const bool considerFieldName = false;
-        if (thisEqIt->woCompare(*otherEqIt, considerFieldName, _collator)) {
-            return false;
-        }
-    }
-    invariant(otherEqIt == realOther->_equalitySet.end());
-    return true;
-}
-
-void InMatchExpression::_doSetCollator(const CollatorInterface* collator) {
-    _collator = collator;
-    _eltCmp = BSONElementComparator(BSONElementComparator::FieldNamesMode::kIgnore, _collator);
-
-    // Re-sort the list of equalities according to our current comparator. This is necessary to work
-    // around https://svn.boost.org/trac10/ticket/13140.
-    std::sort(
-        _originalEqualityVector.begin(), _originalEqualityVector.end(), _eltCmp.makeLessThan());
-
-    // We need to re-compute '_equalitySet', since our set comparator has changed.
-    _equalitySet = _eltCmp.makeBSONEltFlatSet(_originalEqualityVector);
-}
-
-Status InMatchExpression::setEqualities(std::vector<BSONElement> equalities) {
+Status ArrayFilterEntries::setEqualities(std::vector<BSONElement> equalities) {
     for (auto&& equality : equalities) {
         if (equality.type() == BSONType::RegEx) {
-            return Status(ErrorCodes::BadValue, "InMatchExpression equality cannot be a regex");
+            return Status(ErrorCodes::BadValue, "ArrayFilterEntries equality cannot be a regex");
         }
+
         if (equality.type() == BSONType::Undefined) {
-            return Status(ErrorCodes::BadValue, "InMatchExpression equality cannot be undefined");
+            return Status(ErrorCodes::BadValue, "ArrayFilterEntries equality cannot be undefined");
         }
 
         if (equality.type() == BSONType::jstNULL) {
@@ -683,20 +551,141 @@ Status InMatchExpression::setEqualities(std::vector<BSONElement> equalities) {
         }
     }
 
-    _originalEqualityVector = std::move(equalities);
-
     // Sort the list of equalities to work around https://svn.boost.org/trac10/ticket/13140.
-    std::sort(
-        _originalEqualityVector.begin(), _originalEqualityVector.end(), _eltCmp.makeLessThan());
-
-    _equalitySet = _eltCmp.makeBSONEltFlatSet(_originalEqualityVector);
-
+    std::sort(equalities.begin(), equalities.end(), BSONElementCmpWithoutField());
+    _equalities =
+        BSONElementFlatSet(equalities.begin(), equalities.end(), BSONElementCmpWithoutField());
     return Status::OK();
 }
 
-Status InMatchExpression::addRegex(std::unique_ptr<RegexMatchExpression> expr) {
-    _regexes.push_back(std::move(expr));
+Status ArrayFilterEntries::addRegex(RegexMatchExpression* expr) {
+    _regexes.push_back(expr);
     return Status::OK();
+}
+
+bool ArrayFilterEntries::equivalent(const ArrayFilterEntries& other) const {
+    if (_hasNull != other._hasNull)
+        return false;
+
+    if (_regexes.size() != other._regexes.size())
+        return false;
+    for (unsigned i = 0; i < _regexes.size(); i++)
+        if (!_regexes[i]->equivalent(other._regexes[i]))
+            return false;
+
+    return _equalities == other._equalities;
+}
+
+void ArrayFilterEntries::copyTo(ArrayFilterEntries& toFillIn) const {
+    toFillIn._hasNull = _hasNull;
+    toFillIn._hasEmptyArray = _hasEmptyArray;
+    toFillIn._equalities = _equalities;
+    for (unsigned i = 0; i < _regexes.size(); i++)
+        toFillIn._regexes.push_back(
+            static_cast<RegexMatchExpression*>(_regexes[i]->shallowClone().release()));
+}
+
+void ArrayFilterEntries::debugString(StringBuilder& debug) const {
+    debug << "[ ";
+    for (auto&& equality : _equalities) {
+        debug << equality.toString(false) << " ";
+    }
+    for (size_t i = 0; i < _regexes.size(); ++i) {
+        _regexes[i]->shortDebugString(debug);
+        debug << " ";
+    }
+    debug << "]";
+}
+
+void ArrayFilterEntries::toBSON(BSONArrayBuilder* out) const {
+    for (auto&& equality : _equalities) {
+        out->append(equality);
+    }
+    for (size_t i = 0; i < _regexes.size(); ++i) {
+        BSONObjBuilder regexBob;
+        _regexes[i]->toBSON(&regexBob);
+        out->append(regexBob.obj().firstElement());
+    }
+    out->doneFast();
+}
+
+// -----------
+
+Status InMatchExpression::init(StringData path) {
+    return initPath(path);
+}
+
+bool InMatchExpression::_matchesRealElement(const BSONElement& e) const {
+    if (_arrayEntries.contains(e))
+        return true;
+
+    for (unsigned i = 0; i < _arrayEntries.numRegexes(); i++) {
+        if (_arrayEntries.regex(i)->matchesSingleElement(e))
+            return true;
+    }
+
+    return false;
+}
+
+bool InMatchExpression::matchesSingleElement(const BSONElement& e) const {
+    if (_arrayEntries.hasNull() && e.eoo())
+        return true;
+
+    if (_matchesRealElement(e))
+        return true;
+
+    /*
+    if ( e.type() == Array ) {
+        BSONObjIterator i( e.Obj() );
+        while ( i.more() ) {
+            BSONElement sub = i.next();
+            if ( _matchesRealElement( sub ) )
+                return true;
+        }
+    }
+    */
+
+    return false;
+}
+
+void InMatchExpression::debugString(StringBuilder& debug, int level) const {
+    _debugAddSpace(debug, level);
+    debug << path() << " $in ";
+    _arrayEntries.debugString(debug);
+    MatchExpression::TagData* td = getTag();
+    if (NULL != td) {
+        debug << " ";
+        td->debugString(&debug);
+    }
+    debug << "\n";
+}
+
+void InMatchExpression::toBSON(BSONObjBuilder* out) const {
+    BSONObjBuilder inBob(out->subobjStart(path()));
+    BSONArrayBuilder arrBob(inBob.subarrayStart("$in"));
+    _arrayEntries.toBSON(&arrBob);
+    inBob.doneFast();
+}
+
+bool InMatchExpression::equivalent(const MatchExpression* other) const {
+    if (matchType() != other->matchType())
+        return false;
+    const InMatchExpression* realOther = static_cast<const InMatchExpression*>(other);
+    return path() == realOther->path() && _arrayEntries.equivalent(realOther->_arrayEntries);
+}
+
+std::unique_ptr<MatchExpression> InMatchExpression::shallowClone() const {
+    std::unique_ptr<InMatchExpression> next = stdx::make_unique<InMatchExpression>();
+    copyTo(next.get());
+    if (getTag()) {
+        next->setTag(getTag()->clone());
+    }
+    return std::move(next);
+}
+
+void InMatchExpression::copyTo(InMatchExpression* toFillIn) const {
+    toFillIn->init(path());
+    _arrayEntries.copyTo(toFillIn->_arrayEntries);
 }
 
 // -----------
@@ -716,7 +705,7 @@ Status BitTestMatchExpression::init(StringData path, std::vector<uint32_t> bitPo
         _bitMask |= 1ULL << bitPosition;
     }
 
-    return setPath(path);
+    return initPath(path);
 }
 
 Status BitTestMatchExpression::init(StringData path, uint64_t bitMask) {
@@ -729,7 +718,7 @@ Status BitTestMatchExpression::init(StringData path, uint64_t bitMask) {
         }
     }
 
-    return setPath(path);
+    return initPath(path);
 }
 
 Status BitTestMatchExpression::init(StringData path,
@@ -758,7 +747,7 @@ Status BitTestMatchExpression::init(StringData path,
         }
     }
 
-    return setPath(path);
+    return initPath(path);
 }
 
 bool BitTestMatchExpression::needFurtherBitTests(bool isBitSet) const {
@@ -895,7 +884,7 @@ void BitTestMatchExpression::debugString(StringBuilder& debug, int level) const 
     }
 }
 
-void BitTestMatchExpression::serialize(BSONObjBuilder* out) const {
+void BitTestMatchExpression::toBSON(BSONObjBuilder* out) const {
     std::string opString = "";
 
     switch (matchType()) {

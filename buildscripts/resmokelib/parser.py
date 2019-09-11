@@ -4,7 +4,6 @@ Parser for command line arguments.
 
 from __future__ import absolute_import
 
-import collections
 import os
 import os.path
 import optparse
@@ -18,20 +17,14 @@ from .. import resmokeconfig
 # Mapping of the attribute of the parsed arguments (dest) to its key as it appears in the options
 # YAML configuration file. Most should only be converting from snake_case to camelCase.
 DEST_TO_CONFIG = {
-    "archive_file": "archiveFile",
-    "archive_limit_mb": "archiveLimitMb",
-    "archive_limit_tests": "archiveLimitTests",
     "base_port": "basePort",
     "buildlogger_url": "buildloggerUrl",
     "continue_on_failure": "continueOnFailure",
     "dbpath_prefix": "dbpathPrefix",
     "dbtest_executable": "dbtest",
-    "distro_id": "distroId",
     "dry_run": "dryRun",
     "exclude_with_all_tags": "excludeWithAllTags",
     "exclude_with_any_tags": "excludeWithAnyTags",
-    "execution_number": "executionNumber",
-    "git_revision": "gitRevision",
     "include_with_all_tags": "includeWithAllTags",
     "include_with_any_tags": "includeWithAnyTags",
     "jobs": "jobs",
@@ -41,9 +34,7 @@ DEST_TO_CONFIG = {
     "mongos_executable": "mongos",
     "mongos_parameters": "mongosSetParameters",
     "no_journal": "nojournal",
-    "num_clients_per_fixture": "numClientsPerFixture",
     "prealloc_journal": "preallocJournal",
-    "project_name": "projectName",
     "repeat": "repeat",
     "report_file": "reportFile",
     "seed": "seed",
@@ -52,9 +43,6 @@ DEST_TO_CONFIG = {
     "shuffle": "shuffle",
     "storage_engine": "storageEngine",
     "storage_engine_cache_size": "storageEngineCacheSizeGB",
-    "task_id": "taskId",
-    "task_name": "taskName",
-    "variant_name": "variantName",
     "wt_coll_config": "wiredTigerCollectionConfigString",
     "wt_engine_config": "wiredTigerEngineConfigString",
     "wt_index_config": "wiredTigerIndexConfigString"
@@ -89,23 +77,6 @@ def parse_command_line():
     parser.add_option("--options", dest="options_file", metavar="OPTIONS",
                       help="A YAML file that specifies global options to resmoke.py.")
 
-    parser.add_option("--archiveFile", dest="archive_file", metavar="ARCHIVE_FILE",
-                      help=("Sets the archive file name for the Evergreen task running the tests."
-                            " The archive file is JSON format containing a list of tests that were"
-                            " successfully archived to S3. If unspecified, no data files from tests"
-                            " will be archived in S3. Tests can be designated for archival in the"
-                            " task suite configuration file."))
-
-    parser.add_option("--archiveLimitMb", type="int", dest="archive_limit_mb",
-                      metavar="ARCHIVE_LIMIT_MB",
-                      help=("Sets the limit (in MB) for archived files to S3. A value of 0"
-                            " indicates there is no limit."))
-
-    parser.add_option("--archiveLimitTests", type="int", dest="archive_limit_tests",
-                      metavar="ARCHIVE_LIMIT_TESTS",
-                      help=("Sets the maximum number of tests to archive to S3. A value"
-                            " of 0 indicates there is no limit."))
-
     parser.add_option("--basePort", dest="base_port", metavar="PORT",
                       help=("The starting port number to use for mongod and mongos processes"
                             " spawned by resmoke.py or the tests themselves. Each fixture and Job"
@@ -133,9 +104,6 @@ def parse_command_line():
                       metavar="TAG1,TAG2",
                       help=("Comma separated list of tags. Any jstest that contains any of the"
                             " specified tags will be excluded from any suites that are run."))
-
-    parser.add_option("-f", "--findSuites", action="store_true", dest="find_suites",
-                      help="List the names of the suites that will execute the specified tests.")
 
     parser.add_option("--includeWithAllTags", action="append", dest="include_with_all_tags",
                       metavar="TAG1,TAG2",
@@ -191,9 +159,6 @@ def parse_command_line():
     parser.add_option("--nopreallocj", action="store_const", const="off", dest="prealloc_journal",
                       help="Disable preallocation of journal files for all mongod processes.")
 
-    parser.add_option("--numClientsPerFixture", type="int", dest="num_clients_per_fixture",
-                      help="Number of clients running tests per fixture")
-
     parser.add_option("--preallocJournal", type="choice", action="store", dest="prealloc_journal",
                       choices=("on", "off"), metavar="ON|OFF",
                       help=("Enable or disable preallocation of journal files for all mongod"
@@ -236,46 +201,9 @@ def parse_command_line():
     parser.add_option("--wiredTigerIndexConfigString", dest="wt_index_config", metavar="CONFIG",
                       help="Set the WiredTiger index configuration setting for all mongod's.")
 
-
-    evergreen_options = optparse.OptionGroup(
-        parser, title="Evergreen options",
-        description=("Options used to propagate information about the Evergreen task running this"
-                     " script."))
-    parser.add_option_group(evergreen_options)
-
-    evergreen_options.add_option("--buildId", dest="build_id", metavar="BUILD_ID",
-                                 help="Sets the build ID of the task.")
-
-    evergreen_options.add_option("--distroId", dest="distro_id", metavar="DISTRO_ID",
-                                 help=("Sets the identifier for the Evergreen distro running the"
-                                       " tests."))
-
-    evergreen_options.add_option("--executionNumber", type="int", dest="execution_number",
-                                 metavar="EXECUTION_NUMBER",
-                                 help=("Sets the number for the Evergreen execution running the"
-                                       " tests."))
-
-    evergreen_options.add_option("--gitRevision", dest="git_revision", metavar="GIT_REVISION",
-                                 help=("Sets the git revision for the Evergreen task running the"
-                                       " tests."))
-
-    evergreen_options.add_option("--projectName", dest="project_name", metavar="PROJECT_NAME",
-                                 help=("Sets the name of the Evergreen project running the tests."))
-
-    evergreen_options.add_option("--taskName", dest="task_name", metavar="TASK_NAME",
-                                 help="Sets the name of the Evergreen task running the tests.")
-
-    evergreen_options.add_option("--taskId", dest="task_id", metavar="TASK_ID",
-                                 help="Sets the Id of the Evergreen task running the tests.")
-
-    evergreen_options.add_option("--variantName", dest="variant_name", metavar="VARIANT_NAME",
-                                 help=("Sets the name of the Evergreen build variant running the"
-                                       " tests."))
-
     parser.set_defaults(executor_file="with_server",
                         logger_file="console",
                         dry_run="off",
-                        find_suites=False,
                         list_suites=False,
                         prealloc_journal="off")
 
@@ -300,21 +228,11 @@ def update_config_vars(values):
         if values[dest] is not None:
             config[config_var] = values[dest]
 
-    _config.ARCHIVE_FILE = config.pop("archiveFile")
-    _config.ARCHIVE_LIMIT_MB = config.pop("archiveLimitMb")
-    _config.ARCHIVE_LIMIT_TESTS = config.pop("archiveLimitTests")
     _config.BASE_PORT = int(config.pop("basePort"))
     _config.BUILDLOGGER_URL = config.pop("buildloggerUrl")
     _config.DBPATH_PREFIX = _expand_user(config.pop("dbpathPrefix"))
     _config.DBTEST_EXECUTABLE = _expand_user(config.pop("dbtest"))
     _config.DRY_RUN = config.pop("dryRun")
-    _config.EVERGREEN_DISTRO_ID = config.pop("distroId")
-    _config.EVERGREEN_EXECUTION = config.pop("executionNumber")
-    _config.EVERGREEN_PROJECT_NAME = config.pop("projectName")
-    _config.EVERGREEN_REVISION = config.pop("gitRevision")
-    _config.EVERGREEN_TASK_ID = config.pop("taskId")
-    _config.EVERGREEN_TASK_NAME = config.pop("taskName")
-    _config.EVERGREEN_VARIANT_NAME = config.pop("variantName")
     _config.EXCLUDE_WITH_ALL_TAGS = config.pop("excludeWithAllTags")
     _config.EXCLUDE_WITH_ANY_TAGS = config.pop("excludeWithAnyTags")
     _config.FAIL_FAST = not config.pop("continueOnFailure")
@@ -328,7 +246,6 @@ def update_config_vars(values):
     _config.MONGOS_SET_PARAMETERS = config.pop("mongosSetParameters")
     _config.NO_JOURNAL = config.pop("nojournal")
     _config.NO_PREALLOC_JOURNAL = config.pop("preallocJournal") == "off"
-    _config.NUM_CLIENTS_PER_FIXTURE = config.pop("numClientsPerFixture")
     _config.RANDOM_SEED = config.pop("seed")
     _config.REPEAT = config.pop("repeat")
     _config.REPORT_FILE = config.pop("reportFile")
@@ -345,39 +262,9 @@ def update_config_vars(values):
         raise optparse.OptionValueError("Unknown option(s): %s" % (config.keys()))
 
 
-def create_test_membership_map(fail_on_missing_selector=False):
-    """
-    Returns a dict keyed by test name containing all of the suites that will run that test.
-    Since this iterates through every available suite, it should only be run once.
-    """
-
-    test_membership = collections.defaultdict(list)
-    suite_names = get_named_suites()
-    for suite_name in suite_names:
-        try:
-            suite_config = _get_suite_config(suite_name)
-            suite = testing.suite.Suite(suite_name, suite_config)
-        except IOError as err:
-            # If unittests.txt or integration_tests.txt aren't there we'll ignore the error because
-            # unittests haven't been built yet (this is highly likely using find interactively).
-            if err.filename in _config.EXTERNAL_SUITE_SELECTORS:
-                if not fail_on_missing_selector:
-                    continue
-            raise
-
-        for group in suite.test_groups:
-            for testfile in group.tests:
-                if isinstance(testfile, dict):
-                    continue
-                test_membership[testfile].append(suite_name)
-    return test_membership
-
-
 def get_suites(values, args):
     if (values.suite_files is None and not args) or (values.suite_files is not None and args):
         raise optparse.OptionValueError("Must specify either --suites or a list of tests")
-
-    _config.INTERNAL_EXECUTOR_NAME = values.executor_file
 
     # If there are no suites specified, but there are args, assume they are jstests.
     if args:

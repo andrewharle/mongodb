@@ -36,8 +36,6 @@
 #include "mongo/config.h"
 #include "mongo/db/storage/mmap_v1/record.h"
 #include "mongo/platform/bits.h"
-#include "mongo/util/clock_source.h"
-#include "mongo/util/concurrency/threadlocal.h"
 #include "mongo/util/debug_util.h"
 #include "mongo/util/net/listen.h"
 #include "mongo/util/processinfo.h"
@@ -93,15 +91,15 @@ struct Data {
     long long _lastReset;  // time in millis
 };
 
-void reset(Data* data, ClockSource* cs) {
+void reset(Data* data) {
     memset(data->_table, 0, sizeof(data->_table));
-    data->_lastReset = cs->now().toMillisSinceEpoch();
+    data->_lastReset = Listener::getElapsedTimeMillis();
 }
 
-inline void resetIfNeeded(Data* data, ClockSource* cs) {
-    const long long sinceReset = cs->now().toMillisSinceEpoch() - data->_lastReset;
-    if (MONGO_unlikely(sinceReset > RecordAccessTracker::RotateTimeSecs * 1000)) {
-        reset(data, cs);
+inline void resetIfNeeded(Data* data) {
+    const long long now = Listener::getElapsedTimeMillis();
+    if (MONGO_unlikely((now - data->_lastReset) > RecordAccessTracker::RotateTimeSecs * 1000)) {
+        reset(data);
     }
 }
 
@@ -126,8 +124,8 @@ inline void markPageSeen(size_t& superpage, size_t ptr) {
 }
 
 /** call this to check a page has been seen yet. */
-inline bool seen(Data* data, size_t ptr, ClockSource* cs) {
-    resetIfNeeded(data, cs);
+inline bool seen(Data* data, size_t ptr) {
+    resetIfNeeded(data);
 
     // A bucket contains 4 superpages each containing 16 contiguous pages
     // See above for a more detailed explanation of superpages
@@ -170,6 +168,7 @@ RecordAccessTracker::Slice::Slice() {
 
 void RecordAccessTracker::Slice::reset() {
     memset(_data, 0, sizeof(_data));
+    _lastReset = time(0);
 }
 
 RecordAccessTracker::State RecordAccessTracker::Slice::get(int regionHash,
@@ -193,6 +192,10 @@ bool RecordAccessTracker::Slice::put(int regionHash, size_t region, short offset
 
     e->value |= 1ULL << offset;
     return true;
+}
+
+time_t RecordAccessTracker::Slice::lastReset() const {
+    return _lastReset;
 }
 
 RecordAccessTracker::Entry* RecordAccessTracker::Slice::_get(int start, size_t region, bool add) {
@@ -219,20 +222,22 @@ RecordAccessTracker::Entry* RecordAccessTracker::Slice::_get(int start, size_t r
 // Rolling
 //
 
-bool RecordAccessTracker::Rolling::access(size_t region,
-                                          short offset,
-                                          bool doHalf,
-                                          ClockSource* cs) {
+RecordAccessTracker::Rolling::Rolling() {
+    _curSlice = 0;
+    _lastRotate = Listener::getElapsedTimeMillis();
+}
+
+bool RecordAccessTracker::Rolling::access(size_t region, short offset, bool doHalf) {
     int regionHash = hash(region);
 
     stdx::lock_guard<SimpleMutex> lk(_lock);
 
     static int rarelyCount = 0;
     if (rarelyCount++ % (2048 / BigHashSize) == 0) {
-        Date_t now = cs->now();
+        long long now = Listener::getElapsedTimeMillis();
 
-        if (now - _lastRotate > Seconds(static_cast<int64_t>(RotateTimeSecs))) {
-            _rotate(cs);
+        if (now - _lastRotate > (1000 * RotateTimeSecs)) {
+            _rotate();
         }
     }
 
@@ -252,20 +257,16 @@ bool RecordAccessTracker::Rolling::access(size_t region,
     // we weren't in any slice
     // so add to cur
     if (!_slices[_curSlice].put(regionHash, region, offset)) {
-        _rotate(cs);
+        _rotate();
         _slices[_curSlice].put(regionHash, region, offset);
     }
     return false;
 }
 
-void RecordAccessTracker::Rolling::updateLastRotate(ClockSource* cs) {
-    _lastRotate = cs->now();
-}
-
-void RecordAccessTracker::Rolling::_rotate(ClockSource* cs) {
+void RecordAccessTracker::Rolling::_rotate() {
     _curSlice = (_curSlice + 1) % NumSlices;
     _slices[_curSlice].reset();
-    updateLastRotate(cs);
+    _lastRotate = Listener::getElapsedTimeMillis();
 }
 
 // These need to be outside the ps namespace due to the way they are defined
@@ -290,17 +291,13 @@ PointerTable::Data* PointerTable::getData() {
 // RecordAccessTracker
 //
 
-RecordAccessTracker::RecordAccessTracker(ClockSource* cs)
-    : _blockSupported(blockSupported), _clock(cs) {
+RecordAccessTracker::RecordAccessTracker() : _blockSupported(blockSupported) {
     reset();
 }
 
 void RecordAccessTracker::reset() {
-    PointerTable::reset(PointerTable::getData(), _clock);
+    PointerTable::reset(PointerTable::getData());
     _rollingTable.reset(new Rolling[BigHashSize]);
-    for (int i = 0; i < BigHashSize; i++) {
-        _rollingTable[i].updateLastRotate(_clock);
-    }
 }
 
 void RecordAccessTracker::markAccessed(const void* record) {
@@ -308,10 +305,9 @@ void RecordAccessTracker::markAccessed(const void* record) {
     const size_t region = page >> 6;
     const size_t offset = page & 0x3f;
 
-    const bool seen =
-        PointerTable::seen(PointerTable::getData(), reinterpret_cast<size_t>(record), _clock);
+    const bool seen = PointerTable::seen(PointerTable::getData(), reinterpret_cast<size_t>(record));
     if (!seen) {
-        _rollingTable[bigHash(region)].access(region, offset, true, _clock);
+        _rollingTable[bigHash(region)].access(region, offset, true);
     }
 }
 
@@ -324,12 +320,12 @@ bool RecordAccessTracker::checkAccessedAndMark(const void* record) {
     // This is like the "L1 cache". If we're a miss then we fall through and check the
     // "L2 cache". If we're still a miss, then we defer to a system-specific system
     // call (or give up and return false if deferring to the system call is not enabled).
-    if (PointerTable::seen(PointerTable::getData(), reinterpret_cast<size_t>(record), _clock)) {
+    if (PointerTable::seen(PointerTable::getData(), reinterpret_cast<size_t>(record))) {
         return true;
     }
 
     // We were a miss in the PointerTable. See if we can find 'record' in the Rolling table.
-    if (_rollingTable[bigHash(region)].access(region, offset, false, _clock)) {
+    if (_rollingTable[bigHash(region)].access(region, offset, false)) {
         return true;
     }
 

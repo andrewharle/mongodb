@@ -57,15 +57,10 @@ void logFailureInSetStreamNoDelay(std::error_code ec) {
     severe() << "Failed to set no-delay mode on stream: " << ec.message();
 }
 
-void logFailureInSetStreamKeepAlive(std::error_code ec) {
-    invariant(ec);
-    severe() << "Failed to set keep-alive mode on stream: " << ec.message();
-}
-
 void logUnexpectedErrorInCheckOpen(std::error_code ec) {
     invariant(ec);
     log() << "unexpected error when checking if a stream was open: " << ec.message()
-          << ", the only errors we expect are EOF and network/connection reset";
+          << ", the only error we expected was EOF";
 }
 
 

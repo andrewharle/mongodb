@@ -54,7 +54,7 @@ public:
                    WorkingSet* workingSet,
                    const MatchExpression* filter);
 
-    StageState doWork(WorkingSetID* out) final;
+    StageState work(WorkingSetID* out) final;
     bool isEOF() final;
 
     void doInvalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) final;

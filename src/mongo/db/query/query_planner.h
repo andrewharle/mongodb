@@ -28,7 +28,6 @@
 
 #pragma once
 
-#include "mongo/base/string_data.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/query_planner_params.h"
 #include "mongo/db/query/query_solution.h"
@@ -112,7 +111,7 @@ public:
      */
     static Status tagAccordingToCache(MatchExpression* filter,
                                       const PlanCacheIndexTree* const indexTree,
-                                      const std::map<StringData, size_t>& indexMap);
+                                      const std::map<BSONObj, size_t>& indexMap);
 };
 
 }  // namespace mongo

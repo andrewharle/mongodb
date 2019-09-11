@@ -55,8 +55,6 @@ ASIOTimer::~ASIOTimer() {
     ++_callbackSharedState->id;
 }
 
-const auto kMaxTimerDuration = duration_cast<Milliseconds>(ASIOTimer::clock_type::duration::max());
-
 void ASIOTimer::setTimeout(Milliseconds timeout, TimeoutCallback cb) {
     _strand->dispatch([this, timeout, cb] {
         _cb = std::move(cb);
@@ -64,7 +62,7 @@ void ASIOTimer::setTimeout(Milliseconds timeout, TimeoutCallback cb) {
         cancelTimeout();
 
         std::error_code ec;
-        _impl.expires_after(std::min(kMaxTimerDuration, timeout).toSystemDuration(), ec);
+        _impl.expires_after(timeout, ec);
         if (ec) {
             severe() << "Failed to set connection pool timer: " << ec.message();
             fassertFailed(40333);
@@ -176,14 +174,11 @@ std::unique_ptr<NetworkInterfaceASIO::AsyncOp> ASIOConnection::makeAsyncOp(ASIOC
     return stdx::make_unique<NetworkInterfaceASIO::AsyncOp>(
         conn->_global->_impl,
         TaskExecutor::CallbackHandle(),
-        RemoteCommandRequest{conn->getHostAndPort(),
-                             std::string("admin"),
-                             BSON("isMaster" << 1),
-                             BSONObj(),
-                             nullptr},
-        [conn](const TaskExecutor::ResponseStatus& rs) {
+        RemoteCommandRequest{
+            conn->getHostAndPort(), std::string("admin"), BSON("isMaster" << 1), BSONObj()},
+        [conn](const TaskExecutor::ResponseStatus& status) {
             auto cb = std::move(conn->_setupCallback);
-            cb(conn, rs.status);
+            cb(conn, status.isOK() ? Status::OK() : status.getStatus());
         },
         conn->_global->now());
 }
@@ -214,14 +209,9 @@ void ASIOConnection::setup(Milliseconds timeout, SetupCallback cb) {
                 _impl->_access->id++;
 
                 // If our connection timeout callback ran but wasn't the reason we exited
-                // the state machine, clear any TIMED_OUT state.
+                // the state machine, clear the timedOut flag.
                 if (status.isOK()) {
-                    _impl->_transitionToState_inlock(
-                        NetworkInterfaceASIO::AsyncOp::State::kUninitialized);
-                    _impl->_transitionToState_inlock(
-                        NetworkInterfaceASIO::AsyncOp::State::kInProgress);
-                    _impl->_transitionToState_inlock(
-                        NetworkInterfaceASIO::AsyncOp::State::kFinished);
+                    _impl->_timedOut = false;
                 }
             }
 
@@ -241,14 +231,28 @@ void ASIOConnection::setup(Milliseconds timeout, SetupCallback cb) {
         }
 
         // Actually timeout setup
-        setTimeout(timeout, [this, access, generation] {
-            stdx::lock_guard<stdx::mutex> lk(access->mutex);
-            if (generation != access->id) {
-                // The operation has been cleaned up, do not access.
-                return;
-            }
-            _impl->timeOut_inlock();
-        });
+        setTimeout(timeout,
+                   [this, access, generation] {
+                       // For operations that time out immediately, we can't simply cancel the
+                       // connection, because it may not have been initialized.
+                       stdx::lock_guard<stdx::mutex> lk(access->mutex);
+
+                       if (generation != access->id) {
+                           // The operation has been cleaned up, do not access.
+                           return;
+                       }
+
+                       // Time out the op.
+                       _impl->_strand.post([this, access, generation] {
+                           stdx::lock_guard<stdx::mutex> lk(access->mutex);
+                           if (generation == access->id) {
+                               _impl->_timedOut = true;
+                               if (_impl->_connection) {
+                                   _impl->_connection->cancel();
+                               }
+                           }
+                       });
+                   });
 
         _global->_impl->_connect(_impl.get());
     });
@@ -262,17 +266,15 @@ void ASIOConnection::refresh(Milliseconds timeout, RefreshCallback cb) {
     _impl->strand().dispatch([this, timeout, cb] {
         auto op = _impl.get();
 
-        // We clear state transitions because we're re-running a portion of the asio state machine
-        // without entering in startCommand (which would call this for us).
-        op->clearStateTransitions();
-
         _refreshCallback = std::move(cb);
 
         // Actually timeout refreshes
         setTimeout(timeout, [this] { _impl->connection().stream().cancel(); });
 
         // Our pings are isMaster's
-        auto beginStatus = op->beginCommand(makeIsMasterRequest(this), _hostAndPort);
+        auto beginStatus = op->beginCommand(makeIsMasterRequest(this),
+                                            NetworkInterfaceASIO::AsyncCommand::CommandType::kRPC,
+                                            _hostAndPort);
         if (!beginStatus.isOK()) {
             auto cb = std::move(_refreshCallback);
             cb(this, beginStatus);
@@ -284,25 +286,28 @@ void ASIOConnection::refresh(Milliseconds timeout, RefreshCallback cb) {
         // need to intercept those calls so we can capture them. This will get cleared out when we
         // fill
         // in the real onFinish in startCommand.
-        op->setOnFinish([this](RemoteCommandResponse failedResponse) {
+        op->setOnFinish([this](StatusWith<RemoteCommandResponse> failedResponse) {
             invariant(!failedResponse.isOK());
             auto cb = std::move(_refreshCallback);
-            cb(this, failedResponse.status);
+            cb(this, failedResponse.getStatus());
         });
 
         op->_inRefresh = true;
 
-        _global->_impl->_asyncRunCommand(op, [this, op](std::error_code ec, size_t bytes) {
-            cancelTimeout();
+        _global->_impl->_asyncRunCommand(
+            op,
+            [this, op](std::error_code ec, size_t bytes) {
+                cancelTimeout();
 
-            auto cb = std::move(_refreshCallback);
+                auto cb = std::move(_refreshCallback);
 
-            if (ec)
-                return cb(this, Status(ErrorCodes::HostUnreachable, ec.message()));
+                if (ec)
+                    return cb(this, Status(ErrorCodes::HostUnreachable, ec.message()));
 
-            op->_inRefresh = false;
-            cb(this, Status::OK());
-        });
+                op->_inRefresh = false;
+
+                cb(this, Status::OK());
+            });
     });
 }
 

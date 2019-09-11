@@ -36,13 +36,11 @@
 #include "mongo/db/jsobj.h"
 #include "mongo/db/json.h"
 #include "mongo/db/ops/log_builder.h"
-#include "mongo/db/query/collation/collator_interface_mock.h"
 #include "mongo/unittest/unittest.h"
 
 namespace {
 
 using mongo::BSONObj;
-using mongo::CollatorInterfaceMock;
 using mongo::LogBuilder;
 using mongo::ModifierCompare;
 using mongo::ModifierInterface;
@@ -61,13 +59,13 @@ class Mod {
 public:
     Mod() : _mod() {}
 
-    explicit Mod(BSONObj modObj,
-                 ModifierInterface::Options options = ModifierInterface::Options::normal())
+    explicit Mod(BSONObj modObj)
         : _modObj(modObj),
           _mod((modObj.firstElement().fieldNameStringData() == "$min") ? ModifierCompare::MIN
                                                                        : ModifierCompare::MAX) {
         StringData modName = modObj.firstElement().fieldName();
-        ASSERT_OK(_mod.init(modObj[modName].embeddedObject().firstElement(), options));
+        ASSERT_OK(_mod.init(modObj[modName].embeddedObject().firstElement(),
+                            ModifierInterface::Options::normal()));
     }
 
     Status prepare(Element root, StringData matchedField, ModifierInterface::ExecInfo* execInfo) {
@@ -292,54 +290,6 @@ TEST(ExistingEmbeddedDoc, MaxNumber) {
     ASSERT_OK(mod.prepare(doc.root(), "", &execInfo));
     ASSERT_TRUE(execInfo.noOp);
     ASSERT_EQUALS("a", execInfo.fieldRef[0]->dottedField());
-}
-
-TEST(Collation, MinRespectsCollationFromModifierInterfaceOptions) {
-    CollatorInterfaceMock collator(CollatorInterfaceMock::MockType::kReverseString);
-    Document doc(fromjson("{a: 'cbc'}"));
-    ModifierInterface::Options options = ModifierInterface::Options::normal(&collator);
-    Mod mod(fromjson("{$min: {a: 'dba'}}"), options);
-
-    ModifierInterface::ExecInfo execInfo;
-    ASSERT_OK(mod.prepare(doc.root(), "", &execInfo));
-    ASSERT_FALSE(execInfo.noOp);
-
-    ASSERT_EQUALS("a", execInfo.fieldRef[0]->dottedField());
-
-    ASSERT_OK(mod.apply());
-    ASSERT_EQUALS(fromjson("{a : 'dba'}"), doc);
-}
-
-TEST(Collation, MinRespectsCollationFromSetCollator) {
-    CollatorInterfaceMock collator(CollatorInterfaceMock::MockType::kReverseString);
-    Document doc(fromjson("{a: 'cbc'}"));
-    Mod mod(fromjson("{$min: {a: 'dba'}}"));
-    mod.mod().setCollator(&collator);
-
-    ModifierInterface::ExecInfo execInfo;
-    ASSERT_OK(mod.prepare(doc.root(), "", &execInfo));
-    ASSERT_FALSE(execInfo.noOp);
-
-    ASSERT_EQUALS("a", execInfo.fieldRef[0]->dottedField());
-
-    ASSERT_OK(mod.apply());
-    ASSERT_EQUALS(fromjson("{a : 'dba'}"), doc);
-}
-
-TEST(Collation, MaxRespectsCollationFromSetCollator) {
-    CollatorInterfaceMock collator(CollatorInterfaceMock::MockType::kReverseString);
-    Document doc(fromjson("{a: 'cbc'}"));
-    Mod mod(fromjson("{$max: {a: 'abd'}}"));
-    mod.mod().setCollator(&collator);
-
-    ModifierInterface::ExecInfo execInfo;
-    ASSERT_OK(mod.prepare(doc.root(), "", &execInfo));
-    ASSERT_FALSE(execInfo.noOp);
-
-    ASSERT_EQUALS("a", execInfo.fieldRef[0]->dottedField());
-
-    ASSERT_OK(mod.apply());
-    ASSERT_EQUALS(fromjson("{a : 'abd'}"), doc);
 }
 
 TEST(IndexedMod, PrepareReportCreatedArrayElement) {

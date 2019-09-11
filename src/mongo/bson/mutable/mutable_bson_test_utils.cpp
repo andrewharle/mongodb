@@ -142,7 +142,7 @@ bool checkDocNoOrderingImpl(ConstElement lhs, ConstElement rhs) {
     } else {
         // This is some leaf type. We've already checked or ignored field names, so
         // don't recheck it here.
-        return lhs.compareWithElement(rhs, nullptr, false) == 0;
+        return lhs.compareWithElement(rhs, false) == 0;
     }
 }
 
@@ -158,37 +158,32 @@ bool checkDoc(const Document& lhs, const BSONObj& rhs) {
     const int primaryResult = fromLhs.woCompare(rhs);
 
     // Validate primary result via other comparison paths.
-    const int secondaryResult = lhs.compareWithBSONObj(rhs, nullptr);
+    const int secondaryResult = lhs.compareWithBSONObj(rhs);
 
     assertSameSign(primaryResult, secondaryResult);
 
     // Check that mutables serialized result matches against its origin.
-    ASSERT_EQUALS(0, lhs.compareWithBSONObj(fromLhs, nullptr));
+    ASSERT_EQUALS(0, lhs.compareWithBSONObj(fromLhs));
 
     return (primaryResult == 0);
 }
 
 bool checkDoc(const Document& lhs, const Document& rhs) {
-    const int primaryResult = lhs.compareWith(rhs, nullptr);
+    const int primaryResult = lhs.compareWith(rhs);
 
     const BSONObj fromLhs = lhs.getObject();
     const BSONObj fromRhs = rhs.getObject();
 
-    const int result_d_o = lhs.compareWithBSONObj(fromRhs, nullptr);
-    const int result_o_d = rhs.compareWithBSONObj(fromLhs, nullptr);
+    const int result_d_o = lhs.compareWithBSONObj(fromRhs);
+    const int result_o_d = rhs.compareWithBSONObj(fromLhs);
 
     assertSameSign(primaryResult, result_d_o);
     assertOppositeSign(primaryResult, result_o_d);
 
-    ASSERT_EQUALS(0, lhs.compareWithBSONObj(fromLhs, nullptr));
-    ASSERT_EQUALS(0, rhs.compareWithBSONObj(fromRhs, nullptr));
+    ASSERT_EQUALS(0, lhs.compareWithBSONObj(fromLhs));
+    ASSERT_EQUALS(0, rhs.compareWithBSONObj(fromRhs));
 
     return (primaryResult == 0);
-}
-
-std::ostream& operator<<(std::ostream& stream, const ConstElement& elt) {
-    stream << elt.toString();
-    return stream;
 }
 
 std::ostream& operator<<(std::ostream& stream, const Document& doc) {
@@ -196,7 +191,7 @@ std::ostream& operator<<(std::ostream& stream, const Document& doc) {
     return stream;
 }
 
-std::ostream& operator<<(std::ostream& stream, const Element& elt) {
+std::ostream& operator<<(std::ostream& stream, const ConstElement& elt) {
     stream << elt.toString();
     return stream;
 }

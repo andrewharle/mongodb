@@ -33,7 +33,6 @@
 #include <jsfriendapi.h>
 #include <limits>
 
-#include "mongo/base/static_assert.h"
 #include "mongo/scripting/mozjs/implscope.h"
 #include "mongo/scripting/mozjs/jsstringwrapper.h"
 #include "mongo/scripting/mozjs/objectwrapper.h"
@@ -55,9 +54,8 @@ const JSErrorFormatString* uncatchableErrorCallback(void* data, const unsigned c
     return &kUncatchableErrorFormatString;
 }
 
-MONGO_STATIC_ASSERT_MSG(
-    UINT_MAX - JSErr_Limit > ErrorCodes::MaxError,
-    "Not enough space in an unsigned int for Mongo ErrorCodes and JSErrorNumbers");
+static_assert(UINT_MAX - JSErr_Limit > ErrorCodes::MaxError,
+              "Not enough space in an unsigned int for Mongo ErrorCodes and JSErrorNumbers");
 
 }  // namespace
 

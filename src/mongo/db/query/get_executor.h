@@ -26,17 +26,16 @@
  *    it in the license file.
  */
 
+#include "mongo/db/query/canonical_query.h"
+#include "mongo/db/query/plan_executor.h"
+#include "mongo/db/query/query_planner_params.h"
+#include "mongo/db/query/query_settings.h"
+#include "mongo/db/query/query_solution.h"
 #include "mongo/db/ops/delete_request.h"
 #include "mongo/db/ops/parsed_delete.h"
 #include "mongo/db/ops/parsed_update.h"
 #include "mongo/db/ops/update_driver.h"
 #include "mongo/db/ops/update_request.h"
-#include "mongo/db/query/canonical_query.h"
-#include "mongo/db/query/parsed_distinct.h"
-#include "mongo/db/query/plan_executor.h"
-#include "mongo/db/query/query_planner_params.h"
-#include "mongo/db/query/query_settings.h"
-#include "mongo/db/query/query_solution.h"
 
 namespace mongo {
 
@@ -51,7 +50,7 @@ struct GroupRequest;
  * Used by getExecutor().
  * This function is public to facilitate testing.
  */
-void filterAllowedIndexEntries(const AllowedIndicesFilter& allowedIndicesFilter,
+void filterAllowedIndexEntries(const AllowedIndices& allowedIndices,
                                std::vector<IndexEntry>* indexEntries);
 
 /**
@@ -113,7 +112,9 @@ StatusWith<std::unique_ptr<PlanExecutor>> getExecutorDistinct(
     OperationContext* txn,
     Collection* collection,
     const std::string& ns,
-    ParsedDistinct* parsedDistinct,
+    const BSONObj& query,
+    const std::string& field,
+    bool isExplain,
     PlanExecutor::YieldPolicy yieldPolicy);
 
 /*
@@ -134,9 +135,7 @@ StatusWith<std::unique_ptr<PlanExecutor>> getExecutorCount(OperationContext* txn
  * and delete flags like 'isMulti'. The caller must hold the appropriate MODE_X or MODE_IX
  * locks, and must not release these locks until after the returned PlanExecutor is deleted.
  *
- * 'opDebug' Optional argument. When not null, will be used to record operation statistics.
- *
- * The returned PlanExecutor will used the YieldPolicy returned by parsedDelete->yieldPolicy().
+ * The returned PlanExecutor will yield if and only if parsedDelete->canYield().
  *
  * Does not take ownership of its arguments.
  *
@@ -146,7 +145,6 @@ StatusWith<std::unique_ptr<PlanExecutor>> getExecutorCount(OperationContext* txn
  * If the query cannot be executed, returns a Status indicating why.
  */
 StatusWith<std::unique_ptr<PlanExecutor>> getExecutorDelete(OperationContext* txn,
-                                                            OpDebug* opDebug,
                                                             Collection* collection,
                                                             ParsedDelete* parsedDelete);
 
@@ -156,9 +154,7 @@ StatusWith<std::unique_ptr<PlanExecutor>> getExecutorDelete(OperationContext* tx
  * to calling this function, and must not release these locks until after the returned
  * PlanExecutor is deleted.
  *
- * 'opDebug' Optional argument. When not null, will be used to record operation statistics.
- *
- * The returned PlanExecutor will used the YieldPolicy returned by parsedUpdate->yieldPolicy().
+ * The returned PlanExecutor will yield if and only if parsedUpdate->canYield().
  *
  * Does not take ownership of its arguments.
  *
@@ -168,9 +164,9 @@ StatusWith<std::unique_ptr<PlanExecutor>> getExecutorDelete(OperationContext* tx
  * If the query cannot be executed, returns a Status indicating why.
  */
 StatusWith<std::unique_ptr<PlanExecutor>> getExecutorUpdate(OperationContext* txn,
-                                                            OpDebug* opDebug,
                                                             Collection* collection,
-                                                            ParsedUpdate* parsedUpdate);
+                                                            ParsedUpdate* parsedUpdate,
+                                                            OpDebug* opDebug);
 
 /**
  * Get a PlanExecutor for a group operation.

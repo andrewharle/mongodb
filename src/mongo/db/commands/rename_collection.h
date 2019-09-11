@@ -36,11 +36,11 @@
 
 namespace mongo {
 
-class Client;
+class ClientBasic;
 
 namespace rename_collection {
 
-Status checkAuthForRenameCollectionCommand(Client* client,
+Status checkAuthForRenameCollectionCommand(ClientBasic* client,
                                            const std::string& dbname,
                                            const BSONObj& cmdObj);
 

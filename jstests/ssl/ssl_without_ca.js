@@ -36,7 +36,11 @@ MongoRunner.stopMongod(conn.port);
 
 jsTest.log("Assert mongod doesn\'t start with CA file missing and clusterAuthMode=x509.");
 
-var sslParams = {clusterAuthMode: 'x509', sslMode: 'requireSSL', sslPEMKeyFile: SERVER_CERT};
+var sslParams = {
+    clusterAuthMode: 'x509',
+    sslMode: 'requireSSL',
+    sslPEMKeyFile: SERVER_CERT
+};
 var conn = MongoRunner.runMongod(sslParams);
 assert.isnull(conn, "server started with x509 clusterAuthMode but no CA file");
 
@@ -49,4 +53,4 @@ assert.throws(function() {
         verbose: 2,
         other: {configOptions: sslParams, mongosOptions: sslParams, shardOptions: sslParams}
     });
-}, [], "mongos started with x509 clusterAuthMode but no CA file");
+}, null, "mongos started with x509 clusterAuthMode but no CA file");

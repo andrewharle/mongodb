@@ -1,17 +1,10 @@
 var syncFrom;
-var wait;
-var occasionally;
-var reconnect;
-var getLatestOp;
-var waitForAllMembers;
-var reconfig;
-var awaitOpTime;
-var startSetIfSupportsReadMajority;
+var wait, occasionally, reconnect, getLatestOp, waitForAllMembers, reconfig, awaitOpTime;
 var waitUntilAllNodesCaughtUp;
 var waitForState;
-var reInitiateWithoutThrowingOnAbortedMember;
 var awaitRSClientHosts;
 var getLastOpTime;
+var startSetIfSupportsReadMajority;
 
 (function() {
     "use strict";
@@ -156,13 +149,11 @@ var getLastOpTime;
         var e;
         var master;
         try {
-            assert.commandWorked(admin.runCommand(
-                {replSetReconfig: rs._updateConfigIfNotDurable(config), force: force}));
+            assert.commandWorked(admin.runCommand({replSetReconfig: config, force: force}));
         } catch (e) {
-            if (!isNetworkError(e)) {
+            if (tojson(e).indexOf("error doing query: failed") < 0) {
                 throw e;
             }
-            print("Calling replSetReconfig failed. " + tojson(e));
         }
 
         var master = rs.getPrimary().getDB("admin");
@@ -224,17 +215,9 @@ var getLastOpTime;
                 assert.eq(rs.length, rsStatus.members.length, tojson(rsStatus));
                 ot = rsStatus.members[0].optime;
                 for (var i = 1; i < rsStatus.members.length; ++i) {
-                    var otherNode = rsStatus.members[i];
-
-                    // Must be in PRIMARY or SECONDARY state.
-                    if (otherNode.state != ReplSetTest.State.PRIMARY &&
-                        otherNode.state != ReplSetTest.State.SECONDARY) {
-                        return false;
-                    }
-
-                    // Fail if optimes are not equal.
-                    otherOt = otherNode.optime;
-                    if (!friendlyEqual(otherOt, ot)) {
+                    otherOt = rsStatus.members[i].optime;
+                    if (bsonWoCompare({ts: otherOt.ts}, {ts: ot.ts}) ||
+                        bsonWoCompare({t: otherOt.t}, {t: ot.t})) {
                         firstConflictingIndex = i;
                         return false;
                     }
@@ -282,25 +265,6 @@ var getLastOpTime;
     };
 
     /**
-     * Performs a reInitiate() call on 'replSetTest', ignoring errors that are related to an aborted
-     * secondary member. All other errors are rethrown.
-     */
-    reInitiateWithoutThrowingOnAbortedMember = function(replSetTest) {
-        try {
-            replSetTest.reInitiate();
-        } catch (e) {
-            // reInitiate can throw because it tries to run an ismaster command on
-            // all secondaries, including the new one that may have already aborted
-            const errMsg = tojson(e);
-            if (isNetworkError(e)) {
-                // Ignore these exceptions, which are indicative of an aborted node
-            } else {
-                throw e;
-            }
-        }
-    };
-
-    /**
      * Waits for the specified hosts to enter a certain state.
      */
     awaitRSClientHosts = function(conn, host, hostOk, rs, timeout) {
@@ -316,7 +280,9 @@ var getLastOpTime;
         timeout = timeout || 5 * 60 * 1000;
 
         if (hostOk == undefined)
-            hostOk = {ok: true};
+            hostOk = {
+                ok: true
+            };
         if (host.host)
             host = host.host;
         if (rs)

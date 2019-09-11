@@ -106,10 +106,11 @@ TEST(LogBuilder, AddOneToEach) {
 
     ASSERT_OK(lb.addToUnsets("x.y"));
 
-    ASSERT_EQUALS(mongo::fromjson("{ "
-                                  "   $set : { 'a.b' : 1 }, "
-                                  "   $unset : { 'x.y' : true } "
-                                  "}"),
+    ASSERT_EQUALS(mongo::fromjson(
+                      "{ "
+                      "   $set : { 'a.b' : 1 }, "
+                      "   $unset : { 'x.y' : true } "
+                      "}"),
                   doc);
 }
 
@@ -163,10 +164,11 @@ TEST(LogBuilder, VerifySetsAreGrouped) {
     ASSERT_TRUE(elt_xy.ok());
     ASSERT_OK(lb.addToSets(elt_xy));
 
-    ASSERT_EQUALS(mongo::fromjson("{ $set : {"
-                                  "   'a.b' : 1, "
-                                  "   'x.y' : 1 "
-                                  "} }"),
+    ASSERT_EQUALS(mongo::fromjson(
+                      "{ $set : {"
+                      "   'a.b' : 1, "
+                      "   'x.y' : 1 "
+                      "} }"),
                   doc);
 }
 
@@ -177,10 +179,11 @@ TEST(LogBuilder, VerifyUnsetsAreGrouped) {
     ASSERT_OK(lb.addToUnsets("a.b"));
     ASSERT_OK(lb.addToUnsets("x.y"));
 
-    ASSERT_EQUALS(mongo::fromjson("{ $unset : {"
-                                  "   'a.b' : true, "
-                                  "   'x.y' : true "
-                                  "} }"),
+    ASSERT_EQUALS(mongo::fromjson(
+                      "{ $unset : {"
+                      "   'a.b' : true, "
+                      "   'x.y' : true "
+                      "} }"),
                   doc);
 }
 

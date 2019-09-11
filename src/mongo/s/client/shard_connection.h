@@ -103,6 +103,8 @@ public:
         return _setVersion;
     }
 
+    static void sync();
+
     void donotCheckVersion() {
         _setVersion = false;
         _finishedInit = true;
@@ -144,6 +146,9 @@ private:
     DBClientBase* _conn;
     bool _setVersion;
 };
+
+typedef std::shared_ptr<ChunkManager> ChunkManagerPtr;
+typedef std::shared_ptr<ShardConnection> ShardConnectionPtr;
 
 extern DBConnectionPool shardConnectionPool;
 

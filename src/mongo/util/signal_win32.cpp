@@ -28,8 +28,8 @@
 
 #include "mongo/platform/basic.h"
 
-#include "mongo/util/mongoutils/str.h"
 #include <string>
+#include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
 

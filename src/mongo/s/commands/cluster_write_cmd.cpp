@@ -30,20 +30,20 @@
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/owned_pointer_vector.h"
-#include "mongo/client/remote_command_targeter.h"
 #include "mongo/db/client.h"
-#include "mongo/db/client.h"
+#include "mongo/db/client_basic.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/write_commands/write_commands_common.h"
 #include "mongo/db/lasterror.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/stats/counters.h"
+#include "mongo/s/chunk_manager_targeter.h"
+#include "mongo/s/client/dbclient_multi_command.h"
 #include "mongo/s/client/shard_registry.h"
+#include "mongo/s/cluster_explain.h"
 #include "mongo/s/cluster_last_error_info.h"
-#include "mongo/s/commands/chunk_manager_targeter.h"
-#include "mongo/s/commands/cluster_explain.h"
-#include "mongo/s/commands/cluster_write.h"
-#include "mongo/s/commands/dbclient_multi_command.h"
+#include "mongo/s/cluster_write.h"
+#include "mongo/s/dbclient_shard_resolver.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/write_ops/batch_upconvert.h"
 #include "mongo/s/write_ops/batched_command_request.h"
@@ -73,12 +73,11 @@ public:
         return false;
     }
 
-
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
-        return true;
+    virtual bool isWriteCommandForConfigServer() const {
+        return false;
     }
 
-    virtual Status checkAuthForCommand(Client* client,
+    virtual Status checkAuthForCommand(ClientBasic* client,
                                        const std::string& dbname,
                                        const BSONObj& cmdObj) {
         Status status = auth::checkAuthForWriteCommand(AuthorizationSession::get(client),
@@ -259,6 +258,7 @@ private:
                 return status;
         }
 
+        DBClientShardResolver resolver;
         DBClientMultiCommand dispatcher;
 
         // Assemble requests
@@ -266,17 +266,11 @@ private:
              ++it) {
             const ShardEndpoint* endpoint = *it;
 
-            const ReadPreferenceSetting readPref(ReadPreference::PrimaryOnly, TagSet());
-            auto shardStatus = grid.shardRegistry()->getShard(txn, endpoint->shardName);
-            if (!shardStatus.isOK()) {
-                return shardStatus.getStatus();
-            }
-            auto swHostAndPort = shardStatus.getValue()->getTargeter()->findHostNoWait(readPref);
-            if (!swHostAndPort.isOK()) {
-                return swHostAndPort.getStatus();
-            }
+            ConnectionString host;
+            Status status = resolver.chooseWriteHost(txn, endpoint->shardName, &host);
+            if (!status.isOK())
+                return status;
 
-            ConnectionString host(swHostAndPort.getValue());
             dispatcher.addCommand(host, dbName, command);
         }
 
@@ -299,11 +293,8 @@ private:
             Strategy::CommandResult result;
             result.target = host;
             {
-                auto shardStatus = grid.shardRegistry()->getShard(txn, host.toString());
-                if (!shardStatus.isOK()) {
-                    return shardStatus.getStatus();
-                }
-                result.shardTargetId = shardStatus.getValue()->getId();
+                const auto shard = grid.shardRegistry()->getShard(txn, host.toString());
+                result.shardTargetId = shard->getId();
             }
             result.result = response.toBSON();
 

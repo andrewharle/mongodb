@@ -32,12 +32,12 @@
 #include "mongo/db/jsobj.h"
 #include "mongo/db/repl/freshness_checker.h"
 #include "mongo/db/repl/member_heartbeat_data.h"
-#include "mongo/db/repl/repl_set_config.h"
+#include "mongo/db/repl/replica_set_config.h"
 #include "mongo/db/repl/replication_executor.h"
+#include "mongo/db/repl/storage_interface_mock.h"
 #include "mongo/executor/network_interface_mock.h"
 #include "mongo/platform/unordered_set.h"
 #include "mongo/stdx/functional.h"
-#include "mongo/stdx/memory.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/mongoutils/str.h"
@@ -60,7 +60,7 @@ bool stringContains(const std::string& haystack, const std::string& needle) {
 class FreshnessCheckerTest : public mongo::unittest::Test {
 protected:
     void startTest(const Timestamp& lastOpTimeApplied,
-                   const ReplSetConfig& currentConfig,
+                   const ReplicaSetConfig& currentConfig,
                    int selfIndex,
                    const std::vector<HostAndPort>& hosts);
     void waitOnChecker();
@@ -73,13 +73,14 @@ protected:
     }
 
     NetworkInterfaceMock* _net;
+    StorageInterfaceMock* _storage;
     std::unique_ptr<ReplicationExecutor> _executor;
     std::unique_ptr<stdx::thread> _executorThread;
 
 private:
     void freshnessCheckerRunner(const ReplicationExecutor::CallbackArgs& data,
                                 const Timestamp& lastOpTimeApplied,
-                                const ReplSetConfig& currentConfig,
+                                const ReplicaSetConfig& currentConfig,
                                 int selfIndex,
                                 const std::vector<HostAndPort>& hosts);
     void setUp();
@@ -91,7 +92,8 @@ private:
 
 void FreshnessCheckerTest::setUp() {
     _net = new NetworkInterfaceMock;
-    _executor = stdx::make_unique<ReplicationExecutor>(_net, 1 /* prng seed */);
+    _storage = new StorageInterfaceMock;
+    _executor.reset(new ReplicationExecutor(_net, _storage, 1 /* prng seed */));
     _executorThread.reset(new stdx::thread(stdx::bind(&ReplicationExecutor::run, _executor.get())));
     _checker.reset(new FreshnessChecker);
 }
@@ -109,32 +111,28 @@ FreshnessChecker::ElectionAbortReason FreshnessCheckerTest::shouldAbortElection(
     return _checker->shouldAbortElection();
 }
 
-ReplSetConfig assertMakeRSConfig(const BSONObj& configBson) {
-    ReplSetConfig config;
+ReplicaSetConfig assertMakeRSConfig(const BSONObj& configBson) {
+    ReplicaSetConfig config;
     ASSERT_OK(config.initialize(configBson));
     ASSERT_OK(config.validate());
     return config;
 }
 
-const BSONObj makeFreshRequest(const ReplSetConfig& rsConfig,
+const BSONObj makeFreshRequest(const ReplicaSetConfig& rsConfig,
                                Timestamp lastOpTimeApplied,
                                int selfIndex) {
     const MemberConfig& myConfig = rsConfig.getMemberAt(selfIndex);
     return BSON("replSetFresh" << 1 << "set" << rsConfig.getReplSetName() << "opTime"
-                               << Date_t::fromMillisSinceEpoch(lastOpTimeApplied.asLL())
-                               << "who"
-                               << myConfig.getHostAndPort().toString()
-                               << "cfgver"
-                               << rsConfig.getConfigVersion()
-                               << "id"
-                               << myConfig.getId());
+                               << Date_t::fromMillisSinceEpoch(lastOpTimeApplied.asLL()) << "who"
+                               << myConfig.getHostAndPort().toString() << "cfgver"
+                               << rsConfig.getConfigVersion() << "id" << myConfig.getId());
 }
 
 // This is necessary because the run method must be scheduled in the Replication Executor
 // for correct concurrency operation.
 void FreshnessCheckerTest::freshnessCheckerRunner(const ReplicationExecutor::CallbackArgs& data,
                                                   const Timestamp& lastOpTimeApplied,
-                                                  const ReplSetConfig& currentConfig,
+                                                  const ReplicaSetConfig& currentConfig,
                                                   int selfIndex,
                                                   const std::vector<HostAndPort>& hosts) {
     invariant(data.status.isOK());
@@ -146,7 +144,7 @@ void FreshnessCheckerTest::freshnessCheckerRunner(const ReplicationExecutor::Cal
 }
 
 void FreshnessCheckerTest::startTest(const Timestamp& lastOpTimeApplied,
-                                     const ReplSetConfig& currentConfig,
+                                     const ReplicaSetConfig& currentConfig,
                                      int selfIndex,
                                      const std::vector<HostAndPort>& hosts) {
     _executor->wait(
@@ -161,15 +159,13 @@ void FreshnessCheckerTest::startTest(const Timestamp& lastOpTimeApplied,
 
 TEST_F(FreshnessCheckerTest, TwoNodes) {
     // Two nodes, we are node h1.  We are freshest, but we tie with h2.
-    ReplSetConfig config = assertMakeRSConfig(BSON("_id"
-                                                   << "rs0"
-                                                   << "version"
-                                                   << 1
-                                                   << "members"
-                                                   << BSON_ARRAY(BSON("_id" << 1 << "host"
-                                                                            << "h0")
-                                                                 << BSON("_id" << 2 << "host"
-                                                                               << "h1"))));
+    ReplicaSetConfig config = assertMakeRSConfig(BSON("_id"
+                                                      << "rs0"
+                                                      << "version" << 1 << "members"
+                                                      << BSON_ARRAY(BSON("_id" << 1 << "host"
+                                                                               << "h0")
+                                                                    << BSON("_id" << 2 << "host"
+                                                                                  << "h1"))));
 
     std::vector<HostAndPort> hosts;
     hosts.push_back(config.getMemberAt(1).getHostAndPort());
@@ -181,21 +177,18 @@ TEST_F(FreshnessCheckerTest, TwoNodes) {
     for (size_t i = 0; i < hosts.size(); ++i) {
         const NetworkInterfaceMock::NetworkOperationIterator noi = _net->getNextReadyRequest();
         ASSERT_EQUALS("admin", noi->getRequest().dbname);
-        ASSERT_BSONOBJ_EQ(freshRequest, noi->getRequest().cmdObj);
+        ASSERT_EQUALS(freshRequest, noi->getRequest().cmdObj);
         ASSERT_EQUALS(HostAndPort("h1"), noi->getRequest().target);
-        _net->scheduleResponse(
-            noi,
-            startDate + Milliseconds(10),
-            ResponseStatus(RemoteCommandResponse(BSON("ok" << 1 << "id" << 2 << "set"
-                                                           << "rs0"
-                                                           << "who"
-                                                           << "h1"
-                                                           << "cfgver"
-                                                           << 1
-                                                           << "opTime"
-                                                           << Date_t()),
-                                                 BSONObj(),
-                                                 Milliseconds(8))));
+        _net->scheduleResponse(noi,
+                               startDate + Milliseconds(10),
+                               ResponseStatus(RemoteCommandResponse(
+                                   BSON("ok" << 1 << "id" << 2 << "set"
+                                             << "rs0"
+                                             << "who"
+                                             << "h1"
+                                             << "cfgver" << 1 << "opTime" << Date_t()),
+                                   BSONObj(),
+                                   Milliseconds(8))));
     }
     _net->runUntil(startDate + Milliseconds(10));
     _net->exitNetwork();
@@ -206,15 +199,13 @@ TEST_F(FreshnessCheckerTest, TwoNodes) {
 
 TEST_F(FreshnessCheckerTest, ShuttingDown) {
     // Two nodes, we are node h1.  Shutdown happens while we're scheduling remote commands.
-    ReplSetConfig config = assertMakeRSConfig(BSON("_id"
-                                                   << "rs0"
-                                                   << "version"
-                                                   << 1
-                                                   << "members"
-                                                   << BSON_ARRAY(BSON("_id" << 1 << "host"
-                                                                            << "h0")
-                                                                 << BSON("_id" << 2 << "host"
-                                                                               << "h1"))));
+    ReplicaSetConfig config = assertMakeRSConfig(BSON("_id"
+                                                      << "rs0"
+                                                      << "version" << 1 << "members"
+                                                      << BSON_ARRAY(BSON("_id" << 1 << "host"
+                                                                               << "h0")
+                                                                    << BSON("_id" << 2 << "host"
+                                                                                  << "h1"))));
 
     std::vector<HostAndPort> hosts;
     hosts.push_back(config.getMemberAt(1).getHostAndPort());
@@ -231,15 +222,13 @@ TEST_F(FreshnessCheckerTest, ShuttingDown) {
 TEST_F(FreshnessCheckerTest, ElectNotElectingSelfWeAreNotFreshest) {
     // other responds as fresher than us
     startCapturingLogMessages();
-    ReplSetConfig config = assertMakeRSConfig(BSON("_id"
-                                                   << "rs0"
-                                                   << "version"
-                                                   << 1
-                                                   << "members"
-                                                   << BSON_ARRAY(BSON("_id" << 1 << "host"
-                                                                            << "h0")
-                                                                 << BSON("_id" << 2 << "host"
-                                                                               << "h1"))));
+    ReplicaSetConfig config = assertMakeRSConfig(BSON("_id"
+                                                      << "rs0"
+                                                      << "version" << 1 << "members"
+                                                      << BSON_ARRAY(BSON("_id" << 1 << "host"
+                                                                               << "h0")
+                                                                    << BSON("_id" << 2 << "host"
+                                                                                  << "h1"))));
 
     std::vector<HostAndPort> hosts;
     hosts.push_back(config.getMemberAt(1).getHostAndPort());
@@ -252,7 +241,7 @@ TEST_F(FreshnessCheckerTest, ElectNotElectingSelfWeAreNotFreshest) {
     for (size_t i = 0; i < hosts.size(); ++i) {
         const NetworkInterfaceMock::NetworkOperationIterator noi = _net->getNextReadyRequest();
         ASSERT_EQUALS("admin", noi->getRequest().dbname);
-        ASSERT_BSONOBJ_EQ(freshRequest, noi->getRequest().cmdObj);
+        ASSERT_EQUALS(freshRequest, noi->getRequest().cmdObj);
         ASSERT_EQUALS(HostAndPort("h1"), noi->getRequest().target);
         _net->scheduleResponse(
             noi,
@@ -261,12 +250,8 @@ TEST_F(FreshnessCheckerTest, ElectNotElectingSelfWeAreNotFreshest) {
                                                            << "rs0"
                                                            << "who"
                                                            << "h1"
-                                                           << "cfgver"
-                                                           << 1
-                                                           << "fresher"
-                                                           << true
-                                                           << "opTime"
-                                                           << Date_t()),
+                                                           << "cfgver" << 1 << "fresher" << true
+                                                           << "opTime" << Date_t()),
                                                  BSONObj(),
                                                  Milliseconds(8))));
     }
@@ -284,15 +269,13 @@ TEST_F(FreshnessCheckerTest, ElectNotElectingSelfWeAreNotFreshest) {
 TEST_F(FreshnessCheckerTest, ElectNotElectingSelfWeAreNotFreshestOpTime) {
     // other responds with a later optime than ours
     startCapturingLogMessages();
-    ReplSetConfig config = assertMakeRSConfig(BSON("_id"
-                                                   << "rs0"
-                                                   << "version"
-                                                   << 1
-                                                   << "members"
-                                                   << BSON_ARRAY(BSON("_id" << 1 << "host"
-                                                                            << "h0")
-                                                                 << BSON("_id" << 2 << "host"
-                                                                               << "h1"))));
+    ReplicaSetConfig config = assertMakeRSConfig(BSON("_id"
+                                                      << "rs0"
+                                                      << "version" << 1 << "members"
+                                                      << BSON_ARRAY(BSON("_id" << 1 << "host"
+                                                                               << "h0")
+                                                                    << BSON("_id" << 2 << "host"
+                                                                                  << "h1"))));
 
     std::vector<HostAndPort> hosts;
     hosts.push_back(config.getMemberAt(1).getHostAndPort());
@@ -305,7 +288,7 @@ TEST_F(FreshnessCheckerTest, ElectNotElectingSelfWeAreNotFreshestOpTime) {
     for (size_t i = 0; i < hosts.size(); ++i) {
         const NetworkInterfaceMock::NetworkOperationIterator noi = _net->getNextReadyRequest();
         ASSERT_EQUALS("admin", noi->getRequest().dbname);
-        ASSERT_BSONOBJ_EQ(freshRequest, noi->getRequest().cmdObj);
+        ASSERT_EQUALS(freshRequest, noi->getRequest().cmdObj);
         ASSERT_EQUALS(HostAndPort("h1"), noi->getRequest().target);
         _net->scheduleResponse(
             noi,
@@ -315,9 +298,7 @@ TEST_F(FreshnessCheckerTest, ElectNotElectingSelfWeAreNotFreshestOpTime) {
                           << "rs0"
                           << "who"
                           << "h1"
-                          << "cfgver"
-                          << 1
-                          << "opTime"
+                          << "cfgver" << 1 << "opTime"
                           << Date_t::fromMillisSinceEpoch(Timestamp(10, 0).asLL())),
                 BSONObj(),
                 Milliseconds(8))));
@@ -334,15 +315,13 @@ TEST_F(FreshnessCheckerTest, ElectNotElectingSelfWeAreNotFreshestOpTime) {
 TEST_F(FreshnessCheckerTest, ElectWrongTypeInFreshnessResponse) {
     // other responds with "opTime" field of non-Date value, causing not freshest
     startCapturingLogMessages();
-    ReplSetConfig config = assertMakeRSConfig(BSON("_id"
-                                                   << "rs0"
-                                                   << "version"
-                                                   << 1
-                                                   << "members"
-                                                   << BSON_ARRAY(BSON("_id" << 1 << "host"
-                                                                            << "h0")
-                                                                 << BSON("_id" << 2 << "host"
-                                                                               << "h1"))));
+    ReplicaSetConfig config = assertMakeRSConfig(BSON("_id"
+                                                      << "rs0"
+                                                      << "version" << 1 << "members"
+                                                      << BSON_ARRAY(BSON("_id" << 1 << "host"
+                                                                               << "h0")
+                                                                    << BSON("_id" << 2 << "host"
+                                                                                  << "h1"))));
 
     std::vector<HostAndPort> hosts;
     hosts.push_back(config.getMemberAt(1).getHostAndPort());
@@ -355,7 +334,7 @@ TEST_F(FreshnessCheckerTest, ElectWrongTypeInFreshnessResponse) {
     for (size_t i = 0; i < hosts.size(); ++i) {
         const NetworkInterfaceMock::NetworkOperationIterator noi = _net->getNextReadyRequest();
         ASSERT_EQUALS("admin", noi->getRequest().dbname);
-        ASSERT_BSONOBJ_EQ(freshRequest, noi->getRequest().cmdObj);
+        ASSERT_EQUALS(freshRequest, noi->getRequest().cmdObj);
         ASSERT_EQUALS(HostAndPort("h1"), noi->getRequest().target);
         _net->scheduleResponse(
             noi,
@@ -364,10 +343,7 @@ TEST_F(FreshnessCheckerTest, ElectWrongTypeInFreshnessResponse) {
                                                            << "rs0"
                                                            << "who"
                                                            << "h1"
-                                                           << "cfgver"
-                                                           << 1
-                                                           << "opTime"
-                                                           << 3),
+                                                           << "cfgver" << 1 << "opTime" << 3),
                                                  BSONObj(),
                                                  Milliseconds(8))));
     }
@@ -380,22 +356,21 @@ TEST_F(FreshnessCheckerTest, ElectWrongTypeInFreshnessResponse) {
 
     ASSERT_EQUALS(shouldAbortElection(), FreshnessChecker::FresherNodeFound);
     ASSERT_EQUALS(1,
-                  countLogLinesContaining("wrong type for opTime argument in replSetFresh "
-                                          "response: int"));
+                  countLogLinesContaining(
+                      "wrong type for opTime argument in replSetFresh "
+                      "response: NumberInt32"));
 }
 
 TEST_F(FreshnessCheckerTest, ElectVetoed) {
     // other responds with veto
     startCapturingLogMessages();
-    ReplSetConfig config = assertMakeRSConfig(BSON("_id"
-                                                   << "rs0"
-                                                   << "version"
-                                                   << 1
-                                                   << "members"
-                                                   << BSON_ARRAY(BSON("_id" << 1 << "host"
-                                                                            << "h0")
-                                                                 << BSON("_id" << 2 << "host"
-                                                                               << "h1"))));
+    ReplicaSetConfig config = assertMakeRSConfig(BSON("_id"
+                                                      << "rs0"
+                                                      << "version" << 1 << "members"
+                                                      << BSON_ARRAY(BSON("_id" << 1 << "host"
+                                                                               << "h0")
+                                                                    << BSON("_id" << 2 << "host"
+                                                                                  << "h1"))));
 
     std::vector<HostAndPort> hosts;
     hosts.push_back(config.getMemberAt(1).getHostAndPort());
@@ -408,7 +383,7 @@ TEST_F(FreshnessCheckerTest, ElectVetoed) {
     for (size_t i = 0; i < hosts.size(); ++i) {
         const NetworkInterfaceMock::NetworkOperationIterator noi = _net->getNextReadyRequest();
         ASSERT_EQUALS("admin", noi->getRequest().dbname);
-        ASSERT_BSONOBJ_EQ(freshRequest, noi->getRequest().cmdObj);
+        ASSERT_EQUALS(freshRequest, noi->getRequest().cmdObj);
         ASSERT_EQUALS(HostAndPort("h1"), noi->getRequest().target);
         _net->scheduleResponse(
             noi,
@@ -418,14 +393,9 @@ TEST_F(FreshnessCheckerTest, ElectVetoed) {
                           << "rs0"
                           << "who"
                           << "h1"
-                          << "cfgver"
-                          << 1
-                          << "veto"
-                          << true
-                          << "errmsg"
+                          << "cfgver" << 1 << "veto" << true << "errmsg"
                           << "I'd rather you didn't"
-                          << "opTime"
-                          << Date_t::fromMillisSinceEpoch(Timestamp(0, 0).asLL())),
+                          << "opTime" << Date_t::fromMillisSinceEpoch(Timestamp(0, 0).asLL())),
                 BSONObj(),
                 Milliseconds(8))));
     }
@@ -438,11 +408,12 @@ TEST_F(FreshnessCheckerTest, ElectVetoed) {
 
     ASSERT_EQUALS(shouldAbortElection(), FreshnessChecker::FresherNodeFound);
     ASSERT_EQUALS(1,
-                  countLogLinesContaining("not electing self, h1:27017 would veto with "
-                                          "'I'd rather you didn't'"));
+                  countLogLinesContaining(
+                      "not electing self, h1:27017 would veto with "
+                      "'I'd rather you didn't'"));
 }
 
-int findIdForMember(const ReplSetConfig& rsConfig, const HostAndPort& host) {
+int findIdForMember(const ReplicaSetConfig& rsConfig, const HostAndPort& host) {
     const MemberConfig* member = rsConfig.findMemberByHostAndPort(host);
     ASSERT_TRUE(member != NULL) << "No host named " << host.toString() << " in config";
     return member->getId();
@@ -451,24 +422,21 @@ int findIdForMember(const ReplSetConfig& rsConfig, const HostAndPort& host) {
 TEST_F(FreshnessCheckerTest, ElectNotElectingSelfWeAreNotFreshestManyNodes) {
     // one other responds as fresher than us
     startCapturingLogMessages();
-    ReplSetConfig config = assertMakeRSConfig(BSON("_id"
-                                                   << "rs0"
-                                                   << "version"
-                                                   << 1
-                                                   << "members"
-                                                   << BSON_ARRAY(BSON("_id" << 1 << "host"
-                                                                            << "h0")
-                                                                 << BSON("_id" << 2 << "host"
-                                                                               << "h1")
-                                                                 << BSON("_id" << 3 << "host"
-                                                                               << "h2")
-                                                                 << BSON("_id" << 4 << "host"
-                                                                               << "h3")
-                                                                 << BSON("_id" << 5 << "host"
-                                                                               << "h4"))));
+    ReplicaSetConfig config =
+        assertMakeRSConfig(BSON("_id"
+                                << "rs0"
+                                << "version" << 1 << "members"
+                                << BSON_ARRAY(BSON("_id" << 1 << "host"
+                                                         << "h0")
+                                              << BSON("_id" << 2 << "host"
+                                                            << "h1") << BSON("_id" << 3 << "host"
+                                                                                   << "h2")
+                                              << BSON("_id" << 4 << "host"
+                                                            << "h3") << BSON("_id" << 5 << "host"
+                                                                                   << "h4"))));
 
     std::vector<HostAndPort> hosts;
-    for (ReplSetConfig::MemberIterator mem = ++config.membersBegin(); mem != config.membersEnd();
+    for (ReplicaSetConfig::MemberIterator mem = ++config.membersBegin(); mem != config.membersEnd();
          ++mem) {
         hosts.push_back(mem->getHostAndPort());
     }
@@ -483,7 +451,7 @@ TEST_F(FreshnessCheckerTest, ElectNotElectingSelfWeAreNotFreshestManyNodes) {
         const NetworkInterfaceMock::NetworkOperationIterator noi = _net->getNextReadyRequest();
         const HostAndPort target = noi->getRequest().target;
         ASSERT_EQUALS("admin", noi->getRequest().dbname);
-        ASSERT_BSONOBJ_EQ(freshRequest, noi->getRequest().cmdObj);
+        ASSERT_EQUALS(freshRequest, noi->getRequest().cmdObj);
         ASSERT(seen.insert(target).second) << "Already saw " << target;
         BSONObjBuilder responseBuilder;
         responseBuilder << "ok" << 1 << "id" << findIdForMember(config, target) << "set"
@@ -511,24 +479,21 @@ TEST_F(FreshnessCheckerTest, ElectNotElectingSelfWeAreNotFreshestManyNodes) {
 TEST_F(FreshnessCheckerTest, ElectNotElectingSelfWeAreNotFreshestOpTimeManyNodes) {
     // one other responds with a later optime than ours
     startCapturingLogMessages();
-    ReplSetConfig config = assertMakeRSConfig(BSON("_id"
-                                                   << "rs0"
-                                                   << "version"
-                                                   << 1
-                                                   << "members"
-                                                   << BSON_ARRAY(BSON("_id" << 1 << "host"
-                                                                            << "h0")
-                                                                 << BSON("_id" << 2 << "host"
-                                                                               << "h1")
-                                                                 << BSON("_id" << 3 << "host"
-                                                                               << "h2")
-                                                                 << BSON("_id" << 4 << "host"
-                                                                               << "h3")
-                                                                 << BSON("_id" << 5 << "host"
-                                                                               << "h4"))));
+    ReplicaSetConfig config =
+        assertMakeRSConfig(BSON("_id"
+                                << "rs0"
+                                << "version" << 1 << "members"
+                                << BSON_ARRAY(BSON("_id" << 1 << "host"
+                                                         << "h0")
+                                              << BSON("_id" << 2 << "host"
+                                                            << "h1") << BSON("_id" << 3 << "host"
+                                                                                   << "h2")
+                                              << BSON("_id" << 4 << "host"
+                                                            << "h3") << BSON("_id" << 5 << "host"
+                                                                                   << "h4"))));
 
     std::vector<HostAndPort> hosts;
-    for (ReplSetConfig::MemberIterator mem = config.membersBegin(); mem != config.membersEnd();
+    for (ReplicaSetConfig::MemberIterator mem = config.membersBegin(); mem != config.membersEnd();
          ++mem) {
         if (HostAndPort("h0") == mem->getHostAndPort()) {
             continue;
@@ -547,7 +512,7 @@ TEST_F(FreshnessCheckerTest, ElectNotElectingSelfWeAreNotFreshestOpTimeManyNodes
         const NetworkInterfaceMock::NetworkOperationIterator noi = _net->getNextReadyRequest();
         const HostAndPort target = noi->getRequest().target;
         ASSERT_EQUALS("admin", noi->getRequest().dbname);
-        ASSERT_BSONOBJ_EQ(freshRequest, noi->getRequest().cmdObj);
+        ASSERT_EQUALS(freshRequest, noi->getRequest().cmdObj);
         ASSERT(seen.insert(target).second) << "Already saw " << target;
         BSONObjBuilder responseBuilder;
         if (target.host() == "h4") {
@@ -584,24 +549,21 @@ TEST_F(FreshnessCheckerTest, ElectNotElectingSelfWeAreNotFreshestOpTimeManyNodes
 TEST_F(FreshnessCheckerTest, ElectWrongTypeInFreshnessResponseManyNodes) {
     // one other responds with "opTime" field of non-Date value, causing not freshest
     startCapturingLogMessages();
-    ReplSetConfig config = assertMakeRSConfig(BSON("_id"
-                                                   << "rs0"
-                                                   << "version"
-                                                   << 1
-                                                   << "members"
-                                                   << BSON_ARRAY(BSON("_id" << 1 << "host"
-                                                                            << "h0")
-                                                                 << BSON("_id" << 2 << "host"
-                                                                               << "h1")
-                                                                 << BSON("_id" << 3 << "host"
-                                                                               << "h2")
-                                                                 << BSON("_id" << 4 << "host"
-                                                                               << "h3")
-                                                                 << BSON("_id" << 5 << "host"
-                                                                               << "h4"))));
+    ReplicaSetConfig config =
+        assertMakeRSConfig(BSON("_id"
+                                << "rs0"
+                                << "version" << 1 << "members"
+                                << BSON_ARRAY(BSON("_id" << 1 << "host"
+                                                         << "h0")
+                                              << BSON("_id" << 2 << "host"
+                                                            << "h1") << BSON("_id" << 3 << "host"
+                                                                                   << "h2")
+                                              << BSON("_id" << 4 << "host"
+                                                            << "h3") << BSON("_id" << 5 << "host"
+                                                                                   << "h4"))));
 
     std::vector<HostAndPort> hosts;
-    for (ReplSetConfig::MemberIterator mem = ++config.membersBegin(); mem != config.membersEnd();
+    for (ReplicaSetConfig::MemberIterator mem = ++config.membersBegin(); mem != config.membersEnd();
          ++mem) {
         hosts.push_back(mem->getHostAndPort());
     }
@@ -616,7 +578,7 @@ TEST_F(FreshnessCheckerTest, ElectWrongTypeInFreshnessResponseManyNodes) {
         const NetworkInterfaceMock::NetworkOperationIterator noi = _net->getNextReadyRequest();
         const HostAndPort target = noi->getRequest().target;
         ASSERT_EQUALS("admin", noi->getRequest().dbname);
-        ASSERT_BSONOBJ_EQ(freshRequest, noi->getRequest().cmdObj);
+        ASSERT_EQUALS(freshRequest, noi->getRequest().cmdObj);
         ASSERT(seen.insert(target).second) << "Already saw " << target;
         BSONObjBuilder responseBuilder;
         responseBuilder << "ok" << 1 << "id" << findIdForMember(config, target) << "set"
@@ -639,31 +601,29 @@ TEST_F(FreshnessCheckerTest, ElectWrongTypeInFreshnessResponseManyNodes) {
     stopCapturingLogMessages();
     ASSERT_EQUALS(shouldAbortElection(), FreshnessChecker::FresherNodeFound);
     ASSERT_EQUALS(1,
-                  countLogLinesContaining("wrong type for opTime argument in replSetFresh "
-                                          "response: int"));
+                  countLogLinesContaining(
+                      "wrong type for opTime argument in replSetFresh "
+                      "response: NumberInt32"));
 }
 
 TEST_F(FreshnessCheckerTest, ElectVetoedManyNodes) {
     // one other responds with veto
     startCapturingLogMessages();
-    ReplSetConfig config = assertMakeRSConfig(BSON("_id"
-                                                   << "rs0"
-                                                   << "version"
-                                                   << 1
-                                                   << "members"
-                                                   << BSON_ARRAY(BSON("_id" << 1 << "host"
-                                                                            << "h0")
-                                                                 << BSON("_id" << 2 << "host"
-                                                                               << "h1")
-                                                                 << BSON("_id" << 3 << "host"
-                                                                               << "h2")
-                                                                 << BSON("_id" << 4 << "host"
-                                                                               << "h3")
-                                                                 << BSON("_id" << 5 << "host"
-                                                                               << "h4"))));
+    ReplicaSetConfig config =
+        assertMakeRSConfig(BSON("_id"
+                                << "rs0"
+                                << "version" << 1 << "members"
+                                << BSON_ARRAY(BSON("_id" << 1 << "host"
+                                                         << "h0")
+                                              << BSON("_id" << 2 << "host"
+                                                            << "h1") << BSON("_id" << 3 << "host"
+                                                                                   << "h2")
+                                              << BSON("_id" << 4 << "host"
+                                                            << "h3") << BSON("_id" << 5 << "host"
+                                                                                   << "h4"))));
 
     std::vector<HostAndPort> hosts;
-    for (ReplSetConfig::MemberIterator mem = ++config.membersBegin(); mem != config.membersEnd();
+    for (ReplicaSetConfig::MemberIterator mem = ++config.membersBegin(); mem != config.membersEnd();
          ++mem) {
         hosts.push_back(mem->getHostAndPort());
     }
@@ -678,7 +638,7 @@ TEST_F(FreshnessCheckerTest, ElectVetoedManyNodes) {
         const NetworkInterfaceMock::NetworkOperationIterator noi = _net->getNextReadyRequest();
         const HostAndPort target = noi->getRequest().target;
         ASSERT_EQUALS("admin", noi->getRequest().dbname);
-        ASSERT_BSONOBJ_EQ(freshRequest, noi->getRequest().cmdObj);
+        ASSERT_EQUALS(freshRequest, noi->getRequest().cmdObj);
         ASSERT(seen.insert(target).second) << "Already saw " << target;
         BSONObjBuilder responseBuilder;
         responseBuilder << "ok" << 1 << "id" << findIdForMember(config, target) << "set"
@@ -701,31 +661,29 @@ TEST_F(FreshnessCheckerTest, ElectVetoedManyNodes) {
     stopCapturingLogMessages();
     ASSERT_EQUALS(shouldAbortElection(), FreshnessChecker::FresherNodeFound);
     ASSERT_EQUALS(1,
-                  countLogLinesContaining("not electing self, h1:27017 would veto with "
-                                          "'I'd rather you didn't'"));
+                  countLogLinesContaining(
+                      "not electing self, h1:27017 would veto with "
+                      "'I'd rather you didn't'"));
 }
 
 TEST_F(FreshnessCheckerTest, ElectVetoedAndTiedFreshnessManyNodes) {
     // one other responds with veto and another responds with tie
     startCapturingLogMessages();
-    ReplSetConfig config = assertMakeRSConfig(BSON("_id"
-                                                   << "rs0"
-                                                   << "version"
-                                                   << 1
-                                                   << "members"
-                                                   << BSON_ARRAY(BSON("_id" << 1 << "host"
-                                                                            << "h0")
-                                                                 << BSON("_id" << 2 << "host"
-                                                                               << "h1")
-                                                                 << BSON("_id" << 3 << "host"
-                                                                               << "h2")
-                                                                 << BSON("_id" << 4 << "host"
-                                                                               << "h3")
-                                                                 << BSON("_id" << 5 << "host"
-                                                                               << "h4"))));
+    ReplicaSetConfig config =
+        assertMakeRSConfig(BSON("_id"
+                                << "rs0"
+                                << "version" << 1 << "members"
+                                << BSON_ARRAY(BSON("_id" << 1 << "host"
+                                                         << "h0")
+                                              << BSON("_id" << 2 << "host"
+                                                            << "h1") << BSON("_id" << 3 << "host"
+                                                                                   << "h2")
+                                              << BSON("_id" << 4 << "host"
+                                                            << "h3") << BSON("_id" << 5 << "host"
+                                                                                   << "h4"))));
 
     std::vector<HostAndPort> hosts;
-    for (ReplSetConfig::MemberIterator mem = config.membersBegin(); mem != config.membersEnd();
+    for (ReplicaSetConfig::MemberIterator mem = config.membersBegin(); mem != config.membersEnd();
          ++mem) {
         if (HostAndPort("h0") == mem->getHostAndPort()) {
             continue;
@@ -744,7 +702,7 @@ TEST_F(FreshnessCheckerTest, ElectVetoedAndTiedFreshnessManyNodes) {
         const NetworkInterfaceMock::NetworkOperationIterator noi = _net->getNextReadyRequest();
         const HostAndPort target = noi->getRequest().target;
         ASSERT_EQUALS("admin", noi->getRequest().dbname);
-        ASSERT_BSONOBJ_EQ(freshRequest, noi->getRequest().cmdObj);
+        ASSERT_EQUALS(freshRequest, noi->getRequest().cmdObj);
         ASSERT(seen.insert(target).second) << "Already saw " << target;
         BSONObjBuilder responseBuilder;
         if (target.host() == "h4") {
@@ -772,8 +730,9 @@ TEST_F(FreshnessCheckerTest, ElectVetoedAndTiedFreshnessManyNodes) {
     _net->runUntil(startDate + Milliseconds(10));
     ASSERT_EQUALS(startDate + Milliseconds(10), _net->now());
     ASSERT_EQUALS(0,
-                  countLogLinesContaining("not electing self, h4:27017 would veto with '"
-                                          "errmsg: \"I'd rather you didn't\"'"));
+                  countLogLinesContaining(
+                      "not electing self, h4:27017 would veto with '"
+                      "errmsg: \"I'd rather you didn't\"'"));
     _net->runUntil(startDate + Milliseconds(20));
     ASSERT_EQUALS(startDate + Milliseconds(20), _net->now());
     _net->exitNetwork();
@@ -781,29 +740,27 @@ TEST_F(FreshnessCheckerTest, ElectVetoedAndTiedFreshnessManyNodes) {
     stopCapturingLogMessages();
     ASSERT_EQUALS(shouldAbortElection(), FreshnessChecker::FresherNodeFound);
     ASSERT_EQUALS(1,
-                  countLogLinesContaining("not electing self, h4:27017 would veto with "
-                                          "'I'd rather you didn't'"));
+                  countLogLinesContaining(
+                      "not electing self, h4:27017 would veto with "
+                      "'I'd rather you didn't'"));
 }
 
 TEST_F(FreshnessCheckerTest, ElectManyNodesNotAllRespond) {
-    ReplSetConfig config = assertMakeRSConfig(BSON("_id"
-                                                   << "rs0"
-                                                   << "version"
-                                                   << 1
-                                                   << "members"
-                                                   << BSON_ARRAY(BSON("_id" << 1 << "host"
-                                                                            << "h0")
-                                                                 << BSON("_id" << 2 << "host"
-                                                                               << "h1")
-                                                                 << BSON("_id" << 3 << "host"
-                                                                               << "h2")
-                                                                 << BSON("_id" << 4 << "host"
-                                                                               << "h3")
-                                                                 << BSON("_id" << 5 << "host"
-                                                                               << "h4"))));
+    ReplicaSetConfig config =
+        assertMakeRSConfig(BSON("_id"
+                                << "rs0"
+                                << "version" << 1 << "members"
+                                << BSON_ARRAY(BSON("_id" << 1 << "host"
+                                                         << "h0")
+                                              << BSON("_id" << 2 << "host"
+                                                            << "h1") << BSON("_id" << 3 << "host"
+                                                                                   << "h2")
+                                              << BSON("_id" << 4 << "host"
+                                                            << "h3") << BSON("_id" << 5 << "host"
+                                                                                   << "h4"))));
 
     std::vector<HostAndPort> hosts;
-    for (ReplSetConfig::MemberIterator mem = ++config.membersBegin(); mem != config.membersEnd();
+    for (ReplicaSetConfig::MemberIterator mem = ++config.membersBegin(); mem != config.membersEnd();
          ++mem) {
         hosts.push_back(mem->getHostAndPort());
     }
@@ -819,7 +776,7 @@ TEST_F(FreshnessCheckerTest, ElectManyNodesNotAllRespond) {
         const NetworkInterfaceMock::NetworkOperationIterator noi = _net->getNextReadyRequest();
         const HostAndPort target = noi->getRequest().target;
         ASSERT_EQUALS("admin", noi->getRequest().dbname);
-        ASSERT_BSONOBJ_EQ(freshRequest, noi->getRequest().cmdObj);
+        ASSERT_EQUALS(freshRequest, noi->getRequest().cmdObj);
         ASSERT(seen.insert(target).second) << "Already saw " << target;
         if (target.host() == "h2" || target.host() == "h3") {
             _net->scheduleResponse(noi,
@@ -850,21 +807,18 @@ public:
         int selfConfigIndex = 0;
         Timestamp lastOpTimeApplied(100, 0);
 
-        ReplSetConfig config;
+        ReplicaSetConfig config;
         config.initialize(BSON("_id"
                                << "rs0"
-                               << "version"
-                               << 1
-                               << "members"
+                               << "version" << 1 << "members"
                                << BSON_ARRAY(BSON("_id" << 0 << "host"
                                                         << "host0")
                                              << BSON("_id" << 1 << "host"
-                                                           << "host1")
-                                             << BSON("_id" << 2 << "host"
-                                                           << "host2"))));
+                                                           << "host1") << BSON("_id" << 2 << "host"
+                                                                                     << "host2"))));
 
         std::vector<HostAndPort> hosts;
-        for (ReplSetConfig::MemberIterator mem = ++config.membersBegin();
+        for (ReplicaSetConfig::MemberIterator mem = ++config.membersBegin();
              mem != config.membersEnd();
              ++mem) {
             hosts.push_back(mem->getHostAndPort());
@@ -949,7 +903,6 @@ protected:
         return RemoteCommandRequest(HostAndPort(hostname),
                                     "",  // the non-hostname fields do not matter in Freshness
                                     BSONObj(),
-                                    nullptr,
                                     Milliseconds(0));
     }
 

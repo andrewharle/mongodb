@@ -46,7 +46,6 @@
 #include "mongo/db/storage/mmap_v1/durable_mapped_file.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/stdx/thread.h"
-#include "mongo/util/clock_source.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
 #include "mongo/util/stacktrace.h"
@@ -171,15 +170,12 @@ static void prepBasicWrites(AlignedBuilder& bb, const std::vector<WriteIntent>& 
     caller handles locking
     @return partially populated sectheader and _ab set
 */
-static void _PREPLOGBUFFER(JSectHeader& h,
-                           AlignedBuilder& bb,
-                           ClockSource* cs,
-                           int64_t serverStartMs) {
+static void _PREPLOGBUFFER(JSectHeader& h, AlignedBuilder& bb) {
     // Add the JSectHeader
 
     // Invalidate the total length, we will fill it in later.
     h.setSectionLen(0xffffffff);
-    h.seqNumber = generateNextSeqNumber(cs, serverStartMs);
+    h.seqNumber = generateNextSeqNumber();
     h.fileId = j.curFileId();
 
     // Ops other than basic writes (DurOp's) go first
@@ -196,13 +192,10 @@ static void _PREPLOGBUFFER(JSectHeader& h,
     }
 }
 
-void PREPLOGBUFFER(/*out*/ JSectHeader& outHeader,
-                   AlignedBuilder& outBuffer,
-                   ClockSource* cs,
-                   int64_t serverStartMs) {
+void PREPLOGBUFFER(/*out*/ JSectHeader& outHeader, AlignedBuilder& outBuffer) {
     Timer t;
     j.assureLogFileOpen();  // so fileId is set
-    _PREPLOGBUFFER(outHeader, outBuffer, cs, serverStartMs);
+    _PREPLOGBUFFER(outHeader, outBuffer);
     stats.curr()->_prepLogBufferMicros += t.micros();
 }
 }

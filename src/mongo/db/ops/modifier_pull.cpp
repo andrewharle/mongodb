@@ -31,11 +31,9 @@
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/mutable/algorithm.h"
 #include "mongo/db/matcher/expression_parser.h"
-#include "mongo/db/matcher/extensions_callback_disallow_extensions.h"
 #include "mongo/db/ops/field_checker.h"
 #include "mongo/db/ops/log_builder.h"
 #include "mongo/db/ops/path_support.h"
-#include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
@@ -94,13 +92,10 @@ Status ModifierPull::init(const BSONElement& modExpr, const Options& opts, bool*
     if (foundDollar && foundCount > 1) {
         return Status(ErrorCodes::BadValue,
                       str::stream() << "Too many positional (i.e. '$') elements found in path '"
-                                    << _fieldRef.dottedField()
-                                    << "'");
+                                    << _fieldRef.dottedField() << "'");
     }
 
     _exprElt = modExpr;
-
-    _collator = opts.collator;
 
     // If the element in the mod is actually an object or a regular expression, we need to
     // build a matcher, instead of just doing an equality comparision.
@@ -122,8 +117,8 @@ Status ModifierPull::init(const BSONElement& modExpr, const Options& opts, bool*
 
         // Build the matcher around the object we built above. Currently, we do not allow $pull
         // operations to contain $text/$where clauses, so preserving this behaviour.
-        StatusWithMatchExpression parseResult = MatchExpressionParser::parse(
-            _exprObj, ExtensionsCallbackDisallowExtensions(), _collator);
+        StatusWithMatchExpression parseResult =
+            MatchExpressionParser::parse(_exprObj, ExtensionsCallback());
         if (!parseResult.isOK()) {
             return parseResult.getStatus();
         }
@@ -132,14 +127,6 @@ Status ModifierPull::init(const BSONElement& modExpr, const Options& opts, bool*
     }
 
     return Status::OK();
-}
-
-void ModifierPull::setCollator(const CollatorInterface* collator) {
-    invariant(!_collator);
-    _collator = collator;
-    if (_matchExpr) {
-        _matchExpr->setCollator(_collator);
-    }
 }
 
 Status ModifierPull::prepare(mb::Element root, StringData matchedField, ExecInfo* execInfo) {
@@ -272,7 +259,7 @@ bool ModifierPull::isMatch(mutablebson::ConstElement element) {
     dassert(element.hasValue());
 
     if (!_matchExpr)
-        return (element.compareWithBSONElement(_exprElt, _collator, false) == 0);
+        return (element.compareWithBSONElement(_exprElt, false) == 0);
 
     if (_matcherOnPrimitive) {
         // TODO: This is kinda slow.

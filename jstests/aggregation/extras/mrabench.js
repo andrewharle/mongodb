@@ -11,7 +11,10 @@ function rollupMap() {
 }
 
 function rollupReduce(key, values) {
-    var res = {total: 0, unique: 0};
+    var res = {
+        total: 0,
+        unique: 0
+    };
     for (var i = 0; i < values.length; i++) {
         res.total += values[i].total;
         res.unique += values[i].unique;
@@ -38,13 +41,15 @@ function rollupWeeklyMR() {
 function rollupMonthlyA() {
     resMonthlyA = db.runCommand({
         aggregate: "gen.monthly.ip",
-        pipeline: [{$group: {_id: {month: "_id.t"}, total: {$sum: "$value"}, unique: {$sum: 1}}}]
+        pipeline:
+            [{$group: {_id: {month: "_id.t"}, total: {$sum: "$value"}, unique: {$sum: 1}}}]
     });
 }
 
 function rollupWeeklyA() {
     resWeeklyA = db.runCommand({
         aggregate: "gen.weekly.ip",
-        pipeline: [{$group: {_id: {month: "_id.t"}, total: {$sum: "$value"}, unique: {$sum: 1}}}]
+        pipeline:
+            [{$group: {_id: {month: "_id.t"}, total: {$sum: "$value"}, unique: {$sum: 1}}}]
     });
 }

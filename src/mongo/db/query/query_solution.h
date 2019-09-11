@@ -30,10 +30,9 @@
 
 #include <memory>
 
-#include "mongo/bson/bsonobj_comparator_interface.h"
-#include "mongo/db/fts/fts_query.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/matcher/expression.h"
+#include "mongo/db/fts/fts_query.h"
 #include "mongo/db/query/index_bounds.h"
 #include "mongo/db/query/plan_cache.h"
 #include "mongo/db/query/stage_types.h"
@@ -218,9 +217,7 @@ private:
 };
 
 struct TextNode : public QuerySolutionNode {
-    TextNode(IndexEntry index)
-        : _sort(SimpleBSONObjComparator::kInstance.makeBSONObjSet()), index(std::move(index)) {}
-
+    TextNode() {}
     virtual ~TextNode() {}
 
     virtual StageType getType() const {
@@ -247,15 +244,8 @@ struct TextNode : public QuerySolutionNode {
 
     BSONObjSet _sort;
 
-    IndexEntry index;
+    BSONObj indexKeyPattern;
     std::unique_ptr<fts::FTSQuery> ftsQuery;
-
-    // The number of fields in the prefix of the text index. For example, if the key pattern is
-    //
-    //   { a: 1, b: 1, _fts: "text", _ftsx: 1, c: 1 }
-    //
-    // then the number of prefix fields is 2, because of "a" and "b".
-    size_t numPrefixFields = 0u;
 
     // "Prefix" fields of a text index can handle equality predicates.  We group them with the
     // text node while creating the text leaf node and convert them into a BSONObj index prefix
@@ -443,7 +433,7 @@ struct FetchNode : public QuerySolutionNode {
 };
 
 struct IndexScanNode : public QuerySolutionNode {
-    IndexScanNode(IndexEntry index);
+    IndexScanNode();
     virtual ~IndexScanNode() {}
 
     virtual void computeProperties();
@@ -467,17 +457,10 @@ struct IndexScanNode : public QuerySolutionNode {
 
     bool operator==(const IndexScanNode& other) const;
 
-    /**
-     * This function extracts a list of field names from 'indexKeyPattern' whose corresponding index
-     * bounds in 'bounds' can contain strings.  This is the case if there are intervals containing
-     * String, Object, or Array values.
-     */
-    static std::set<StringData> getFieldsWithStringBounds(const IndexBounds& bounds,
-                                                          const BSONObj& indexKeyPattern);
-
     BSONObjSet _sorts;
 
-    IndexEntry index;
+    BSONObj indexKeyPattern;
+    bool indexIsMultiKey;
 
     int direction;
 
@@ -487,9 +470,11 @@ struct IndexScanNode : public QuerySolutionNode {
     // If there's a 'returnKey' projection we add key metadata.
     bool addKeyMetadata;
 
+    // BIG NOTE:
+    // If you use simple bounds, we'll use whatever index access method the keypattern implies.
+    // If you use the complex bounds, we force Btree access.
+    // The complex bounds require Btree access.
     IndexBounds bounds;
-
-    const CollatorInterface* queryCollator;
 };
 
 struct ProjectionNode : public QuerySolutionNode {
@@ -511,19 +496,13 @@ struct ProjectionNode : public QuerySolutionNode {
         SIMPLE_DOC,
     };
 
-    ProjectionNode(ParsedProjection proj)
-        : _sorts(SimpleBSONObjComparator::kInstance.makeBSONObjSet()),
-          fullExpression(NULL),
-          projType(DEFAULT),
-          parsed(proj) {}
+    ProjectionNode() : fullExpression(NULL), projType(DEFAULT) {}
 
     virtual ~ProjectionNode() {}
 
     virtual StageType getType() const {
         return STAGE_PROJECTION;
     }
-
-    virtual void computeProperties();
 
     virtual void appendToString(mongoutils::str::stream* ss, int indent) const;
 
@@ -553,6 +532,8 @@ struct ProjectionNode : public QuerySolutionNode {
     }
 
     const BSONObjSet& getSort() const {
+        // TODO: If we're applying a projection that maintains sort order, the prefix of the
+        // sort order we project is the sort order.
         return _sorts;
     }
 
@@ -570,8 +551,6 @@ struct ProjectionNode : public QuerySolutionNode {
 
     // What implementation of the projection algorithm should we use?
     ProjectionType projType;
-
-    ParsedProjection parsed;
 
     // Only meaningful if projType == COVERED_ONE_INDEX.  This is the key pattern of the index
     // supplying our covered data.  We can pre-compute which fields to include and cache that
@@ -613,8 +592,7 @@ struct SortKeyGeneratorNode : public QuerySolutionNode {
 };
 
 struct SortNode : public QuerySolutionNode {
-    SortNode() : _sorts(SimpleBSONObjComparator::kInstance.makeBSONObjSet()), limit(0) {}
-
+    SortNode() : limit(0) {}
     virtual ~SortNode() {}
 
     virtual StageType getType() const {
@@ -712,12 +690,7 @@ struct SkipNode : public QuerySolutionNode {
 
 // This is a standalone stage.
 struct GeoNear2DNode : public QuerySolutionNode {
-    GeoNear2DNode(IndexEntry index)
-        : _sorts(SimpleBSONObjComparator::kInstance.makeBSONObjSet()),
-          index(std::move(index)),
-          addPointMeta(false),
-          addDistMeta(false) {}
-
+    GeoNear2DNode() : addPointMeta(false), addDistMeta(false) {}
     virtual ~GeoNear2DNode() {}
 
     virtual StageType getType() const {
@@ -746,19 +719,14 @@ struct GeoNear2DNode : public QuerySolutionNode {
     const GeoNearExpression* nq;
     IndexBounds baseBounds;
 
-    IndexEntry index;
+    BSONObj indexKeyPattern;
     bool addPointMeta;
     bool addDistMeta;
 };
 
 // This is actually its own standalone stage.
 struct GeoNear2DSphereNode : public QuerySolutionNode {
-    GeoNear2DSphereNode(IndexEntry index)
-        : _sorts(SimpleBSONObjComparator::kInstance.makeBSONObjSet()),
-          index(std::move(index)),
-          addPointMeta(false),
-          addDistMeta(false) {}
-
+    GeoNear2DSphereNode() : addPointMeta(false), addDistMeta(false) {}
     virtual ~GeoNear2DSphereNode() {}
 
     virtual StageType getType() const {
@@ -787,7 +755,7 @@ struct GeoNear2DSphereNode : public QuerySolutionNode {
     const GeoNearExpression* nq;
     IndexBounds baseBounds;
 
-    IndexEntry index;
+    BSONObj indexKeyPattern;
     bool addPointMeta;
     bool addDistMeta;
 };
@@ -833,8 +801,7 @@ struct ShardingFilterNode : public QuerySolutionNode {
  * into the query result stream.
  */
 struct KeepMutationsNode : public QuerySolutionNode {
-    KeepMutationsNode() : sorts(SimpleBSONObjComparator::kInstance.makeBSONObjSet()) {}
-
+    KeepMutationsNode() {}
     virtual ~KeepMutationsNode() {}
 
     virtual StageType getType() const {
@@ -870,9 +837,7 @@ struct KeepMutationsNode : public QuerySolutionNode {
  * *always* skip over the current key to the next key.
  */
 struct DistinctNode : public QuerySolutionNode {
-    DistinctNode(IndexEntry index)
-        : sorts(SimpleBSONObjComparator::kInstance.makeBSONObjSet()), index(std::move(index)) {}
-
+    DistinctNode() {}
     virtual ~DistinctNode() {}
 
     virtual StageType getType() const {
@@ -886,7 +851,7 @@ struct DistinctNode : public QuerySolutionNode {
         return false;
     }
     bool hasField(const std::string& field) const {
-        return !index.keyPattern[field].eoo();
+        return !indexKeyPattern[field].eoo();
     }
     bool sortedByDiskLoc() const {
         return false;
@@ -899,10 +864,10 @@ struct DistinctNode : public QuerySolutionNode {
 
     BSONObjSet sorts;
 
-    IndexEntry index;
+    BSONObj indexKeyPattern;
     int direction;
     IndexBounds bounds;
-    // We are distinct-ing over the 'fieldNo'-th field of 'index.keyPattern'.
+    // We are distinct-ing over the 'fieldNo'-th field of 'indexKeyPattern'.
     int fieldNo;
 };
 
@@ -910,11 +875,9 @@ struct DistinctNode : public QuerySolutionNode {
  * Some count queries reduce to counting how many keys are between two entries in a
  * Btree.
  */
-struct CountScanNode : public QuerySolutionNode {
-    CountScanNode(IndexEntry index)
-        : sorts(SimpleBSONObjComparator::kInstance.makeBSONObjSet()), index(std::move(index)) {}
-
-    virtual ~CountScanNode() {}
+struct CountNode : public QuerySolutionNode {
+    CountNode() {}
+    virtual ~CountNode() {}
 
     virtual StageType getType() const {
         return STAGE_COUNT_SCAN;
@@ -938,7 +901,7 @@ struct CountScanNode : public QuerySolutionNode {
 
     BSONObjSet sorts;
 
-    IndexEntry index;
+    BSONObj indexKeyPattern;
 
     BSONObj startKey;
     bool startKeyInclusive;

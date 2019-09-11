@@ -32,8 +32,6 @@
 #include "mongo/db/jsobj.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/repl/optime.h"
-#include "mongo/stdx/functional.h"
-#include "mongo/util/time_support.h"
 
 namespace mongo {
 
@@ -46,28 +44,9 @@ namespace repl {
 class OplogInterface;
 class ReplicationCoordinator;
 class RollbackSource;
-class StorageInterface;
 
 /**
- * Entry point to rollback process.
- * Set state to ROLLBACK while we are in this function. This prevents serving reads, even from
- * the oplog. This can fail if we are elected PRIMARY, in which case we better not do any
- * rolling back. If we successfully enter ROLLBACK we will only exit this function fatally or
- * after transition to RECOVERING.
- *
- * 'sleepSecsFn' is an optional testing-only argument for overriding mongo::sleepsecs().
- */
-
-void rollback(OperationContext* opCtx,
-              const OplogInterface& localOplog,
-              const RollbackSource& rollbackSource,
-              int requiredRBID,
-              ReplicationCoordinator* replCoord,
-              StorageInterface* storageInterface,
-              stdx::function<void(int)> sleepSecsFn = [](int secs) { sleepsecs(secs); });
-
-/**
- * Initiates the rollback process after transition to ROLLBACK.
+ * Initiates the rollback process.
  * This function assumes the preconditions for undertaking rollback have already been met;
  * we have ops in our oplog that our sync source does not have, and we are not currently
  * PRIMARY.
@@ -85,9 +64,7 @@ void rollback(OperationContext* opCtx,
  * @param rollbackSource interface for sync source:
  *            provides oplog; and
  *            supports fetching documents and copying collections.
- * @param requiredRBID Rollback ID we are required to have throughout rollback.
  * @param replCoord Used to track the rollback ID and to change the follower state
- * @param storageInterface Used to update minValid.
  *
  * If requiredRBID is supplied, we error if the upstream node has a different RBID (ie it rolled
  * back) after fetching any information from it.
@@ -99,9 +76,8 @@ void rollback(OperationContext* opCtx,
 Status syncRollback(OperationContext* txn,
                     const OplogInterface& localOplog,
                     const RollbackSource& rollbackSource,
-                    int requiredRBID,
-                    ReplicationCoordinator* replCoord,
-                    StorageInterface* storageInterface);
+                    boost::optional<int> requiredRBID,
+                    ReplicationCoordinator* replCoord);
 
 /**
  * This namespace contains internal details of the rollback system. It is only exposed in a header

@@ -33,7 +33,6 @@
 
 #include "mongo/db/concurrency/lock_manager.h"
 #include "mongo/db/concurrency/lock_stats.h"
-#include "mongo/stdx/thread.h"
 
 namespace mongo {
 
@@ -84,12 +83,6 @@ public:
     virtual LockerId getId() const = 0;
 
     /**
-     * Get a platform-specific thread identifier of the thread which owns the this locker for
-     * tracing purposes.
-     */
-    virtual stdx::thread::id getThreadId() const = 0;
-
-    /**
      * This should be the first method invoked for a particular Locker object. It acquires the
      * Global lock in the specified mode and effectively indicates the mode of the operation.
      * This is what the lock modes on the global lock mean:
@@ -101,26 +94,26 @@ public:
      *          shutdown, etc).
      *
      * This method can be called recursively, but each call to lockGlobal must be accompanied
-     * by a call to unlockGlobal.
+     * by a call to unlockAll.
      *
      * @param mode Mode in which the global lock should be acquired. Also indicates the intent
      *              of the operation.
+     * @param timeoutMs How long to wait for the global lock (and the flush lock, for the MMAP
+     *          V1 engine) to be acquired.
      *
      * @return LOCK_OK, if the global lock (and the flush lock, for the MMAP V1 engine) were
      *          acquired within the specified time bound. Otherwise, the respective failure
      *          code and neither lock will be acquired.
      */
-    virtual LockResult lockGlobal(LockMode mode) = 0;
+    virtual LockResult lockGlobal(LockMode mode, unsigned timeoutMs = UINT_MAX) = 0;
 
     /**
      * Requests the global lock to be acquired in the specified mode.
      *
      * See the comments for lockBegin/Complete for more information on the semantics.
-     * The timeout indicates how long to wait for the lock to be acquired. The lockGlobalBegin
-     * method has a timeout for use with the TicketHolder, if there is one.
      */
-    virtual LockResult lockGlobalBegin(LockMode mode, Milliseconds timeout) = 0;
-    virtual LockResult lockGlobalComplete(Milliseconds timeout) = 0;
+    virtual LockResult lockGlobalBegin(LockMode mode) = 0;
+    virtual LockResult lockGlobalComplete(unsigned timeoutMs) = 0;
 
     /**
      * This method is used only in the MMAP V1 storage engine, otherwise it is a no-op. See the
@@ -130,8 +123,7 @@ public:
 
     /**
      * Decrements the reference count on the global lock.  If the reference count on the
-     * global lock hits zero, the transaction is over, and unlockGlobal unlocks all other locks
-     * except for RESOURCE_MUTEX locks.
+     * global lock hits zero, the transaction is over, and unlockAll unlocks all other locks.
      *
      * @return true if this is the last endTransaction call (i.e., the global lock was
      *          released); false if there are still references on the global lock. This value
@@ -139,7 +131,7 @@ public:
      *
      * @return false if the global lock is still held.
      */
-    virtual bool unlockGlobal() = 0;
+    virtual bool unlockAll() = 0;
 
     /**
      * This is only necessary for the MMAP V1 engine and in particular, the fsyncLock command
@@ -171,9 +163,9 @@ public:
      *
      * @param resId Id of the resource to be locked.
      * @param mode Mode in which the resource should be locked. Lock upgrades are allowed.
-     * @param timeout How long to wait for the lock to be granted, before
-     *              returning LOCK_TIMEOUT. This parameter defaults to an infinite timeout.
-     *              If Milliseconds(0) is passed, the request will return immediately, if
+     * @param timeoutMs How many milliseconds to wait for the lock to be granted, before
+     *              returning LOCK_TIMEOUT. This parameter defaults to UINT_MAX, which means
+     *              wait infinitely. If 0 is passed, the request will return immediately, if
      *              the request could not be granted right away.
      * @param checkDeadlock Whether to enable deadlock detection for this acquisition. This
      *              parameter is put in place until we can handle deadlocks at all places,
@@ -183,7 +175,7 @@ public:
      */
     virtual LockResult lock(ResourceId resId,
                             LockMode mode,
-                            Milliseconds timeout = Milliseconds::max(),
+                            unsigned timeoutMs = UINT_MAX,
                             bool checkDeadlock = false) = 0;
 
     /**
@@ -271,12 +263,11 @@ public:
     };
 
     /**
-     * Retrieves all locks held by this transaction, other than RESOURCE_MUTEX locks, and what mode
-     * they're held in.
+     * Retrieves all locks held by this transaction, and what mode they're held in.
      * Stores these locks in 'stateOut', destroying any previous state.  Unlocks all locks
-     * held by this transaction.  This functionality is used for yielding, which is
-     * voluntary/cooperative lock release and reacquisition in order to allow for interleaving
-     * of otherwise conflicting long-running operations.
+     * held by this transaction.  This functionality is used for yielding in the MMAPV1
+     * storage engine.  MMAPV1 uses voluntary/cooperative lock release and reacquisition
+     * in order to allow for interleaving of otherwise conflicting long-running operations.
      *
      * This functionality is also used for releasing locks on databases and collections
      * when cursors are dormant and waiting for a getMore request.
@@ -321,38 +312,18 @@ public:
      */
     virtual bool hasLockPending() const = 0;
 
-    /**
-     * If set to false, this opts out of conflicting with replication's use of the
-     * ParallelBatchWriterMode lock. Code that opts-out must be ok with seeing an inconsistent view
-     * of data because within a batch, secondaries apply operations in a different order than on the
-     * primary. User operations should *never* opt out.
-     */
-    void setShouldConflictWithSecondaryBatchApplication(bool newValue) {
-        _shouldConflictWithSecondaryBatchApplication = newValue;
-    }
-    bool shouldConflictWithSecondaryBatchApplication() const {
-        return _shouldConflictWithSecondaryBatchApplication;
-    }
+    // Used for the replication parallel log op application threads
+    virtual void setIsBatchWriter(bool newValue) = 0;
+    virtual bool isBatchWriter() const = 0;
 
     /**
-     * If set to false, this opts out of the ticket mechanism. This should be used sparingly
-     * for special purpose threads, such as FTDC.
+     * A string lock is MODE_X or MODE_S.
+     * These are incompatible with other locks and therefore are strong.
      */
-    void setShouldAcquireTicket(bool newValue) {
-        invariant(!isLocked());
-        _shouldAcquireTicket = newValue;
-    }
-    bool shouldAcquireTicket() const {
-        return _shouldAcquireTicket;
-    }
-
+    virtual bool hasStrongLocks() const = 0;
 
 protected:
     Locker() {}
-
-private:
-    bool _shouldConflictWithSecondaryBatchApplication = true;
-    bool _shouldAcquireTicket = true;
 };
 
 }  // namespace mongo

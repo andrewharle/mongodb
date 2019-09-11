@@ -40,13 +40,9 @@ namespace {
 TEST(KillCursorsResponseTest, parseFromBSONSuccess) {
     StatusWith<KillCursorsResponse> result = KillCursorsResponse::parseFromBSON(
         BSON("cursorsKilled" << BSON_ARRAY(CursorId(123)) << "cursorsNotFound"
-                             << BSON_ARRAY(CursorId(456) << CursorId(6))
-                             << "cursorsAlive"
+                             << BSON_ARRAY(CursorId(456) << CursorId(6)) << "cursorsAlive"
                              << BSON_ARRAY(CursorId(7) << CursorId(8) << CursorId(9))
-                             << "cursorsUnknown"
-                             << BSONArray()
-                             << "ok"
-                             << 1.0));
+                             << "cursorsUnknown" << BSONArray() << "ok" << 1.0));
     ASSERT_OK(result.getStatus());
     KillCursorsResponse response = result.getValue();
     ASSERT_EQ(response.cursorsKilled.size(), 1U);
@@ -64,11 +60,8 @@ TEST(KillCursorsResponseTest, parseFromBSONSuccess) {
 TEST(KillCursorsResponseTest, parseFromBSONSuccessOmitCursorsAlive) {
     StatusWith<KillCursorsResponse> result = KillCursorsResponse::parseFromBSON(
         BSON("cursorsKilled" << BSON_ARRAY(CursorId(123)) << "cursorsNotFound"
-                             << BSON_ARRAY(CursorId(456) << CursorId(6))
-                             << "cursorsUnknown"
-                             << BSON_ARRAY(CursorId(789))
-                             << "ok"
-                             << 1.0));
+                             << BSON_ARRAY(CursorId(456) << CursorId(6)) << "cursorsUnknown"
+                             << BSON_ARRAY(CursorId(789)) << "ok" << 1.0));
     ASSERT_NOT_OK(result.getStatus());
     ASSERT_EQ(result.getStatus().code(), ErrorCodes::FailedToParse);
 }
@@ -83,13 +76,11 @@ TEST(KillCursorsResponseTest, parseFromBSONCommandNotOk) {
 }
 
 TEST(KillCursorsResponseTest, parseFromBSONFieldNotArray) {
-    StatusWith<KillCursorsResponse> result = KillCursorsResponse::parseFromBSON(
-        BSON("cursorsKilled" << BSON_ARRAY(CursorId(123)) << "cursorsNotFound"
-                             << "foobar"
-                             << "cursorsAlive"
-                             << BSON_ARRAY(CursorId(7) << CursorId(8) << CursorId(9))
-                             << "ok"
-                             << 1.0));
+    StatusWith<KillCursorsResponse> result = KillCursorsResponse::parseFromBSON(BSON(
+        "cursorsKilled" << BSON_ARRAY(CursorId(123)) << "cursorsNotFound"
+                        << "foobar"
+                        << "cursorsAlive" << BSON_ARRAY(CursorId(7) << CursorId(8) << CursorId(9))
+                        << "ok" << 1.0));
     ASSERT_NOT_OK(result.getStatus());
     ASSERT_EQ(result.getStatus().code(), ErrorCodes::FailedToParse);
 }
@@ -97,11 +88,8 @@ TEST(KillCursorsResponseTest, parseFromBSONFieldNotArray) {
 TEST(KillCursorsResponseTest, parseFromBSONArrayContainsInvalidElement) {
     StatusWith<KillCursorsResponse> result = KillCursorsResponse::parseFromBSON(
         BSON("cursorsKilled" << BSON_ARRAY(CursorId(123)) << "cursorsNotFound"
-                             << BSON_ARRAY(CursorId(456) << CursorId(6))
-                             << "cursorsAlive"
-                             << BSON_ARRAY(CursorId(7) << "foobar" << CursorId(9))
-                             << "ok"
-                             << 1.0));
+                             << BSON_ARRAY(CursorId(456) << CursorId(6)) << "cursorsAlive"
+                             << BSON_ARRAY(CursorId(7) << "foobar" << CursorId(9)) << "ok" << 1.0));
     ASSERT_NOT_OK(result.getStatus());
     ASSERT_EQ(result.getStatus().code(), ErrorCodes::FailedToParse);
 }
@@ -115,14 +103,10 @@ TEST(KillCursorsResponseTest, toBSON) {
     BSONObj responseObj = response.toBSON();
     BSONObj expectedResponse =
         BSON("cursorsKilled" << BSON_ARRAY(CursorId(123)) << "cursorsNotFound"
-                             << BSON_ARRAY(CursorId(456) << CursorId(6))
-                             << "cursorsAlive"
+                             << BSON_ARRAY(CursorId(456) << CursorId(6)) << "cursorsAlive"
                              << BSON_ARRAY(CursorId(7) << CursorId(8) << CursorId(9))
-                             << "cursorsUnknown"
-                             << BSONArray()
-                             << "ok"
-                             << 1.0);
-    ASSERT_BSONOBJ_EQ(responseObj, expectedResponse);
+                             << "cursorsUnknown" << BSONArray() << "ok" << 1.0);
+    ASSERT_EQ(responseObj, expectedResponse);
 }
 
 }  // namespace

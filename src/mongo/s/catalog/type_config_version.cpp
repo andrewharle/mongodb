@@ -33,6 +33,7 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/util/bson_extract.h"
 #include "mongo/s/catalog/config_server_version.h"
+#include "mongo/s/catalog/legacy/config_upgrade.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/mongoutils/str.h"
 
@@ -82,10 +83,6 @@ Status VersionType::validate() const {
     if (getCurrentVersion() > UpgradeHistory::UpgradeHistory_NoEpochVersion &&
         !_clusterId.is_initialized()) {
         return {ErrorCodes::NoSuchKey, str::stream() << "missing " << clusterId.name() << " field"};
-    }
-
-    if (!_clusterId->isSet()) {
-        return {ErrorCodes::NotYetInitialized, "Cluster ID cannot be empty"};
     }
 
     return Status::OK();
@@ -214,6 +211,7 @@ void VersionType::setCurrentVersion(const int currentVersion) {
 }
 
 void VersionType::setClusterId(const OID& clusterId) {
+    invariant(clusterId.isSet());
     _clusterId = clusterId;
 }
 

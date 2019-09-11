@@ -30,7 +30,6 @@
 
 #include <boost/optional.hpp>
 #include <string>
-#include <vector>
 
 #include "mongo/db/jsobj.h"
 #include "mongo/util/time_support.h"
@@ -54,7 +53,6 @@ public:
     static const BSONField<bool> waiting;
     static const BSONField<std::string> mongoVersion;
     static const BSONField<long long> configVersion;
-    static const BSONField<BSONArray> advisoryHostFQDNs;
 
     /**
      * Returns the BSON representation of the entry.
@@ -114,11 +112,6 @@ public:
     }
     void setConfigVersion(const long long configVersion);
 
-    std::vector<std::string> getAdvisoryHostFQDNs() const {
-        return _advisoryHostFQDNs.value_or(std::vector<std::string>());
-    }
-    void setAdvisoryHostFQDNs(const std::vector<std::string>& advisoryHostFQDNs);
-
 private:
     // Convention: (M)andatory, (O)ptional, (S)pecial rule.
 
@@ -134,8 +127,6 @@ private:
     boost::optional<std::string> _mongoVersion;
     // (O) the config version of the pinging mongos
     boost::optional<long long> _configVersion;
-    // (O) the results of hostname canonicalization on the pinging mongos
-    boost::optional<std::vector<std::string>> _advisoryHostFQDNs;
 };
 
 }  // namespace mongo

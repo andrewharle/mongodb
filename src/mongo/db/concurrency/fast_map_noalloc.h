@@ -28,7 +28,6 @@
 
 #pragma once
 
-#include "mongo/base/static_assert.h"
 #include "mongo/platform/unordered_map.h"
 #include "mongo/util/assert_util.h"
 
@@ -181,10 +180,6 @@ public:
      * entry just inserted.
      */
     Iterator insert(const KeyType& key) {
-        uassert(ErrorCodes::TooManyLocks,
-                "Operation requires too many locks",
-                _fastAccessUsedSize < PreallocCount);
-
         // Find the first unused slot. This could probably be even further optimized by adding
         // a field pointing to the first unused location.
         int idx = 0;
@@ -238,8 +233,8 @@ public:
 private:
     // Empty and very large maps do not make sense since there will be no performance gain, so
     // disallow them.
-    MONGO_STATIC_ASSERT(PreallocCount > 0);
-    MONGO_STATIC_ASSERT(PreallocCount < 32);
+    static_assert(PreallocCount > 0, "PreallocCount > 0");
+    static_assert(PreallocCount < 32, "PreallocCount < 32");
 
     // Iterator accesses the map directly
     friend class IteratorImpl<FastMapNoAlloc<KeyType, ValueType, PreallocCount>, ValueType>;

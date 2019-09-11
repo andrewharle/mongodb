@@ -26,130 +26,16 @@
  *    it in the license file.
  */
 
-#include <vector>
-
 #include "mongo/db/query/query_solution.h"
 
-#include "mongo/bson/bsontypes.h"
-#include "mongo/bson/simple_bsonelement_comparator.h"
 #include "mongo/db/index_names.h"
 #include "mongo/db/matcher/expression_geo.h"
-#include "mongo/db/query/collation/collation_index_key.h"
-#include "mongo/db/query/index_bounds_builder.h"
 #include "mongo/db/query/planner_analysis.h"
 #include "mongo/db/query/query_planner_common.h"
 
 namespace mongo {
 
-namespace {
-
-// Create an ordred interval list which represents the bounds for all BSON elements of type String,
-// Object, or Array.
-OrderedIntervalList buildStringBoundsOil(const std::string& keyName) {
-    OrderedIntervalList ret;
-    ret.name = keyName;
-
-    BSONObjBuilder strBob;
-    strBob.appendMinForType("", BSONType::String);
-    strBob.appendMaxForType("", BSONType::String);
-    ret.intervals.push_back(
-        IndexBoundsBuilder::makeRangeInterval(strBob.obj(), BoundInclusion::kIncludeStartKeyOnly));
-
-    BSONObjBuilder objBob;
-    objBob.appendMinForType("", BSONType::Object);
-    objBob.appendMaxForType("", BSONType::Object);
-    ret.intervals.push_back(
-        IndexBoundsBuilder::makeRangeInterval(objBob.obj(), BoundInclusion::kIncludeStartKeyOnly));
-
-    BSONObjBuilder arrBob;
-    arrBob.appendMinForType("", BSONType::Array);
-    arrBob.appendMaxForType("", BSONType::Array);
-    ret.intervals.push_back(
-        IndexBoundsBuilder::makeRangeInterval(arrBob.obj(), BoundInclusion::kIncludeStartKeyOnly));
-
-    return ret;
-}
-
-bool rangeCanContainString(const BSONElement& startKey,
-                           const BSONElement& endKey,
-                           BoundInclusion boundInclusion) {
-    OrderedIntervalList stringBoundsOil = buildStringBoundsOil("");
-    OrderedIntervalList rangeOil;
-    BSONObjBuilder bob;
-    bob.appendAs(startKey, "");
-    bob.appendAs(endKey, "");
-    rangeOil.intervals.push_back(IndexBoundsBuilder::makeRangeInterval(bob.obj(), boundInclusion));
-
-    IndexBoundsBuilder::intersectize(rangeOil, &stringBoundsOil);
-    return !stringBoundsOil.intervals.empty();
-}
-
-// Helper function for IndexScanNode::computeProperties for adding additional sort orders made
-// possible by point bounds on some fields of the sort pattern.
-void addEqualityFieldSorts(const BSONObj& sortPattern,
-                           const std::set<string>& equalityFields,
-                           BSONObjSet* sortsOut) {
-    invariant(sortsOut);
-    // TODO: Each field in equalityFields could be dropped from the sort order since it is
-    // a point interval.  The full set of sort orders is as follows:
-    // For each sort in sortsOut:
-    //    For each drop in powerset(equalityFields):
-    //        Remove fields in 'drop' from 'sort' and add resulting sort to output.
-    //
-    // Since this involves a powerset, we don't generate the full set of possibilities.
-    // Instead, we generate sort orders by removing possible contiguous prefixes of equality
-    // predicates. For example, if the key pattern is {a: 1, b: 1, c: 1, d: 1, e: 1}
-    // and and there are equality predicates on 'a', 'b', and 'c', then here we add the sort
-    // orders {b: 1, c: 1, d: 1, e: 1} and {c: 1, d: 1, e: 1}. (We also end up adding
-    // {d: 1, e: 1} and {d: 1}, but this is done later on.)
-    BSONObjIterator it(sortPattern);
-    BSONObjBuilder suffixBob;
-    while (it.more()) {
-        BSONElement elt = it.next();
-        // TODO: string slowness.  fix when bounds are stringdata not string.
-        if (equalityFields.end() == equalityFields.find(string(elt.fieldName()))) {
-            suffixBob.append(elt);
-            // This field isn't a point interval, can't drop.
-            break;
-        }
-
-        // We add the sort obtained by dropping 'elt' and all preceding elements from the index
-        // key pattern.
-        BSONObjIterator droppedPrefixIt = it;
-        if (!droppedPrefixIt.more()) {
-            // Do not insert an empty sort order.
-            break;
-        }
-        BSONObjBuilder droppedPrefixBob;
-        while (droppedPrefixIt.more()) {
-            droppedPrefixBob.append(droppedPrefixIt.next());
-        }
-        sortsOut->insert(droppedPrefixBob.obj());
-    }
-
-    while (it.more()) {
-        suffixBob.append(it.next());
-    }
-
-    // We've found the suffix following the contiguous prefix of equality fields.
-    //   Ex. For index {a: 1, b: 1, c: 1, d: 1} and query {a: 3, b: 5}, this suffix
-    //   of the key pattern is {c: 1, d: 1}.
-    //
-    // Now we have to add all prefixes of this suffix as possible sort orders.
-    //   Ex. Continuing the example from above, we have to include sort orders
-    //   {c: 1} and {c: 1, d: 1}.
-    BSONObj filterPointsObj = suffixBob.obj();
-    for (int i = 0; i < filterPointsObj.nFields(); ++i) {
-        // Make obj out of fields [0,i]
-        BSONObjIterator it(filterPointsObj);
-        BSONObjBuilder prefixBob;
-        for (int j = 0; j <= i; ++j) {
-            prefixBob.append(it.next());
-        }
-        sortsOut->insert(prefixBob.obj());
-    }
-}
-}
+using std::set;
 
 string QuerySolutionNode::toString() const {
     mongoutils::str::stream ss;
@@ -185,9 +71,7 @@ void TextNode::appendToString(mongoutils::str::stream* ss, int indent) const {
     addIndent(ss, indent);
     *ss << "TEXT\n";
     addIndent(ss, indent + 1);
-    *ss << "name = " << index.name << '\n';
-    addIndent(ss, indent + 1);
-    *ss << "keyPattern = " << index.keyPattern.toString() << '\n';
+    *ss << "keyPattern = " << indexKeyPattern.toString() << '\n';
     addIndent(ss, indent + 1);
     *ss << "query = " << ftsQuery->getQuery() << '\n';
     addIndent(ss, indent + 1);
@@ -206,10 +90,11 @@ void TextNode::appendToString(mongoutils::str::stream* ss, int indent) const {
 }
 
 QuerySolutionNode* TextNode::clone() const {
-    TextNode* copy = new TextNode(this->index);
+    TextNode* copy = new TextNode();
     cloneBaseData(copy);
 
     copy->_sort = this->_sort;
+    copy->indexKeyPattern = this->indexKeyPattern;
     copy->ftsQuery = this->ftsQuery->clone();
     copy->indexPrefix = this->indexPrefix;
 
@@ -220,11 +105,7 @@ QuerySolutionNode* TextNode::clone() const {
 // CollectionScanNode
 //
 
-CollectionScanNode::CollectionScanNode()
-    : _sort(SimpleBSONObjComparator::kInstance.makeBSONObjSet()),
-      tailable(false),
-      direction(1),
-      maxScan(0) {}
+CollectionScanNode::CollectionScanNode() : tailable(false), direction(1), maxScan(0) {}
 
 void CollectionScanNode::appendToString(mongoutils::str::stream* ss, int indent) const {
     addIndent(ss, indent);
@@ -255,7 +136,7 @@ QuerySolutionNode* CollectionScanNode::clone() const {
 // AndHashNode
 //
 
-AndHashNode::AndHashNode() : _sort(SimpleBSONObjComparator::kInstance.makeBSONObjSet()) {}
+AndHashNode::AndHashNode() {}
 
 AndHashNode::~AndHashNode() {}
 
@@ -309,7 +190,7 @@ QuerySolutionNode* AndHashNode::clone() const {
 // AndSortedNode
 //
 
-AndSortedNode::AndSortedNode() : _sort(SimpleBSONObjComparator::kInstance.makeBSONObjSet()) {}
+AndSortedNode::AndSortedNode() {}
 
 AndSortedNode::~AndSortedNode() {}
 
@@ -359,7 +240,7 @@ QuerySolutionNode* AndSortedNode::clone() const {
 // OrNode
 //
 
-OrNode::OrNode() : _sort(SimpleBSONObjComparator::kInstance.makeBSONObjSet()), dedup(true) {}
+OrNode::OrNode() : dedup(true) {}
 
 OrNode::~OrNode() {}
 
@@ -419,8 +300,7 @@ QuerySolutionNode* OrNode::clone() const {
 // MergeSortNode
 //
 
-MergeSortNode::MergeSortNode()
-    : _sorts(SimpleBSONObjComparator::kInstance.makeBSONObjSet()), dedup(true) {}
+MergeSortNode::MergeSortNode() : dedup(true) {}
 
 MergeSortNode::~MergeSortNode() {}
 
@@ -481,7 +361,7 @@ QuerySolutionNode* MergeSortNode::clone() const {
 // FetchNode
 //
 
-FetchNode::FetchNode() : _sorts(SimpleBSONObjComparator::kInstance.makeBSONObjSet()) {}
+FetchNode::FetchNode() {}
 
 void FetchNode::appendToString(mongoutils::str::stream* ss, int indent) const {
     addIndent(ss, indent);
@@ -512,20 +392,14 @@ QuerySolutionNode* FetchNode::clone() const {
 // IndexScanNode
 //
 
-IndexScanNode::IndexScanNode(IndexEntry index)
-    : _sorts(SimpleBSONObjComparator::kInstance.makeBSONObjSet()),
-      index(std::move(index)),
-      direction(1),
-      maxScan(0),
-      addKeyMetadata(false),
-      queryCollator(nullptr) {}
+IndexScanNode::IndexScanNode()
+    : indexIsMultiKey(false), direction(1), maxScan(0), addKeyMetadata(false) {}
 
 void IndexScanNode::appendToString(mongoutils::str::stream* ss, int indent) const {
     addIndent(ss, indent);
     *ss << "IXSCAN\n";
     addIndent(ss, indent + 1);
-    *ss << "indexName = " << index.name << '\n';
-    *ss << "keyPattern = " << index.keyPattern << '\n';
+    *ss << "keyPattern = " << indexKeyPattern << '\n';
     if (NULL != filter) {
         addIndent(ss, indent + 1);
         *ss << "filter = " << filter->toString();
@@ -540,26 +414,17 @@ void IndexScanNode::appendToString(mongoutils::str::stream* ss, int indent) cons
 bool IndexScanNode::hasField(const string& field) const {
     // There is no covering in a multikey index because you don't know whether or not the field
     // in the key was extracted from an array in the original document.
-    if (index.multikey) {
+    if (indexIsMultiKey) {
         return false;
     }
 
     // Custom index access methods may return non-exact key data - this function is currently
     // used for covering exact key data only.
-    if (IndexNames::BTREE != IndexNames::findPluginName(index.keyPattern)) {
+    if (IndexNames::BTREE != IndexNames::findPluginName(indexKeyPattern)) {
         return false;
     }
 
-    // If the index has a non-simple collation and we have collation keys inside 'field', then this
-    // index scan does not provide that field (and the query cannot be covered).
-    if (index.collator) {
-        std::set<StringData> collatedFields = getFieldsWithStringBounds(bounds, index.keyPattern);
-        if (collatedFields.find(field) != collatedFields.end()) {
-            return false;
-        }
-    }
-
-    BSONObjIterator it(index.keyPattern);
+    BSONObjIterator it(indexKeyPattern);
     while (it.more()) {
         if (field == it.next().fieldName()) {
             return true;
@@ -575,7 +440,7 @@ bool IndexScanNode::sortedByDiskLoc() const {
 
     // If it's a simple range query, it's easy to determine if the range is a point.
     if (bounds.isSimpleRange) {
-        return 0 == bounds.startKey.woCompare(bounds.endKey, index.keyPattern);
+        return 0 == bounds.startKey.woCompare(bounds.endKey, indexKeyPattern);
     }
 
     // If it's a more complex bounds query, we make sure that each field is a point.
@@ -593,68 +458,10 @@ bool IndexScanNode::sortedByDiskLoc() const {
     return true;
 }
 
-// static
-std::set<StringData> IndexScanNode::getFieldsWithStringBounds(const IndexBounds& inputBounds,
-                                                              const BSONObj& indexKeyPattern) {
-    // Produce a copy of the bounds which are all ascending, as we can only compute intersections
-    // of ascending bounds.
-    IndexBounds bounds = inputBounds.forwardize();
-
-    BSONObjIterator keyPatternIterator(indexKeyPattern);
-
-    if (bounds.isSimpleRange) {
-        // With a simple range, the only cases we can say for sure do not contain strings
-        // are those with point bounds.
-        BSONObjIterator startKeyIterator = bounds.startKey.begin();
-        BSONObjIterator endKeyIterator = bounds.endKey.begin();
-        while (keyPatternIterator.more() && startKeyIterator.more() && endKeyIterator.more()) {
-            BSONElement startKey = startKeyIterator.next();
-            BSONElement endKey = endKeyIterator.next();
-            if (SimpleBSONElementComparator::kInstance.evaluate(startKey != endKey) ||
-                CollationIndexKey::isCollatableType(startKey.type())) {
-                BoundInclusion boundInclusion = bounds.boundInclusion;
-                if (startKeyIterator.more()) {
-                    boundInclusion = BoundInclusion::kIncludeBothStartAndEndKeys;
-                }
-                if (!rangeCanContainString(startKey, endKey, boundInclusion)) {
-                    // If the first non-point range cannot contain strings, we don't need to
-                    // add it to the return set.
-                    keyPatternIterator.next();
-                }
-
-                // Any remaining keys could have strings.
-                std::set<StringData> ret;
-                while (keyPatternIterator.more()) {
-                    ret.insert(keyPatternIterator.next().fieldNameStringData());
-                }
-                return ret;
-            }
-
-            keyPatternIterator.next();
-        }
-
-        return std::set<StringData>{};
-    }
-
-    std::set<StringData> ret;
-    invariant(bounds.fields.size() == static_cast<size_t>(indexKeyPattern.nFields()));
-    for (const auto& oil : bounds.fields) {
-        invariant(keyPatternIterator.more());
-        BSONElement el = keyPatternIterator.next();
-        OrderedIntervalList intersection = buildStringBoundsOil(el.fieldName());
-        IndexBoundsBuilder::intersectize(oil, &intersection);
-        if (!intersection.intervals.empty()) {
-            ret.insert(el.fieldNameStringData());
-        }
-    }
-
-    return ret;
-}
-
 void IndexScanNode::computeProperties() {
     _sorts.clear();
 
-    BSONObj sortPattern = QueryPlannerAnalysis::getSortPattern(index.keyPattern);
+    BSONObj sortPattern = QueryPlannerAnalysis::getSortPattern(indexKeyPattern);
     if (direction == -1) {
         sortPattern = QueryPlannerCommon::reverseSortObj(sortPattern);
     }
@@ -680,7 +487,7 @@ void IndexScanNode::computeProperties() {
 
     // See if there are any fields with equalities for bounds.  We can drop these
     // from any sort orders created.
-    std::set<string> equalityFields;
+    set<string> equalityFields;
     if (!bounds.isSimpleRange) {
         // Figure out how many fields are point intervals.
         for (size_t i = 0; i < bounds.fields.size(); ++i) {
@@ -695,53 +502,88 @@ void IndexScanNode::computeProperties() {
             equalityFields.insert(oil.name);
         }
     } else {
-        BSONObjIterator keyIter(index.keyPattern);
+        BSONObjIterator keyIter(indexKeyPattern);
         BSONObjIterator startIter(bounds.startKey);
         BSONObjIterator endIter(bounds.endKey);
         while (keyIter.more() && startIter.more() && endIter.more()) {
             BSONElement key = keyIter.next();
-            if (SimpleBSONElementComparator::kInstance.evaluate(startIter.next() ==
-                                                                endIter.next())) {
+            if (startIter.next() == endIter.next()) {
                 equalityFields.insert(key.fieldName());
             }
         }
     }
 
-    if (!equalityFields.empty()) {
-        addEqualityFieldSorts(sortPattern, equalityFields, &_sorts);
+    if (equalityFields.empty()) {
+        return;
     }
 
-    if (!CollatorInterface::collatorsMatch(queryCollator, index.collator)) {
-        // Prune sorts containing fields that don't match the collation.
-        std::set<StringData> collatedFields = getFieldsWithStringBounds(bounds, index.keyPattern);
-        auto sortsIt = _sorts.begin();
-        while (sortsIt != _sorts.end()) {
-            bool matched = false;
-            for (const BSONElement& el : *sortsIt) {
-                if (collatedFields.find(el.fieldNameStringData()) != collatedFields.end()) {
-                    sortsIt = _sorts.erase(sortsIt);
-                    matched = true;
-                    break;
-                }
-            }
-
-            if (!matched) {
-                sortsIt++;
-            }
+    // TODO: Each field in equalityFields could be dropped from the sort order since it is
+    // a point interval.  The full set of sort orders is as follows:
+    // For each sort in _sorts:
+    //    For each drop in powerset(equalityFields):
+    //        Remove fields in 'drop' from 'sort' and add resulting sort to output.
+    //
+    // Since this involves a powerset, we don't generate the full set of possibilities.
+    // Instead, we generate sort orders by removing possible contiguous prefixes of equality
+    // predicates. For example, if the key pattern is {a: 1, b: 1, c: 1, d: 1, e: 1}
+    // and and there are equality predicates on 'a', 'b', and 'c', then here we add the sort
+    // orders {b: 1, c: 1, d: 1, e: 1} and {c: 1, d: 1, e: 1}. (We also end up adding
+    // {d: 1, e: 1} and {d: 1}, but this is done later on.)
+    BSONObjIterator it(sortPattern);
+    BSONObjBuilder suffixBob;
+    while (it.more()) {
+        BSONElement elt = it.next();
+        // TODO: string slowness.  fix when bounds are stringdata not string.
+        if (equalityFields.end() == equalityFields.find(string(elt.fieldName()))) {
+            suffixBob.append(elt);
+            // This field isn't a point interval, can't drop.
+            break;
         }
+
+        // We add the sort obtained by dropping 'elt' and all preceding elements from the index
+        // key pattern.
+        BSONObjIterator droppedPrefixIt = it;
+        BSONObjBuilder droppedPrefixBob;
+        while (droppedPrefixIt.more()) {
+            droppedPrefixBob.append(droppedPrefixIt.next());
+        }
+        _sorts.insert(droppedPrefixBob.obj());
+    }
+
+    while (it.more()) {
+        suffixBob.append(it.next());
+    }
+
+    // We've found the suffix following the contiguous prefix of equality fields.
+    //   Ex. For index {a: 1, b: 1, c: 1, d: 1} and query {a: 3, b: 5}, this suffix
+    //   of the key pattern is {c: 1, d: 1}.
+    //
+    // Now we have to add all prefixes of this suffix as possible sort orders.
+    //   Ex. Continuing the example from above, we have to include sort orders
+    //   {c: 1} and {c: 1, d: 1}.
+    BSONObj filterPointsObj = suffixBob.obj();
+    for (int i = 0; i < filterPointsObj.nFields(); ++i) {
+        // Make obj out of fields [0,i]
+        BSONObjIterator it(filterPointsObj);
+        BSONObjBuilder prefixBob;
+        for (int j = 0; j <= i; ++j) {
+            prefixBob.append(it.next());
+        }
+        _sorts.insert(prefixBob.obj());
     }
 }
 
 QuerySolutionNode* IndexScanNode::clone() const {
-    IndexScanNode* copy = new IndexScanNode(this->index);
+    IndexScanNode* copy = new IndexScanNode();
     cloneBaseData(copy);
 
     copy->_sorts = this->_sorts;
+    copy->indexKeyPattern = this->indexKeyPattern;
+    copy->indexIsMultiKey = this->indexIsMultiKey;
     copy->direction = this->direction;
     copy->maxScan = this->maxScan;
     copy->addKeyMetadata = this->addKeyMetadata;
     copy->bounds = this->bounds;
-    copy->queryCollator = this->queryCollator;
 
     return copy;
 }
@@ -761,7 +603,8 @@ bool filtersAreEquivalent(const MatchExpression* lhs, const MatchExpression* rhs
 }  // namespace
 
 bool IndexScanNode::operator==(const IndexScanNode& other) const {
-    return filtersAreEquivalent(filter.get(), other.filter.get()) && index == other.index &&
+    return filtersAreEquivalent(filter.get(), other.filter.get()) &&
+        indexKeyPattern == other.indexKeyPattern && indexIsMultiKey == other.indexIsMultiKey &&
         direction == other.direction && maxScan == other.maxScan &&
         addKeyMetadata == other.addKeyMetadata && bounds == other.bounds;
 }
@@ -790,40 +633,15 @@ void ProjectionNode::appendToString(mongoutils::str::stream* ss, int indent) con
     children[0]->appendToString(ss, indent + 2);
 }
 
-void ProjectionNode::computeProperties() {
-    invariant(children.size() == 1U);
-    children[0]->computeProperties();
-
-    _sorts.clear();
-
-    const BSONObjSet& inputSorts = children[0]->getSort();
-
-    // Our input sort is not necessarily maintained if we project some fields that are part of the
-    // sort out.
-    for (auto&& sort : inputSorts) {
-        bool sortCompatible = true;
-        for (auto&& key : sort) {
-            if (!parsed.isFieldRetainedExactly(key.fieldNameStringData())) {
-                sortCompatible = false;
-                break;
-            }
-        }
-        if (sortCompatible) {
-            _sorts.insert(sort);
-        }
-    }
-}
-
 QuerySolutionNode* ProjectionNode::clone() const {
-    ProjectionNode* copy = new ProjectionNode(parsed);
+    ProjectionNode* copy = new ProjectionNode();
     cloneBaseData(copy);
 
     copy->_sorts = this->_sorts;
+    copy->fullExpression = this->fullExpression;
 
     // This MatchExpression* is owned by the canonical query, not by the
     // ProjectionNode. Just copying the pointer is fine.
-    copy->fullExpression = this->fullExpression;
-
     copy->projection = this->projection;
 
     return copy;
@@ -940,9 +758,7 @@ void GeoNear2DNode::appendToString(mongoutils::str::stream* ss, int indent) cons
     addIndent(ss, indent);
     *ss << "GEO_NEAR_2D\n";
     addIndent(ss, indent + 1);
-    *ss << "name = " << index.name << '\n';
-    addIndent(ss, indent + 1);
-    *ss << "keyPattern = " << index.keyPattern.toString() << '\n';
+    *ss << "keyPattern = " << indexKeyPattern.toString() << '\n';
     addCommon(ss, indent);
     *ss << "nearQuery = " << nq->toString() << '\n';
     if (NULL != filter) {
@@ -952,12 +768,13 @@ void GeoNear2DNode::appendToString(mongoutils::str::stream* ss, int indent) cons
 }
 
 QuerySolutionNode* GeoNear2DNode::clone() const {
-    GeoNear2DNode* copy = new GeoNear2DNode(this->index);
+    GeoNear2DNode* copy = new GeoNear2DNode();
     cloneBaseData(copy);
 
     copy->_sorts = this->_sorts;
     copy->nq = this->nq;
     copy->baseBounds = this->baseBounds;
+    copy->indexKeyPattern = this->indexKeyPattern;
     copy->addPointMeta = this->addPointMeta;
     copy->addDistMeta = this->addDistMeta;
 
@@ -972,9 +789,7 @@ void GeoNear2DSphereNode::appendToString(mongoutils::str::stream* ss, int indent
     addIndent(ss, indent);
     *ss << "GEO_NEAR_2DSPHERE\n";
     addIndent(ss, indent + 1);
-    *ss << "name = " << index.name << '\n';
-    addIndent(ss, indent + 1);
-    *ss << "keyPattern = " << index.keyPattern.toString() << '\n';
+    *ss << "keyPattern = " << indexKeyPattern.toString() << '\n';
     addCommon(ss, indent);
     *ss << "baseBounds = " << baseBounds.toString() << '\n';
     addIndent(ss, indent + 1);
@@ -986,12 +801,13 @@ void GeoNear2DSphereNode::appendToString(mongoutils::str::stream* ss, int indent
 }
 
 QuerySolutionNode* GeoNear2DSphereNode::clone() const {
-    GeoNear2DSphereNode* copy = new GeoNear2DSphereNode(this->index);
+    GeoNear2DSphereNode* copy = new GeoNear2DSphereNode();
     cloneBaseData(copy);
 
     copy->_sorts = this->_sorts;
     copy->nq = this->nq;
     copy->baseBounds = this->baseBounds;
+    copy->indexKeyPattern = this->indexKeyPattern;
     copy->addPointMeta = this->addPointMeta;
     copy->addDistMeta = this->addDistMeta;
 
@@ -1061,9 +877,7 @@ void DistinctNode::appendToString(mongoutils::str::stream* ss, int indent) const
     addIndent(ss, indent);
     *ss << "DISTINCT\n";
     addIndent(ss, indent + 1);
-    *ss << "name = " << index.name << '\n';
-    addIndent(ss, indent + 1);
-    *ss << "keyPattern = " << index.keyPattern << '\n';
+    *ss << "keyPattern = " << indexKeyPattern << '\n';
     addIndent(ss, indent + 1);
     *ss << "direction = " << direction << '\n';
     addIndent(ss, indent + 1);
@@ -1071,10 +885,11 @@ void DistinctNode::appendToString(mongoutils::str::stream* ss, int indent) const
 }
 
 QuerySolutionNode* DistinctNode::clone() const {
-    DistinctNode* copy = new DistinctNode(this->index);
+    DistinctNode* copy = new DistinctNode();
     cloneBaseData(copy);
 
     copy->sorts = this->sorts;
+    copy->indexKeyPattern = this->indexKeyPattern;
     copy->direction = this->direction;
     copy->bounds = this->bounds;
     copy->fieldNo = this->fieldNo;
@@ -1083,27 +898,26 @@ QuerySolutionNode* DistinctNode::clone() const {
 }
 
 //
-// CountScanNode
+// CountNode
 //
 
-void CountScanNode::appendToString(mongoutils::str::stream* ss, int indent) const {
+void CountNode::appendToString(mongoutils::str::stream* ss, int indent) const {
     addIndent(ss, indent);
     *ss << "COUNT\n";
     addIndent(ss, indent + 1);
-    *ss << "name = " << index.name << '\n';
-    addIndent(ss, indent + 1);
-    *ss << "keyPattern = " << index.keyPattern << '\n';
+    *ss << "keyPattern = " << indexKeyPattern << '\n';
     addIndent(ss, indent + 1);
     *ss << "startKey = " << startKey << '\n';
     addIndent(ss, indent + 1);
     *ss << "endKey = " << endKey << '\n';
 }
 
-QuerySolutionNode* CountScanNode::clone() const {
-    CountScanNode* copy = new CountScanNode(this->index);
+QuerySolutionNode* CountNode::clone() const {
+    CountNode* copy = new CountNode();
     cloneBaseData(copy);
 
     copy->sorts = this->sorts;
+    copy->indexKeyPattern = this->indexKeyPattern;
     copy->startKey = this->startKey;
     copy->startKeyInclusive = this->startKeyInclusive;
     copy->endKey = this->endKey;

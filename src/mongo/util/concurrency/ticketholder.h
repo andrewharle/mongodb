@@ -34,7 +34,6 @@
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/concurrency/mutex.h"
-#include "mongo/util/time_support.h"
 
 namespace mongo {
 
@@ -48,8 +47,6 @@ public:
     bool tryAcquire();
 
     void waitForTicket();
-
-    bool waitForTicketUntil(Date_t until);
 
     void release();
 

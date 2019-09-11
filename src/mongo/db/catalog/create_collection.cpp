@@ -40,10 +40,7 @@
 #include "mongo/db/repl/replication_coordinator_global.h"
 
 namespace mongo {
-Status createCollection(OperationContext* txn,
-                        const std::string& dbName,
-                        const BSONObj& cmdObj,
-                        const BSONObj& idIndex) {
+Status createCollection(OperationContext* txn, const std::string& dbName, const BSONObj& cmdObj) {
     BSONObjIterator it(cmdObj);
 
     // Extract ns from first cmdObj element.
@@ -82,8 +79,7 @@ Status createCollection(OperationContext* txn,
         WriteUnitOfWork wunit(txn);
 
         // Create collection.
-        const bool createDefaultIndexes = true;
-        status = userCreateNS(txn, ctx.db(), nss.ns(), options, createDefaultIndexes, idIndex);
+        status = userCreateNS(txn, ctx.db(), nss.ns(), options);
         if (!status.isOK()) {
             return status;
         }

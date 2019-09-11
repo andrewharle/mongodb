@@ -110,7 +110,8 @@ Message CommandReplyBuilder::done() {
     MsgData::View msg = _builder.buf();
     msg.setLen(_builder.len());
     msg.setOperation(dbCommandReply);
-    _message.setData(_builder.release());
+    _builder.decouple();                     // release ownership from BufBuilder
+    _message.setData(msg.view2ptr(), true);  // transfer ownership to Message
     _state = State::kDone;
     return std::move(_message);
 }

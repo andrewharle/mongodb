@@ -26,8 +26,6 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/jsobj.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/unittest/unittest.h"
@@ -38,13 +36,12 @@ namespace {
 
 TEST(ReadAfterParse, ReadAfterOnly) {
     ReadConcernArgs readAfterOpTime;
-    ASSERT_OK(readAfterOpTime.initialize(BSON(
-        "find"
-        << "test"
-        << ReadConcernArgs::kReadConcernFieldName
-        << BSON(ReadConcernArgs::kAfterOpTimeFieldName
-                << BSON(OpTime::kTimestampFieldName << Timestamp(20, 30) << OpTime::kTermFieldName
-                                                    << 2)))));
+    ASSERT_OK(readAfterOpTime.initialize(BSON("find"
+                                              << "test" << ReadConcernArgs::kReadConcernFieldName
+                                              << BSON(ReadConcernArgs::kAfterOpTimeFieldName
+                                                      << BSON(OpTime::kTimestampFieldName
+                                                              << Timestamp(20, 30)
+                                                              << OpTime::kTermFieldName << 2)))));
 
     ASSERT_EQ(Timestamp(20, 30), readAfterOpTime.getOpTime().getTimestamp());
     ASSERT_EQ(2, readAfterOpTime.getOpTime().getTerm());
@@ -55,8 +52,7 @@ TEST(ReadAfterParse, ReadCommitLevelOnly) {
     ReadConcernArgs readAfterOpTime;
     ASSERT_OK(
         readAfterOpTime.initialize(BSON("find"
-                                        << "test"
-                                        << ReadConcernArgs::kReadConcernFieldName
+                                        << "test" << ReadConcernArgs::kReadConcernFieldName
                                         << BSON(ReadConcernArgs::kLevelFieldName << "majority"))));
 
     ASSERT_TRUE(readAfterOpTime.getOpTime().isNull());
@@ -65,15 +61,13 @@ TEST(ReadAfterParse, ReadCommitLevelOnly) {
 
 TEST(ReadAfterParse, ReadCommittedFullSpecification) {
     ReadConcernArgs readAfterOpTime;
-    ASSERT_OK(readAfterOpTime.initialize(BSON(
-        "find"
-        << "test"
-        << ReadConcernArgs::kReadConcernFieldName
-        << BSON(ReadConcernArgs::kAfterOpTimeFieldName
-                << BSON(OpTime::kTimestampFieldName << Timestamp(20, 30) << OpTime::kTermFieldName
-                                                    << 2)
-                << ReadConcernArgs::kLevelFieldName
-                << "majority"))));
+    ASSERT_OK(readAfterOpTime.initialize(
+        BSON("find"
+             << "test" << ReadConcernArgs::kReadConcernFieldName
+             << BSON(ReadConcernArgs::kAfterOpTimeFieldName
+                     << BSON(OpTime::kTimestampFieldName << Timestamp(20, 30)
+                                                         << OpTime::kTermFieldName << 2)
+                     << ReadConcernArgs::kLevelFieldName << "majority"))));
 
     ASSERT_EQ(Timestamp(20, 30), readAfterOpTime.getOpTime().getTimestamp());
     ASSERT_EQ(2, readAfterOpTime.getOpTime().getTerm());
@@ -91,26 +85,24 @@ TEST(ReadAfterParse, Empty) {
 
 TEST(ReadAfterParse, BadRootType) {
     ReadConcernArgs readAfterOpTime;
-    ASSERT_NOT_OK(readAfterOpTime.initialize(BSON("find"
-                                                  << "test"
-                                                  << ReadConcernArgs::kReadConcernFieldName
-                                                  << "x")));
+    ASSERT_NOT_OK(
+        readAfterOpTime.initialize(BSON("find"
+                                        << "test" << ReadConcernArgs::kReadConcernFieldName
+                                        << "x")));
 }
 
 TEST(ReadAfterParse, BadOpTimeType) {
     ReadConcernArgs readAfterOpTime;
     ASSERT_NOT_OK(
         readAfterOpTime.initialize(BSON("find"
-                                        << "test"
-                                        << ReadConcernArgs::kReadConcernFieldName
+                                        << "test" << ReadConcernArgs::kReadConcernFieldName
                                         << BSON(ReadConcernArgs::kAfterOpTimeFieldName << 2))));
 }
 
 TEST(ReadAfterParse, OpTimeNotNeededForValidReadConcern) {
     ReadConcernArgs readAfterOpTime;
     ASSERT_OK(readAfterOpTime.initialize(BSON("find"
-                                              << "test"
-                                              << ReadConcernArgs::kReadConcernFieldName
+                                              << "test" << ReadConcernArgs::kReadConcernFieldName
                                               << BSONObj())));
 }
 
@@ -118,49 +110,47 @@ TEST(ReadAfterParse, NoOpTimeTS) {
     ReadConcernArgs readAfterOpTime;
     ASSERT_NOT_OK(
         readAfterOpTime.initialize(BSON("find"
-                                        << "test"
-                                        << ReadConcernArgs::kReadConcernFieldName
+                                        << "test" << ReadConcernArgs::kReadConcernFieldName
                                         << BSON(ReadConcernArgs::kAfterOpTimeFieldName
                                                 << BSON(OpTime::kTimestampFieldName << 2)))));
 }
 
 TEST(ReadAfterParse, NoOpTimeTerm) {
     ReadConcernArgs readAfterOpTime;
-    ASSERT_NOT_OK(readAfterOpTime.initialize(BSON("find"
-                                                  << "test"
-                                                  << ReadConcernArgs::kReadConcernFieldName
-                                                  << BSON(ReadConcernArgs::kAfterOpTimeFieldName
-                                                          << BSON(OpTime::kTermFieldName << 2)))));
+    ASSERT_NOT_OK(
+        readAfterOpTime.initialize(BSON("find"
+                                        << "test" << ReadConcernArgs::kReadConcernFieldName
+                                        << BSON(ReadConcernArgs::kAfterOpTimeFieldName
+                                                << BSON(OpTime::kTermFieldName << 2)))));
 }
 
 TEST(ReadAfterParse, BadOpTimeTSType) {
     ReadConcernArgs readAfterOpTime;
-    ASSERT_NOT_OK(readAfterOpTime.initialize(
-        BSON("find"
-             << "test"
-             << ReadConcernArgs::kReadConcernFieldName
-             << BSON(ReadConcernArgs::kAfterOpTimeFieldName
-                     << BSON(OpTime::kTimestampFieldName << BSON("x" << 1) << OpTime::kTermFieldName
-                                                         << 2)))));
+    ASSERT_NOT_OK(
+        readAfterOpTime.initialize(BSON("find"
+                                        << "test" << ReadConcernArgs::kReadConcernFieldName
+                                        << BSON(ReadConcernArgs::kAfterOpTimeFieldName
+                                                << BSON(OpTime::kTimestampFieldName
+                                                        << BSON("x" << 1) << OpTime::kTermFieldName
+                                                        << 2)))));
 }
 
 TEST(ReadAfterParse, BadOpTimeTermType) {
     ReadConcernArgs readAfterOpTime;
-    ASSERT_NOT_OK(readAfterOpTime.initialize(BSON(
-        "find"
-        << "test"
-        << ReadConcernArgs::kReadConcernFieldName
-        << BSON(ReadConcernArgs::kAfterOpTimeFieldName
-                << BSON(OpTime::kTimestampFieldName << Timestamp(1, 0) << OpTime::kTermFieldName
-                                                    << "y")))));
+    ASSERT_NOT_OK(
+        readAfterOpTime.initialize(BSON("find"
+                                        << "test" << ReadConcernArgs::kReadConcernFieldName
+                                        << BSON(ReadConcernArgs::kAfterOpTimeFieldName
+                                                << BSON(OpTime::kTimestampFieldName
+                                                        << Timestamp(1, 0) << OpTime::kTermFieldName
+                                                        << "y")))));
 }
 
 TEST(ReadAfterParse, BadLevelType) {
     ReadConcernArgs readAfterOpTime;
     ASSERT_EQ(ErrorCodes::TypeMismatch,
               readAfterOpTime.initialize(BSON("find"
-                                              << "test"
-                                              << ReadConcernArgs::kReadConcernFieldName
+                                              << "test" << ReadConcernArgs::kReadConcernFieldName
                                               << BSON(ReadConcernArgs::kLevelFieldName << 7))));
 }
 
@@ -168,8 +158,7 @@ TEST(ReadAfterParse, BadLevelValue) {
     ReadConcernArgs readAfterOpTime;
     ASSERT_EQ(ErrorCodes::FailedToParse,
               readAfterOpTime.initialize(BSON("find"
-                                              << "test"
-                                              << ReadConcernArgs::kReadConcernFieldName
+                                              << "test" << ReadConcernArgs::kReadConcernFieldName
                                               << BSON(ReadConcernArgs::kLevelFieldName
                                                       << "seven is not a real level"))));
 }
@@ -178,8 +167,7 @@ TEST(ReadAfterParse, BadOption) {
     ReadConcernArgs readAfterOpTime;
     ASSERT_EQ(ErrorCodes::InvalidOptions,
               readAfterOpTime.initialize(BSON("find"
-                                              << "test"
-                                              << ReadConcernArgs::kReadConcernFieldName
+                                              << "test" << ReadConcernArgs::kReadConcernFieldName
                                               << BSON("asdf" << 1))));
 }
 
@@ -190,7 +178,7 @@ TEST(ReadAfterSerialize, Empty) {
 
     BSONObj obj(builder.done());
 
-    ASSERT_BSONOBJ_EQ(BSON(ReadConcernArgs::kReadConcernFieldName << BSONObj()), obj);
+    ASSERT_EQ(BSON(ReadConcernArgs::kReadConcernFieldName << BSONObj()), obj);
 }
 
 TEST(ReadAfterSerialize, ReadAfterOnly) {
@@ -198,12 +186,12 @@ TEST(ReadAfterSerialize, ReadAfterOnly) {
     ReadConcernArgs readAfterOpTime(OpTime(Timestamp(20, 30), 2), boost::none);
     readAfterOpTime.appendInfo(&builder);
 
-    BSONObj expectedObj(BSON(
-        ReadConcernArgs::kReadConcernFieldName << BSON(
-            ReadConcernArgs::kAfterOpTimeFieldName << BSON(
-                OpTime::kTimestampFieldName << Timestamp(20, 30) << OpTime::kTermFieldName << 2))));
+    BSONObj expectedObj(BSON(ReadConcernArgs::kReadConcernFieldName
+                             << BSON(ReadConcernArgs::kAfterOpTimeFieldName << BSON(
+                                         OpTime::kTimestampFieldName
+                                         << Timestamp(20, 30) << OpTime::kTermFieldName << 2))));
 
-    ASSERT_BSONOBJ_EQ(expectedObj, builder.done());
+    ASSERT_EQ(expectedObj, builder.done());
 }
 
 TEST(ReadAfterSerialize, CommitLevelOnly) {
@@ -214,7 +202,7 @@ TEST(ReadAfterSerialize, CommitLevelOnly) {
     BSONObj expectedObj(BSON(ReadConcernArgs::kReadConcernFieldName
                              << BSON(ReadConcernArgs::kLevelFieldName << "local")));
 
-    ASSERT_BSONOBJ_EQ(expectedObj, builder.done());
+    ASSERT_EQ(expectedObj, builder.done());
 }
 
 TEST(ReadAfterSerialize, FullSpecification) {
@@ -223,15 +211,13 @@ TEST(ReadAfterSerialize, FullSpecification) {
                                     ReadConcernLevel::kMajorityReadConcern);
     readAfterOpTime.appendInfo(&builder);
 
-    BSONObj expectedObj(BSON(
-        ReadConcernArgs::kReadConcernFieldName
-        << BSON(ReadConcernArgs::kLevelFieldName
-                << "majority"
-                << ReadConcernArgs::kAfterOpTimeFieldName
-                << BSON(OpTime::kTimestampFieldName << Timestamp(20, 30) << OpTime::kTermFieldName
-                                                    << 2))));
+    BSONObj expectedObj(BSON(ReadConcernArgs::kReadConcernFieldName << BSON(
+                                 ReadConcernArgs::kLevelFieldName
+                                 << "majority" << ReadConcernArgs::kAfterOpTimeFieldName
+                                 << BSON(OpTime::kTimestampFieldName
+                                         << Timestamp(20, 30) << OpTime::kTermFieldName << 2))));
 
-    ASSERT_BSONOBJ_EQ(expectedObj, builder.done());
+    ASSERT_EQ(expectedObj, builder.done());
 }
 
 }  // unnamed namespace

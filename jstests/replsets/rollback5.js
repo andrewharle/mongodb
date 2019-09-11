@@ -44,7 +44,10 @@ assert.soon(function() {
     return res.myState == 7;
 }, "Arbiter failed to initialize.");
 
-var options = {writeConcern: {w: 2, wtimeout: 60000}, upsert: true};
+var options = {
+    writeConcern: {w: 2, wtimeout: 60000},
+    upsert: true
+};
 assert.writeOK(A.foo.update({key: 'value1'}, {$set: {req: 'req'}}, options));
 replTest.stop(AID);
 

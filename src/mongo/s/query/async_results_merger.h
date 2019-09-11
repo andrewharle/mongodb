@@ -38,7 +38,6 @@
 #include "mongo/db/cursor_id.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/s/query/cluster_client_cursor_params.h"
-#include "mongo/s/query/cluster_query_result.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/time_support.h"
@@ -102,13 +101,6 @@ public:
     Status setAwaitDataTimeout(Milliseconds awaitDataTimeout);
 
     /**
-     * Update the operation context for remote requests.
-     *
-     * Network requests depend on having a valid operation context for user initiated actions.
-     */
-    void setOperationContext(OperationContext* txn);
-
-    /**
      * Returns true if there is no need to schedule remote work in order to take the next action.
      * This means that either
      *   --there is a buffered result which we can return,
@@ -129,10 +121,10 @@ public:
      * status.
      *
      * If this AsyncResultsMerger is fetching results from a remote cursor tailing a capped
-     * collection, may return an empty ClusterQueryResult before end-of-stream. (Tailable cursors
-     * remain open even when there are no further results, and may subsequently return more results
-     * when they become available.) The calling code is responsible for handling multiple empty,
-     * ClusterQueryResult return values, keeping the cursor open in the tailable case.
+     * collection, may return boost::none before end-of-stream. (Tailable cursors remain open even
+     * when there are no further results, and may subsequently return more results when they become
+     * available.) The calling code is responsible for handling multiple boost::none return values,
+     * keeping the cursor open in the tailable case.
      *
      * If there has been an error received from one of the shards, or there is an error in
      * processing results from a shard, then a non-ok status is returned.
@@ -140,7 +132,7 @@ public:
      * Invalid to call unless ready() has returned true (i.e., invalid to call if getting the next
      * result requires scheduling remote work).
      */
-    StatusWith<ClusterQueryResult> nextReady();
+    StatusWith<boost::optional<BSONObj>> nextReady();
 
     /**
      * Schedules remote work as required in order to make further results available. If there is an
@@ -222,13 +214,7 @@ private:
          */
         Status resolveShardIdToHostAndPort(const ReadPreferenceSetting& readPref);
 
-        /**
-         * Returns the Shard object associated with this remote cursor.
-         */
-        std::shared_ptr<Shard> getShard();
-
         // ShardId on which a cursor will be created.
-        // TODO: This should always be set.
         const boost::optional<ShardId> shardId;
 
         // The command object for sending to the remote to establish the cursor. If a remote cursor
@@ -242,7 +228,7 @@ private:
         // established but is now exhausted, this member will be set to zero.
         boost::optional<CursorId> cursorId;
 
-        std::queue<ClusterQueryResult> docBuffer;
+        std::queue<BSONObj> docBuffer;
         executor::TaskExecutor::CallbackHandle cbHandle;
         Status status = Status::OK();
 
@@ -317,8 +303,8 @@ private:
     // Helpers for nextReady().
     //
 
-    ClusterQueryResult nextReadySorted();
-    ClusterQueryResult nextReadyUnsorted();
+    boost::optional<BSONObj> nextReadySorted();
+    boost::optional<BSONObj> nextReadyUnsorted();
 
     /**
      * When nextEvent() schedules remote work, it passes this method as a callback. The TaskExecutor

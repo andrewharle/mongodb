@@ -33,7 +33,7 @@
 namespace mongo {
 namespace repl {
 
-class BackgroundSync;
+class BackgroundSyncInterface;
 
 /**
  * Initial clone and sync
@@ -41,7 +41,7 @@ class BackgroundSync;
 class InitialSync : public SyncTail {
 public:
     virtual ~InitialSync();
-    InitialSync(BackgroundSync* q, MultiSyncApplyFunc func);
+    InitialSync(BackgroundSyncInterface* q, MultiSyncApplyFunc func);
 
 
     /**

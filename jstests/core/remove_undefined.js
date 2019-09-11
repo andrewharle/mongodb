@@ -18,10 +18,10 @@ assert.eq(3, t.count(), "A2");
 
 assert.throws(function() {
     t.remove({_id: z.bar});
-}, [], "B1");
+}, null, "B1");
 assert.throws(function() {
     t.remove({_id: undefined});
-}, [], "B2");
+}, null, "B2");
 
 t.remove({_id: z.x});
 assert.eq(2, t.count(), "C1");
@@ -31,5 +31,5 @@ assert.eq(3, t.count(), "C2");
 
 assert.throws(function() {
     t.remove({_id: undefined});
-}, [], "C3");
+}, null, "C3");
 assert.eq(3, t.count(), "C4");

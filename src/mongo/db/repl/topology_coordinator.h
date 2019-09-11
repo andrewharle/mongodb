@@ -28,8 +28,8 @@
 
 #pragma once
 
-#include <iosfwd>
 #include <string>
+#include <iosfwd>
 
 #include "mongo/base/disallow_copying.h"
 #include "mongo/db/repl/repl_set_heartbeat_response.h"
@@ -48,7 +48,7 @@ namespace repl {
 class HeartbeatResponseAction;
 class OpTime;
 class ReplSetHeartbeatArgs;
-class ReplSetConfig;
+class ReplicaSetConfig;
 class TagSubgroup;
 class LastVote;
 struct MemberState;
@@ -132,14 +132,10 @@ public:
      */
     virtual void setForceSyncSourceIndex(int index) = 0;
 
-    enum class ChainingPreference { kAllowChaining, kUseConfiguration };
-
     /**
      * Chooses and sets a new sync source, based on our current knowledge of the world.
      */
-    virtual HostAndPort chooseNewSyncSource(Date_t now,
-                                            const OpTime& lastOpTimeFetched,
-                                            ChainingPreference chainingPreference) = 0;
+    virtual HostAndPort chooseNewSyncSource(Date_t now, const Timestamp& lastTimestampApplied) = 0;
 
     /**
      * Suppresses selecting "host" as sync source until "until".
@@ -166,13 +162,11 @@ public:
      * ("syncSourceHasSyncSource" is false), and only has data up to "myLastOpTime", returns true.
      *
      * "now" is used to skip over currently blacklisted sync sources.
-     *
-     * TODO (SERVER-27668): Make OplogQueryMetadata non-optional in mongodb 3.8.
      */
     virtual bool shouldChangeSyncSource(const HostAndPort& currentSource,
                                         const OpTime& myLastOpTime,
-                                        const rpc::ReplSetMetadata& replMetadata,
-                                        boost::optional<rpc::OplogQueryMetadata> oqMetadata,
+                                        const OpTime& syncSourceLastOpTime,
+                                        bool syncSourceHasSyncSource,
                                         Date_t now) const = 0;
 
     /**
@@ -214,7 +208,8 @@ public:
     ////////////////////////////////////////////////////////////
 
     // produces a reply to a replSetSyncFrom command
-    virtual void prepareSyncFromResponse(const HostAndPort& target,
+    virtual void prepareSyncFromResponse(const ReplicationExecutor::CallbackArgs& data,
+                                         const HostAndPort& target,
                                          const OpTime& lastOpApplied,
                                          BSONObjBuilder* response,
                                          Status* result) = 0;
@@ -249,18 +244,11 @@ public:
                                               const OpTime& lastOpDurable,
                                               ReplSetHeartbeatResponse* response) = 0;
 
-    struct ReplSetStatusArgs {
-        Date_t now;
-        unsigned selfUptime;
-        const OpTime& lastOpApplied;
-        const OpTime& lastOpDurable;
-        const OpTime& lastCommittedOpTime;
-        const OpTime& readConcernMajorityOpTime;
-        const BSONObj& initialSyncStatus;
-    };
-
     // produce a reply to a status request
-    virtual void prepareStatusResponse(const ReplSetStatusArgs& rsStatusArgs,
+    virtual void prepareStatusResponse(const ReplicationExecutor::CallbackArgs& data,
+                                       Date_t now,
+                                       unsigned uptime,
+                                       const OpTime& lastOpApplied,
                                        BSONObjBuilder* response,
                                        Status* result) = 0;
 
@@ -268,14 +256,8 @@ public:
     // replset.
     virtual void fillIsMasterForReplSet(IsMasterResponse* response) = 0;
 
-    enum class PrepareFreezeResponseResult { kNoAction, kElectSelf };
-
-    /**
-     * Produce a reply to a freeze request. Returns a PostMemberStateUpdateAction on success that
-     * may trigger state changes in the caller.
-     */
-    virtual StatusWith<PrepareFreezeResponseResult> prepareFreezeResponse(
-        Date_t now, int secs, BSONObjBuilder* response) = 0;
+    // produce a reply to a freeze request
+    virtual void prepareFreezeResponse(Date_t now, int secs, BSONObjBuilder* response) = 0;
 
     ////////////////////////////////////////////////////////////
     //
@@ -295,7 +277,7 @@ public:
      * newConfig.isInitialized() should be true, though implementations may accept
      * configurations where this is not true, for testing purposes.
      */
-    virtual void updateConfig(const ReplSetConfig& newConfig,
+    virtual void updateConfig(const ReplicaSetConfig& newConfig,
                               int selfIndex,
                               Date_t now,
                               const OpTime& lastOpApplied) = 0;
@@ -406,14 +388,15 @@ public:
      *      C2. If C1 holds, then there must exist at least one electable secondary node in the
      *      majority set M.
      *
-     * C1 should already be checked in ReplicationCoordinator. This method checks C2.
-     *
-     * If C2 holds, a step down occurs and this method returns true. Else, the step down
+     * If C1 and C2 hold, a step down occurs and this method returns true. Else, the step down
      * fails and this method returns false.
      *
      * NOTE: It is illegal to call this method if the node is not a primary.
      */
-    virtual bool stepDown(Date_t until, bool force, const OpTime& lastOpApplied) = 0;
+    virtual bool stepDown(Date_t until,
+                          bool force,
+                          const OpTime& lastOpApplied,
+                          const OpTime& lastOpCommitted) = 0;
 
     /**
      * Sometimes a request to step down comes in (like via a heartbeat), but we don't have the
@@ -437,19 +420,11 @@ public:
     virtual void setMyHeartbeatMessage(const Date_t now, const std::string& s) = 0;
 
     /**
-     * Prepares a ReplSetMetadata object describing the current term, primary, and lastOp
-     * information.
+     * Prepares a BSONObj describing the current term, primary, and lastOp information.
      */
-    virtual rpc::ReplSetMetadata prepareReplSetMetadata(
-        const OpTime& lastVisibleOpTime, const OpTime& lastCommittedOpTime) const = 0;
-
-    /**
-     * Prepares an OplogQueryMetadata object describing the current sync source, rbid, primary,
-     * lastOpApplied, and lastOpCommitted.
-     */
-    virtual rpc::OplogQueryMetadata prepareOplogQueryMetadata(const OpTime& lastCommittedOpTime,
-                                                              const OpTime& lastAppliedOpTime,
-                                                              int rbid) const = 0;
+    virtual void prepareReplMetadata(rpc::ReplSetMetadata* metadata,
+                                     const OpTime& lastVisibleOpTime,
+                                     const OpTime& lastCommittedOpTime) const = 0;
 
     /**
      * Writes into 'output' all the information needed to generate a summary of the current
@@ -463,6 +438,15 @@ public:
     virtual void processReplSetRequestVotes(const ReplSetRequestVotesArgs& args,
                                             ReplSetRequestVotesResponse* response,
                                             const OpTime& lastAppliedOpTime) = 0;
+
+    /**
+     * Determines whether or not the newly elected primary is valid from our perspective.
+     * If it is, sets the _currentPrimaryIndex and term to the received values.
+     * If it is not, return ErrorCode::BadValue and the current term from our perspective.
+     * Populate responseTerm with the current term from our perspective.
+     */
+    virtual Status processReplSetDeclareElectionWinner(const ReplSetDeclareElectionWinnerArgs& args,
+                                                       long long* responseTerm) = 0;
 
     /**
      * Loads an initial LastVote document, which was read from local storage.
@@ -484,30 +468,13 @@ public:
     /**
      * Transitions to the candidate role if the node is electable.
      */
-    virtual Status becomeCandidateIfElectable(const Date_t now,
-                                              const OpTime& lastOpApplied,
-                                              bool isPriorityTakeover) = 0;
+    virtual Status becomeCandidateIfElectable(const Date_t now, const OpTime& lastOpApplied) = 0;
 
     /**
      * Updates the storage engine read committed support in the TopologyCoordinator options after
      * creation.
      */
     virtual void setStorageEngineSupportsReadCommitted(bool supported) = 0;
-
-    /**
-     * Reset the booleans to record the last heartbeat restart.
-     */
-    virtual void restartHeartbeats() = 0;
-
-    /**
-     * Scans through all members that are 'up' and return the latest known optime, if we have
-     * received (successful or failed) heartbeats from all nodes since heartbeat restart.
-     *
-     * Returns boost::none if any node hasn't responded to a heartbeat since we last restarted
-     * heartbeats.
-     * Returns OpTime(Timestamp(0, 0), 0), the smallest OpTime in PV1, if other nodes are all down.
-     */
-    virtual boost::optional<OpTime> latestKnownOpTimeSinceHeartbeatRestart() const = 0;
 
 protected:
     TopologyCoordinator() {}
@@ -561,7 +528,6 @@ private:
 //
 
 std::ostream& operator<<(std::ostream& os, TopologyCoordinator::Role role);
-std::ostream& operator<<(std::ostream& os, TopologyCoordinator::PrepareFreezeResponseResult result);
 
 }  // namespace repl
 }  // namespace mongo

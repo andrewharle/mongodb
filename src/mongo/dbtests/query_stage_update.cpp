@@ -30,22 +30,20 @@
  * This file tests db/exec/update.cpp (UpdateStage).
  */
 
-#include "mongo/platform/basic.h"
 
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/database.h"
-#include "mongo/db/client.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/exec/collection_scan.h"
 #include "mongo/db/exec/eof.h"
-#include "mongo/db/exec/queued_data_stage.h"
 #include "mongo/db/exec/update.h"
+#include "mongo/db/exec/queued_data_stage.h"
 #include "mongo/db/exec/working_set.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/json.h"
-#include "mongo/db/matcher/extensions_callback_disallow_extensions.h"
+#include "mongo/db/operation_context_impl.h"
 #include "mongo/db/ops/update_driver.h"
 #include "mongo/db/ops/update_lifecycle_impl.h"
 #include "mongo/db/ops/update_request.h"
@@ -88,10 +86,7 @@ public:
     }
 
     unique_ptr<CanonicalQuery> canonicalize(const BSONObj& query) {
-        auto qr = stdx::make_unique<QueryRequest>(nss);
-        qr->setFilter(query);
-        auto statusWithCQ = CanonicalQuery::canonicalize(
-            &_txn, std::move(qr), ExtensionsCallbackDisallowExtensions());
+        auto statusWithCQ = CanonicalQuery::canonicalize(nss, query);
         ASSERT_OK(statusWithCQ.getStatus());
         return std::move(statusWithCQ.getValue());
     }
@@ -135,9 +130,9 @@ public:
         }
     }
 
-    void getRecordIds(Collection* collection,
-                      CollectionScanParams::Direction direction,
-                      vector<RecordId>* out) {
+    void getLocs(Collection* collection,
+                 CollectionScanParams::Direction direction,
+                 vector<RecordId>* out) {
         WorkingSet ws;
 
         CollectionScanParams params;
@@ -151,8 +146,8 @@ public:
             PlanStage::StageState state = scan->work(&id);
             if (PlanStage::ADVANCED == state) {
                 WorkingSetMember* member = ws.get(id);
-                verify(member->hasRecordId());
-                out->push_back(member->recordId);
+                verify(member->hasLoc());
+                out->push_back(member->loc);
             }
         }
     }
@@ -172,8 +167,7 @@ public:
     }
 
 protected:
-    const ServiceContext::UniqueOperationContext _txnPtr = cc().makeOperationContext();
-    OperationContext& _txn = *_txnPtr;
+    OperationContextImpl _txn;
 
 private:
     DBDirectClient _client;
@@ -197,7 +191,7 @@ public:
             ASSERT_EQUALS(0U, count(BSONObj()));
 
             UpdateRequest request(nss);
-            UpdateLifecycleImpl updateLifecycle(nss);
+            UpdateLifecycleImpl updateLifecycle(false, nss);
             request.setLifecycle(&updateLifecycle);
 
             // Update is the upsert {_id: 0, x: 1}, {$set: {y: 2}}.
@@ -234,7 +228,7 @@ public:
 
             // Expect a single document, {_id: 0, x: 1, y: 2}.
             ASSERT_EQUALS(1U, objs.size());
-            ASSERT_BSONOBJ_EQ(objs[0], fromjson("{_id: 0, x: 1, y: 2}"));
+            ASSERT_EQUALS(objs[0], fromjson("{_id: 0, x: 1, y: 2}"));
         }
     }
 };
@@ -263,11 +257,11 @@ public:
             Collection* coll = db->getCollection(nss.ns());
 
             // Get the RecordIds that would be returned by an in-order scan.
-            vector<RecordId> recordIds;
-            getRecordIds(coll, CollectionScanParams::FORWARD, &recordIds);
+            vector<RecordId> locs;
+            getLocs(coll, CollectionScanParams::FORWARD, &locs);
 
             UpdateRequest request(nss);
-            UpdateLifecycleImpl updateLifecycle(nss);
+            UpdateLifecycleImpl updateLifecycle(false, nss);
             request.setLifecycle(&updateLifecycle);
 
             // Update is a multi-update that sets 'bar' to 3 in every document
@@ -309,14 +303,14 @@ public:
                 ASSERT_EQUALS(PlanStage::NEED_TIME, state);
             }
 
-            // Remove recordIds[targetDocIndex];
+            // Remove locs[targetDocIndex];
             updateStage->saveState();
             {
                 WriteUnitOfWork wunit(&_txn);
-                updateStage->invalidate(&_txn, recordIds[targetDocIndex], INVALIDATION_DELETION);
+                updateStage->invalidate(&_txn, locs[targetDocIndex], INVALIDATION_DELETION);
                 wunit.commit();
             }
-            BSONObj targetDoc = coll->docFor(&_txn, recordIds[targetDocIndex]).value();
+            BSONObj targetDoc = coll->docFor(&_txn, locs[targetDocIndex]).value();
             ASSERT(!targetDoc.isEmpty());
             remove(targetDoc);
             updateStage->restoreState();
@@ -372,7 +366,7 @@ public:
         OldClientWriteContext ctx(&_txn, nss.ns());
         OpDebug* opDebug = &CurOp::get(_txn)->debug();
         Collection* coll = ctx.getCollection();
-        UpdateLifecycleImpl updateLifecycle(nss);
+        UpdateLifecycleImpl updateLifecycle(false, nss);
         UpdateRequest request(nss);
         UpdateDriver driver((UpdateDriver::Options()));
         const int targetDocIndex = 0;  // We'll be working with the first doc in the collection.
@@ -381,8 +375,8 @@ public:
         const unique_ptr<CanonicalQuery> cq(canonicalize(query));
 
         // Get the RecordIds that would be returned by an in-order scan.
-        vector<RecordId> recordIds;
-        getRecordIds(coll, CollectionScanParams::FORWARD, &recordIds);
+        vector<RecordId> locs;
+        getLocs(coll, CollectionScanParams::FORWARD, &locs);
 
         // Populate the request.
         request.setQuery(query);
@@ -395,14 +389,14 @@ public:
         ASSERT_OK(driver.parse(request.getUpdates(), request.isMulti()));
 
         // Configure a QueuedDataStage to pass the first object in the collection back in a
-        // RID_AND_OBJ state.
+        // LOC_AND_OBJ state.
         auto qds = make_unique<QueuedDataStage>(&_txn, ws.get());
         WorkingSetID id = ws->allocate();
         WorkingSetMember* member = ws->get(id);
-        member->recordId = recordIds[targetDocIndex];
+        member->loc = locs[targetDocIndex];
         const BSONObj oldDoc = BSON("_id" << targetDocIndex << "foo" << targetDocIndex);
         member->obj = Snapshotted<BSONObj>(SnapshotId(), oldDoc);
-        ws->transitionToRecordIdAndObj(id);
+        ws->transitionToLocAndObj(id);
         qds->pushBack(id);
 
         // Configure the update.
@@ -424,18 +418,18 @@ public:
         WorkingSetMember* resultMember = ws->get(id);
         // With an owned copy of the object, with no RecordId.
         ASSERT_TRUE(resultMember->hasOwnedObj());
-        ASSERT_FALSE(resultMember->hasRecordId());
+        ASSERT_FALSE(resultMember->hasLoc());
         ASSERT_EQUALS(resultMember->getState(), WorkingSetMember::OWNED_OBJ);
         ASSERT_TRUE(resultMember->obj.value().isOwned());
 
         // Should be the old value.
-        ASSERT_BSONOBJ_EQ(resultMember->obj.value(), oldDoc);
+        ASSERT_EQUALS(resultMember->obj.value(), oldDoc);
 
         // Should have done the update.
         BSONObj newDoc = BSON("_id" << targetDocIndex << "foo" << targetDocIndex << "x" << 0);
         vector<BSONObj> objs;
         getCollContents(coll, &objs);
-        ASSERT_BSONOBJ_EQ(objs[targetDocIndex], newDoc);
+        ASSERT_EQUALS(objs[targetDocIndex], newDoc);
 
         // That should be it.
         id = WorkingSet::INVALID_ID;
@@ -460,7 +454,7 @@ public:
         OldClientWriteContext ctx(&_txn, nss.ns());
         OpDebug* opDebug = &CurOp::get(_txn)->debug();
         Collection* coll = ctx.getCollection();
-        UpdateLifecycleImpl updateLifecycle(nss);
+        UpdateLifecycleImpl updateLifecycle(false, nss);
         UpdateRequest request(nss);
         UpdateDriver driver((UpdateDriver::Options()));
         const int targetDocIndex = 10;
@@ -469,8 +463,8 @@ public:
         const unique_ptr<CanonicalQuery> cq(canonicalize(query));
 
         // Get the RecordIds that would be returned by an in-order scan.
-        vector<RecordId> recordIds;
-        getRecordIds(coll, CollectionScanParams::FORWARD, &recordIds);
+        vector<RecordId> locs;
+        getLocs(coll, CollectionScanParams::FORWARD, &locs);
 
         // Populate the request.
         request.setQuery(query);
@@ -483,14 +477,14 @@ public:
         ASSERT_OK(driver.parse(request.getUpdates(), request.isMulti()));
 
         // Configure a QueuedDataStage to pass the first object in the collection back in a
-        // RID_AND_OBJ state.
+        // LOC_AND_OBJ state.
         auto qds = make_unique<QueuedDataStage>(&_txn, ws.get());
         WorkingSetID id = ws->allocate();
         WorkingSetMember* member = ws->get(id);
-        member->recordId = recordIds[targetDocIndex];
+        member->loc = locs[targetDocIndex];
         const BSONObj oldDoc = BSON("_id" << targetDocIndex << "foo" << targetDocIndex);
         member->obj = Snapshotted<BSONObj>(SnapshotId(), oldDoc);
-        ws->transitionToRecordIdAndObj(id);
+        ws->transitionToLocAndObj(id);
         qds->pushBack(id);
 
         // Configure the update.
@@ -512,18 +506,18 @@ public:
         WorkingSetMember* resultMember = ws->get(id);
         // With an owned copy of the object, with no RecordId.
         ASSERT_TRUE(resultMember->hasOwnedObj());
-        ASSERT_FALSE(resultMember->hasRecordId());
+        ASSERT_FALSE(resultMember->hasLoc());
         ASSERT_EQUALS(resultMember->getState(), WorkingSetMember::OWNED_OBJ);
         ASSERT_TRUE(resultMember->obj.value().isOwned());
 
         // Should be the new value.
         BSONObj newDoc = BSON("_id" << targetDocIndex << "foo" << targetDocIndex << "x" << 0);
-        ASSERT_BSONOBJ_EQ(resultMember->obj.value(), newDoc);
+        ASSERT_EQUALS(resultMember->obj.value(), newDoc);
 
         // Should have done the update.
         vector<BSONObj> objs;
         getCollContents(coll, &objs);
-        ASSERT_BSONOBJ_EQ(objs[targetDocIndex], newDoc);
+        ASSERT_EQUALS(objs[targetDocIndex], newDoc);
 
         // That should be it.
         id = WorkingSet::INVALID_ID;
@@ -544,7 +538,7 @@ public:
         OldClientWriteContext ctx(&_txn, nss.ns());
         OpDebug* opDebug = &CurOp::get(_txn)->debug();
         Collection* coll = ctx.getCollection();
-        UpdateLifecycleImpl updateLifecycle(nss);
+        UpdateLifecycleImpl updateLifecycle(false, nss);
         UpdateRequest request(nss);
         UpdateDriver driver((UpdateDriver::Options()));
         const BSONObj query = BSONObj();

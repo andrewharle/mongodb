@@ -33,11 +33,9 @@
 #include "mongo/client/dbclientinterface.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/rpc/metadata/audit_metadata.h"
-#include "mongo/rpc/metadata/client_metadata_ismaster.h"
 #include "mongo/rpc/metadata/config_server_metadata.h"
-#include "mongo/rpc/metadata/server_selection_metadata.h"
 #include "mongo/rpc/metadata/sharding_metadata.h"
-#include "mongo/rpc/metadata/tracking_metadata.h"
+#include "mongo/rpc/metadata/server_selection_metadata.h"
 
 namespace mongo {
 namespace rpc {
@@ -50,8 +48,6 @@ Status readRequestMetadata(OperationContext* txn, const BSONObj& metadataObj) {
     BSONElement ssmElem;
     BSONElement auditElem;
     BSONElement configSvrElem;
-    BSONElement trackingElem;
-    BSONElement clientElem;
 
     for (const auto& metadataElem : metadataObj) {
         auto fieldName = metadataElem.fieldNameStringData();
@@ -61,10 +57,6 @@ Status readRequestMetadata(OperationContext* txn, const BSONObj& metadataObj) {
             auditElem = metadataElem;
         } else if (fieldName == ConfigServerMetadata::fieldName()) {
             configSvrElem = metadataElem;
-        } else if (fieldName == ClientMetadata::fieldName()) {
-            clientElem = metadataElem;
-        } else if (fieldName == TrackingMetadata::fieldName()) {
-            trackingElem = metadataElem;
         }
     }
 
@@ -80,23 +72,11 @@ Status readRequestMetadata(OperationContext* txn, const BSONObj& metadataObj) {
     }
     AuditMetadata::get(txn) = std::move(swAuditMetadata.getValue());
 
-    const auto statusClientMetadata =
-        ClientMetadataIsMasterState::readFromMetadata(txn, clientElem);
-    if (!statusClientMetadata.isOK()) {
-        return statusClientMetadata;
-    }
-
     auto configServerMetadata = ConfigServerMetadata::readFromMetadata(configSvrElem);
     if (!configServerMetadata.isOK()) {
         return configServerMetadata.getStatus();
     }
     ConfigServerMetadata::get(txn) = std::move(configServerMetadata.getValue());
-
-    auto trackingMetadata = TrackingMetadata::readFromMetadata(trackingElem);
-    if (!trackingMetadata.isOK()) {
-        return trackingMetadata.getStatus();
-    }
-    TrackingMetadata::get(txn) = std::move(trackingMetadata.getValue());
 
     return Status::OK();
 }

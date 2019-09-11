@@ -33,6 +33,7 @@
 #include <pdh.h>
 #include <pdhmsg.h>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "mongo/base/disallow_copying.h"
@@ -40,7 +41,6 @@
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/stdx/memory.h"
-#include "mongo/stdx/unordered_map.h"
 
 namespace mongo {
 
@@ -58,8 +58,14 @@ class PerfCounterCollection {
 
 public:
     PerfCounterCollection() = default;
-    PerfCounterCollection(PerfCounterCollection&&) = default;
-    PerfCounterCollection& operator=(PerfCounterCollection&&) = default;
+    PerfCounterCollection(PerfCounterCollection&& other)
+        : _counters(std::move(other._counters)),
+          _nestedCounters(std::move(other._nestedCounters)) {}
+    PerfCounterCollection& operator=(PerfCounterCollection&& other) {
+        _counters = std::move(other._counters);
+        _nestedCounters = std::move(other._nestedCounters);
+        return *this;
+    }
 
     /**
      * Add vector of counters grouped under 'name'.
@@ -124,10 +130,10 @@ private:
 
 private:
     // Vector of counters which are not sub-grouped by instance name.
-    stdx::unordered_map<std::string, std::vector<std::string>> _counters;
+    std::unordered_map<std::string, std::vector<std::string>> _counters;
 
     // Vector of counters sub grouped by instance name.
-    stdx::unordered_map<std::string, std::vector<std::string>> _nestedCounters;
+    std::unordered_map<std::string, std::vector<std::string>> _nestedCounters;
 };
 
 /**
@@ -139,7 +145,11 @@ class PerfCounterCollector {
 
 public:
     ~PerfCounterCollector();
-    PerfCounterCollector(PerfCounterCollector&&) = default;
+    PerfCounterCollector(PerfCounterCollector&& other)
+        : _query(std::move(other._query)),
+          _counters(std::move(other._counters)),
+          _nestedCounters(std::move(other._nestedCounters)),
+          _timeBaseTicksCounter(std::move(other._timeBaseTicksCounter)) {}
 
     /**
      * Create a PerfCounterCollector to collect the performance counters in the specified

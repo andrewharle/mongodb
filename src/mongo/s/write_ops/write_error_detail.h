@@ -77,14 +77,17 @@ public:
     //
 
     void setIndex(int index);
+    void unsetIndex();
     bool isIndexSet() const;
     int getIndex() const;
 
     void setErrCode(int errCode);
+    void unsetErrCode();
     bool isErrCodeSet() const;
     int getErrCode() const;
 
     void setErrInfo(const BSONObj& errInfo);
+    void unsetErrInfo();
     bool isErrInfoSet() const;
     const BSONObj& getErrInfo() const;
 

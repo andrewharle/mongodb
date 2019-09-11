@@ -26,18 +26,15 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
 #include <string>
 
-#include "mongo/db/storage/mmap_v1/btree/btree_interface.h"
+#include "mongo/db/storage/sorted_data_interface.h"
+
 
 #include "mongo/db/operation_context.h"
 #include "mongo/db/storage/mmap_v1/btree/btree_logic.h"
 #include "mongo/db/storage/mmap_v1/record_store_v1_base.h"
-#include "mongo/db/storage/sorted_data_interface.h"
 #include "mongo/stdx/memory.h"
-#include "mongo/util/assert_util.h"
 
 namespace mongo {
 namespace {
@@ -45,8 +42,6 @@ namespace {
 using std::unique_ptr;
 using std::string;
 using std::vector;
-
-using IndexVersion = IndexDescriptor::IndexVersion;
 
 template <class OnDiskFormat>
 class BtreeBuilderInterfaceImpl final : public SortedDataBuilderInterface {
@@ -101,8 +96,9 @@ public:
     }
 
     virtual void fullValidate(OperationContext* txn,
+                              bool full,
                               long long* numKeysOut,
-                              ValidateResults* fullResults) const {
+                              BSONObjBuilder* output) const {
         *numKeysOut = _btree->fullValidate(txn, NULL, false, false, 0);
     }
 
@@ -419,18 +415,16 @@ SortedDataInterface* getMMAPV1Interface(HeadManager* headManager,
                                         SavedCursorRegistry* cursorRegistry,
                                         const Ordering& ordering,
                                         const string& indexName,
-                                        IndexVersion version,
+                                        int version,
                                         bool isUnique) {
-    switch (version) {
-        case IndexVersion::kV0:
-            return new BtreeInterfaceImpl<BtreeLayoutV0>(
-                headManager, recordStore, cursorRegistry, ordering, indexName, isUnique);
-        case IndexVersion::kV1:
-        case IndexVersion::kV2:
-            return new BtreeInterfaceImpl<BtreeLayoutV1>(
-                headManager, recordStore, cursorRegistry, ordering, indexName, isUnique);
+    if (0 == version) {
+        return new BtreeInterfaceImpl<BtreeLayoutV0>(
+            headManager, recordStore, cursorRegistry, ordering, indexName, isUnique);
+    } else {
+        invariant(1 == version);
+        return new BtreeInterfaceImpl<BtreeLayoutV1>(
+            headManager, recordStore, cursorRegistry, ordering, indexName, isUnique);
     }
-    MONGO_UNREACHABLE;
 }
 
 }  // namespace mongo

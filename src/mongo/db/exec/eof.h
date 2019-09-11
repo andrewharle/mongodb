@@ -43,7 +43,7 @@ public:
     ~EOFStage();
 
     bool isEOF() final;
-    StageState doWork(WorkingSetID* out) final;
+    StageState work(WorkingSetID* out) final;
 
 
     StageType stageType() const final {

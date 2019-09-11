@@ -32,23 +32,22 @@
 
 #include "mongo/db/catalog/capped_utils.h"
 
-#include "mongo/base/error_codes.h"
 #include "mongo/db/background.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/collection_catalog_entry.h"
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/catalog/index_catalog.h"
-#include "mongo/db/client.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
+#include "mongo/db/client.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/index_builder.h"
+#include "mongo/db/operation_context_impl.h"
 #include "mongo/db/query/internal_plans.h"
 #include "mongo/db/query/plan_yield_policy.h"
 #include "mongo/db/repl/replication_coordinator_global.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/views/view.h"
 #include "mongo/util/scopeguard.h"
 
 namespace mongo {
@@ -61,38 +60,15 @@ Status emptyCapped(OperationContext* txn, const NamespaceString& collectionName)
 
     if (userInitiatedWritesAndNotPrimary) {
         return Status(ErrorCodes::NotMaster,
-                      str::stream() << "Not primary while truncating collection: "
+                      str::stream() << "Not primary while truncating collection "
                                     << collectionName.ns());
     }
 
     Database* db = autoDb.getDb();
-    uassert(ErrorCodes::NamespaceNotFound, "no such database", db);
+    massert(13429, "no such database", db);
 
     Collection* collection = db->getCollection(collectionName);
-    uassert(ErrorCodes::CommandNotSupportedOnView,
-            str::stream() << "emptycapped not supported on view: " << collectionName.ns(),
-            collection || !db->getViewCatalog()->lookup(txn, collectionName.ns()));
-    uassert(ErrorCodes::NamespaceNotFound, "no such collection", collection);
-
-    if (collectionName.isSystem() && !collectionName.isSystemDotProfile()) {
-        return Status(ErrorCodes::IllegalOperation,
-                      str::stream() << "Cannot truncate a system collection: "
-                                    << collectionName.ns());
-    }
-
-    if (NamespaceString::virtualized(collectionName.ns())) {
-        return Status(ErrorCodes::IllegalOperation,
-                      str::stream() << "Cannot truncate a virtual collection: "
-                                    << collectionName.ns());
-    }
-
-    if ((repl::getGlobalReplicationCoordinator()->getReplicationMode() !=
-         repl::ReplicationCoordinator::modeNone) &&
-        collectionName.isOplog()) {
-        return Status(ErrorCodes::OplogOperationUnsupported,
-                      str::stream() << "Cannot truncate a live oplog while replicating: "
-                                    << collectionName.ns());
-    }
+    massert(28584, "no such collection", collection);
 
     BackgroundOperation::assertNoBgOpInProgForNs(collectionName.ns());
 
@@ -120,15 +96,9 @@ Status cloneCollectionAsCapped(OperationContext* txn,
     std::string toNs = db->name() + "." + shortTo;
 
     Collection* fromCollection = db->getCollection(fromNs);
-    if (!fromCollection) {
-        if (db->getViewCatalog()->lookup(txn, fromNs)) {
-            return Status(ErrorCodes::CommandNotSupportedOnView,
-                          str::stream() << "cloneCollectionAsCapped not supported for views: "
-                                        << fromNs);
-        }
+    if (!fromCollection)
         return Status(ErrorCodes::NamespaceNotFound,
                       str::stream() << "source collection " << fromNs << " does not exist");
-    }
 
     if (db->getCollection(toNs))
         return Status(ErrorCodes::NamespaceExists, "to collection already exists");
@@ -168,7 +138,7 @@ Status cloneCollectionAsCapped(OperationContext* txn,
     std::unique_ptr<PlanExecutor> exec(InternalPlanner::collectionScan(
         txn, fromNs, fromCollection, PlanExecutor::YIELD_MANUAL, InternalPlanner::FORWARD));
 
-    exec->setYieldPolicy(PlanExecutor::WRITE_CONFLICT_RETRY_ONLY, fromCollection);
+    exec->setYieldPolicy(PlanExecutor::WRITE_CONFLICT_RETRY_ONLY);
 
     Snapshotted<BSONObj> objToClone;
     RecordId loc;
@@ -213,9 +183,7 @@ Status cloneCollectionAsCapped(OperationContext* txn,
             }
 
             WriteUnitOfWork wunit(txn);
-            OpDebug* const nullOpDebug = nullptr;
-            toCollection->insertDocument(
-                txn, objToClone.value(), nullOpDebug, true, txn->writesAreReplicated());
+            toCollection->insertDocument(txn, objToClone.value(), true, txn->writesAreReplicated());
             wunit.commit();
 
             // Go to the next document
@@ -268,7 +236,6 @@ Status convertToCapped(OperationContext* txn, const NamespaceString& collectionN
         Status status = db->dropCollection(txn, longTmpName);
         if (!status.isOK())
             return status;
-        wunit.commit();
     }
 
 

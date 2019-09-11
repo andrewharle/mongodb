@@ -6,11 +6,10 @@ Parses .cpp files for assertions and verifies assertion codes are distinct.
 Optionally replaces zero codes in source code with new distinct values.
 """
 
-import bisect
 import os
 import re
-import sys
 import utils
+import sys
 from collections import defaultdict, namedtuple
 from optparse import OptionParser
 
@@ -51,10 +50,9 @@ def parseSourceFiles( callback ):
     quick = [ "assert" , "Exception"]
 
     patterns = [
-        re.compile( r"(?:u|m(?:sg)?)asser(?:t|ted)(?:NoTrace)?\s*\(\s*(\d+)", re.MULTILINE ) ,
-        re.compile( r"(?:User|Msg|MsgAssertion)Exception\s*\(\s*(\d+)", re.MULTILINE ),
-        re.compile( r"fassert(?:Failed)?(?:WithStatus)?(?:NoTrace)?(?:StatusOK)?\s*\(\s*(\d+)",
-                    re.MULTILINE ),
+        re.compile( r"[umsg]asser(?:t|ted)(?:NoTrace)? *\( *(\d+)" ) ,
+        re.compile( r"(?:User|Msg|MsgAssertion)Exception *\( *(\d+)" ),
+        re.compile( r"fassert(?:Failed)?(?:WithStatus)?(?:NoTrace)?(?:StatusOK)? *\( *(\d+)" ),
     ]
 
     bad = [ re.compile( r"^\s*assert *\(" ) ]
@@ -65,40 +63,42 @@ def parseSourceFiles( callback ):
             continue
 
         with open(sourceFile) as f:
-            text = f.read()
+            line_iterator = enumerate(f, 1)
+            for (lineNum, line) in line_iterator:
 
-            if not any([zz in text for zz in quick]):
-                continue
+                # See if we can skip regexes
+                if not any([zz in line for zz in quick]):
+                    continue
 
-            # TODO: move check for bad assert type to the linter.
-            for b in bad:
-                if b.search(text):
-                    msg = "Bare assert prohibited. Replace with [umwdf]assert"
-                    print( "%s: %s" % (sourceFile, msg) )
-                    raise Exception(msg)
+                for b in bad:
+                    if b.search(line):
+                        msg = "Bare assert prohibited. Replace with [umwdf]assert"
+                        print( "%s:%s: %s\n%s" % (sourceFile, lineNum, msg, line) )
+                        raise Exception(msg)
 
-            splitlines = text.splitlines(True)
-
-            line_offsets = [0]
-            for line in splitlines:
-                line_offsets.append(line_offsets[-1] + len(line))
-
-            matchiters = [p.finditer(text) for p in patterns]
-            for matchiter in matchiters:
-                for match in matchiter:
+                # no more than one pattern should ever match
+                matches = [x for x in [p.search(line) for p in patterns]
+                           if x]
+                assert len(matches) <= 1, matches
+                if matches:
+                    match = matches[0]
                     code = match.group(1)
                     span = match.span()
 
-                    thisLoc = AssertLocation(sourceFile,
-                                             getLineForPosition(line_offsets, span[1]),
-                                             text[span[0]:span[1]],
-                                             code)
+                    # Advance to statement terminator iff not on this line
+                    lines = [line.strip()]
 
+                    if not isTerminated(lines):
+                        for (_lineNum, line) in line_iterator:
+                            lines.append(line.strip())
+                            if isTerminated(lines):
+                                break
+
+                    thisLoc = AssertLocation(sourceFile, lineNum, lines, code)
                     callback( thisLoc )
 
-# Converts an absolute position in a file into a line number.
-def getLineForPosition(line_offsets, position):
-    return bisect.bisect(line_offsets, position)
+        # end for sourceFile loop
+
 
 def isTerminated( lines ):
     """Given .cpp/.h source lines as text, determine if assert is terminated."""
@@ -159,12 +159,12 @@ def readErrorCodes():
         bad = seen[code]
         errors.append( bad )
         print( "ZERO_CODE:" )
-        print( "  %s:%d:%s" % (bad.sourceFile, bad.lineNum, bad.lines) )
+        print( "  %s:%d:%s" % (bad.sourceFile, bad.lineNum, bad.lines[0]) )
 
     for code, locations in dups.items():
         print( "DUPLICATE IDS: %s" % code )
         for loc in locations:
-            print( "  %s:%d:%s" % (loc.sourceFile, loc.lineNum, loc.lines) )
+            print( "  %s:%d:%s" % (loc.sourceFile, loc.lineNum, loc.lines[0]) )
 
     return (codes, errors)
 
@@ -236,11 +236,66 @@ def getBestMessage( lines , codeStr ):
 
     return err.strip()
 
+
+def writeMarkdownReport( codes, outfile ):
+    """Write errors.md report to filesystem in Markdown format
+
+    Args:
+        codes: list of AssertLocation
+        outfile: string path to a file to overwrite
+    """
+
+    baseurl = "http://github.com/mongodb/mongo/blob/master"
+
+    if os.path.exists(outfile):
+        i = open(outfile, "r" )
+        i.close()
+
+    out = open(outfile, 'wb')
+    out.write("MongoDB Error Codes\n")
+    out.write("===================\n\n")
+    out.write("This file is generated by errorcodes.py. Do not edit.\n\n")
+
+    prev = ""
+    seen = {}
+
+    # Sort by sourceFile, then code
+    codes.sort( key=lambda loc: loc.sourceFile+"-"+loc.code )
+
+    for assertLoc in codes:
+        if assertLoc.code in seen:
+            continue
+        seen[assertLoc.code] = True
+
+        (sourceFile, lineNum, lines, code) = assertLoc
+
+        if sourceFile.startswith("./"):
+            sourceFile = sourceFile[2:]
+
+        if sourceFile != prev:
+            out.write("\n\n%s\n----\n" % sourceFile)
+            prev = sourceFile
+
+        url = "%s/%s#L%s" % (baseurl, sourceFile, lineNum)
+        message = getBestMessage(lines, str(code))
+        out.write("* %s [code](%s) %s\n" % (code, url, message))
+
+    out.write( "\n" )
+    out.close()
+
+
 def main():
     parser = OptionParser(description=__doc__.strip())
     parser.add_option("--fix", dest="replace",
                       action="store_true", default=False,
                       help="Fix zero codes in source files [default: %default]")
+    parser.add_option("-o", dest="outfile",
+                      default="docs/errors.md",
+                      help="Report file [default: %default]")
+    parser.add_option("--report", type="choice",
+                      choices=["none", "markdown"], default="none",
+                      help="What format report should be generated. " \
+                           "Possible options: [none, markdown]")
     (options, args) = parser.parse_args()
 
     (codes, errors) = readErrorCodes()
@@ -251,7 +306,9 @@ def main():
     print("next: %s" % next)
 
     if ok:
-        sys.exit(0)
+        reportStyle = options.report
+        if reportStyle == "markdown":
+            writeMarkdownReport(codes, options.outfile)
     elif options.replace:
         replaceBadCodes(errors, next)
     else:

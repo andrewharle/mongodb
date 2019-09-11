@@ -37,12 +37,8 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/replication_coordinator_global.h"
-#include "mongo/db/s/sharding_state.h"
-#include "mongo/db/server_options.h"
 #include "mongo/executor/connection_pool_stats.h"
 #include "mongo/executor/network_interface_factory.h"
-#include "mongo/executor/task_executor_pool.h"
-#include "mongo/s/catalog/sharding_catalog_manager.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/grid.h"
 
@@ -56,8 +52,7 @@ public:
         help << "stats about connections between servers in a replica set or sharded cluster.";
     }
 
-
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    bool isWriteCommandForConfigServer() const override {
         return false;
     }
 
@@ -89,12 +84,9 @@ public:
         }
 
         // Sharding connections, if we have any.
-        auto grid = Grid::get(txn);
-        if (grid->shardRegistry()) {
-            grid->getExecutorPool()->appendConnectionStats(&stats);
-            if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
-                grid->catalogManager()->appendConnectionStats(&stats);
-            }
+        auto registry = grid.shardRegistry();
+        if (registry) {
+            registry->appendConnectionStats(&stats);
         }
 
         // Output to a BSON object.

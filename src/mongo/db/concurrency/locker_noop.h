@@ -53,19 +53,15 @@ public:
         invariant(false);
     }
 
-    stdx::thread::id getThreadId() const override {
+    virtual LockResult lockGlobal(LockMode mode, unsigned timeoutMs) {
         invariant(false);
     }
 
-    virtual LockResult lockGlobal(LockMode mode) {
+    virtual LockResult lockGlobalBegin(LockMode mode) {
         invariant(false);
     }
 
-    virtual LockResult lockGlobalBegin(LockMode mode, Milliseconds timeout) {
-        invariant(false);
-    }
-
-    virtual LockResult lockGlobalComplete(Milliseconds timeout) {
+    virtual LockResult lockGlobalComplete(unsigned timeoutMs) {
         invariant(false);
     }
 
@@ -73,7 +69,7 @@ public:
         invariant(false);
     }
 
-    virtual bool unlockGlobal() {
+    virtual bool unlockAll() {
         invariant(false);
     }
 
@@ -91,9 +87,9 @@ public:
 
     virtual LockResult lock(ResourceId resId,
                             LockMode mode,
-                            Milliseconds timeout,
+                            unsigned timeoutMs,
                             bool checkDeadlock) {
-        return LockResult::LOCK_OK;
+        invariant(false);
     }
 
     virtual void downgrade(ResourceId resId, LockMode newMode) {
@@ -101,7 +97,7 @@ public:
     }
 
     virtual bool unlock(ResourceId resId) {
-        return true;
+        invariant(false);
     }
 
     virtual LockMode getLockMode(ResourceId resId) const {
@@ -166,6 +162,18 @@ public:
 
     virtual bool hasLockPending() const {
         invariant(false);
+    }
+
+    virtual void setIsBatchWriter(bool newValue) {
+        invariant(false);
+    }
+
+    virtual bool isBatchWriter() const {
+        invariant(false);
+    }
+
+    virtual bool hasStrongLocks() const {
+        return false;
     }
 };
 

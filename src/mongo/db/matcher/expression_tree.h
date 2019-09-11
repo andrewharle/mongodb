@@ -65,12 +65,6 @@ public:
         return _expressions[i];
     }
 
-    virtual std::unique_ptr<MatchExpression> releaseChild(size_t i) {
-        auto child = std::unique_ptr<MatchExpression>(_expressions[i]);
-        _expressions[i] = nullptr;
-        return child;
-    }
-
     virtual std::vector<MatchExpression*>* getChildVector() {
         return &_expressions;
     }
@@ -107,7 +101,7 @@ public:
 
     virtual void debugString(StringBuilder& debug, int level = 0) const;
 
-    virtual void serialize(BSONObjBuilder* out) const;
+    virtual void toBSON(BSONObjBuilder* out) const;
 };
 
 class OrMatchExpression : public ListOfMatchExpression {
@@ -131,7 +125,7 @@ public:
 
     virtual void debugString(StringBuilder& debug, int level = 0) const;
 
-    virtual void serialize(BSONObjBuilder* out) const;
+    virtual void toBSON(BSONObjBuilder* out) const;
 };
 
 class NorMatchExpression : public ListOfMatchExpression {
@@ -155,7 +149,7 @@ public:
 
     virtual void debugString(StringBuilder& debug, int level = 0) const;
 
-    virtual void serialize(BSONObjBuilder* out) const;
+    virtual void toBSON(BSONObjBuilder* out) const;
 };
 
 class NotMatchExpression : public MatchExpression {
@@ -189,7 +183,7 @@ public:
 
     virtual void debugString(StringBuilder& debug, int level = 0) const;
 
-    virtual void serialize(BSONObjBuilder* out) const;
+    virtual void toBSON(BSONObjBuilder* out) const;
 
     bool equivalent(const MatchExpression* other) const;
 

@@ -56,7 +56,7 @@ OplogStart::OplogStart(OperationContext* txn,
       _workingSet(ws),
       _filter(filter) {}
 
-PlanStage::StageState OplogStart::doWork(WorkingSetID* out) {
+PlanStage::StageState OplogStart::work(WorkingSetID* out) {
     // We do our (heavy) init in a work(), where work is expected.
     if (_needInit) {
         CollectionScanParams params;
@@ -106,9 +106,9 @@ PlanStage::StageState OplogStart::workExtentHopping(WorkingSetID* out) {
                 _done = true;
                 WorkingSetID id = _workingSet->allocate();
                 WorkingSetMember* member = _workingSet->get(id);
-                member->recordId = record->id;
+                member->loc = record->id;
                 member->obj = {getOpCtx()->recoveryUnit()->getSnapshotId(), std::move(obj)};
-                _workingSet->transitionToRecordIdAndObj(id);
+                _workingSet->transitionToLocAndObj(id);
                 *out = id;
                 return PlanStage::ADVANCED;
             }
@@ -149,7 +149,7 @@ PlanStage::StageState OplogStart::workBackwardsScan(WorkingSetID* out) {
 
     WorkingSetMember* member = _workingSet->get(*out);
     verify(member->hasObj());
-    verify(member->hasRecordId());
+    verify(member->hasLoc());
 
     if (!_filter->matchesBSON(member->obj.value())) {
         _done = true;

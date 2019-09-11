@@ -31,7 +31,10 @@ replTest.waitForState(replTest.nodes[0], ReplSetTest.State.PRIMARY);
 var master = replTest.getPrimary();
 assert(master === conns[0], "conns[0] assumed to be master");
 assert(a_conn.host === master.host, "a_conn assumed to be master");
-var options = {writeConcern: {w: 2, wtimeout: 60000}, upsert: true};
+var options = {
+    writeConcern: {w: 2, wtimeout: 60000},
+    upsert: true
+};
 assert.writeOK(a_conn.getDB(name).foo.insert({x: 1}, options));
 
 // shut down master
@@ -64,4 +67,4 @@ assert.soon(function() {
         "rollback : can't rollback drop database full resync will be required");
 }, "B failed to fassert");
 
-replTest.stopSet(undefined, undefined, {allowedExitCodes: [MongoRunner.EXIT_ABRUPT]});
+replTest.stopSet();

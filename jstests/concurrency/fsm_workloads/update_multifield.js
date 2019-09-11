@@ -7,8 +7,7 @@
  * The collection has an index for each field, and a compound index for all fields.
  */
 
-// For isMongod and supportsDocumentLevelConcurrency.
-load('jstests/concurrency/fsm_workload_helpers/server_types.js');
+load('jstests/concurrency/fsm_workload_helpers/server_types.js');  // for isMongod and isMMAPv1
 
 var $config = (function() {
 
@@ -35,9 +34,15 @@ var $config = (function() {
         var push = Random.rand() > 0.2;
 
         var updateDoc = {};
-        updateDoc[set ? '$set' : '$unset'] = {x: x};
-        updateDoc[push ? '$push' : '$pull'] = {y: y};
-        updateDoc.$inc = {z: z};
+        updateDoc[set ? '$set' : '$unset'] = {
+            x: x
+        };
+        updateDoc[push ? '$push' : '$pull'] = {
+            y: y
+        };
+        updateDoc.$inc = {
+            z: z
+        };
 
         return updateDoc;
     }
@@ -55,7 +60,9 @@ var $config = (function() {
         }
     };
 
-    var transitions = {update: {update: 1}};
+    var transitions = {
+        update: {update: 1}
+    };
 
     function setup(db, collName, cluster) {
         assertAlways.commandWorked(db[collName].ensureIndex({x: 1}));
@@ -84,19 +91,16 @@ var $config = (function() {
             assertResult: function(res, db, collName, query) {
                 assertAlways.eq(0, res.nUpserted, tojson(res));
 
-                if (isMongod(db) && supportsDocumentLevelConcurrency(db)) {
-                    // Storage engines which support document-level concurrency will automatically
-                    // retry any operations when there are conflicts, so we should always see a
-                    // matching document.
+                if (isMongod(db) && !isMMAPv1(db)) {
+                    // For non-mmap storage engines we can have a strong assertion that exactly one
+                    // doc will be modified.
                     assertWhenOwnColl.eq(res.nMatched, 1, tojson(res));
                     if (db.getMongo().writeMode() === 'commands') {
                         assertWhenOwnColl.eq(res.nModified, 1, tojson(res));
                     }
                 } else {
-                    // On storage engines that do not support document-level concurrency, it is
-                    // possible that the query will not find the document. This can happen if
-                    // another thread updated the target document during a yield, triggering an
-                    // invalidation.
+                    // Zero matches are possible for MMAP v1 because the update will skip a document
+                    // that was invalidated during a yield.
                     assertWhenOwnColl.contains(res.nMatched, [0, 1], tojson(res));
                     if (db.getMongo().writeMode() === 'commands') {
                         assertWhenOwnColl.contains(res.nModified, [0, 1], tojson(res));

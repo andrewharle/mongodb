@@ -59,15 +59,13 @@ Status TextMatchExpression::init(OperationContext* txn,
         if (!db) {
             return {ErrorCodes::IndexNotFound,
                     str::stream() << "text index required for $text query (no such collection '"
-                                  << nss.ns()
-                                  << "')"};
+                                  << nss.ns() << "')"};
         }
         Collection* collection = db->getCollection(nss);
         if (!collection) {
             return {ErrorCodes::IndexNotFound,
                     str::stream() << "text index required for $text query (no such collection '"
-                                  << nss.ns()
-                                  << "')"};
+                                  << nss.ns() << "')"};
         }
         std::vector<IndexDescriptor*> idxMatches;
         collection->getIndexCatalog()->findIndexByType(txn, IndexNames::TEXT, idxMatches);
@@ -95,7 +93,7 @@ Status TextMatchExpression::init(OperationContext* txn,
         return parseStatus;
     }
 
-    return setPath("_fts");
+    return initPath("_fts");
 }
 
 std::unique_ptr<MatchExpression> TextMatchExpression::shallowClone() const {
@@ -103,7 +101,7 @@ std::unique_ptr<MatchExpression> TextMatchExpression::shallowClone() const {
     // We initialize _ftsQuery here directly rather than calling init(), to avoid needing to examine
     // the index catalog.
     expr->_ftsQuery = _ftsQuery;
-    invariantOK(expr->setPath("_fts"));
+    invariantOK(expr->initPath("_fts"));
     if (getTag()) {
         expr->setTag(getTag()->clone());
     }

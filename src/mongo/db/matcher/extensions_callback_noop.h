@@ -48,10 +48,6 @@ public:
      * Returns a WhereNoOpMatchExpression, or an error Status if parsing fails.
      */
     StatusWithMatchExpression parseWhere(BSONElement where) const final;
-
-    bool hasNoopExtensions() const final {
-        return true;
-    }
 };
 
 }  // namespace mongo

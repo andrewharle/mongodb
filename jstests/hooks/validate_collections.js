@@ -20,36 +20,9 @@ function validateCollections(db, obj) {
     var full = obj.full;
 
     var success = true;
-
-    // Don't run validate on view namespaces.
-    let filter = {type: "collection"};
-    if (jsTest.options().skipValidationOnInvalidViewDefinitions) {
-        // If skipValidationOnInvalidViewDefinitions=true, then we avoid resolving the view catalog
-        // on the admin database.
-        //
-        // TODO SERVER-25493: Remove the $exists clause once performing an initial sync from
-        // versions of MongoDB <= 3.2 is no longer supported.
-        filter = {$or: [filter, {type: {$exists: false}}]};
-    }
-
-    // Optionally skip collections.
-    if (Array.isArray(jsTest.options().skipValidationNamespaces) &&
-        jsTest.options().skipValidationNamespaces.length > 0) {
-        let skippedCollections = [];
-        for (let ns of jsTest.options().skipValidationNamespaces) {
-            // Strip off the database name from 'ns' to extract the collName.
-            const collName = ns.replace(new RegExp('^' + db.getName() + '\.'), '');
-            // Skip the collection 'collName' if the db name was removed from 'ns'.
-            if (collName !== ns) {
-                skippedCollections.push({name: {$ne: collName}});
-            }
-        }
-        filter = {$and: [filter, ...skippedCollections]};
-    }
-
-    let collInfo = db.getCollectionInfos(filter);
-    for (var collDocument of collInfo) {
-        var coll = db.getCollection(collDocument["name"]);
+    var collNames = db.getCollectionNames();
+    for (var collName of collNames) {
+        var coll = db.getCollection(collName);
         var res = coll.validate(full);
 
         if (!res.ok || !res.valid) {
@@ -58,6 +31,5 @@ function validateCollections(db, obj) {
             success = false;
         }
     }
-
     return success;
 }

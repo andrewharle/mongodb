@@ -50,8 +50,7 @@ public:
         return true;
     }
 
-
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    virtual bool isWriteCommandForConfigServer() const {
         return false;
     }
 
@@ -87,22 +86,19 @@ public:
         grid.shardRegistry()->getAllShardIds(&shardIds);
 
         for (const ShardId& shardId : shardIds) {
-            auto shardStatus = grid.shardRegistry()->getShard(txn, shardId);
-            if (!shardStatus.isOK()) {
+            const auto s = grid.shardRegistry()->getShard(txn, shardId);
+            if (!s) {
                 continue;
             }
-            const auto s = shardStatus.getValue();
 
-            auto response = uassertStatusOK(s->runCommandWithFixedRetryAttempts(
+            BSONObj x = uassertStatusOK(grid.shardRegistry()->runIdempotentCommandOnShard(
                 txn,
+                s,
                 ReadPreferenceSetting{ReadPreference::PrimaryOnly},
                 "admin",
-                BSON("fsync" << 1),
-                Shard::RetryPolicy::kIdempotent));
-            uassertStatusOK(response.commandStatus);
-            BSONObj x = std::move(response.response);
+                BSON("fsync" << 1)));
 
-            sub.append(s->getId().toString(), x);
+            sub.append(s->getId(), x);
 
             if (!x["ok"].trueValue()) {
                 ok = false;

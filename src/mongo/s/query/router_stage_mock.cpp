@@ -34,8 +34,8 @@
 
 namespace mongo {
 
-void RouterStageMock::queueResult(const ClusterQueryResult& result) {
-    _resultsQueue.push({result});
+void RouterStageMock::queueResult(BSONObj obj) {
+    _resultsQueue.push({obj});
 }
 
 void RouterStageMock::queueError(Status status) {
@@ -43,16 +43,16 @@ void RouterStageMock::queueError(Status status) {
 }
 
 void RouterStageMock::queueEOF() {
-    _resultsQueue.push({ClusterQueryResult()});
+    _resultsQueue.push({boost::none});
 }
 
 void RouterStageMock::markRemotesExhausted() {
     _remotesExhausted = true;
 }
 
-StatusWith<ClusterQueryResult> RouterStageMock::next() {
+StatusWith<boost::optional<BSONObj>> RouterStageMock::next() {
     if (_resultsQueue.empty()) {
-        return {ClusterQueryResult()};
+        return {boost::none};
     }
 
     auto out = _resultsQueue.front();
@@ -71,10 +71,6 @@ bool RouterStageMock::remotesExhausted() {
 Status RouterStageMock::setAwaitDataTimeout(Milliseconds awaitDataTimeout) {
     _awaitDataTimeout = awaitDataTimeout;
     return Status::OK();
-}
-
-void RouterStageMock::setOperationContext(OperationContext* txn) {
-    // Do nothing
 }
 
 StatusWith<Milliseconds> RouterStageMock::getAwaitDataTimeout() {

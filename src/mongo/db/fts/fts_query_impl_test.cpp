@@ -28,9 +28,7 @@
 *    it in the license file.
 */
 
-#include "mongo/platform/basic.h"
 
-#include "mongo/bson/json.h"
 #include "mongo/db/fts/fts_query_impl.h"
 #include "mongo/unittest/unittest.h"
 
@@ -72,9 +70,9 @@ TEST(FTSQueryImpl, ParsePunctuation) {
     ASSERT_TRUE(q.getTermsForBounds() == q.getPositiveTerms());
 }
 
-TEST(FTSQueryImpl, HyphenBeforeWordShouldNegateTerm) {
+TEST(FTSQueryImpl, Neg1) {
     FTSQueryImpl q;
-    q.setQuery("-really fun");
+    q.setQuery("this is -really fun");
     q.setLanguage("english");
     q.setCaseSensitive(false);
     q.setDiacriticSensitive(false);
@@ -85,69 +83,6 @@ TEST(FTSQueryImpl, HyphenBeforeWordShouldNegateTerm) {
     ASSERT_EQUALS(1U, q.getNegatedTerms().size());
     ASSERT_EQUALS("realli", *q.getNegatedTerms().begin());
     ASSERT_TRUE(q.getTermsForBounds() == q.getPositiveTerms());
-}
-
-TEST(FTSQueryImpl, HyphenFollowedByWhitespaceShouldNotNegate) {
-    FTSQueryImpl q;
-    q.setQuery("- really fun");
-    q.setLanguage("english");
-    q.setCaseSensitive(false);
-    q.setDiacriticSensitive(false);
-    ASSERT(q.parse(TEXT_INDEX_VERSION_3).isOK());
-
-    auto positiveTerms = q.getPositiveTerms();
-    ASSERT_EQUALS(2U, positiveTerms.size());
-    ASSERT_EQUALS(1U, positiveTerms.count("fun"));
-    ASSERT_EQUALS(1U, positiveTerms.count("realli"));
-    ASSERT_EQUALS(0U, q.getNegatedTerms().size());
-    ASSERT_TRUE(q.getTermsForBounds() == q.getPositiveTerms());
-}
-
-TEST(FTSQueryImpl, TwoHyphensShouldNegate) {
-    FTSQueryImpl q;
-    q.setQuery("--really fun");
-    q.setLanguage("english");
-    q.setCaseSensitive(false);
-    q.setDiacriticSensitive(false);
-    ASSERT(q.parse(TEXT_INDEX_VERSION_3).isOK());
-
-    ASSERT_EQUALS(1U, q.getPositiveTerms().size());
-    ASSERT_EQUALS("fun", *q.getPositiveTerms().begin());
-    ASSERT_EQUALS(1U, q.getNegatedTerms().size());
-    ASSERT_EQUALS("realli", *q.getNegatedTerms().begin());
-    ASSERT_TRUE(q.getTermsForBounds() == q.getPositiveTerms());
-}
-
-TEST(FTSQueryImpl, HyphenWithNoSurroundingWhitespaceShouldBeTreatedAsDelimiter) {
-    FTSQueryImpl q;
-    q.setQuery("really-fun");
-    q.setLanguage("english");
-    q.setCaseSensitive(false);
-    q.setDiacriticSensitive(false);
-    ASSERT(q.parse(TEXT_INDEX_VERSION_3).isOK());
-
-    auto positiveTerms = q.getPositiveTerms();
-    ASSERT_EQUALS(2U, positiveTerms.size());
-    ASSERT_EQUALS(1U, positiveTerms.count("fun"));
-    ASSERT_EQUALS(1U, positiveTerms.count("realli"));
-    ASSERT_EQUALS(0U, q.getNegatedTerms().size());
-    ASSERT_TRUE(q.getTermsForBounds() == q.getPositiveTerms());
-}
-
-TEST(FTSQueryImpl, HyphenShouldNegateAllSucceedingTermsSeparatedByHyphens) {
-    FTSQueryImpl q;
-    q.setQuery("-really-fun-stuff");
-    q.setLanguage("english");
-    q.setCaseSensitive(false);
-    q.setDiacriticSensitive(false);
-    ASSERT(q.parse(TEXT_INDEX_VERSION_3).isOK());
-
-    auto negatedTerms = q.getNegatedTerms();
-    ASSERT_EQUALS(3U, negatedTerms.size());
-    ASSERT_EQUALS(1U, negatedTerms.count("realli"));
-    ASSERT_EQUALS(1U, negatedTerms.count("fun"));
-    ASSERT_EQUALS(1U, negatedTerms.count("stuff"));
-    ASSERT_EQUALS(0U, q.getPositiveTerms().size());
 }
 
 TEST(FTSQueryImpl, Phrase1) {
@@ -158,11 +93,14 @@ TEST(FTSQueryImpl, Phrase1) {
     q.setDiacriticSensitive(false);
     ASSERT(q.parse(TEXT_INDEX_VERSION_3).isOK());
 
-    ASSERT_BSONOBJ_EQ(
-        q.toBSON(),
-        fromjson("{terms: ['fun', 'phrase', 'test'], negatedTerms: [], phrases: ['phrase "
-                 "test'], negatedPhrases: []}"));
+    ASSERT_EQUALS(3U, q.getPositiveTerms().size());
+    ASSERT_EQUALS(0U, q.getNegatedTerms().size());
+    ASSERT_EQUALS(1U, q.getPositivePhr().size());
+    ASSERT_EQUALS(0U, q.getNegatedPhr().size());
     ASSERT_TRUE(q.getTermsForBounds() == q.getPositiveTerms());
+
+    ASSERT_EQUALS("phrase test", q.getPositivePhr()[0]);
+    ASSERT_EQUALS("fun|phrase|test||||phrase test||", q.debugString());
 }
 
 TEST(FTSQueryImpl, Phrase2) {
@@ -176,55 +114,14 @@ TEST(FTSQueryImpl, Phrase2) {
     ASSERT_EQUALS("phrase-test", q.getPositivePhr()[0]);
 }
 
-TEST(FTSQueryImpl, HyphenDirectlyBeforePhraseShouldNegateEntirePhrase) {
+TEST(FTSQueryImpl, NegPhrase1) {
     FTSQueryImpl q;
     q.setQuery("doing a -\"phrase test\" for fun");
     q.setLanguage("english");
     q.setCaseSensitive(false);
     q.setDiacriticSensitive(false);
     ASSERT(q.parse(TEXT_INDEX_VERSION_3).isOK());
-    ASSERT_BSONOBJ_EQ(
-        q.toBSON(),
-        fromjson(
-            "{terms: ['fun'], negatedTerms: [], phrases: [], negatedPhrases: ['phrase test']}"));
-}
-
-TEST(FTSQueryImpl, HyphenSurroundedByWhitespaceBeforePhraseShouldNotNegateEntirePhrase) {
-    FTSQueryImpl q;
-    q.setQuery("doing a - \"phrase test\" for fun");
-    q.setLanguage("english");
-    q.setCaseSensitive(false);
-    q.setDiacriticSensitive(false);
-    ASSERT(q.parse(TEXT_INDEX_VERSION_3).isOK());
-    ASSERT_BSONOBJ_EQ(
-        q.toBSON(),
-        fromjson("{terms: ['fun', 'phrase', 'test'], negatedTerms: [], phrases: ['phrase "
-                 "test'], negatedPhrases: []}"));
-}
-
-TEST(FTSQueryImpl, HyphenBetweenTermAndPhraseShouldBeTreatedAsDelimiter) {
-    FTSQueryImpl q;
-    q.setQuery("doing a-\"phrase test\" for fun");
-    q.setLanguage("english");
-    q.setCaseSensitive(false);
-    q.setDiacriticSensitive(false);
-    ASSERT(q.parse(TEXT_INDEX_VERSION_3).isOK());
-    ASSERT_BSONOBJ_EQ(
-        q.toBSON(),
-        fromjson("{terms: ['fun', 'phrase', 'test'], negatedTerms: [], phrases: ['phrase "
-                 "test'], negatedPhrases: []}"));
-}
-
-TEST(FTSQueryImpl, HyphenShouldNegateAllSucceedingPhrasesSeparatedByHyphens) {
-    FTSQueryImpl q;
-    q.setQuery("-\"really fun\"-\"stuff here\" \"another phrase\"");
-    q.setLanguage("english");
-    q.setCaseSensitive(false);
-    q.setDiacriticSensitive(false);
-    ASSERT(q.parse(TEXT_INDEX_VERSION_3).isOK());
-    ASSERT_BSONOBJ_EQ(q.toBSON(),
-                      fromjson("{terms: ['anoth', 'phrase'], negatedTerms: [], phrases: ['another "
-                               "phrase'], negatedPhrases: ['really fun', 'stuff here']}"));
+    ASSERT_EQUALS("fun||||||phrase test", q.debugString());
 }
 
 TEST(FTSQueryImpl, CaseSensitiveOption) {
@@ -307,10 +204,7 @@ TEST(FTSQueryImpl, Mix1) {
     q.setCaseSensitive(false);
     q.setDiacriticSensitive(false);
     ASSERT(q.parse(TEXT_INDEX_VERSION_3).isOK());
-    ASSERT_BSONOBJ_EQ(
-        q.toBSON(),
-        fromjson("{terms: ['industri'], negatedTerms: ['melbourn', 'physic'], phrases: "
-                 "['industry'], negatedPhrases: []}"));
+    ASSERT_EQUALS("industri||melbourn|physic||industry||", q.debugString());
 }
 
 TEST(FTSQueryImpl, NegPhrase2) {

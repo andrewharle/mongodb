@@ -1,7 +1,6 @@
 // Tests group using slaveOk
 (function() {
     'use strict';
-    load("jstests/replsets/rslib.js");
 
     var st = new ShardingTest(
         {name: "groupSlaveOk", shards: 1, mongos: 1, other: {rs: true, rs0: {nodes: 2}}});
@@ -32,7 +31,7 @@
     printjson(rst.status());
 
     // Wait for the mongos to recognize the slave
-    awaitRSClientHosts(conn, sec, {ok: true, secondary: true});
+    ReplSetTest.awaitRSClientHosts(conn, sec, {ok: true, secondary: true});
 
     // Need to check slaveOk=true first, since slaveOk=false will destroy conn in pool when
     // master is down
@@ -41,13 +40,12 @@
     // Should not throw exception, since slaveOk'd
     assert.eq(10,
               coll.group({
-                      key: {i: true},
-                      reduce: function(obj, ctx) {
-                          ctx.count += 1;
-                      },
-                      initial: {count: 0}
-                  })
-                  .length);
+                  key: {i: true},
+                  reduce: function(obj, ctx) {
+                      ctx.count += 1;
+                  },
+                  initial: {count: 0}
+              }).length);
 
     try {
         conn.setSlaveOk(false);

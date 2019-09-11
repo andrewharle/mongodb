@@ -33,7 +33,6 @@
 #include <type_traits>
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/static_assert.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 
@@ -58,10 +57,10 @@ struct DataType {
     struct Handler {
         static void unsafeLoad(T* t, const char* ptr, size_t* advanced) {
 #if MONGO_HAVE_STD_IS_TRIVIALLY_COPYABLE
-            MONGO_STATIC_ASSERT_MSG(std::is_trivially_copyable<T>::value,
-                                    "The generic DataType implementation requires values to be "
-                                    "trivially copyable. You may specialize the template to use it "
-                                    "with other types.");
+            static_assert(std::is_trivially_copyable<T>::value,
+                          "The generic DataType implementation requires values "
+                          "to be trivially copyable. You may specialize the "
+                          "template to use it with other types.");
 #endif
 
             if (t) {
@@ -86,10 +85,10 @@ struct DataType {
 
         static void unsafeStore(const T& t, char* ptr, size_t* advanced) {
 #if MONGO_HAVE_STD_IS_TRIVIALLY_COPYABLE
-            MONGO_STATIC_ASSERT_MSG(std::is_trivially_copyable<T>::value,
-                                    "The generic DataType implementation requires values to be "
-                                    "trivially copyable. You may specialize the template to use it "
-                                    "with other types.");
+            static_assert(std::is_trivially_copyable<T>::value,
+                          "The generic DataType implementation requires values "
+                          "to be trivially copyable.  You may specialize the "
+                          "template to use it with other types.");
 #endif
 
             if (ptr) {

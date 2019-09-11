@@ -45,6 +45,7 @@
 #include "mongo/db/db_raii.h"
 #include "mongo/db/index_builder.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/db/operation_context_impl.h"
 #include "mongo/db/repl/replication_coordinator_global.h"
 #include "mongo/util/log.h"
 
@@ -55,7 +56,7 @@ using std::stringstream;
 
 class CompactCmd : public Command {
 public:
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    virtual bool isWriteCommandForConfigServer() const {
         return false;
     }
     virtual bool adminOnly() const {
@@ -92,7 +93,7 @@ public:
                      int,
                      string& errmsg,
                      BSONObjBuilder& result) {
-        NamespaceString nss = parseNsCollectionRequired(db, cmdObj);
+        const std::string nsToCompact = parseNsCollectionRequired(db, cmdObj);
 
         repl::ReplicationCoordinator* replCoord = repl::getGlobalReplicationCoordinator();
         if (replCoord->getMemberState().primary() && !cmdObj["force"].trueValue()) {
@@ -102,6 +103,7 @@ public:
             return false;
         }
 
+        NamespaceString nss(nsToCompact);
         if (!nss.isNormal()) {
             errmsg = "bad namespace name";
             return false;
@@ -144,28 +146,22 @@ public:
         if (cmdObj.hasElement("validate"))
             compactOptions.validateDocuments = cmdObj["validate"].trueValue();
 
+
         ScopedTransaction transaction(txn, MODE_IX);
         AutoGetDb autoDb(txn, db, MODE_X);
         Database* const collDB = autoDb.getDb();
-
-        Collection* collection = collDB ? collDB->getCollection(nss) : nullptr;
-        auto view =
-            collDB && !collection ? collDB->getViewCatalog()->lookup(txn, nss.ns()) : nullptr;
+        Collection* collection = collDB ? collDB->getCollection(nss) : NULL;
 
         // If db/collection does not exist, short circuit and return.
         if (!collDB || !collection) {
-            if (view)
-                return appendCommandStatus(
-                    result, {ErrorCodes::CommandNotSupportedOnView, "can't compact a view"});
-            else
-                return appendCommandStatus(
-                    result, {ErrorCodes::NamespaceNotFound, "collection does not exist"});
+            errmsg = "namespace does not exist";
+            return false;
         }
 
         OldClientContext ctx(txn, nss.ns());
         BackgroundOperation::assertNoBgOpInProgForNs(nss.ns());
 
-        log() << "compact " << nss.ns() << " begin, options: " << compactOptions;
+        log() << "compact " << nss.ns() << " begin, options: " << compactOptions.toString();
 
         StatusWith<CompactStats> status = collection->compact(txn, &compactOptions);
         if (!status.isOK())

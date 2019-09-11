@@ -30,7 +30,6 @@
 
 #include <string>
 
-#include "mongo/db/client.h"
 #include "mongo/db/repl/repl_settings.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/replication_executor.h"
@@ -47,7 +46,7 @@ class NetworkInterfaceMock;
 
 namespace repl {
 
-class ReplSetConfig;
+class ReplicaSetConfig;
 class ReplicationCoordinatorExternalStateMock;
 class ReplicationCoordinatorImpl;
 class StorageInterfaceMock;
@@ -73,10 +72,10 @@ public:
                                              Milliseconds millis = Milliseconds(0));
 
     /**
-     * Constructs a ReplSetConfig from the given BSON, or raises a test failure exception.
+     * Constructs a ReplicaSetConfig from the given BSON, or raises a test failure exception.
      */
-    static ReplSetConfig assertMakeRSConfig(const BSONObj& configBSON);
-    static ReplSetConfig assertMakeRSConfigV0(const BSONObj& configBson);
+    static ReplicaSetConfig assertMakeRSConfig(const BSONObj& configBSON);
+    static ReplicaSetConfig assertMakeRSConfigV0(const BSONObj& configBson);
 
     /**
      * Adds { protocolVersion: 0 or 1 } to the config.
@@ -126,27 +125,6 @@ protected:
      */
     ReplicationCoordinatorExternalStateMock* getExternalState() {
         return _externalState;
-    }
-
-    /**
-     * Makes a new OperationContext on the default Client for this test.
-     */
-    ServiceContext::UniqueOperationContext makeOperationContext() {
-        return _client->makeOperationContext();
-    }
-
-    /**
-     * Returns the ServiceContext for this test.
-     */
-    ServiceContext* getServiceContext() {
-        return getGlobalServiceContext();
-    }
-
-    /**
-     * Returns the default Client for this test.
-     */
-    Client* getClient() {
-        return _client.get();
     }
 
     /**
@@ -235,7 +213,7 @@ protected:
     /**
      * Shuts down the objects under test.
      */
-    void shutdown(OperationContext* txn);
+    void shutdown();
 
     /**
      * Receive the heartbeat request from replication coordinator and reply with a response.
@@ -253,7 +231,6 @@ protected:
         return _isStorageEngineDurable;
     }
 
-    void simulateEnoughHeartbeatsForAllNodesUp();
 
     /**
      * Disables read concern majority support.
@@ -265,24 +242,20 @@ protected:
      */
     void disableSnapshots();
 
-    /**
-     * Timeout all heartbeat requests for primary catch-up.
-     */
-    void simulateCatchUpAbort();
-
 private:
     std::unique_ptr<ReplicationCoordinatorImpl> _repl;
     // Owned by ReplicationCoordinatorImpl
     TopologyCoordinatorImpl* _topo = nullptr;
     // Owned by ReplicationExecutor
     executor::NetworkInterfaceMock* _net = nullptr;
+    // Owned by ReplicationExecutor
+    StorageInterfaceMock* _storage = nullptr;
     std::unique_ptr<ReplicationExecutor> _replExec;
     // Owned by ReplicationCoordinatorImpl
     ReplicationCoordinatorExternalStateMock* _externalState = nullptr;
     ReplSettings _settings;
     bool _callShutdown = false;
     bool _isStorageEngineDurable = true;
-    ServiceContext::UniqueClient _client = getGlobalServiceContext()->makeClient("testClient");
 };
 
 }  // namespace repl

@@ -273,7 +273,7 @@ err:	__wt_free(session, cgconf);
 	__wt_buf_free(session, &fmt);
 	__wt_buf_free(session, &namebuf);
 
-	WT_TRET(__wt_schema_release_table(session, table));
+	__wt_schema_release_table(session, table);
 	return (ret);
 }
 
@@ -540,7 +540,7 @@ err:	__wt_free(session, idxconf);
 	__wt_buf_free(session, &fmt);
 	__wt_buf_free(session, &namebuf);
 
-	WT_TRET(__wt_schema_release_table(session, table));
+	__wt_schema_release_table(session, table);
 	return (ret);
 }
 
@@ -615,7 +615,7 @@ err:		if (table != NULL) {
 		}
 	}
 	if (table != NULL)
-		WT_TRET(__wt_schema_release_table(session, table));
+		__wt_schema_release_table(session, table);
 	__wt_free(session, cgname);
 	__wt_free(session, tableconf);
 	return (ret);

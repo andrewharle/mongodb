@@ -110,6 +110,9 @@ public:
     void setMayHaveCollationMetadata() {
         _minor |= kMayHaveCollationMetadata;
     }
+    void clearMayHaveCollationMetadata() {
+        _minor &= ~kMayHaveCollationMetadata;
+    }
 
     uint32_t majorRaw() const {
         return _major;
@@ -125,7 +128,9 @@ private:
     // first 4 bits - index plugin cleanliness.
     //    see IndexCatalog::_upgradeDatabaseMinorVersionIfNeeded for details
     // 5th bit - 1 if started with 3.0-style freelist implementation (SERVER-14081)
-    // 6th bit - 1 if indexes or collections with a collation have been created.
+    // 6th bit - 1 if data files were created on a newer version that supports collation, and
+    //           indices or collections with a collation were at some point constructed on that
+    //           version.
     // 7th through 31st bit - reserved and must be set to 0.
     static const uint32_t kIndexPluginMask = 0xf;
     static const uint32_t kIndexes22AndOlder = 5;

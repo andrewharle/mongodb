@@ -28,8 +28,6 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/storage/record_store_test_harness.h"
 
 
@@ -51,14 +49,14 @@ TEST(RecordStoreTestHarness, DeleteRecord) {
     unique_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
 
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(0, rs->numRecords(opCtx.get()));
     }
 
     string data = "my record";
     RecordId loc;
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             StatusWith<RecordId> res =
@@ -70,12 +68,12 @@ TEST(RecordStoreTestHarness, DeleteRecord) {
     }
 
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(1, rs->numRecords(opCtx.get()));
     }
 
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             rs->deleteRecord(opCtx.get(), loc);
@@ -84,7 +82,7 @@ TEST(RecordStoreTestHarness, DeleteRecord) {
     }
 
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(0, rs->numRecords(opCtx.get()));
     }
 }
@@ -95,14 +93,14 @@ TEST(RecordStoreTestHarness, DeleteMultipleRecords) {
     unique_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
 
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(0, rs->numRecords(opCtx.get()));
     }
 
     const int nToInsert = 10;
     RecordId locs[nToInsert];
     for (int i = 0; i < nToInsert; i++) {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             stringstream ss;
             ss << "record " << i;
@@ -118,12 +116,12 @@ TEST(RecordStoreTestHarness, DeleteMultipleRecords) {
     }
 
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(nToInsert, rs->numRecords(opCtx.get()));
     }
 
     for (int i = 0; i < nToInsert; i++) {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             rs->deleteRecord(opCtx.get(), locs[i]);
@@ -132,7 +130,7 @@ TEST(RecordStoreTestHarness, DeleteMultipleRecords) {
     }
 
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(0, rs->numRecords(opCtx.get()));
     }
 }

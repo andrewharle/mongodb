@@ -28,10 +28,10 @@
 
 #include "mongo/db/commands.h"
 #include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/operation_context.h"
+#include "mongo/db/repl/bgsync.h"
 #include "mongo/db/repl/master_slave.h"  // replSettings
 #include "mongo/db/repl/replication_coordinator_global.h"
-#include "mongo/db/repl/replication_coordinator_impl.h"
+#include "mongo/db/operation_context.h"
 
 namespace mongo {
 
@@ -39,13 +39,6 @@ using std::string;
 using std::stringstream;
 
 namespace repl {
-
-namespace {
-
-constexpr StringData kResyncFieldName = "resync"_sd;
-constexpr StringData kWaitFieldName = "wait"_sd;
-
-}  // namespace
 
 // operator requested resynchronization of replication (on a slave or secondary). {resync: 1}
 class CmdResync : public Command {
@@ -56,8 +49,8 @@ public:
     virtual bool adminOnly() const {
         return true;
     }
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
-        return false;
+    virtual bool isWriteCommandForConfigServer() const {
+        return true;
     }
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
@@ -71,26 +64,18 @@ public:
         h << "resync (from scratch) a stale slave or replica set secondary node.\n";
     }
 
-    CmdResync() : Command(kResyncFieldName) {}
+    CmdResync() : Command("resync") {}
     virtual bool run(OperationContext* txn,
                      const string& dbname,
                      BSONObj& cmdObj,
                      int,
                      string& errmsg,
                      BSONObjBuilder& result) {
-        bool waitForResync = !cmdObj.hasField(kWaitFieldName) || cmdObj[kWaitFieldName].trueValue();
+        ScopedTransaction transaction(txn, MODE_X);
+        Lock::GlobalWrite globalWriteLock(txn->lockState());
 
-        // Replica set resync.
         ReplicationCoordinator* replCoord = getGlobalReplicationCoordinator();
         if (getGlobalReplicationCoordinator()->getSettings().usingReplSets()) {
-            // Resync is disabled in production on replica sets until it stabilizes (SERVER-27081).
-            if (!Command::testCommandsEnabled) {
-                return appendCommandStatus(
-                    result,
-                    Status(ErrorCodes::OperationFailed,
-                           "Replica sets do not support the resync command"));
-            }
-
             const MemberState memberState = replCoord->getMemberState();
             if (memberState.startup()) {
                 return appendCommandStatus(
@@ -100,13 +85,10 @@ public:
                 return appendCommandStatus(
                     result, Status(ErrorCodes::NotSecondary, "primaries cannot resync"));
             }
-            uassertStatusOKWithLocation(replCoord->resyncData(txn, waitForResync), "resync", 0);
+            BackgroundSync::get()->setInitialSyncRequestedFlag(true);
             return true;
         }
 
-        // Master/Slave resync.
-        ScopedTransaction transaction(txn, MODE_X);
-        Lock::GlobalWrite globalWriteLock(txn->lockState());
         // below this comment pertains only to master/slave replication
         if (cmdObj.getBoolField("force")) {
             if (!waitForSyncToFinish(txn, errmsg))

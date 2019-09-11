@@ -37,17 +37,15 @@
 #include "mongo/base/init.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/client/dbclientinterface.h"
+#include "mongo/db/commands.h"
 #include "mongo/db/auth/action_set.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authorization_manager_global.h"
 #include "mongo/db/auth/internal_user_auth.h"
 #include "mongo/db/auth/privilege.h"
-#include "mongo/db/commands.h"
-#include "mongo/db/service_context.h"
-#include "mongo/util/log.h"
-#include "mongo/util/net/listen.h"
 #include "mongo/util/scopeguard.h"
+#include "mongo/util/log.h"
 
 #if defined(__linux__) || defined(__APPLE__) || defined(__FreeBSD__) || defined(__sun) || \
     defined(__OpenBSD__)
@@ -68,11 +66,11 @@
 #endif
 
 #elif defined(_WIN32)
-#include <Ws2tcpip.h>
 #include <boost/asio/detail/socket_ops.hpp>
 #include <boost/system/error_code.hpp>
 #include <iphlpapi.h>
 #include <winsock2.h>
+#include <Ws2tcpip.h>
 #endif  // defined(_WIN32)
 
 namespace mongo {
@@ -156,7 +154,7 @@ std::vector<std::string> getAddrsForHost(const std::string& iporhost,
 
 }  // namespace
 
-bool isSelf(const HostAndPort& hostAndPort, ServiceContext* const ctx) {
+bool isSelf(const HostAndPort& hostAndPort) {
     // Fastpath: check if the host&port in question is bound to one
     // of the interfaces on this machine.
     // No need for ip match if the ports do not match
@@ -184,11 +182,11 @@ bool isSelf(const HostAndPort& hostAndPort, ServiceContext* const ctx) {
         }
     }
 
-    const auto listener = Listener::get(ctx);
+    // Ensure that the server is up and ready to accept incoming network requests.
+    const Listener* listener = Listener::getTimeTracker();
     if (!listener) {
         return false;
     }
-    // Ensure that the server is up and ready to accept incoming network requests.
     listener->waitUntilListening();
 
     try {
@@ -204,8 +202,10 @@ bool isSelf(const HostAndPort& hostAndPort, ServiceContext* const ctx) {
             return false;
         }
 
-        if (isInternalAuthSet() && !conn.authenticateInternalUser()) {
-            return false;
+        if (getGlobalAuthorizationManager()->isAuthEnabled() && isInternalAuthSet()) {
+            if (!conn.authenticateInternalUser()) {
+                return false;
+            }
         }
         BSONObj out;
         bool ok = conn.simpleCommand("admin", &out, "_isSelf");

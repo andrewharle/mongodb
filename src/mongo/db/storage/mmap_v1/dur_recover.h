@@ -32,10 +32,8 @@
 
 #include <boost/filesystem/operations.hpp>
 #include <list>
-#include <memory>
 
 #include "mongo/db/storage/mmap_v1/dur_journalformat.h"
-#include "mongo/stdx/mutex.h"
 #include "mongo/util/concurrency/mutex.h"
 
 namespace mongo {

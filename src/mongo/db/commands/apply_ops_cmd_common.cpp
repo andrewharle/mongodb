@@ -56,7 +56,7 @@ Status checkOperationAuthorization(OperationContext* txn,
     checkBSONType(BSONType::String, opTypeElem);
     const StringData opType = opTypeElem.checkAndGetStringData();
 
-    if (opType == "n"_sd) {
+    if (opType == "n") {
         // oplog notes require cluster permissions, and may not have a ns
         if (!authSession->isAuthorizedForActionsOnResource(ResourcePattern::forClusterResource(),
                                                            ActionType::appendOplogNote)) {
@@ -73,7 +73,7 @@ Status checkOperationAuthorization(OperationContext* txn,
     checkBSONType(BSONType::Object, oElem);
     BSONObj o = oElem.Obj();
 
-    if (opType == "c"_sd) {
+    if (opType == "c") {
         Command* command = Command::findCommand(o.firstElement().fieldNameStringData());
         if (!command) {
             return Status(ErrorCodes::FailedToParse, "Unrecognized command in op");
@@ -82,9 +82,9 @@ Status checkOperationAuthorization(OperationContext* txn,
         return Command::checkAuthorization(command, txn, dbname, o);
     }
 
-    if (opType == "i"_sd) {
+    if (opType == "i") {
         return authSession->checkAuthForInsert(txn, ns, o);
-    } else if (opType == "u"_sd) {
+    } else if (opType == "u") {
         BSONElement o2Elem = oplogEntry["o2"];
         checkBSONType(BSONType::Object, o2Elem);
         BSONObj o2 = o2Elem.Obj();
@@ -98,10 +98,9 @@ Status checkOperationAuthorization(OperationContext* txn,
         const bool upsert = b || alwaysUpsert;
 
         return authSession->checkAuthForUpdate(txn, ns, o, o2, upsert);
-    } else if (opType == "d"_sd) {
-
+    } else if (opType == "d") {
         return authSession->checkAuthForDelete(txn, ns, o);
-    } else if (opType == "db"_sd) {
+    } else if (opType == "db") {
         // It seems that 'db' isn't used anymore. Require all actions to prevent casual use.
         ActionSet allActions;
         allActions.addAllActions();
@@ -125,12 +124,12 @@ ApplyOpsValidity validateApplyOpsCommand(const BSONObj& cmdObj) {
         checkBSONType(BSONType::String, opTypeElem);
         const StringData opType = opTypeElem.checkAndGetStringData();
 
-        if (opType == "c"_sd) {
+        if (opType == "c") {
             BSONElement oElem = opObj["o"];
             checkBSONType(BSONType::Object, oElem);
             BSONObj o = oElem.Obj();
 
-            if (o.firstElement().fieldNameStringData() == "applyOps"_sd) {
+            if (o.firstElement().fieldNameStringData() == "applyOps") {
                 return true;
             }
         }

@@ -30,12 +30,11 @@
 
 #include <third_party/murmurhash3/MurmurHash3.h>
 
-#include <bitset>
 #include <boost/intrusive_ptr.hpp>
+#include <bitset>
 
-#include "mongo/base/static_assert.h"
-#include "mongo/db/pipeline/value.h"
 #include "mongo/util/intrusive_counter.h"
+#include "mongo/db/pipeline/value.h"
 
 namespace mongo {
 /** Helper class to make the position in a document abstract
@@ -97,6 +96,7 @@ public:
 
 
     // helpers for doing pointer arithmetic with this class
+    // Note: These don't dereference 'this' so they are safe to use with NULL
     char* ptr() {
         return reinterpret_cast<char*>(this);
     }
@@ -124,7 +124,8 @@ private:
 };
 // Real size is sizeof(ValueElement) + nameLen
 #pragma pack()
-MONGO_STATIC_ASSERT(sizeof(ValueElement) == (sizeof(Value) + sizeof(Position) + sizeof(int) + 1));
+static_assert(sizeof(ValueElement) == (sizeof(Value) + sizeof(Position) + sizeof(int) + 1),
+              "sizeof(ValueElement) == (sizeof(Value) + sizeof(Position) + sizeof(int) + 1)");
 
 // This is an internal class for Document. See FieldIterator for the public version.
 class DocumentStorageIterator {
@@ -181,6 +182,7 @@ private:
 /// Storage class used by both Document and MutableDocument
 class DocumentStorage : public RefCountable {
 public:
+    // Note: default constructor should zero-init to support emptyDoc()
     DocumentStorage()
         : _buffer(NULL),
           _bufferEnd(NULL),
@@ -188,9 +190,7 @@ public:
           _numFields(0),
           _hashTabMask(0),
           _metaFields(),
-          _textScore(0),
-          _randVal(0) {}
-
+          _textScore(0) {}
     ~DocumentStorage();
 
     enum MetaType : char {
@@ -201,7 +201,8 @@ public:
     };
 
     static const DocumentStorage& emptyDoc() {
-        return kEmptyDoc;
+        static const char emptyBytes[sizeof(DocumentStorage)] = {0};
+        return *reinterpret_cast<const DocumentStorage*>(emptyBytes);
     }
 
     size_t size() const {
@@ -307,7 +308,7 @@ public:
 private:
     /// Same as lastElement->next() or firstElement() if empty.
     const ValueElement* end() const {
-        return _firstElement ? _firstElement->plusBytes(_usedBytes) : nullptr;
+        return _firstElement->plusBytes(_usedBytes);
     }
 
     /// Allocates space in _buffer. Copies existing data if there is any.
@@ -386,8 +387,5 @@ private:
     double _textScore;
     double _randVal;
     // When adding a field, make sure to update clone() method
-
-    // Defined in document.cpp
-    static const DocumentStorage kEmptyDoc;
 };
 }

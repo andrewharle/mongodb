@@ -34,26 +34,23 @@
 
 #include "mongo/db/storage/mmap_v1/dur_recover.h"
 
-#include <cstring>
 #include <fcntl.h>
 #include <iomanip>
 #include <iostream>
 #include <sys/stat.h>
 
-#include "mongo/db/client.h"
-#include "mongo/db/operation_context.h"
+#include "mongo/db/operation_context_impl.h"
 #include "mongo/db/storage/mmap_v1/compress.h"
 #include "mongo/db/storage/mmap_v1/dur_commitjob.h"
 #include "mongo/db/storage/mmap_v1/dur_journal.h"
 #include "mongo/db/storage/mmap_v1/dur_journalformat.h"
 #include "mongo/db/storage/mmap_v1/dur_stats.h"
-#include "mongo/db/storage/mmap_v1/durable_mapped_file.h"
 #include "mongo/db/storage/mmap_v1/durop.h"
+#include "mongo/db/storage/mmap_v1/durable_mapped_file.h"
 #include "mongo/db/storage/mmap_v1/mmap_v1_options.h"
 #include "mongo/platform/strnlen.h"
 #include "mongo/util/bufreader.h"
 #include "mongo/util/checksum.h"
-#include "mongo/util/destructor_guard.h"
 #include "mongo/util/exit.h"
 #include "mongo/util/hex.h"
 #include "mongo/util/log.h"
@@ -92,7 +89,7 @@ void removeJournalFiles();
 boost::filesystem::path getJournalDir();
 
 
-struct ParsedJournalEntry { /*copyable*/
+struct ParsedJournalEntry {/*copyable*/
     ParsedJournalEntry() : e(0) {}
 
     // relative path of database for the operation.
@@ -121,8 +118,7 @@ static void getFiles(boost::filesystem::path dir, vector<boost::filesystem::path
             if (m.count(u)) {
                 uasserted(13531,
                           str::stream() << "unexpected files in journal directory " << dir.string()
-                                        << " : "
-                                        << fileName);
+                                        << " : " << fileName);
             }
             m.insert(pair<unsigned, boost::filesystem::path>(u, filepath));
         }
@@ -131,8 +127,7 @@ static void getFiles(boost::filesystem::path dir, vector<boost::filesystem::path
         if (i != m.begin() && m.count(i->first - 1) == 0) {
             uasserted(13532,
                       str::stream() << "unexpected file in journal directory " << dir.string()
-                                    << " : "
-                                    << boost::filesystem::path(i->second).leaf().string()
+                                    << " : " << boost::filesystem::path(i->second).leaf().string()
                                     << " : can't find its preceding file");
         }
         files.push_back(i->second);
@@ -182,7 +177,7 @@ public:
      *  throws on premature end of section.
      */
     void next(ParsedJournalEntry& e) {
-        unsigned lenOrOpCode{};
+        unsigned lenOrOpCode;
         _entries->read(lenOrOpCode);
 
         if (lenOrOpCode > JEntry::OpCode_Min) {
@@ -304,7 +299,7 @@ DurableMappedFile* RecoveryJob::Last::newEntry(const dur::ParsedJournalEntry& en
             verify(false);
         }
         std::shared_ptr<DurableMappedFile> sp(new DurableMappedFile);
-        verify(sp->open(fn));
+        verify(sp->open(fn, false));
         rj._mmfs.push_back(sp);
         mmf = sp.get();
     }
@@ -345,7 +340,7 @@ void RecoveryJob::applyEntry(Last& last, const ParsedJournalEntry& entry, bool a
                 ss << setw(2) << entry.e->getFileNo();
             ss << ' ' << setw(6) << entry.e->len << ' '
                << /*hex << setw(8) << (size_t) fqe.srcData << dec <<*/
-                "  " << redact(hexdump(entry.e->srcData(), entry.e->len));
+                "  " << hexdump(entry.e->srcData(), entry.e->len);
             log() << ss.str() << endl;
         }
         if (apply) {
@@ -354,7 +349,7 @@ void RecoveryJob::applyEntry(Last& last, const ParsedJournalEntry& entry, bool a
     } else if (entry.op) {
         // a DurOp subclass operation
         if (dump) {
-            log() << "  OP " << redact(entry.op->toString()) << endl;
+            log() << "  OP " << entry.op->toString() << endl;
         }
         if (apply) {
             if (entry.op->needFilesClosed()) {
@@ -476,8 +471,6 @@ bool RecoveryJob::processFileBuffer(const void* p, unsigned len) {
         {
             // read file header
             JHeader h;
-            std::memset(&h, 0, sizeof(h));
-
             br.read(h);
 
             if (!h.valid()) {
@@ -491,8 +484,7 @@ bool RecoveryJob::processFileBuffer(const void* p, unsigned len) {
                 log() << "journal file version number mismatch got:" << hex << h._version
                       << " expected:" << hex << (unsigned)JHeader::CurrentVersion
                       << ". if you have just upgraded, recover with old version of mongod, "
-                         "terminate cleanly, then upgrade."
-                      << endl;
+                         "terminate cleanly, then upgrade." << endl;
                 // Not using JournalSectionCurruptException as we don't want to ignore
                 // journal files on upgrade.
                 uasserted(13536, str::stream() << "journal version number mismatch " << h._version);
@@ -506,8 +498,6 @@ bool RecoveryJob::processFileBuffer(const void* p, unsigned len) {
         // read sections
         while (!br.atEof()) {
             JSectHeader h;
-            std::memset(&h, 0, sizeof(h));
-
             br.peek(h);
             if (h.fileId != fileId) {
                 if (kDebugBuild ||
@@ -556,8 +546,9 @@ bool RecoveryJob::processFile(boost::filesystem::path journalfile) {
         log() << "recover exception checking filesize" << endl;
     }
 
-    MemoryMappedFile f{MongoFile::Options::READONLY | MongoFile::Options::SEQUENTIAL};
-    void* p = f.map(journalfile.string().c_str());
+    MemoryMappedFile f;
+    void* p =
+        f.mapWithOptions(journalfile.string().c_str(), MongoFile::READONLY | MongoFile::SEQUENTIAL);
     massert(13544, str::stream() << "recover error couldn't open " << journalfile.string(), p);
     return processFileBuffer(p, (unsigned)f.length());
 }
@@ -633,8 +624,7 @@ void _recover() {
 void replayJournalFilesAtStartup() {
     // we use a lock so that exitCleanly will wait for us
     // to finish (or at least to notice what is up and stop)
-    const ServiceContext::UniqueOperationContext txnPtr = cc().makeOperationContext();
-    OperationContext& txn = *txnPtr;
+    OperationContextImpl txn;
     ScopedTransaction transaction(&txn, MODE_X);
     Lock::GlobalWrite lk(txn.lockState());
 

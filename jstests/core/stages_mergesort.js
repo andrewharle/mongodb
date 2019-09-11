@@ -20,7 +20,6 @@ ixscan1 = {
             keyPattern: {foo: 1, bar: 1},
             startKey: {foo: 1, bar: 0},
             endKey: {foo: 1, bar: 100000},
-            startKeyInclusive: true,
             endKeyInclusive: true,
             direction: 1
         }
@@ -33,7 +32,6 @@ ixscan2 = {
             keyPattern: {baz: 1, bar: 1},
             startKey: {baz: 1, bar: 0},
             endKey: {baz: 1, bar: 100000},
-            startKeyInclusive: true,
             endKeyInclusive: true,
             direction: 1
         }

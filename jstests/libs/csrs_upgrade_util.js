@@ -11,7 +11,8 @@ var CSRSUpgradeCoordinator = function() {
     "use strict";
 
     var testDBName = jsTestName();
-    var dataCollectionName = testDBName + ".data";
+    var shardedCollectionName = testDBName + ".sharded";
+    var unshardedCollectionName = testDBName + ".unsharded";
     var csrsName = jsTestName() + "-csrs";
     var numCsrsMembers;
     var st;
@@ -24,8 +25,20 @@ var CSRSUpgradeCoordinator = function() {
         return testDBName;
     };
 
-    this.getDataCollectionName = function() {
-        return dataCollectionName;
+    this.getShardedCollectionName = function() {
+        return shardedCollectionName;
+    };
+
+    this.getShardedCollection = function() {
+        return st.s.getCollection(shardedCollectionName);
+    };
+
+    this.getUnhardedCollectionName = function() {
+        return unshardedCollectionName;
+    };
+
+    this.getUnshardedCollection = function() {
+        return st.s.getCollection(unshardedCollectionName);
     };
 
     /**
@@ -53,6 +66,10 @@ var CSRSUpgradeCoordinator = function() {
 
     this.getMongos = function(n) {
         return st._mongos[n];
+    };
+
+    this.getShard = function(n) {
+        return st['shard' + n];
     };
 
     this.getShardName = function(n) {
@@ -84,14 +101,55 @@ var CSRSUpgradeCoordinator = function() {
     };
 
     /**
+    * Sets up the underlying sharded cluster in SCCC mode, and shards the test collection on _id.
+    */
+    this.setupSCCCCluster = function() {
+        if (TestData.storageEngine == "wiredTiger" || TestData.storageEngine == "") {
+            // TODO(schwerin): SERVER-19739 Support testing CSRS with storage engines other than
+            // wired
+            // tiger, when such other storage engines support majority read concern.
+            numCsrsMembers = 3;
+        } else {
+            numCsrsMembers = 4;
+        }
+
+        jsTest.log("Setting up SCCC sharded cluster");
+
+        st = new ShardingTest({
+            name: "csrsUpgrade",
+            mongos: 2,
+            rs: {nodes: 3},
+            shards: 2,
+            nopreallocj: true,
+            other: {sync: true, enableBalancer: false, useHostname: true}
+        });
+
+        shardConfigs = st.s0.getCollection("config.shards").find().toArray();
+        assert.eq(2, shardConfigs.length);
+
+        jsTest.log("Enabling sharding on " + testDBName + " and making " + this.getShardName(0) +
+                   " the primary shard");
+        assert.commandWorked(st.s0.adminCommand({enablesharding: testDBName}));
+        st.ensurePrimaryShard(testDBName, this.getShardName(0));
+
+        jsTest.log("Creating a sharded collection " + shardedCollectionName);
+        assert.commandWorked(
+            st.s0.adminCommand({shardcollection: shardedCollectionName, key: {_id: 1}}));
+    };
+
+    /**
      * Restarts the first config server as a single node replica set, while still leaving the
      * cluster
      * operating in SCCC mode.
      */
     this.restartFirstConfigAsReplSet = function() {
         jsTest.log("Restarting " + st.c0.name + " as a standalone replica set");
-        csrsConfig =
-            {_id: csrsName, version: 1, configsvr: true, members: [{_id: 0, host: st.c0.name}]};
+        csrsConfig = {
+            _id: csrsName,
+            version: 1,
+            configsvr: true,
+            members: [{_id: 0, host: st.c0.name}]
+        };
         assert.commandWorked(st.c0.adminCommand({replSetInitiate: csrsConfig}));
         csrs = [];
         csrs0Opts = Object.extend({}, st.c0.fullOptions, /* deep */ true);
@@ -120,7 +178,7 @@ var CSRSUpgradeCoordinator = function() {
     };
 
     this.waitUntilConfigsCaughtUp = function() {
-        waitUntilAllNodesCaughtUp(csrs, 60000);
+        waitUntilAllNodesCaughtUp(csrs, 120000);
     };
 
     /**

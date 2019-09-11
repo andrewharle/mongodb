@@ -26,7 +26,6 @@
  *    it in the license file.
  */
 
-#include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/db/exec/working_set.h"
 
 namespace mongo {
@@ -45,9 +44,9 @@ public:
         // Both 'src' and 'dest' must have a RecordId (and they must be the same RecordId), as
         // we should have just matched them according to this RecordId while doing an
         // intersection.
-        verify(dest->hasRecordId());
-        verify(src.hasRecordId());
-        verify(dest->recordId == src.recordId);
+        verify(dest->hasLoc());
+        verify(src.hasLoc());
+        verify(dest->loc == src.loc);
 
         // Merge computed data.
         typedef WorkingSetComputedDataType WSCD;
@@ -64,7 +63,7 @@ public:
         }
 
         if (src.hasObj()) {
-            invariant(src.getState() == WorkingSetMember::RID_AND_OBJ);
+            invariant(src.getState() == WorkingSetMember::LOC_AND_OBJ);
 
             // 'src' has the full document but 'dest' doesn't so we need to copy it over.
             dest->obj = src.obj;
@@ -73,7 +72,7 @@ public:
             // We have an object so we don't need key data.
             dest->keyData.clear();
 
-            workingSet->transitionToRecordIdAndObj(destId);
+            workingSet->transitionToLocAndObj(destId);
 
             // Now 'dest' has the full object. No more work to do.
             return;
@@ -86,8 +85,7 @@ public:
         for (size_t i = 0; i < src.keyData.size(); ++i) {
             bool found = false;
             for (size_t j = 0; j < dest->keyData.size(); ++j) {
-                if (SimpleBSONObjComparator::kInstance.evaluate(dest->keyData[j].indexKeyPattern ==
-                                                                src.keyData[i].indexKeyPattern)) {
+                if (dest->keyData[j].indexKeyPattern == src.keyData[i].indexKeyPattern) {
                     found = true;
                     break;
                 }

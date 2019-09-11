@@ -28,7 +28,10 @@ var $config = (function() {
             this.num = 1;
             var fromDB = db.getSiblingDB(this.fromDBName);
 
-            var options = {capped: true, size: 4096};
+            var options = {
+                capped: true,
+                size: 4096
+            };
 
             assertAlways.commandWorked(fromDB.createCollection(collName, options));
             assertAlways(fromDB[collName].isCapped());
@@ -54,11 +57,17 @@ var $config = (function() {
             this.fromDBName = toDBName;
         }
 
-        return {init: init, rename: rename};
+        return {
+            init: init,
+            rename: rename
+        };
 
     })();
 
-    var transitions = {init: {rename: 1}, rename: {rename: 1}};
+    var transitions = {
+        init: {rename: 1},
+        rename: {rename: 1}
+    };
 
     function teardown(db, collName, cluster) {
         var pattern = new RegExp('^' + db.getName() + this.prefix + '\\d+_\\d+$');

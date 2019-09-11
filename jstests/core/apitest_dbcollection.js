@@ -42,9 +42,7 @@ for (i = 0; i < 100; i++) {
 (function() {
     var validateResult = assert.commandWorked(db.getCollection("test_db").validate());
     // Extract validation results from mongos output if running in a sharded context.
-    var isShardedNS = validateResult.hasOwnProperty('raw');
-
-    if (isShardedNS) {
+    if (jsTest.isMongos(db.getMongo())) {
         // Sample mongos format:
         // {
         //   raw: {
@@ -214,7 +212,9 @@ assert.eq(0, db.getCollection("test_db").getIndexes().length, "24");
     }
 
     // indexDetailsKey - show indexDetails results for this index key only.
-    var indexKey = {a: 1};
+    var indexKey = {
+        a: 1
+    };
     var indexName = getIndexName(indexKey);
     checkIndexDetails({indexDetails: true, indexDetailsKey: indexKey}, indexName);
 
@@ -224,7 +224,7 @@ assert.eq(0, db.getCollection("test_db").getIndexes().length, "24");
     // Cannot specify both indexDetailsKey and indexDetailsName.
     var error = assert.throws(function() {
         t.stats({indexDetails: true, indexDetailsKey: indexKey, indexDetailsName: indexName});
-    }, [], 'indexDetailsKey and indexDetailsName cannot be used at the same time');
+    }, null, 'indexDetailsKey and indexDetailsName cannot be used at the same time');
     assert.eq(Error,
               error.constructor,
               'db.collection.stats() failed when both indexDetailsKey and indexDetailsName ' +

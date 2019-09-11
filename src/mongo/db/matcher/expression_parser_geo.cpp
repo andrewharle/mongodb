@@ -53,7 +53,12 @@ StatusWithMatchExpression expressionParserGeoCallbackReal(const char* name,
 
         unique_ptr<GeoMatchExpression> e = make_unique<GeoMatchExpression>();
 
-        Status s = e->init(name, gq.release(), section);
+        // Until the index layer accepts non-BSON predicates, or special indices are moved into
+        // stages, we have to clean up the raw object so it can be passed down to the index
+        // layer.
+        BSONObjBuilder bob;
+        bob.append(name, section);
+        Status s = e->init(name, gq.release(), bob.obj());
         if (!s.isOK())
             return StatusWithMatchExpression(s);
         return {std::move(e)};
@@ -65,7 +70,12 @@ StatusWithMatchExpression expressionParserGeoCallbackReal(const char* name,
             return StatusWithMatchExpression(s);
         }
         unique_ptr<GeoNearMatchExpression> e = make_unique<GeoNearMatchExpression>();
-        s = e->init(name, nq.release(), section);
+        // Until the index layer accepts non-BSON predicates, or special indices are moved into
+        // stages, we have to clean up the raw object so it can be passed down to the index
+        // layer.
+        BSONObjBuilder bob;
+        bob.append(name, section);
+        s = e->init(name, nq.release(), bob.obj());
         if (!s.isOK())
             return StatusWithMatchExpression(s);
         return {std::move(e)};

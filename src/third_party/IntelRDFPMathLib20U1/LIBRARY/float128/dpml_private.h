@@ -242,10 +242,6 @@ versions until we need them. ] */
 
 #    include "ix86_macros.h"
 
-#elif (ARCHITECTURE == s390 )
-
-#    include "ix86_macros.h"
-
 #else
 
 #    error Unknown ARCHITECTURE.

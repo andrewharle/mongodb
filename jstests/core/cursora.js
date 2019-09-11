@@ -1,3 +1,4 @@
+// @tags: [requires_parallel_shell]
 t = db.cursora;
 
 function run(n, atomic) {
@@ -24,11 +25,11 @@ function run(n, atomic) {
     try {
         start = new Date();
         num = t.find(function() {
-                   num = 2;
-                   for (var x = 0; x < 1000; x++)
-                       num += 2;
-                   return num > 0;
-               })
+            num = 2;
+            for (var x = 0; x < 1000; x++)
+                num += 2;
+            return num > 0;
+        })
                   .sort({_id: -1})
                   .itcount();
         end = new Date();

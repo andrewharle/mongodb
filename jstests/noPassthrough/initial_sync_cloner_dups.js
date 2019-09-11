@@ -6,17 +6,11 @@
  * add new secondary to force initialSync
  * verify collection and both indexes on the secondary have the right number of docs
  */
-(function(doNotRun) {
-    "use strict";
-
-    if (doNotRun) {
-        return;
-    }
-
+(function() {
+    'use strict';
     load('jstests/libs/parallelTester.js');
 
-    Random.setRandomSeed();
-
+    var awaitTimeout = 2 * 60 * 1000;
     // used to parse RAM log file
     var contains = function(logLines, func) {
         var i = logLines.length;
@@ -35,7 +29,7 @@
     conf.settings = {};
     conf.settings.chainingAllowed = false;
     replTest.initiate(conf);
-    replTest.awaitSecondaryNodes();
+    replTest.awaitSecondaryNodes(awaitTimeout);
     var primary = replTest.getPrimary();
     var coll = primary.getDB('test').cloner;
     coll.drop();
@@ -50,7 +44,7 @@
     }
     batch.execute();
 
-    replTest.awaitReplication();
+    replTest.awaitReplication(awaitTimeout);
 
     jsTestLog("Start remove/insert on primary");
     var insertAndRemove = function(host) {
@@ -80,7 +74,7 @@
 
     jsTestLog("add a new secondary");
     var secondary = replTest.add({});
-    replTest.reInitiate();
+    replTest.reInitiate(awaitTimeout * 2);
     secondary.setSlaveOk();
     // Wait for the secondary to get ReplSetInitiate command.
     replTest.waitForState(
@@ -98,9 +92,10 @@
     // Removed the assertion because it was too flaky.  Printing a warning instead (dan)
     jsTestLog("making sure we dropped some dups");
     var res = secondary.adminCommand({getLog: "global"});
-    var droppedDups = (contains(res.log, function(v) {
-        return v.indexOf("index build dropped" /* NNN dups*/) != -1;
-    }));
+    var droppedDups = (contains(res.log,
+                                function(v) {
+                                    return v.indexOf("index build dropped" /* NNN dups*/) != -1;
+                                }));
     if (!droppedDups) {
         jsTestLog(
             "Warning: Test did not trigger duplicate documents, this run will be a false negative");
@@ -111,8 +106,8 @@
     worker.join();
     // make sure all secondaries are caught up, after init sync
     reconnect(secondary.getDB("test"));
-    replTest.awaitSecondaryNodes();
-    replTest.awaitReplication();
+    replTest.awaitSecondaryNodes(awaitTimeout);
+    replTest.awaitReplication(awaitTimeout);
 
     jsTestLog("check that secondary has correct counts");
     var secondaryColl = secondary.getDB('test').getCollection('cloner');
@@ -129,4 +124,4 @@
     }
     assert.eq(index, table);
     assert.eq(table, secondary_index);
-})(true /* Disabled until SERVER-23476 re-enabled rsync command */);
+})();

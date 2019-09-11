@@ -36,7 +36,7 @@
 
 #include "mongo/client/dbclient_rs.h"
 #include "mongo/client/dbclientinterface.h"
-#include "mongo/client/mongo_uri.h"
+#include "mongo/client/syncclusterconnection.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/log.h"
@@ -46,22 +46,13 @@ namespace mongo {
 stdx::mutex ConnectionString::_connectHookMutex;
 ConnectionString::ConnectionHook* ConnectionString::_connectHook = NULL;
 
-DBClientBase* ConnectionString::connect(StringData applicationName,
-                                        std::string& errmsg,
-                                        double socketTimeout,
-                                        const MongoURI* uri) const {
-    MongoURI newURI{};
-    if (uri) {
-        newURI = *uri;
-    }
-
+DBClientBase* ConnectionString::connect(std::string& errmsg, double socketTimeout) const {
     switch (_type) {
         case MASTER: {
-            auto c = stdx::make_unique<DBClientConnection>(true, 0, std::move(newURI));
-
+            auto c = stdx::make_unique<DBClientConnection>(true);
             c->setSoTimeout(socketTimeout);
             LOG(1) << "creating new connection to:" << _servers[0];
-            if (!c->connect(_servers[0], applicationName, errmsg)) {
+            if (!c->connect(_servers[0], errmsg)) {
                 return 0;
             }
             LOG(1) << "connected connection!";
@@ -69,14 +60,22 @@ DBClientBase* ConnectionString::connect(StringData applicationName,
         }
 
         case SET: {
-            auto set = stdx::make_unique<DBClientReplicaSet>(
-                _setName, _servers, applicationName, socketTimeout, std::move(newURI));
+            auto set = stdx::make_unique<DBClientReplicaSet>(_setName, _servers, socketTimeout);
             if (!set->connect()) {
                 errmsg = "connect failed to replica set ";
                 errmsg += toString();
                 return 0;
             }
             return set.release();
+        }
+
+        case SYNC: {
+            // TODO , don't copy
+            std::list<HostAndPort> l;
+            for (unsigned i = 0; i < _servers.size(); i++)
+                l.push_back(_servers[i]);
+            SyncClusterConnection* c = new SyncClusterConnection(l, socketTimeout);
+            return c;
         }
 
         case CUSTOM: {
@@ -99,9 +98,8 @@ DBClientBase* ConnectionString::connect(StringData applicationName,
             return replacementConn;
         }
 
-        case LOCAL:
         case INVALID:
-            MONGO_UNREACHABLE;
+            uasserted(13421, "trying to connect to invalid ConnectionString");
     }
 
     MONGO_UNREACHABLE;

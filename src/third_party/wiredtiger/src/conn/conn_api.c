@@ -2220,9 +2220,6 @@ wiredtiger_open(const char *home, WT_EVENT_HANDLER *event_handler,
 	WT_ERR(__wt_config_gets(session, cfg, "readonly", &cval));
 	if (cval.val)
 		F_SET(conn, WT_CONN_READONLY);
-	WT_ERR(__wt_config_gets(session, cfg, "session_table_cache", &cval));
-	if (cval.val)
-		F_SET(conn, WT_CONN_TABLE_CACHE);
 
 	/* Configure error messages so we get them right early. */
 	WT_ERR(__wt_config_gets(session, cfg, "error_prefix", &cval));
@@ -2513,15 +2510,8 @@ err:	/* Discard the scratch buffers. */
 		__wt_scr_discard(session);
 	__wt_scr_discard(&conn->dummy_session);
 
-	if (ret != 0) {
-		/*
-		 * Set panic if we're returning the run recovery error so that
-		 * we don't try to checkpoint data handles.
-		 */
-		if (ret == WT_RUN_RECOVERY)
-			F_SET(conn, WT_CONN_PANIC);
+	if (ret != 0)
 		WT_TRET(__wt_connection_close(conn));
-	}
 
 	return (ret);
 }

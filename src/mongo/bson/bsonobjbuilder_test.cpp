@@ -33,10 +33,9 @@
 #include "mongo/db/jsobj.h"
 #include "mongo/db/json.h"
 
-#include "mongo/unittest/unittest.h"
 #include <sstream>
+#include "mongo/unittest/unittest.h"
 
-namespace mongo {
 namespace {
 
 using mongo::BSONElement;
@@ -72,14 +71,6 @@ void assertBSONTypeEquals(BSONType actual, BSONType expected, T value, int i) {
         const string msg = ss.str();
         FAIL(msg);
     }
-}
-
-TEST(BSONObjBuilder, AppendInt64T) {
-    auto obj = BSON("a" << int64_t{5} << "b" << int64_t{1ll << 40});
-    ASSERT_EQ(obj["a"].type(), NumberLong);
-    ASSERT_EQ(obj["b"].type(), NumberLong);
-    ASSERT_EQ(obj["a"].Long(), 5);
-    ASSERT_EQ(obj["b"].Long(), 1ll << 40);
 }
 
 /**
@@ -259,7 +250,7 @@ TEST(BSONObjBuilderTest, AppendNumberLongLongMinCompareObject) {
 
     BSONObj o2 = BSON("a" << std::numeric_limits<long long>::min());
 
-    ASSERT_BSONOBJ_EQ(o1, o2);
+    ASSERT_EQUALS(o1, o2);
 }
 
 TEST(BSONObjBuilderTest, AppendMaxTimestampConversion) {
@@ -285,11 +276,11 @@ TEST(BSONObjBuilderTest, ResumeBuilding) {
         secondBuilder.append("c", "d");
     }
     auto obj = BSONObj(b.buf());
-    ASSERT_BSONOBJ_EQ(obj,
-                      BSON("a"
-                           << "b"
-                           << "c"
-                           << "d"));
+    ASSERT_EQ(obj,
+              BSON("a"
+                   << "b"
+                   << "c"
+                   << "d"));
 }
 
 TEST(BSONObjBuilderTest, ResumeBuildingWithNesting) {
@@ -307,18 +298,16 @@ TEST(BSONObjBuilderTest, ResumeBuildingWithNesting) {
         secondBuilder.append("a", BSON("c" << 3));
     }
     auto obj = BSONObj(b.buf());
-    ASSERT_BSONOBJ_EQ(obj,
-                      BSON("ll" << BSON("f" << BSON("cc"
-                                                    << "dd"))
-                                << "a"
-                                << BSON("c" << 3)));
+    ASSERT_EQ(obj,
+              BSON("ll" << BSON("f" << BSON("cc"
+                                            << "dd")) << "a" << BSON("c" << 3)));
 }
 
 TEST(BSONObjBuilderTest, ResetToEmptyResultsInEmptyObj) {
     BSONObjBuilder bob;
     bob.append("a", 3);
     bob.resetToEmpty();
-    ASSERT_BSONOBJ_EQ(BSONObj(), bob.obj());
+    ASSERT_EQ(BSONObj(), bob.obj());
 }
 
 TEST(BSONObjBuilderTest, ResetToEmptyForNestedBuilderOnlyResetsInnerObj) {
@@ -328,8 +317,7 @@ TEST(BSONObjBuilderTest, ResetToEmptyForNestedBuilderOnlyResetsInnerObj) {
     innerObj.append("b", 4);
     innerObj.resetToEmpty();
     innerObj.done();
-    ASSERT_BSONOBJ_EQ(BSON("a" << 3 << "nestedObj" << BSONObj()), bob.obj());
+    ASSERT_EQ(BSON("a" << 3 << "nestedObj" << BSONObj()), bob.obj());
 }
 
 }  // unnamed namespace
-}  // namespace mongo

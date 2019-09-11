@@ -28,8 +28,8 @@
 
 #pragma once
 
-#include "mongo/db/repl/oplog_interface.h"
 #include <initializer_list>
+#include "mongo/db/repl/oplog_interface.h"
 
 namespace mongo {
 namespace repl {

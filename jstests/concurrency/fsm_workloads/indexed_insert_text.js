@@ -32,7 +32,10 @@ var $config = (function() {
         }
     };
 
-    var transitions = {init: {insert: 1}, insert: {insert: 1}};
+    var transitions = {
+        init: {insert: 1},
+        insert: {insert: 1}
+    };
 
     function setup(db, collName, cluster) {
         var ixSpec = {};

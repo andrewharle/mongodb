@@ -36,21 +36,19 @@
 #include <pcrecpp.h>
 
 #include "mongo/config.h"
-#include "mongo/db/service_context.h"
-#include "mongo/util/assert_util.h"
 #include "mongo/util/hex.h"
 #include "mongo/util/log.h"
-#include "mongo/util/net/socket_exception.h"
 
 namespace mongo {
 
 using std::shared_ptr;
+using std::endl;
 using std::string;
 using std::stringstream;
 using std::vector;
 
-MiniWebServer::MiniWebServer(const string& name, const string& ip, int port, ServiceContext* ctx)
-    : Listener(name, ip, port, ctx, false, false) {}
+MiniWebServer::MiniWebServer(const string& name, const string& ip, int port)
+    : Listener(name, ip, port, false) {}
 
 string MiniWebServer::parseURL(const char* buf) {
     const char* urlStart = strchr(buf, ' ');
@@ -131,7 +129,7 @@ bool MiniWebServer::fullReceive(const char* buf) {
     return false;
 }
 
-void MiniWebServer::_accepted(const std::shared_ptr<Socket>& psock, long long connectionId) {
+void MiniWebServer::accepted(std::shared_ptr<Socket> psock, long long connectionId) {
     char buf[4096];
     int len = 0;
     try {
@@ -157,7 +155,7 @@ void MiniWebServer::_accepted(const std::shared_ptr<Socket>& psock, long long co
             }
         }
     } catch (const SocketException& e) {
-        LOG(1) << "couldn't recv data via http client: " << e;
+        LOG(1) << "couldn't recv data via http client: " << e << endl;
         return;
     }
     buf[len] = 0;
@@ -200,12 +198,8 @@ void MiniWebServer::_accepted(const std::shared_ptr<Socket>& psock, long long co
         psock->send(response.c_str(), response.size(), "http response");
         psock->close();
     } catch (SocketException& e) {
-        LOG(1) << "couldn't send data to http client: " << e;
+        LOG(1) << "couldn't send data to http client: " << e << endl;
     }
-}
-
-void MiniWebServer::accepted(std::unique_ptr<AbstractMessagingPort> mp) {
-    MONGO_UNREACHABLE;
 }
 
 string MiniWebServer::getHeader(const char* req, const std::string& wanted) {

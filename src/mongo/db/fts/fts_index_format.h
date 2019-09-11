@@ -33,7 +33,6 @@
 #include <string>
 
 #include "mongo/base/string_data.h"
-#include "mongo/bson/bsonobj_comparator_interface.h"
 #include "mongo/db/fts/fts_util.h"
 
 namespace mongo {

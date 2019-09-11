@@ -36,7 +36,7 @@
 
 namespace mongo {
 
-static const auto oneDay = Hours(24);
+static const auto oneDay = stdx::chrono::hours(24);
 
 CertificateExpirationMonitor::CertificateExpirationMonitor(Date_t date)
     : _certExpiration(date), _lastCheckTime(Date_t::now()) {}
@@ -66,7 +66,8 @@ void CertificateExpirationMonitor::taskDoWork() {
     if (remainingValidDuration <= 30 * oneDay) {
         // The certificate will expire in the next 30 days.
         warning() << "Server certificate will expire on " << dateToISOStringUTC(_certExpiration)
-                  << " in " << durationCount<Hours>(remainingValidDuration) / 24 << " days.";
+                  << " in " << durationCount<stdx::chrono::hours>(remainingValidDuration) / 24
+                  << " days.";
     }
 }
 

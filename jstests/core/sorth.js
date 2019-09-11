@@ -230,8 +230,10 @@
         // For matching documents, highest value of 'b' is 2.
         assertMatches(
             {expectedQueryResults: [{a: 1, b: 2}], query: {a: {$in: [1, 2]}, b: {$lt: 3}}});
-        assertMatches(
-            {expectedQueryResults: [{a: 1, b: 2}], query: {a: {$in: [1, 2]}, b: {$lt: 3, $gt: 1}}});
+        assertMatches({
+            expectedQueryResults: [{a: 1, b: 2}],
+            query: {a: {$in: [1, 2]}, b: {$lt: 3, $gt: 1}}
+        });
 
         // For matching documents, highest value of 'b' is 1.
         assertMatches({

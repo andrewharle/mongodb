@@ -58,13 +58,13 @@
 
     coll.drop();
     assert.commandWorked(coll.ensureIndex({a: 1}));
-    for (let i = 0; i < 10; ++i) {
+    for (var i = 0; i < 10; ++i) {
         assert.writeOK(coll.save({_id: i, a: i}));
     }
 
     // Reverse direction scan of the a:1 index between a:6 (inclusive) and a:3 (exclusive) is
     // expected to fail, as max must be > min.
-    let error = assert.throws(function() {
+    var error = assert.throws(function() {
         coll.find().min({a: 6}).max({a: 3}).sort({a: -1}).toArray();
     });
     assert.eq(error.code, ErrorCodes.BadValue);
@@ -116,7 +116,7 @@
     assert.writeOK(coll.insert({a: 4}));
     assert.writeOK(coll.insert({a: 5}));
 
-    let cursor = coll.find().min({a: 4});
+    var cursor = coll.find().min({a: 4});
     assert.eq(4, cursor.next().a);
     assert.eq(5, cursor.next().a);
 

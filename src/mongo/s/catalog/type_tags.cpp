@@ -34,7 +34,6 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/util/bson_extract.h"
-#include "mongo/s/catalog/type_chunk.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/mongoutils/str.h"
 
@@ -56,9 +55,8 @@ StatusWith<TagsType> TagsType::fromBSON(const BSONObj& source) {
     {
         std::string tagsNs;
         Status status = bsonExtractStringField(source, ns.name(), &tagsNs);
-        if (!status.isOK()) {
+        if (!status.isOK())
             return status;
-        }
 
         tags._ns = tagsNs;
     }
@@ -66,21 +64,28 @@ StatusWith<TagsType> TagsType::fromBSON(const BSONObj& source) {
     {
         std::string tagsTag;
         Status status = bsonExtractStringField(source, tag.name(), &tagsTag);
-        if (!status.isOK()) {
+        if (!status.isOK())
             return status;
-        }
 
         tags._tag = tagsTag;
     }
 
     {
-        auto tagRangeStatus = ChunkRange::fromBSON(source);
-        if (!tagRangeStatus.isOK())
-            return tagRangeStatus.getStatus();
+        BSONElement tagsMinKey;
+        Status status = bsonExtractTypedField(source, min.name(), Object, &tagsMinKey);
+        if (!status.isOK())
+            return status;
 
-        const auto tagRange = std::move(tagRangeStatus.getValue());
-        tags._minKey = tagRange.getMin().getOwned();
-        tags._maxKey = tagRange.getMax().getOwned();
+        tags._minKey = tagsMinKey.Obj().getOwned();
+    }
+
+    {
+        BSONElement tagsMaxKey;
+        Status status = bsonExtractTypedField(source, max.name(), Object, &tagsMaxKey);
+        if (!status.isOK())
+            return status;
+
+        tags._maxKey = tagsMaxKey.Obj().getOwned();
     }
 
     return tags;

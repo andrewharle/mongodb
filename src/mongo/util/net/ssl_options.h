@@ -45,24 +45,21 @@ namespace moe = mongo::optionenvironment;
 struct SSLParams {
     enum class Protocols { TLS1_0, TLS1_1, TLS1_2 };
     AtomicInt32 sslMode;             // --sslMode - the SSL operation mode, see enum SSLModes
+    bool sslOnNormalPorts;           // --sslOnNormalPorts (deprecated)
     std::string sslPEMKeyFile;       // --sslPEMKeyFile
     std::string sslPEMKeyPassword;   // --sslPEMKeyPassword
     std::string sslClusterFile;      // --sslInternalKeyFile
     std::string sslClusterPassword;  // --sslInternalKeyPassword
     std::string sslCAFile;           // --sslCAFile
-    std::string sslClusterCAFile;    // --sslClusterCAFile
     std::string sslCRLFile;          // --sslCRLFile
     std::string sslCipherConfig;     // --sslCipherConfig
     std::vector<Protocols> sslDisabledProtocols;  // --sslDisabledProtocols
-    bool sslWeakCertificateValidation = false;    // --sslWeakCertificateValidation
-    bool sslFIPSMode = false;                     // --sslFIPSMode
-    bool sslAllowInvalidCertificates = false;     // --sslAllowInvalidCertificates
-    bool sslAllowInvalidHostnames = false;        // --sslAllowInvalidHostnames
+    bool sslWeakCertificateValidation;            // --sslWeakCertificateValidation
+    bool sslFIPSMode;                             // --sslFIPSMode
+    bool sslAllowInvalidCertificates;             // --sslAllowInvalidCertificates
+    bool sslAllowInvalidHostnames;                // --sslAllowInvalidHostnames
     bool disableNonSSLConnectionLogging =
         false;  // --setParameter disableNonSSLConnectionLogging=true
-    bool suppressNoTLSPeerCertificateWarning =
-        false;  // --setParameter suppressNoTLSPeerCertificateWarning
-    bool tlsWithholdClientCertificate = false;  // --setParameter tlsWithholdClientCertificate
 
     SSLParams() {
         sslMode.store(SSLMode_disabled);

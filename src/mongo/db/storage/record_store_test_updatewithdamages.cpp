@@ -28,8 +28,6 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/storage/record_store_test_harness.h"
 
 
@@ -52,7 +50,7 @@ TEST(RecordStoreTestHarness, UpdateWithDamages) {
         return;
 
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(0, rs->numRecords(opCtx.get()));
     }
 
@@ -60,7 +58,7 @@ TEST(RecordStoreTestHarness, UpdateWithDamages) {
     RecordId loc;
     const RecordData rec(data.c_str(), data.size() + 1);
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             StatusWith<RecordId> res = rs->insertRecord(opCtx.get(), rec.data(), rec.size(), false);
@@ -71,13 +69,13 @@ TEST(RecordStoreTestHarness, UpdateWithDamages) {
     }
 
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(1, rs->numRecords(opCtx.get()));
     }
 
     string modifiedData = "11101000";
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             mutablebson::DamageVector dv(3);
             dv[0].sourceOffset = 5;
@@ -99,7 +97,7 @@ TEST(RecordStoreTestHarness, UpdateWithDamages) {
     }
 
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             RecordData record = rs->dataFor(opCtx.get(), loc);
             ASSERT_EQUALS(modifiedData, record.data());
@@ -117,7 +115,7 @@ TEST(RecordStoreTestHarness, UpdateWithOverlappingDamageEvents) {
         return;
 
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(0, rs->numRecords(opCtx.get()));
     }
 
@@ -125,7 +123,7 @@ TEST(RecordStoreTestHarness, UpdateWithOverlappingDamageEvents) {
     RecordId loc;
     const RecordData rec(data.c_str(), data.size() + 1);
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             StatusWith<RecordId> res = rs->insertRecord(opCtx.get(), rec.data(), rec.size(), false);
@@ -136,13 +134,13 @@ TEST(RecordStoreTestHarness, UpdateWithOverlappingDamageEvents) {
     }
 
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(1, rs->numRecords(opCtx.get()));
     }
 
     string modifiedData = "10100010";
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             mutablebson::DamageVector dv(2);
             dv[0].sourceOffset = 3;
@@ -161,7 +159,7 @@ TEST(RecordStoreTestHarness, UpdateWithOverlappingDamageEvents) {
     }
 
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             RecordData record = rs->dataFor(opCtx.get(), loc);
             ASSERT_EQUALS(modifiedData, record.data());
@@ -180,7 +178,7 @@ TEST(RecordStoreTestHarness, UpdateWithOverlappingDamageEventsReversed) {
         return;
 
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(0, rs->numRecords(opCtx.get()));
     }
 
@@ -188,7 +186,7 @@ TEST(RecordStoreTestHarness, UpdateWithOverlappingDamageEventsReversed) {
     RecordId loc;
     const RecordData rec(data.c_str(), data.size() + 1);
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             StatusWith<RecordId> res = rs->insertRecord(opCtx.get(), rec.data(), rec.size(), false);
@@ -199,13 +197,13 @@ TEST(RecordStoreTestHarness, UpdateWithOverlappingDamageEventsReversed) {
     }
 
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(1, rs->numRecords(opCtx.get()));
     }
 
     string modifiedData = "10111010";
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             mutablebson::DamageVector dv(2);
             dv[0].sourceOffset = 0;
@@ -224,7 +222,7 @@ TEST(RecordStoreTestHarness, UpdateWithOverlappingDamageEventsReversed) {
     }
 
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             RecordData record = rs->dataFor(opCtx.get(), loc);
             ASSERT_EQUALS(modifiedData, record.data());
@@ -241,7 +239,7 @@ TEST(RecordStoreTestHarness, UpdateWithNoDamages) {
         return;
 
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(0, rs->numRecords(opCtx.get()));
     }
 
@@ -249,7 +247,7 @@ TEST(RecordStoreTestHarness, UpdateWithNoDamages) {
     RecordId loc;
     const RecordData rec(data.c_str(), data.size() + 1);
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             StatusWith<RecordId> res = rs->insertRecord(opCtx.get(), rec.data(), rec.size(), false);
@@ -260,12 +258,12 @@ TEST(RecordStoreTestHarness, UpdateWithNoDamages) {
     }
 
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(1, rs->numRecords(opCtx.get()));
     }
 
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             mutablebson::DamageVector dv;
 
@@ -278,7 +276,7 @@ TEST(RecordStoreTestHarness, UpdateWithNoDamages) {
     }
 
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             RecordData record = rs->dataFor(opCtx.get(), loc);
             ASSERT_EQUALS(data, record.data());

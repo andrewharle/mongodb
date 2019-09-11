@@ -29,8 +29,6 @@
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/pipeline/accumulator.h"
-
-#include "mongo/db/pipeline/accumulation_statement.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/value.h"
 
@@ -71,8 +69,7 @@ Value AccumulatorPush::getValue(bool toBeMerged) const {
     return Value(vpValue);
 }
 
-AccumulatorPush::AccumulatorPush(const boost::intrusive_ptr<ExpressionContext>& expCtx)
-    : Accumulator(expCtx) {
+AccumulatorPush::AccumulatorPush() {
     _memUsageBytes = sizeof(*this);
 }
 
@@ -81,8 +78,7 @@ void AccumulatorPush::reset() {
     _memUsageBytes = sizeof(*this);
 }
 
-intrusive_ptr<Accumulator> AccumulatorPush::create(
-    const boost::intrusive_ptr<ExpressionContext>& expCtx) {
-    return new AccumulatorPush(expCtx);
+intrusive_ptr<Accumulator> AccumulatorPush::create() {
+    return new AccumulatorPush();
 }
 }

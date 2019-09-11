@@ -6,24 +6,24 @@
 (function() {
     'use strict';
 
-    load("jstests/replsets/rslib.js");
-    load("jstests/libs/write_concern_util.js");
-
     var name = "writeConcernStepDownAndBackUp";
     var dbName = "wMajorityCheck";
     var collName = "stepdownAndBackUp";
 
-    var rst = new ReplSetTest({
-        name: name,
-        nodes: [
-            {},
-            {},
-            {rsConfig: {priority: 0}},
-        ],
-        useBridge: true
-    });
+    var rst = new ReplSetTest(
+        {name: name, nodes: [{}, {}, {rsConfig: {priority: 0}}, ], useBridge: true});
     var nodes = rst.startSet();
     rst.initiate();
+
+    var timeout = 5 * 60 * 1000;
+
+    function waitForState(node, state) {
+        assert.soonNoExcept(function() {
+            assert.commandWorked(node.adminCommand(
+                {replSetTest: 1, waitForMemberState: state, timeoutMillis: timeout}));
+            return true;
+        });
+    }
 
     function waitForPrimary(node) {
         assert.soon(function() {
@@ -31,27 +31,20 @@
         });
     }
 
-    function stepUp(node) {
-        var primary = rst.getPrimary();
-        if (primary != node) {
-            assert.throws(function() {
-                primary.adminCommand({replSetStepDown: 60 * 5});
-            });
-        }
-        waitForPrimary(node);
-    }
-
     jsTestLog("Make sure node 0 is primary.");
-    stepUp(nodes[0]);
+    rst.stepUp(nodes[0]);
     var primary = rst.getPrimary();
     var secondaries = rst.getSecondaries();
     assert.eq(nodes[0], primary);
     // Wait for all data bearing nodes to get up to date.
     assert.writeOK(nodes[0].getDB(dbName).getCollection(collName).insert(
-        {a: 1}, {writeConcern: {w: 3, wtimeout: rst.kDefaultTimeoutMS}}));
+        {a: 1}, {writeConcern: {w: 3, wtimeout: timeout}}));
 
     // Stop the secondaries from replicating.
-    stopServerReplication(secondaries);
+    secondaries.forEach(function(node) {
+        assert.commandWorked(
+            node.adminCommand({configureFailPoint: 'rsSyncApplyStop', mode: 'alwaysOn'}));
+    });
     // Stop the primary from calling into awaitReplication()
     assert.commandWorked(nodes[0].adminCommand(
         {configureFailPoint: 'hangBeforeWaitingForWriteConcern', mode: 'alwaysOn'}));
@@ -59,15 +52,12 @@
     jsTestLog("Do w:majority write that won't enter awaitReplication() until after the primary " +
               "has stepped down and back up");
     var doMajorityWrite = function() {
-        // Run ismaster command with 'hangUpOnStepDown' set to false to mark this connection as
-        // one that shouldn't be closed when the node steps down.  This simulates the scenario where
-        // the write was coming from a mongos.
-        assert.commandWorked(db.adminCommand({ismaster: 1, hangUpOnStepDown: false}));
+        assert.commandWorked(db.adminCommand({ismaster: 1}));
 
-        var res = db.getSiblingDB('wMajorityCheck').stepdownAndBackUp.insert({a: 2}, {
-            writeConcern: {w: 'majority'}
+        assert.throws(function() {
+            db.getSiblingDB('wMajorityCheck')
+                .stepdownAndBackUp.insert({a: 2}, {writeConcern: {w: 'majority'}});
         });
-        assert.writeErrorWithCode(res, ErrorCodes.PrimarySteppedDown);
     };
 
     var joinMajorityWriter = startParallelShell(doMajorityWrite, nodes[0].port);
@@ -78,13 +68,16 @@
 
     jsTest.log("Wait for a new primary to be elected");
     // Allow the secondaries to replicate again.
-    restartServerReplication(secondaries);
+    secondaries.forEach(function(node) {
+        assert.commandWorked(
+            node.adminCommand({configureFailPoint: 'rsSyncApplyStop', mode: 'off'}));
+    });
 
     waitForPrimary(nodes[1]);
 
     jsTest.log("Do a write to the new primary");
     assert.writeOK(nodes[1].getDB(dbName).getCollection(collName).insert(
-        {a: 3}, {writeConcern: {w: 2, wtimeout: rst.kDefaultTimeoutMS}}));
+        {a: 3}, {writeConcern: {w: 2, wtimeout: timeout}}));
 
     jsTest.log("Reconnect the old primary to the rest of the nodes");
     nodes[0].reconnect(nodes[1]);
@@ -110,7 +103,7 @@
     });
 
     jsTest.log("Make the original primary become primary once again");
-    stepUp(nodes[0]);
+    rst.stepUp(nodes[0]);
 
     jsTest.log("Unblock the thread waiting for replication of the now rolled-back write, ensure " +
                "that the write concern failed");

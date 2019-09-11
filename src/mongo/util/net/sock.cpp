@@ -36,23 +36,18 @@
 #include <algorithm>
 
 #if !defined(_WIN32)
-#include <arpa/inet.h>
-#include <errno.h>
 #include <fcntl.h>
-#include <netdb.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <poll.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/un.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
+#include <errno.h>
+#include <netdb.h>
 #if defined(__OpenBSD__)
 #include <sys/uio.h>
 #endif
-#else
-#include <mstcpip.h>
-#include <winsock2.h>
-#include <ws2tcpip.h>
 #endif
 
 #include "mongo/config.h"
@@ -62,17 +57,16 @@
 #include "mongo/util/debug_util.h"
 #include "mongo/util/fail_point_service.h"
 #include "mongo/util/hex.h"
-#include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
+#include "mongo/util/log.h"
 #include "mongo/util/net/message.h"
-#include "mongo/util/net/socket_exception.h"
-#include "mongo/util/net/socket_poll.h"
 #include "mongo/util/net/ssl_manager.h"
+#include "mongo/util/net/socket_poll.h"
 #include "mongo/util/quick_exit.h"
-#include "mongo/util/winutil.h"
 
 namespace mongo {
 
+using std::endl;
 using std::pair;
 using std::string;
 using std::stringstream;
@@ -110,7 +104,6 @@ void networkWarnWithDescription(const Socket& socket, StringData call, int error
 
 const double kMaxConnectTimeoutMS = 5000;
 
-
 }  // namespace
 
 static bool ipv6 = false;
@@ -129,133 +122,76 @@ void setSockTimeouts(int sock, double secs) {
     int status =
         setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<char*>(&timeout), sizeof(DWORD));
     if (report && (status == SOCKET_ERROR))
-        log() << "unable to set SO_RCVTIMEO: " << errnoWithDescription(WSAGetLastError());
+        log() << "unable to set SO_RCVTIMEO: " << errnoWithDescription(WSAGetLastError()) << endl;
     status =
         setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<char*>(&timeout), sizeof(DWORD));
-    DEV if (report && (status == SOCKET_ERROR)) log() << "unable to set SO_SNDTIMEO: "
-                                                      << errnoWithDescription(WSAGetLastError());
+    DEV if (report && (status == SOCKET_ERROR)) log()
+        << "unable to set SO_SNDTIMEO: " << errnoWithDescription(WSAGetLastError()) << endl;
 #else
     struct timeval tv;
     tv.tv_sec = (int)secs;
     tv.tv_usec = (int)((long long)(secs * 1000 * 1000) % (1000 * 1000));
     bool ok = setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&tv, sizeof(tv)) == 0;
     if (report && !ok)
-        log() << "unable to set SO_RCVTIMEO";
+        log() << "unable to set SO_RCVTIMEO" << endl;
     ok = setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (char*)&tv, sizeof(tv)) == 0;
-    DEV if (report && !ok) log() << "unable to set SO_SNDTIMEO";
+    DEV if (report && !ok) log() << "unable to set SO_SNDTIMEO" << endl;
 #endif
 }
 
-#ifdef _WIN32
-#ifdef _UNICODE
-#define X_STR_CONST(str) (L##str)
-#else
-#define X_STR_CONST(str) (str)
-#endif
-const CString kKeepAliveGroup(
-    X_STR_CONST("SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters"));
-const CString kKeepAliveTime(X_STR_CONST("KeepAliveTime"));
-const CString kKeepAliveInterval(X_STR_CONST("KeepAliveInterval"));
-#undef X_STR_CONST
-#endif
-
-void setSocketKeepAliveParams(int sock,
-                              unsigned int maxKeepIdleSecs,
-                              unsigned int maxKeepIntvlSecs) {
-#ifdef _WIN32
-    // Defaults per MSDN when registry key does not exist.
-    // Expressed in seconds here to be consistent with posix,
-    // though Windows uses milliseconds.
-    const DWORD kWindowsKeepAliveTimeSecsDefault = 2 * 60 * 60;
-    const DWORD kWindowsKeepAliveIntervalSecsDefault = 1;
-
-    const auto getKey = [](const CString& key, DWORD default_value) {
-        auto withval = windows::getDWORDRegistryKey(kKeepAliveGroup, key);
-        if (withval.isOK()) {
-            auto val = withval.getValue();
-            // Return seconds
-            return val ? (val.get() / 1000) : default_value;
-        }
-        error() << "can't get KeepAlive parameter: " << withval.getStatus();
-        return default_value;
-    };
-
-    const auto keepIdleSecs = getKey(kKeepAliveTime, kWindowsKeepAliveTimeSecsDefault);
-    const auto keepIntvlSecs = getKey(kKeepAliveInterval, kWindowsKeepAliveIntervalSecsDefault);
-
-    if ((keepIdleSecs > maxKeepIdleSecs) || (keepIntvlSecs > maxKeepIntvlSecs)) {
-        DWORD sent = 0;
-        struct tcp_keepalive keepalive;
-        keepalive.onoff = TRUE;
-        keepalive.keepalivetime = std::min<DWORD>(keepIdleSecs, maxKeepIdleSecs) * 1000;
-        keepalive.keepaliveinterval = std::min<DWORD>(keepIntvlSecs, maxKeepIntvlSecs) * 1000;
-        if (WSAIoctl(sock,
-                     SIO_KEEPALIVE_VALS,
-                     &keepalive,
-                     sizeof(keepalive),
-                     nullptr,
-                     0,
-                     &sent,
-                     nullptr,
-                     nullptr)) {
-            error() << "failed setting keepalive values: " << WSAGetLastError();
-        }
-    }
-#elif defined(__APPLE__) || defined(__linux__)
-    const auto updateSockOpt =
-        [sock](int level, int optnum, unsigned int maxval, StringData optname) {
-            unsigned int optval = 1;
-            socklen_t len = sizeof(optval);
-
-            if (getsockopt(sock, level, optnum, (char*)&optval, &len)) {
-                error() << "can't get " << optname << ": " << errnoWithDescription();
-            }
-
-            if (optval > maxval) {
-                optval = maxval;
-                if (setsockopt(sock, level, optnum, (char*)&optval, sizeof(optval))) {
-                    error() << "can't set " << optname << ": " << errnoWithDescription();
-                }
-            }
-        };
-
-#ifdef __APPLE__
-    updateSockOpt(IPPROTO_TCP, TCP_KEEPALIVE, maxKeepIdleSecs, "TCP_KEEPALIVE");
-#endif
-
-#ifdef __linux__
-#ifdef SOL_TCP
-    const int level = SOL_TCP;
-#else
-    const int level = SOL_SOCKET;
-#endif
-    updateSockOpt(level, TCP_KEEPIDLE, maxKeepIdleSecs, "TCP_KEEPIDLE");
-    updateSockOpt(level, TCP_KEEPINTVL, maxKeepIntvlSecs, "TCP_KEEPINTVL");
-#endif
-
-#endif
+#if defined(_WIN32)
+void disableNagle(int sock) {
+    int x = 1;
+    if (setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (char*)&x, sizeof(x)))
+        error() << "disableNagle failed: " << errnoWithDescription() << endl;
+    if (setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, (char*)&x, sizeof(x)))
+        error() << "SO_KEEPALIVE failed: " << errnoWithDescription() << endl;
 }
+#else
 
 void disableNagle(int sock) {
     int x = 1;
-#ifdef _WIN32
-    const int level = IPPROTO_TCP;
-#elif defined(SOL_TCP)
-    const int level = SOL_TCP;
+
+#ifdef SOL_TCP
+    int level = SOL_TCP;
 #else
-    const int level = SOL_SOCKET;
+    int level = SOL_SOCKET;
 #endif
 
     if (setsockopt(sock, level, TCP_NODELAY, (char*)&x, sizeof(x)))
-        error() << "disableNagle failed: " << errnoWithDescription();
+        error() << "disableNagle failed: " << errnoWithDescription() << endl;
 
 #ifdef SO_KEEPALIVE
     if (setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, (char*)&x, sizeof(x)))
-        error() << "SO_KEEPALIVE failed: " << errnoWithDescription();
-#endif
+        error() << "SO_KEEPALIVE failed: " << errnoWithDescription() << endl;
 
-    setSocketKeepAliveParams(sock);
+#ifdef __linux__
+    socklen_t len = sizeof(x);
+    if (getsockopt(sock, level, TCP_KEEPIDLE, (char*)&x, &len))
+        error() << "can't get TCP_KEEPIDLE: " << errnoWithDescription() << endl;
+
+    if (x > 300) {
+        x = 300;
+        if (setsockopt(sock, level, TCP_KEEPIDLE, (char*)&x, sizeof(x))) {
+            error() << "can't set TCP_KEEPIDLE: " << errnoWithDescription() << endl;
+        }
+    }
+
+    len = sizeof(x);  // just in case it changed
+    if (getsockopt(sock, level, TCP_KEEPINTVL, (char*)&x, &len))
+        error() << "can't get TCP_KEEPINTVL: " << errnoWithDescription() << endl;
+
+    if (x > 300) {
+        x = 300;
+        if (setsockopt(sock, level, TCP_KEEPINTVL, (char*)&x, sizeof(x))) {
+            error() << "can't set TCP_KEEPINTVL: " << errnoWithDescription() << endl;
+        }
+    }
+#endif
+#endif
 }
+
+#endif
 
 string getAddrInfoStrError(int code) {
 #if !defined(_WIN32)
@@ -267,6 +203,209 @@ string getAddrInfoStrError(int code) {
 }
 
 // --- SockAddr
+SockAddr::SockAddr() {
+    addressSize = sizeof(sa);
+    memset(&sa, 0, sizeof(sa));
+    sa.ss_family = AF_UNSPEC;
+    _isValid = true;
+}
+
+SockAddr::SockAddr(int sourcePort) {
+    memset(as<sockaddr_in>().sin_zero, 0, sizeof(as<sockaddr_in>().sin_zero));
+    as<sockaddr_in>().sin_family = AF_INET;
+    as<sockaddr_in>().sin_port = htons(sourcePort);
+    as<sockaddr_in>().sin_addr.s_addr = htonl(INADDR_ANY);
+    addressSize = sizeof(sockaddr_in);
+    _isValid = true;
+}
+
+SockAddr::SockAddr(const char* _iporhost, int port) {
+    string target = _iporhost;
+    if (target == "localhost") {
+        target = "127.0.0.1";
+    }
+
+    if (mongoutils::str::contains(target, '/')) {
+#ifdef _WIN32
+        uassert(13080, "no unix socket support on windows", false);
+#endif
+        uassert(13079,
+                "path to unix socket too long",
+                target.size() < sizeof(as<sockaddr_un>().sun_path));
+        as<sockaddr_un>().sun_family = AF_UNIX;
+        strcpy(as<sockaddr_un>().sun_path, target.c_str());
+        addressSize = sizeof(sockaddr_un);
+        _isValid = true;
+        return;
+    }
+
+    addrinfo* addrs = NULL;
+    addrinfo hints;
+    memset(&hints, 0, sizeof(addrinfo));
+    hints.ai_socktype = SOCK_STREAM;
+    // hints.ai_flags = AI_ADDRCONFIG; // This is often recommended but don't do it.
+    // SERVER-1579
+    hints.ai_flags |= AI_NUMERICHOST;  // first pass tries w/o DNS lookup
+    hints.ai_family = (IPv6Enabled() ? AF_UNSPEC : AF_INET);
+
+    StringBuilder ss;
+    ss << port;
+    int ret = getaddrinfo(target.c_str(), ss.str().c_str(), &hints, &addrs);
+
+// old C compilers on IPv6-capable hosts return EAI_NODATA error
+#ifdef EAI_NODATA
+    int nodata = (ret == EAI_NODATA);
+#else
+    int nodata = false;
+#endif
+    if ((ret == EAI_NONAME || nodata)) {
+        // iporhost isn't an IP address, allow DNS lookup
+        hints.ai_flags &= ~AI_NUMERICHOST;
+        ret = getaddrinfo(target.c_str(), ss.str().c_str(), &hints, &addrs);
+    }
+
+    if (ret) {
+        // we were unsuccessful
+        if (target != "0.0.0.0") {  // don't log if this as it is a
+                                    // CRT construction and log() may not work yet.
+            log() << "getaddrinfo(\"" << target << "\") failed: " << getAddrInfoStrError(ret)
+                  << endl;
+            _isValid = false;
+            return;
+        }
+        *this = SockAddr(port);
+        return;
+    }
+
+    // TODO: handle other addresses in linked list;
+    fassert(16501, addrs->ai_addrlen <= sizeof(sa));
+    memcpy(&sa, addrs->ai_addr, addrs->ai_addrlen);
+    addressSize = addrs->ai_addrlen;
+    freeaddrinfo(addrs);
+    _isValid = true;
+}
+
+bool SockAddr::isLocalHost() const {
+    switch (getType()) {
+        case AF_INET:
+            return getAddr() == "127.0.0.1";
+        case AF_INET6:
+            return getAddr() == "::1";
+        case AF_UNIX:
+            return true;
+        default:
+            return false;
+    }
+    fassert(16502, false);
+    return false;
+}
+
+string SockAddr::toString(bool includePort) const {
+    string out = getAddr();
+    if (includePort && getType() != AF_UNIX && getType() != AF_UNSPEC)
+        out += mongoutils::str::stream() << ':' << getPort();
+    return out;
+}
+
+sa_family_t SockAddr::getType() const {
+    return sa.ss_family;
+}
+
+unsigned SockAddr::getPort() const {
+    switch (getType()) {
+        case AF_INET:
+            return ntohs(as<sockaddr_in>().sin_port);
+        case AF_INET6:
+            return ntohs(as<sockaddr_in6>().sin6_port);
+        case AF_UNIX:
+            return 0;
+        case AF_UNSPEC:
+            return 0;
+        default:
+            massert(SOCK_FAMILY_UNKNOWN_ERROR, "unsupported address family", false);
+            return 0;
+    }
+}
+
+std::string SockAddr::getAddr() const {
+    switch (getType()) {
+        case AF_INET:
+        case AF_INET6: {
+            const int buflen = 128;
+            char buffer[buflen];
+            int ret = getnameinfo(raw(), addressSize, buffer, buflen, NULL, 0, NI_NUMERICHOST);
+            massert(13082,
+                    mongoutils::str::stream() << "getnameinfo error " << getAddrInfoStrError(ret),
+                    ret == 0);
+            return buffer;
+        }
+
+        case AF_UNIX:
+            return (as<sockaddr_un>().sun_path[0] != '\0' ? as<sockaddr_un>().sun_path
+                                                          : "anonymous unix socket");
+        case AF_UNSPEC:
+            return "(NONE)";
+        default:
+            massert(SOCK_FAMILY_UNKNOWN_ERROR, "unsupported address family", false);
+            return "";
+    }
+}
+
+bool SockAddr::operator==(const SockAddr& r) const {
+    if (getType() != r.getType())
+        return false;
+
+    if (getPort() != r.getPort())
+        return false;
+
+    switch (getType()) {
+        case AF_INET:
+            return as<sockaddr_in>().sin_addr.s_addr == r.as<sockaddr_in>().sin_addr.s_addr;
+        case AF_INET6:
+            return memcmp(as<sockaddr_in6>().sin6_addr.s6_addr,
+                          r.as<sockaddr_in6>().sin6_addr.s6_addr,
+                          sizeof(in6_addr)) == 0;
+        case AF_UNIX:
+            return strcmp(as<sockaddr_un>().sun_path, r.as<sockaddr_un>().sun_path) == 0;
+        case AF_UNSPEC:
+            return true;  // assume all unspecified addresses are the same
+        default:
+            massert(SOCK_FAMILY_UNKNOWN_ERROR, "unsupported address family", false);
+    }
+    return false;
+}
+
+bool SockAddr::operator!=(const SockAddr& r) const {
+    return !(*this == r);
+}
+
+bool SockAddr::operator<(const SockAddr& r) const {
+    if (getType() < r.getType())
+        return true;
+    else if (getType() > r.getType())
+        return false;
+
+    if (getPort() < r.getPort())
+        return true;
+    else if (getPort() > r.getPort())
+        return false;
+
+    switch (getType()) {
+        case AF_INET:
+            return as<sockaddr_in>().sin_addr.s_addr < r.as<sockaddr_in>().sin_addr.s_addr;
+        case AF_INET6:
+            return memcmp(as<sockaddr_in6>().sin6_addr.s6_addr,
+                          r.as<sockaddr_in6>().sin6_addr.s6_addr,
+                          sizeof(in6_addr)) < 0;
+        case AF_UNIX:
+            return strcmp(as<sockaddr_un>().sun_path, r.as<sockaddr_un>().sun_path) < 0;
+        case AF_UNSPEC:
+            return false;
+        default:
+            massert(SOCK_FAMILY_UNKNOWN_ERROR, "unsupported address family", false);
+    }
+    return false;
+}
 
 string makeUnixSockPath(int port) {
     return mongoutils::str::stream() << serverGlobalParams.socket << "/mongodb-" << port << ".sock";
@@ -291,7 +430,7 @@ string getHostName() {
     char buf[256];
     int ec = gethostname(buf, 127);
     if (ec || *buf == 0) {
-        log() << "can't get this server's hostname " << errnoWithDescription();
+        log() << "can't get this server's hostname " << errnoWithDescription() << endl;
         return "";
     }
     return buf;
@@ -315,6 +454,8 @@ string prettyHostName() {
     return s.str();
 }
 
+// --------- SocketException ----------
+
 #ifdef MSG_NOSIGNAL
 const int portSendFlags = MSG_NOSIGNAL;
 const int portRecvFlags = MSG_NOSIGNAL;
@@ -322,6 +463,19 @@ const int portRecvFlags = MSG_NOSIGNAL;
 const int portSendFlags = 0;
 const int portRecvFlags = 0;
 #endif
+
+string SocketException::toString() const {
+    stringstream ss;
+    ss << _ei.code << " socket exception [" << _getStringType(_type) << "] ";
+
+    if (_server.size())
+        ss << "server [" << _server << "] ";
+
+    if (_extra.size())
+        ss << _extra;
+
+    return ss.str();
+}
 
 // ------------ Socket -----------------
 
@@ -357,7 +511,7 @@ Socket::Socket(int fd, const SockAddr& remote)
 }
 
 Socket::Socket(double timeout, logger::LogSeverity ll) : _logLevel(ll) {
-    _fd = INVALID_SOCKET;
+    _fd = -1;
     _timeout = timeout;
     _lastValidityCheckAtSecs = time(0);
     _init();
@@ -377,7 +531,7 @@ void Socket::_init() {
 }
 
 void Socket::close() {
-    if (_fd != INVALID_SOCKET) {
+    if (_fd >= 0) {
 // Stop any blocking reads/writes, and prevent new reads/writes
 #if defined(_WIN32)
         shutdown(_fd, SD_BOTH);
@@ -385,14 +539,14 @@ void Socket::close() {
         shutdown(_fd, SHUT_RDWR);
 #endif
         closesocket(_fd);
-        _fd = INVALID_SOCKET;
+        _fd = -1;
     }
 }
 
 #ifdef MONGO_CONFIG_SSL
 bool Socket::secure(SSLManagerInterface* mgr, const std::string& remoteHost) {
     fassert(16503, mgr);
-    if (_fd == INVALID_SOCKET) {
+    if (_fd < 0) {
         return false;
     }
     _sslManager = mgr;
@@ -405,10 +559,10 @@ void Socket::secureAccepted(SSLManagerInterface* ssl) {
     _sslManager = ssl;
 }
 
-SSLPeerInfo Socket::doSSLHandshake(const char* firstBytes, int len) {
+std::string Socket::doSSLHandshake(const char* firstBytes, int len) {
     if (!_sslManager)
-        return SSLPeerInfo();
-    fassert(16506, _fd != INVALID_SOCKET);
+        return "";
+    fassert(16506, _fd);
     if (_sslConnection.get()) {
         throw SocketException(SocketException::RECV_ERROR,
                               "Attempt to call SSL_accept on already secure Socket from " +
@@ -416,20 +570,6 @@ SSLPeerInfo Socket::doSSLHandshake(const char* firstBytes, int len) {
     }
     _sslConnection.reset(_sslManager->accept(this, firstBytes, len));
     return _sslManager->parseAndValidatePeerCertificateDeprecated(_sslConnection.get(), "");
-}
-
-std::string Socket::getSNIServerName() const {
-    if (!_sslConnection)
-        return "";
-
-    if (!_sslConnection->ssl)
-        return "";
-
-    const char* name = SSL_get_servername(_sslConnection->ssl, TLSEXT_NAMETYPE_host_name);
-    if (!name)
-        return "";
-
-    return name;
 }
 #endif
 
@@ -704,18 +844,18 @@ void Socket::handleSendError(int ret, const char* context) {
     const int mongo_errno = errno;
     if ((mongo_errno == EAGAIN || mongo_errno == EWOULDBLOCK) && _timeout != 0) {
 #endif
-        LOG(_logLevel) << "Socket " << context << " send() timed out " << remoteString();
+        LOG(_logLevel) << "Socket " << context << " send() timed out " << remoteString() << endl;
         throw SocketException(SocketException::SEND_TIMEOUT, remoteString());
     } else if (mongo_errno != EINTR) {
         LOG(_logLevel) << "Socket " << context << " send() " << errnoWithDescription(mongo_errno)
-                       << ' ' << remoteString();
+                       << ' ' << remoteString() << endl;
         throw SocketException(SocketException::SEND_ERROR, remoteString());
     }
 }
 
 void Socket::handleRecvError(int ret, int len) {
     if (ret == 0) {
-        LOG(3) << "Socket recv() conn closed? " << remoteString();
+        LOG(3) << "Socket recv() conn closed? " << remoteString() << endl;
         throw SocketException(SocketException::CLOSED, remoteString());
     }
 
@@ -738,11 +878,11 @@ void Socket::handleRecvError(int ret, int len) {
     if (e == EAGAIN && _timeout > 0) {
 #endif
         // this is a timeout
-        LOG(_logLevel) << "Socket recv() timeout  " << remoteString();
+        LOG(_logLevel) << "Socket recv() timeout  " << remoteString() << endl;
         throw SocketException(SocketException::RECV_TIMEOUT, remoteString());
     }
 
-    LOG(_logLevel) << "Socket recv() " << errnoWithDescription(e) << " " << remoteString();
+    LOG(_logLevel) << "Socket recv() " << errnoWithDescription(e) << " " << remoteString() << endl;
     throw SocketException(SocketException::RECV_ERROR, remoteString());
 }
 
@@ -764,7 +904,7 @@ const int Socket::errorPollIntervalSecs(5);
 // isStillConnected() polls the socket at max every Socket::errorPollIntervalSecs to determine
 // if any disconnection-type events have happened on the socket.
 bool Socket::isStillConnected() {
-    if (_fd == INVALID_SOCKET) {
+    if (_fd == -1) {
         // According to the man page, poll will respond with POLLVNAL for invalid or
         // unopened descriptors, but it doesn't seem to be properly implemented in
         // some platforms - it can return 0 events and 0 for revent. Hence this workaround.
@@ -796,7 +936,8 @@ bool Socket::isStillConnected() {
     int nEvents = socketPoll(&pollInfo, 1, 0);
 
     LOG(2) << "polling for status of connection to " << remoteString() << ", "
-           << (nEvents == 0 ? "no events" : nEvents == -1 ? "error detected" : "event detected");
+           << (nEvents == 0 ? "no events" : nEvents == -1 ? "error detected" : "event detected")
+           << endl;
 
     if (nEvents == 0) {
         // No events incoming, return still connected AFAWK
@@ -805,7 +946,8 @@ bool Socket::isStillConnected() {
         // Poll itself failed, this is weird, warn and log errno
         warning() << "Socket poll() failed during connectivity check"
                   << " (idle " << idleTimeSecs << " secs,"
-                  << " remote host " << remoteString() << ")" << causedBy(errnoWithDescription());
+                  << " remote host " << remoteString() << ")" << causedBy(errnoWithDescription())
+                  << endl;
 
         // Return true since it's not clear that we're disconnected.
         return true;
@@ -831,7 +973,7 @@ bool Socket::isStillConnected() {
             warning() << "Socket recv() failed during connectivity check"
                       << " (idle " << idleTimeSecs << " secs,"
                       << " remote host " << remoteString() << ")"
-                      << causedBy(errnoWithDescription());
+                      << causedBy(errnoWithDescription()) << endl;
         } else if (recvd > 0) {
             // We got nonzero data from this socket, very weird?
             // Log and warn at runtime, log and abort at devtime
@@ -839,41 +981,41 @@ bool Socket::isStillConnected() {
             error() << "Socket found pending " << recvd
                     << " bytes of data during connectivity check"
                     << " (idle " << idleTimeSecs << " secs,"
-                    << " remote host " << remoteString() << ")";
+                    << " remote host " << remoteString() << ")" << endl;
             DEV {
                 std::string hex = hexdump(testBuf, recvd);
-                error() << "Hex dump of stale log data: " << hex;
+                error() << "Hex dump of stale log data: " << hex << endl;
             }
             dassert(false);
         } else {
             // recvd == 0, socket closed remotely, just return false
             LOG(0) << "Socket closed remotely, no longer connected"
                    << " (idle " << idleTimeSecs << " secs,"
-                   << " remote host " << remoteString() << ")";
+                   << " remote host " << remoteString() << ")" << endl;
         }
     } else if (pollInfo.revents & POLLHUP) {
         // A hangup has occurred on this socket
         LOG(0) << "Socket hangup detected, no longer connected"
                << " (idle " << idleTimeSecs << " secs,"
-               << " remote host " << remoteString() << ")";
+               << " remote host " << remoteString() << ")" << endl;
     } else if (pollInfo.revents & POLLERR) {
         // An error has occurred on this socket
         LOG(0) << "Socket error detected, no longer connected"
                << " (idle " << idleTimeSecs << " secs,"
-               << " remote host " << remoteString() << ")";
+               << " remote host " << remoteString() << ")" << endl;
     } else if (pollInfo.revents & POLLNVAL) {
         // Socket descriptor itself is weird
         // Log and warn at runtime, log and abort at devtime
         error() << "Socket descriptor detected as invalid"
                 << " (idle " << idleTimeSecs << " secs,"
-                << " remote host " << remoteString() << ")";
+                << " remote host " << remoteString() << ")" << endl;
         dassert(false);
     } else {
         // Don't know what poll is saying here
         // Log and warn at runtime, log and abort at devtime
         error() << "Socket had unknown event (" << static_cast<int>(pollInfo.revents) << ")"
                 << " (idle " << idleTimeSecs << " secs,"
-                << " remote host " << remoteString() << ")";
+                << " remote host " << remoteString() << ")" << endl;
         dassert(false);
     }
 
@@ -885,7 +1027,7 @@ struct WinsockInit {
     WinsockInit() {
         WSADATA d;
         if (WSAStartup(MAKEWORD(2, 2), &d) != 0) {
-            log() << "ERROR: wsastartup failed " << errnoWithDescription();
+            log() << "ERROR: wsastartup failed " << errnoWithDescription() << endl;
             quickExit(EXIT_NTSERVICE_ERROR);
         }
     }

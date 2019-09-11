@@ -42,9 +42,7 @@ namespace mongo {
 #error "Include assert_util.h instead of invariant.h."
 #endif
 
-MONGO_COMPILER_NORETURN void invariantFailed(const char* expr,
-                                             const char* file,
-                                             unsigned line) noexcept;
+MONGO_COMPILER_NORETURN void invariantFailed(const char* expr, const char* file, unsigned line);
 
 #define MONGO_invariant(_Expression)                                    \
     do {                                                                \
@@ -55,12 +53,12 @@ MONGO_COMPILER_NORETURN void invariantFailed(const char* expr,
 
 #define invariant MONGO_invariant
 
-// Behaves like invariant in debug builds and is compiled out in release. Use for checks, which can
-// potentially be slow or on a critical path.
+/* dassert is 'debug assert' -- might want to turn off for production as these
+   could be slow.
+*/
 #define MONGO_dassert(x) \
     if (kDebugBuild)     \
     invariant(x)
 
 #define dassert MONGO_dassert
-
 }  // namespace mongo

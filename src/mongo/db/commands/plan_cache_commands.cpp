@@ -30,8 +30,8 @@
 
 #include "mongo/platform/basic.h"
 
-#include <sstream>
 #include <string>
+#include <sstream>
 
 #include "mongo/base/init.h"
 #include "mongo/base/status.h"
@@ -53,6 +53,19 @@ using std::string;
 using std::unique_ptr;
 using namespace mongo;
 
+/**
+ * Utility function to extract error code and message from status
+ * and append to BSON results.
+ */
+void addStatus(const Status& status, BSONObjBuilder& builder) {
+    builder.append("ok", status.isOK() ? 1.0 : 0.0);
+    if (!status.isOK()) {
+        builder.append("code", status.code());
+    }
+    if (!status.reason().empty()) {
+        builder.append("errmsg", status.reason());
+    }
+}
 
 /**
  * Retrieves a collection's plan cache from the database.
@@ -83,8 +96,8 @@ static Status getPlanCache(OperationContext* txn,
 // available to the client.
 //
 
-MONGO_INITIALIZER_WITH_PREREQUISITES(SetupPlanCacheCommands, MONGO_NO_PREREQUISITES)
-(InitializerContext* context) {
+MONGO_INITIALIZER_WITH_PREREQUISITES(SetupPlanCacheCommands,
+                                     MONGO_NO_PREREQUISITES)(InitializerContext* context) {
     // PlanCacheCommand constructors refer to static ActionType instances.
     // Registering commands in a mongo static initializer ensures that
     // the ActionType construction will be completed first.
@@ -116,12 +129,18 @@ bool PlanCacheCommand::run(OperationContext* txn,
                            string& errmsg,
                            BSONObjBuilder& result) {
     string ns = parseNs(dbname, cmdObj);
+
     Status status = runPlanCacheCommand(txn, ns, cmdObj, &result);
-    return appendCommandStatus(result, status);
+
+    if (!status.isOK()) {
+        addStatus(status, result);
+        return false;
+    }
+
+    return true;
 }
 
-
-bool PlanCacheCommand::supportsWriteConcern(const BSONObj& cmd) const {
+bool PlanCacheCommand::isWriteCommandForConfigServer() const {
     return false;
 }
 
@@ -137,7 +156,7 @@ void PlanCacheCommand::help(stringstream& ss) const {
     ss << helpText;
 }
 
-Status PlanCacheCommand::checkAuthForCommand(Client* client,
+Status PlanCacheCommand::checkAuthForCommand(ClientBasic* client,
                                              const std::string& dbname,
                                              const BSONObj& cmdObj) {
     AuthorizationSession* authzSession = AuthorizationSession::get(client);
@@ -187,28 +206,12 @@ StatusWith<unique_ptr<CanonicalQuery>> PlanCacheCommand::canonicalize(OperationC
         projObj = projElt.Obj();
     }
 
-    // collation - optional
-    BSONObj collationObj;
-    if (auto collationElt = cmdObj["collation"]) {
-        if (!collationElt.isABSONObj()) {
-            return Status(ErrorCodes::BadValue, "optional field collation must be an object");
-        }
-        collationObj = collationElt.Obj();
-        if (collationObj.isEmpty()) {
-            return Status(ErrorCodes::BadValue,
-                          "optional field collation cannot be an empty object");
-        }
-    }
-
     // Create canonical query
     const NamespaceString nss(ns);
-    auto qr = stdx::make_unique<QueryRequest>(std::move(nss));
-    qr->setFilter(queryObj);
-    qr->setSort(sortObj);
-    qr->setProj(projObj);
-    qr->setCollation(collationObj);
     const ExtensionsCallbackReal extensionsCallback(txn, &nss);
-    auto statusWithCQ = CanonicalQuery::canonicalize(txn, std::move(qr), extensionsCallback);
+
+    auto statusWithCQ = CanonicalQuery::canonicalize(
+        std::move(nss), queryObj, sortObj, projObj, extensionsCallback);
     if (!statusWithCQ.isOK()) {
         return statusWithCQ.getStatus();
     }
@@ -255,9 +258,6 @@ Status PlanCacheListQueryShapes::list(const PlanCache& planCache, BSONObjBuilder
         shapeBuilder.append("query", entry->query);
         shapeBuilder.append("sort", entry->sort);
         shapeBuilder.append("projection", entry->projection);
-        if (!entry->collation.isEmpty()) {
-            shapeBuilder.append("collation", entry->collation);
-        }
         shapeBuilder.doneFast();
 
         // Release resources for cached solution after extracting query shape.
@@ -311,9 +311,8 @@ Status PlanCacheClear::clear(OperationContext* txn,
         if (!planCache->contains(*cq)) {
             // Log if asked to clear non-existent query shape.
             LOG(1) << ns << ": query shape doesn't exist in PlanCache - "
-                   << redact(cq->getQueryObj()) << "(sort: " << cq->getQueryRequest().getSort()
-                   << "; projection: " << cq->getQueryRequest().getProj()
-                   << "; collation: " << cq->getQueryRequest().getCollation() << ")";
+                   << cq->getQueryObj().toString() << "(sort: " << cq->getParsed().getSort()
+                   << "; projection: " << cq->getParsed().getProj() << ")";
             return Status::OK();
         }
 
@@ -322,20 +321,18 @@ Status PlanCacheClear::clear(OperationContext* txn,
             return result;
         }
 
-        LOG(1) << ns << ": removed plan cache entry - " << redact(cq->getQueryObj())
-               << "(sort: " << cq->getQueryRequest().getSort()
-               << "; projection: " << cq->getQueryRequest().getProj()
-               << "; collation: " << cq->getQueryRequest().getCollation() << ")";
+        LOG(1) << ns << ": removed plan cache entry - " << cq->getQueryObj().toString()
+               << "(sort: " << cq->getParsed().getSort()
+               << "; projection: " << cq->getParsed().getProj() << ")";
 
         return Status::OK();
     }
 
-    // If query is not provided, make sure sort, projection, and collation are not in arguments.
+    // If query is not provided, make sure sort and projection are not in arguments.
     // We do not want to clear the entire cache inadvertently when the user
     // forgets to provide a value for "query".
-    if (cmdObj.hasField("sort") || cmdObj.hasField("projection") || cmdObj.hasField("collation")) {
-        return Status(ErrorCodes::BadValue,
-                      "sort, projection, or collation provided without query");
+    if (cmdObj.hasField("sort") || cmdObj.hasField("projection")) {
+        return Status(ErrorCodes::BadValue, "sort or projection provided without query");
     }
 
     planCache->clear();

@@ -44,57 +44,53 @@ const BSONObj kMinBSONKey(kMinKeyData);
 const char* typeName(BSONType type) {
     switch (type) {
         case MinKey:
-            return "minKey";
+            return "MinKey";
         case EOO:
-            return "missing";
+            return "EOO";
         case NumberDouble:
-            return "double";
+            return "NumberDouble";
         case String:
-            return "string";
+            return "String";
         case Object:
-            return "object";
+            return "Object";
         case Array:
-            return "array";
+            return "Array";
         case BinData:
-            return "binData";
+            return "BinaryData";
         case Undefined:
-            return "undefined";
+            return "Undefined";
         case jstOID:
-            return "objectId";
+            return "OID";
         case Bool:
-            return "bool";
+            return "Bool";
         case Date:
-            return "date";
+            return "Date";
         case jstNULL:
-            return "null";
+            return "NULL";
         case RegEx:
-            return "regex";
+            return "RegEx";
         case DBRef:
-            return "dbPointer";
+            return "DBRef";
         case Code:
-            return "javascript";
+            return "Code";
         case Symbol:
-            return "symbol";
+            return "Symbol";
         case CodeWScope:
-            return "javascriptWithScope";
+            return "CodeWScope";
         case NumberInt:
-            return "int";
+            return "NumberInt32";
         case bsonTimestamp:
-            return "timestamp";
+            return "Timestamp";
         case NumberLong:
-            return "long";
+            return "NumberLong64";
         case NumberDecimal:
-            return "decimal";
+            return "NumberDecimal128";
         // JSTypeMax doesn't make sense to turn into a string; overlaps with highest-valued type
         case MaxKey:
-            return "maxKey";
+            return "MaxKey";
         default:
-            return "invalid";
+            return "Invalid";
     }
-}
-
-std::ostream& operator<<(std::ostream& stream, BSONType type) {
-    return stream << typeName(type);
 }
 
 bool isValidBSONType(int type) {
@@ -119,7 +115,9 @@ bool isValidBSONType(int type) {
         case NumberInt:
         case bsonTimestamp:
         case NumberLong:
+#ifdef MONGO_CONFIG_EXPERIMENTAL_DECIMAL_SUPPORT
         case NumberDecimal:
+#endif
         case MaxKey:
             return true;
         default:

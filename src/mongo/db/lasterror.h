@@ -65,6 +65,8 @@ public:
      */
     void setLastError(int code, std::string msg);
 
+    void recordInsert(long long nObjects);
+
     void recordUpdate(bool updateObjects, long long nObjects, BSONObj upsertedId);
 
     void recordDelete(long long nDeleted);
@@ -82,7 +84,7 @@ public:
     bool isValid() const {
         return _valid;
     }
-    int getNPrev() const {
+    int const getNPrev() const {
         return _nPrev;
     }
 

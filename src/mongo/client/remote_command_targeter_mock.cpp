@@ -52,14 +52,8 @@ ConnectionString RemoteCommandTargeterMock::connectionString() {
     return _connectionStringReturnValue;
 }
 
-StatusWith<HostAndPort> RemoteCommandTargeterMock::findHost(OperationContext* txn,
-                                                            const ReadPreferenceSetting& readPref) {
-    return _findHostReturnValue;
-}
-
-StatusWith<HostAndPort> RemoteCommandTargeterMock::findHostWithMaxWait(
-    const ReadPreferenceSetting& readPref, Milliseconds maxTime) {
-
+StatusWith<HostAndPort> RemoteCommandTargeterMock::findHost(const ReadPreferenceSetting& readPref,
+                                                            Milliseconds maxWait) {
     return _findHostReturnValue;
 }
 

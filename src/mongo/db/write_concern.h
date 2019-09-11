@@ -28,7 +28,6 @@
 
 #pragma once
 
-#include "mongo/bson/bsonobj.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/util/net/hostandport.h"
 
@@ -43,9 +42,12 @@ class OpTime;
 }
 
 /**
- * Returns true if 'cmdObj' has a 'writeConcern' field.
+ * If txn->getWriteConcern() indicates a durable commit level,
+ * marks the RecoveryUnit associated with "txn" appropriately.
+ * Provides a hint to the storage engine that
+ * particular operations will be waiting for their changes to become durable.
  */
-bool commandSpecifiesWriteConcern(const BSONObj& cmdObj);
+void setupSynchronousCommit(OperationContext* txn);
 
 /**
  * Attempts to extract a writeConcern from cmdObj.
@@ -57,11 +59,11 @@ StatusWith<WriteConcernOptions> extractWriteConcern(OperationContext* txn,
                                                     const std::string& dbName);
 
 /**
- * Verifies that a WriteConcern is valid for this particular host and database.
+ * Verifies that a WriteConcern is valid for this particular host.
  */
 Status validateWriteConcern(OperationContext* txn,
                             const WriteConcernOptions& writeConcern,
-                            StringData dbName);
+                            const std::string& dbName);
 
 struct WriteConcernResult {
     WriteConcernResult() {

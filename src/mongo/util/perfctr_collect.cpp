@@ -50,7 +50,6 @@ HANDLE hPdhLibrary = nullptr;
  * Load PDH.DLL for good error messages.
  */
 MONGO_INITIALIZER(PdhInit)(InitializerContext* context) {
-
     hPdhLibrary = LoadLibraryW(L"pdh.dll");
     if (nullptr == hPdhLibrary) {
         DWORD gle = GetLastError();
@@ -126,7 +125,6 @@ bool counterHasTickBasedTimeBase(uint32_t type) {
 
 StatusWith<std::vector<std::string>> PerfCounterCollection::checkCounters(
     StringData name, const std::vector<StringData>& paths) {
-
     if (_counters.find(name.toString()) != _counters.end() ||
         _nestedCounters.find(name.toString()) != _nestedCounters.end()) {
         return Status(ErrorCodes::BadValue, str::stream() << "Duplicate group name for " << name);
@@ -148,7 +146,6 @@ StatusWith<std::vector<std::string>> PerfCounterCollection::checkCounters(
 
 Status PerfCounterCollection::addCountersGroup(StringData name,
                                                const std::vector<StringData>& paths) {
-
     auto swCounters = checkCounters(name, paths);
     if (!swCounters.getStatus().isOK()) {
         return swCounters.getStatus();
@@ -161,7 +158,6 @@ Status PerfCounterCollection::addCountersGroup(StringData name,
 
 Status PerfCounterCollection::addCountersGroupedByInstanceName(
     StringData name, const std::vector<StringData>& paths) {
-
     auto swCounters = checkCounters(name, paths);
     if (!swCounters.getStatus().isOK()) {
         return swCounters.getStatus();
@@ -215,7 +211,6 @@ PerfCounterCollector::~PerfCounterCollector() {
 }
 
 Status PerfCounterCollector::open() {
-
     PDH_STATUS status = PdhOpenQueryW(nullptr, NULL, &_query);
     if (status != ERROR_SUCCESS) {
         return {ErrorCodes::WindowsPdhError, formatFunctionCallError("PdhOpenQueryW", status)};
@@ -225,7 +220,6 @@ Status PerfCounterCollector::open() {
 }
 
 StatusWith<PerfCounterCollector::CounterInfo> PerfCounterCollector::addCounter(StringData path) {
-
     PDH_HCOUNTER counter{0};
 
     PDH_STATUS status =
@@ -295,9 +289,7 @@ StatusWith<std::vector<PerfCounterCollector::CounterInfo>> PerfCounterCollector:
     if (status != PDH_MORE_DATA) {
         return {ErrorCodes::WindowsPdhError,
                 str::stream() << formatFunctionCallError("PdhExpandCounterPathW", status)
-                              << " for counter '"
-                              << path
-                              << "'"};
+                              << " for counter '" << path << "'"};
     }
 
     auto buf = stdx::make_unique<wchar_t[]>(pathListLength);
@@ -325,7 +317,6 @@ StatusWith<std::vector<PerfCounterCollector::CounterInfo>> PerfCounterCollector:
     std::sort(counterNames.begin(), counterNames.end());
 
     for (const auto& name : counterNames) {
-
         auto swCounterInfo = addCounter(name);
         if (!swCounterInfo.isOK()) {
             return swCounterInfo.getStatus();
@@ -396,7 +387,6 @@ Status PerfCounterCollector::addCountersGroupedByInstanceName(
 Status PerfCounterCollector::collectCounters(const std::vector<CounterInfo>& counters,
                                              BSONObjBuilder* builder) {
     for (const auto& counterInfo : counters) {
-
         DWORD dwType = 0;
 
         // Elapsed Time is an unusual counter in that being able to control the sample period for
@@ -414,7 +404,6 @@ Status PerfCounterCollector::collectCounters(const std::vector<CounterInfo>& cou
             builder->append(counterInfo.firstName, counterValue.doubleValue);
 
         } else {
-
             PDH_RAW_COUNTER rawCounter = {0};
             PDH_STATUS status = PdhGetRawCounterValue(counterInfo.handle, &dwType, &rawCounter);
             if (status != ERROR_SUCCESS) {

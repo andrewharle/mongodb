@@ -32,7 +32,6 @@
 
 #include "mongo/base/string_data.h"
 #include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/index/multikey_paths.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/record_id.h"
 
@@ -64,35 +63,22 @@ public:
 
     virtual BSONObj getIndexSpec(OperationContext* txn, StringData idxName) const = 0;
 
-    virtual void getReadyIndexes(OperationContext* txn, std::vector<std::string>* names) const = 0;
+    virtual bool isIndexMultikey(OperationContext* txn, StringData indexName) const = 0;
 
-    /**
-     * Returns true if the index identified by 'indexName' is multikey, and returns false otherwise.
-     *
-     * If the 'multikeyPaths' pointer is non-null, then it must point to an empty vector. If this
-     * index supports tracking path-level multikey information, then this function sets
-     * 'multikeyPaths' as the path components that cause this index to be multikey.
-     *
-     * In particular, if this function returns false and the index supports tracking path-level
-     * multikey information, then 'multikeyPaths' is initialized as a vector with size equal to the
-     * number of elements in the index key pattern of empty sets.
-     */
-    virtual bool isIndexMultikey(OperationContext* txn,
-                                 StringData indexName,
-                                 MultikeyPaths* multikeyPaths) const = 0;
-
-    /**
-     * Sets the index identified by 'indexName' to be multikey.
-     *
-     * If 'multikeyPaths' is non-empty, then it must be a vector with size equal to the number of
-     * elements in the index key pattern. Additionally, at least one path component of the indexed
-     * fields must cause this index to be multikey.
-     *
-     * This function returns true if the index metadata has changed, and returns false otherwise.
-     */
     virtual bool setIndexIsMultikey(OperationContext* txn,
                                     StringData indexName,
-                                    const MultikeyPaths& multikeyPaths) = 0;
+                                    bool multikey = true) = 0;
+
+    /**
+     * Removes metadata about which path components cause an index to be multikey from all indexes
+     * that exist on this collection.
+     *
+     * This function is used to support downgrading from 3.4.
+     *
+     * This function should be overridden if the storage engine supports path-level multikey
+     * tracking.
+     */
+    virtual void removePathLevelMultikeyInfoFromAllIndexes(OperationContext* txn) {}
 
     virtual RecordId getIndexHead(OperationContext* txn, StringData indexName) const = 0;
 

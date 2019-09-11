@@ -10,7 +10,10 @@
 
 var $config = (function() {
 
-    var data = {numSplitPoints: 100, shardKey: {key: 1}};
+    var data = {
+        numSplitPoints: 100,
+        shardKey: {key: 1}
+    };
 
     var states = {
 

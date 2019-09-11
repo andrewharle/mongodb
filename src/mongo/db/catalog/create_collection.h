@@ -29,19 +29,13 @@
 #include <string>
 
 #include "mongo/base/status.h"
-#include "mongo/bson/bsonobj.h"
 
 namespace mongo {
 class BSONObj;
 class OperationContext;
 
 /**
- * Creates a collection as described in "cmdObj" on the database "dbName". Creates the collection's
- * _id index according to 'idIndex', if it is non-empty. When 'idIndex' is empty, creates the
- * default _id index.
+ * Creates a collection as described in "cmdObj" on the database "dbName".
  */
-Status createCollection(OperationContext* txn,
-                        const std::string& dbName,
-                        const BSONObj& cmdObj,
-                        const BSONObj& idIndex = BSONObj());
+Status createCollection(OperationContext* txn, const std::string& dbName, const BSONObj& cmdObj);
 }  // namespace mongo

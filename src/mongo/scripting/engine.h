@@ -29,8 +29,8 @@
 
 #pragma once
 
-#include "mongo/db/jsobj.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/jsobj.h"
 #include "mongo/platform/atomic_word.h"
 
 namespace mongo {
@@ -44,7 +44,7 @@ class OperationContext;
 
 struct JSFile {
     const char* name;
-    const StringData source;
+    const StringData& source;
 };
 
 class Scope {
@@ -74,10 +74,12 @@ public:
     virtual std::string getString(const char* field) = 0;
     virtual bool getBoolean(const char* field) = 0;
     virtual double getNumber(const char* field) = 0;
-    virtual int getNumberInt(const char* field) = 0;
-
-    virtual long long getNumberLongLong(const char* field) = 0;
-
+    virtual int getNumberInt(const char* field) {
+        return (int)getNumber(field);
+    }
+    virtual long long getNumberLongLong(const char* field) {
+        return static_cast<long long>(getNumber(field));
+    }
     virtual Decimal128 getNumberDecimal(const char* field) = 0;
 
     virtual void setElement(const char* field, const BSONElement& e, const BSONObj& parent) = 0;
@@ -247,9 +249,6 @@ public:
     virtual void enableJavaScriptProtection(bool value) = 0;
     virtual bool isJavaScriptProtectionEnabled() const = 0;
 
-    virtual int getJSHeapLimitMB() const = 0;
-    virtual void setJSHeapLimitMB(int limit) = 0;
-
     static void setup();
     static void dropScopeCache();
 
@@ -294,6 +293,7 @@ void installGlobalUtils(Scope& scope);
 bool hasJSReturn(const std::string& s);
 const char* jsSkipWhiteSpace(const char* raw);
 
-ScriptEngine* getGlobalScriptEngine();
-void setGlobalScriptEngine(ScriptEngine* impl);
+DBClientBase* createDirectClient(OperationContext* txn);
+
+extern ScriptEngine* globalScriptEngine;
 }

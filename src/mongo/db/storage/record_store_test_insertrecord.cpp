@@ -28,8 +28,6 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/storage/record_store_test_harness.h"
 
 
@@ -52,14 +50,14 @@ TEST(RecordStoreTestHarness, InsertRecord) {
     unique_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
 
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(0, rs->numRecords(opCtx.get()));
     }
 
     string data = "my record";
     RecordId loc;
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             StatusWith<RecordId> res =
@@ -71,7 +69,7 @@ TEST(RecordStoreTestHarness, InsertRecord) {
     }
 
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(1, rs->numRecords(opCtx.get()));
     }
 }
@@ -83,14 +81,14 @@ TEST(RecordStoreTestHarness, InsertMultipleRecords) {
     unique_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
 
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(0, rs->numRecords(opCtx.get()));
     }
 
     const int nToInsert = 10;
     RecordId locs[nToInsert];
     for (int i = 0; i < nToInsert; i++) {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             stringstream ss;
             ss << "record " << i;
@@ -106,7 +104,7 @@ TEST(RecordStoreTestHarness, InsertMultipleRecords) {
     }
 
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(nToInsert, rs->numRecords(opCtx.get()));
     }
 }
@@ -118,18 +116,18 @@ TEST(RecordStoreTestHarness, InsertRecordUsingDocWriter) {
     unique_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
 
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(0, rs->numRecords(opCtx.get()));
     }
 
     RecordId loc;
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             StringDocWriter docWriter("my record", false);
 
             WriteUnitOfWork uow(opCtx.get());
-            StatusWith<RecordId> res = rs->insertRecordWithDocWriter(opCtx.get(), &docWriter);
+            StatusWith<RecordId> res = rs->insertRecord(opCtx.get(), &docWriter, false);
             ASSERT_OK(res.getStatus());
             loc = res.getValue();
             uow.commit();
@@ -137,7 +135,7 @@ TEST(RecordStoreTestHarness, InsertRecordUsingDocWriter) {
     }
 
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(1, rs->numRecords(opCtx.get()));
     }
 }
@@ -149,21 +147,21 @@ TEST(RecordStoreTestHarness, InsertMultipleRecordsUsingDocWriter) {
     unique_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
 
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(0, rs->numRecords(opCtx.get()));
     }
 
     const int nToInsert = 10;
     RecordId locs[nToInsert];
     for (int i = 0; i < nToInsert; i++) {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             stringstream ss;
             ss << "record " << i;
             StringDocWriter docWriter(ss.str(), false);
 
             WriteUnitOfWork uow(opCtx.get());
-            StatusWith<RecordId> res = rs->insertRecordWithDocWriter(opCtx.get(), &docWriter);
+            StatusWith<RecordId> res = rs->insertRecord(opCtx.get(), &docWriter, false);
             ASSERT_OK(res.getStatus());
             locs[i] = res.getValue();
             uow.commit();
@@ -171,7 +169,7 @@ TEST(RecordStoreTestHarness, InsertMultipleRecordsUsingDocWriter) {
     }
 
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(nToInsert, rs->numRecords(opCtx.get()));
     }
 }

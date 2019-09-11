@@ -2,13 +2,16 @@
 
 var coll = 'points';
 
-function test(st, db, sharded, indexType) {
+function test(db, sharded, indexType) {
     printjson(db);
     db[coll].drop();
 
     if (sharded) {
-        var shards = [st.shard0, st.shard1, st.shard2];
+        var shards = [];
         var config = shardedDB.getSiblingDB("config");
+        config.shards.find().forEach(function(shard) {
+            shards.push(shard._id);
+        });
 
         shardedDB.adminCommand({shardCollection: shardedDB[coll].getFullName(), key: {rand: 1}});
         for (var i = 1; i < 10; i++) {
@@ -17,14 +20,13 @@ function test(st, db, sharded, indexType) {
             shardedDB.adminCommand({
                 moveChunk: shardedDB[coll].getFullName(),
                 find: {rand: i / 10},
-                to: shards[i % shards.length].shardName
+                to: shards[i % shards.length]
             });
         }
 
         assert.eq(config.chunks.count({'ns': shardedDB[coll].getFullName()}), 10);
     }
 
-    Random.setRandomSeed();
     var numPts = 10 * 1000;
     for (var i = 0; i < numPts; i++) {
         var lat = 90 - Random.rand() * 180;
@@ -36,7 +38,12 @@ function test(st, db, sharded, indexType) {
     assert.commandWorked(db[coll].ensureIndex({loc: indexType}));
 
     var queryPoint = [0, 0];
-    geoCmd = {geoNear: coll, near: queryPoint, spherical: true, includeLocs: true};
+    geoCmd = {
+        geoNear: coll,
+        near: queryPoint,
+        spherical: true,
+        includeLocs: true
+    };
     assert.commandWorked(db.runCommand(geoCmd), tojson({sharded: sharded, indexType: indexType}));
 }
 
@@ -47,5 +54,5 @@ var shardedDB = sharded.getDB('test');
 sharded.ensurePrimaryShard('test', 'shard0001');
 printjson(shardedDB);
 
-test(sharded, shardedDB, true, '2dsphere');
+test(shardedDB, true, '2dsphere');
 sharded.stop();

@@ -32,8 +32,7 @@ for (var i = 0; i < config.members.length; i++) {
         break;
     }
 }
-var nextVersion = replTest.getReplSetConfigFromNode().version + 1;
-config.version = nextVersion;
+config.version = 2;
 
 assert.eq(secondary.getDB("admin").runCommand({ping: 1}).ok,
           1,
@@ -56,20 +55,20 @@ assert.soon(function() {
 });
 
 // Now we should successfully reconnect to the secondary.
-assert.eq(
-    secondary.getDB("admin").runCommand({ping: 1}).ok, 1, "we aren't connected to the secondary");
+assert.eq(secondary.getDB("admin").runCommand({ping: 1}).ok,
+          1,
+          "we aren't connected to the secondary");
 
 reconnect(master);
 
 assert.soon(function() {
     var c = master.getDB("local").system.replset.findOne();
-    return c.version == nextVersion;
+    return c.version == 2;
 });
 
 print("Add it back as a secondary");
 config.members.push({_id: 2, host: secondary.host});
-nextVersion++;
-config.version = nextVersion;
+config.version = 3;
 // Need to keep retrying reconfig here, as it will not work at first due to the primary's
 // perception that the secondary is still "down".
 assert.soon(function() {
@@ -81,11 +80,10 @@ assert.soon(function() {
     }
 });
 master = replTest.getPrimary();
-secondary = replTest.getSecondary();
 printjson(master.getDB("admin").runCommand({replSetGetStatus: 1}));
 var newConfig = master.getDB("local").system.replset.findOne();
 print("newConfig: " + tojson(newConfig));
-assert.eq(newConfig.version, nextVersion);
+assert.eq(newConfig.version, 3);
 
 print("reconfig with minority");
 replTest.stop(secondary);
@@ -98,9 +96,8 @@ assert.soon(function() {
     }
 }, "waiting for primary to step down", (60 * 1000), 1000);
 
-nextVersion++;
-config.version = nextVersion;
-config.members = config.members.filter(node => node.host == master.host);
+config.version = 4;
+config.members.pop();
 try {
     master.getDB("admin").runCommand({replSetReconfig: config, force: true});
 } catch (e) {
@@ -114,6 +111,6 @@ assert.soon(function() {
 
 config = master.getDB("local").system.replset.findOne();
 printjson(config);
-assert.gt(config.version, nextVersion);
+assert.gt(config.version, 4);
 
 replTest.stopSet();

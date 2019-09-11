@@ -35,7 +35,6 @@
 #include <cmath>
 #include <cstdio>
 #include <js/CharacterEncoding.h>
-#include <js/Date.h>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/platform/decimal128.h"
@@ -97,7 +96,21 @@ void ValueReader::fromBSONElement(const BSONElement& elem, const BSONObj& parent
             _value.setInt32(elem.Int());
             return;
         case mongo::Array: {
-            fromBSONArray(elem.embeddedObject(), &parent, readOnly);
+            JS::AutoValueVector avv(_context);
+
+            BSONForEach(subElem, elem.embeddedObject()) {
+                JS::RootedValue member(_context);
+
+                ValueReader(_context, &member).fromBSONElement(subElem, parent, readOnly);
+                if (!avv.append(member)) {
+                    uasserted(ErrorCodes::JSInterpreterFailure, "Failed to append to JS array");
+                }
+            }
+            JS::RootedObject array(_context, JS_NewArrayObject(_context, avv));
+            if (!array) {
+                uasserted(ErrorCodes::JSInterpreterFailure, "Failed to JS_NewArrayObject");
+            }
+            _value.setObjectOrNull(array);
             return;
         }
         case mongo::Object:
@@ -105,7 +118,7 @@ void ValueReader::fromBSONElement(const BSONElement& elem, const BSONObj& parent
             return;
         case mongo::Date:
             _value.setObjectOrNull(
-                JS::NewDateObject(_context, JS::TimeClip(elem.Date().toMillisSinceEpoch())));
+                JS_NewDateObjectMsec(_context, elem.Date().toMillisSinceEpoch()));
             return;
         case mongo::Bool:
             _value.setBoolean(elem.Bool());
@@ -159,10 +172,28 @@ void ValueReader::fromBSONElement(const BSONElement& elem, const BSONObj& parent
             return;
         }
         case mongo::NumberLong: {
-            JS::RootedObject thisv(_context);
-            scope->getProto<NumberLongInfo>().newObject(&thisv);
-            JS_SetPrivate(thisv, scope->trackedNew<int64_t>(elem.numberLong()));
-            _value.setObjectOrNull(thisv);
+            unsigned long long nativeUnsignedLong = elem.numberLong();
+            // values above 2^53 are not accurately represented in JS
+            if (static_cast<long long>(nativeUnsignedLong) ==
+                    static_cast<long long>(
+                        static_cast<double>(static_cast<long long>(nativeUnsignedLong))) &&
+                nativeUnsignedLong < 9007199254740992ULL) {
+                JS::AutoValueArray<1> args(_context);
+                ValueReader(_context, args[0])
+                    .fromDouble(static_cast<double>(static_cast<long long>(nativeUnsignedLong)));
+
+                scope->getProto<NumberLongInfo>().newInstance(args, _value);
+            } else {
+                JS::AutoValueArray<3> args(_context);
+                ValueReader(_context, args[0])
+                    .fromDouble(static_cast<double>(static_cast<long long>(nativeUnsignedLong)));
+                ValueReader(_context, args[1]).fromDouble(nativeUnsignedLong >> 32);
+                ValueReader(_context, args[2])
+                    .fromDouble(
+                        static_cast<unsigned long>(nativeUnsignedLong & 0x00000000ffffffff));
+                scope->getProto<NumberLongInfo>().newInstance(args, _value);
+            }
+
             return;
         }
         case mongo::NumberDecimal: {
@@ -238,24 +269,6 @@ void ValueReader::fromBSON(const BSONObj& obj, const BSONObj* parent, bool readO
     BSONInfo::make(_context, &child, obj, parent, readOnly);
 
     _value.setObjectOrNull(child);
-}
-
-void ValueReader::fromBSONArray(const BSONObj& obj, const BSONObj* parent, bool readOnly) {
-    JS::AutoValueVector avv(_context);
-
-    BSONForEach(elem, obj) {
-        JS::RootedValue member(_context);
-
-        ValueReader(_context, &member).fromBSONElement(elem, parent ? *parent : obj, readOnly);
-        if (!avv.append(member)) {
-            uasserted(ErrorCodes::JSInterpreterFailure, "Failed to append to JS array");
-        }
-    }
-    JS::RootedObject array(_context, JS_NewArrayObject(_context, avv));
-    if (!array) {
-        uasserted(ErrorCodes::JSInterpreterFailure, "Failed to JS_NewArrayObject");
-    }
-    _value.setObjectOrNull(array);
 }
 
 /**

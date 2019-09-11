@@ -35,7 +35,6 @@
 
 #include "mongo/base/data_range_cursor.h"
 #include "mongo/base/data_type_validated.h"
-#include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/rpc/object_check.h"
 #include "mongo/util/net/message.h"
 
@@ -54,9 +53,7 @@ CommandReply::CommandReply(const Message* message) : _message(message) {
     ConstDataRangeCursor cur(begin, messageEnd);
 
     _commandReply = uassertStatusOK(cur.readAndAdvance<Validated<BSONObj>>()).val;
-    _commandReply.shareOwnershipWith(message->sharedBuffer());
     _metadata = uassertStatusOK(cur.readAndAdvance<Validated<BSONObj>>()).val;
-    _metadata.shareOwnershipWith(message->sharedBuffer());
     _outputDocs = DocumentRange(cur.data(), messageEnd);
 }
 
@@ -77,10 +74,8 @@ Protocol CommandReply::getProtocol() const {
 }
 
 bool operator==(const CommandReply& lhs, const CommandReply& rhs) {
-    SimpleBSONObjComparator bsonComparator;
-    return bsonComparator.evaluate(lhs._metadata == rhs._metadata) &&
-        bsonComparator.evaluate(lhs._commandReply == rhs._commandReply) &&
-        (lhs._outputDocs == rhs._outputDocs);
+    return std::tie(lhs._metadata, lhs._commandReply, lhs._outputDocs) ==
+        std::tie(rhs._metadata, rhs._commandReply, rhs._outputDocs);
 }
 
 bool operator!=(const CommandReply& lhs, const CommandReply& rhs) {

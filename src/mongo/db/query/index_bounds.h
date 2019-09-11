@@ -37,13 +37,6 @@
 
 namespace mongo {
 
-enum class BoundInclusion {
-    kExcludeBothStartAndEndKeys,
-    kIncludeStartKeyOnly,
-    kIncludeEndKeyOnly,
-    kIncludeBothStartAndEndKeys
-};
-
 /**
  * An ordered list of intervals for one field.
  */
@@ -74,15 +67,6 @@ struct OrderedIntervalList {
 
     bool operator==(const OrderedIntervalList& other) const;
     bool operator!=(const OrderedIntervalList& other) const;
-
-    void reverse();
-
-    /**
-     * Return a clone of this OIL, that is reversed.
-     */
-    OrderedIntervalList reverseClone() const;
-
-    Interval::Direction computeDirection() const;
 };
 
 /**
@@ -90,7 +74,7 @@ struct OrderedIntervalList {
  * interpret.  Previously known as FieldRangeVector.
  */
 struct IndexBounds {
-    IndexBounds() : isSimpleRange(false), boundInclusion(BoundInclusion::kIncludeStartKeyOnly) {}
+    IndexBounds() : isSimpleRange(false), endKeyInclusive(false) {}
 
     // For each indexed field, the values that the field is allowed to take on.
     std::vector<OrderedIntervalList> fields;
@@ -117,31 +101,6 @@ struct IndexBounds {
     bool operator!=(const IndexBounds& other) const;
 
     /**
-     * Returns if the start key should be included in the bounds specified by the given
-     * BoundInclusion.
-     */
-    static bool isStartIncludedInBound(BoundInclusion boundInclusion);
-
-    /**
-     * Returns if the end key should be included in the bounds specified by the given
-     * BoundInclusion.
-     */
-    static bool isEndIncludedInBound(BoundInclusion boundInclusion);
-
-    /**
-     * Returns a BoundInclusion given two booleans of whether to included the start key and the end
-     * key.
-     */
-    static BoundInclusion makeBoundInclusionFromBoundBools(bool startKeyInclusive,
-                                                           bool endKeyInclusive);
-
-    /**
-     * Reverse the BoundInclusion.
-     */
-    static BoundInclusion reverseBoundInclusion(BoundInclusion b);
-
-
-    /**
      * BSON format for explain. The format is an array of strings for each field.
      * Each string represents an interval. The strings use "[" and "]" if the interval
      * bounds are inclusive, and "(" / ")" if exclusive.
@@ -151,17 +110,11 @@ struct IndexBounds {
      */
     BSONObj toBSON() const;
 
-    /**
-     * Return a copy of the index bounds, but with each of the OILs going in the ascending
-     * direction.
-     */
-    IndexBounds forwardize() const;
-
     // TODO: we use this for max/min scan.  Consider migrating that.
     bool isSimpleRange;
     BSONObj startKey;
     BSONObj endKey;
-    BoundInclusion boundInclusion;
+    bool endKeyInclusive;
 };
 
 /**

@@ -50,14 +50,12 @@
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/auth/sasl_options.h"
 #include "mongo/db/auth/security_key.h"
-#include "mongo/db/client.h"
+#include "mongo/db/client_basic.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/db/operation_context.h"
 #include "mongo/db/server_options.h"
 #include "mongo/platform/random.h"
 #include "mongo/stdx/memory.h"
-#include "mongo/transport/session.h"
 #include "mongo/util/concurrency/mutex.h"
 #include "mongo/util/log.h"
 #include "mongo/util/md5.hpp"
@@ -107,7 +105,7 @@ public:
     void help(stringstream& h) const {
         h << "internal";
     }
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    virtual bool isWriteCommandForConfigServer() const {
         return false;
     }
     virtual void addRequiredPrivileges(const std::string& dbname,
@@ -123,7 +121,7 @@ public:
         stringstream ss;
         ss << hex << n;
         result.append("nonce", ss.str());
-        AuthenticationSession::set(Client::getCurrent(),
+        AuthenticationSession::set(ClientBasic::getCurrent(),
                                    stdx::make_unique<MongoAuthenticationSession>(n));
         return true;
     }
@@ -162,18 +160,8 @@ bool CmdAuthenticate::run(OperationContext* txn,
         redactForLogging(&cmdToLog);
         log() << " authenticate db: " << dbname << " " << cmdToLog;
     }
-    std::string mechanism = cmdObj.getStringField("mechanism");
-    if (mechanism.empty()) {
-        mechanism = "MONGODB-CR";
-    }
 
     UserName user(cmdObj.getStringField("user"), dbname);
-#ifdef MONGO_CONFIG_SSL
-    if (mechanism == "MONGODB-X509" && user.getUser().empty()) {
-        auto sslPeerInfo = txn->getClient()->session()->getX509PeerInfo();
-        user = UserName(sslPeerInfo.subjectName.toString(), dbname);
-    }
-#endif
     uassert(ErrorCodes::AuthenticationFailed, "No user name provided", !user.getUser().empty());
 
     if (Command::testCommandsEnabled && user.getDB() == "admin" &&
@@ -184,8 +172,12 @@ bool CmdAuthenticate::run(OperationContext* txn,
         user = internalSecurity.user->getName();
     }
 
+    std::string mechanism = cmdObj.getStringField("mechanism");
+    if (mechanism.empty()) {
+        mechanism = "MONGODB-CR";
+    }
     Status status = _authenticate(txn, mechanism, user, cmdObj);
-    audit::logAuthentication(Client::getCurrent(), mechanism, user, status.code());
+    audit::logAuthentication(ClientBasic::getCurrent(), mechanism, user, status.code());
     if (!status.isOK()) {
         if (!serverGlobalParams.quiet) {
             log() << "Failed to authenticate " << user << " with mechanism " << mechanism << ": "
@@ -250,7 +242,7 @@ Status CmdAuthenticate::_authenticateCR(OperationContext* txn,
     stringstream digestBuilder;
 
     {
-        Client* client = Client::getCurrent();
+        ClientBasic* client = ClientBasic::getCurrent();
         std::unique_ptr<AuthenticationSession> session;
         AuthenticationSession::swap(client, session);
         if (!session || session->getType() != AuthenticationSession::SESSION_TYPE_MONGO) {
@@ -299,7 +291,8 @@ Status CmdAuthenticate::_authenticateCR(OperationContext* txn,
         return Status(ErrorCodes::AuthenticationFailed, "key mismatch");
     }
 
-    AuthorizationSession* authorizationSession = AuthorizationSession::get(Client::getCurrent());
+    AuthorizationSession* authorizationSession =
+        AuthorizationSession::get(ClientBasic::getCurrent());
     status = authorizationSession->addAndAuthorizeUser(txn, user);
     if (!status.isOK()) {
         return status;
@@ -321,22 +314,22 @@ Status CmdAuthenticate::_authenticateX509(OperationContext* txn,
                       "X.509 authentication must always use the $external database.");
     }
 
-    Client* client = Client::getCurrent();
+    ClientBasic* client = ClientBasic::getCurrent();
     AuthorizationSession* authorizationSession = AuthorizationSession::get(client);
-    auto clientName = client->session()->getX509PeerInfo().subjectName;
+    std::string clientSubjectName = client->port()->getX509SubjectName();
     uassert(ErrorCodes::AuthenticationFailed,
             "No verified subject name available from client",
-            !clientName.empty());
+            !clientSubjectName.empty());
 
     if (!getSSLManager()->getSSLConfiguration().hasCA) {
         return Status(ErrorCodes::AuthenticationFailed,
                       "Unable to verify x.509 certificate, as no CA has been provided.");
-    } else if (user.getUser() != clientName.toString()) {
+    } else if (user.getUser() != clientSubjectName) {
         return Status(ErrorCodes::AuthenticationFailed,
                       "There is no x.509 client certificate matching the user.");
     } else {
         // Handle internal cluster member auth, only applies to server-server connections
-        if (getSSLManager()->getSSLConfiguration().isClusterMember(clientName)) {
+        if (getSSLManager()->getSSLConfiguration().isClusterMember(clientSubjectName)) {
             int clusterAuthMode = serverGlobalParams.clusterAuthMode.load();
             if (clusterAuthMode == ServerGlobalParams::ClusterAuthMode_undefined ||
                 clusterAuthMode == ServerGlobalParams::ClusterAuthMode_keyFile) {
@@ -375,7 +368,7 @@ public:
     void help(stringstream& h) const {
         h << "de-authenticate";
     }
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    virtual bool isWriteCommandForConfigServer() const {
         return false;
     }
     CmdLogout() : Command("logout") {}
@@ -385,7 +378,7 @@ public:
              int options,
              string& errmsg,
              BSONObjBuilder& result) {
-        AuthorizationSession* authSession = AuthorizationSession::get(Client::getCurrent());
+        AuthorizationSession* authSession = AuthorizationSession::get(ClientBasic::getCurrent());
         authSession->logoutDatabase(dbname);
         if (Command::testCommandsEnabled && dbname == "admin") {
             // Allows logging out as the internal user against the admin database, however

@@ -37,6 +37,7 @@
 #include "mongo/base/string_data.h"
 #include "mongo/bson/util/bson_extract.h"
 #include "mongo/client/sasl_client_authenticate.h"
+#include "mongo/db/commands.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authorization_manager_global.h"
 #include "mongo/db/auth/authorization_session.h"
@@ -45,7 +46,6 @@
 #include "mongo/db/auth/sasl_options.h"
 #include "mongo/db/auth/sasl_plain_server_conversation.h"
 #include "mongo/db/auth/sasl_scramsha1_server_conversation.h"
-#include "mongo/db/commands.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/mongoutils/str.h"
@@ -56,8 +56,7 @@ using std::unique_ptr;
 
 namespace {
 SaslAuthenticationSession* createNativeSaslAuthenticationSession(AuthorizationSession* authzSession,
-                                                                 StringData db,
-                                                                 StringData mechanism) {
+                                                                 const std::string& mechanism) {
     return new NativeSaslAuthenticationSession(authzSession);
 }
 
@@ -84,7 +83,7 @@ MONGO_INITIALIZER_WITH_PREREQUISITES(PostSaslCommands, ("NativeSaslServerCore"))
             continue;
         }
         unique_ptr<SaslAuthenticationSession> session(
-            SaslAuthenticationSession::create(authzSession.get(), "$external", mechanism));
+            SaslAuthenticationSession::create(authzSession.get(), mechanism));
         Status status = session->start(
             "test", mechanism, saslGlobalParams.serviceName, saslGlobalParams.hostName, 1, true);
         if (!status.isOK())

@@ -61,7 +61,11 @@ var $config = (function() {
             }
         }
 
-        return {insert: insert, explain: explain, explainNonExistentNS: explainNonExistentNS};
+        return {
+            insert: insert,
+            explain: explain,
+            explainNonExistentNS: explainNonExistentNS
+        };
 
     })();
 

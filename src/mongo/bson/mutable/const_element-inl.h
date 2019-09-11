@@ -165,21 +165,17 @@ inline SafeNum ConstElement::getValueSafeNum() const {
 }
 
 inline int ConstElement::compareWithElement(const ConstElement& other,
-                                            const StringData::ComparatorInterface* comparator,
                                             bool considerFieldName) const {
-    return _basis.compareWithElement(other, comparator, considerFieldName);
+    return _basis.compareWithElement(other, considerFieldName);
 }
 
 inline int ConstElement::compareWithBSONElement(const BSONElement& other,
-                                                const StringData::ComparatorInterface* comparator,
                                                 bool considerFieldName) const {
-    return _basis.compareWithBSONElement(other, comparator, considerFieldName);
+    return _basis.compareWithBSONElement(other, considerFieldName);
 }
 
-inline int ConstElement::compareWithBSONObj(const BSONObj& other,
-                                            const StringData::ComparatorInterface* comparator,
-                                            bool considerFieldName) const {
-    return _basis.compareWithBSONObj(other, comparator, considerFieldName);
+inline int ConstElement::compareWithBSONObj(const BSONObj& other, bool considerFieldName) const {
+    return _basis.compareWithBSONObj(other, considerFieldName);
 }
 
 inline void ConstElement::writeTo(BSONObjBuilder* builder) const {

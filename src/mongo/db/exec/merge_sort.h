@@ -39,7 +39,6 @@
 
 namespace mongo {
 
-class CollatorInterface;
 // External params for the merge sort stage.  Declared below.
 class MergeSortStageParams;
 
@@ -64,7 +63,7 @@ public:
     void addChild(PlanStage* child);
 
     bool isEOF() final;
-    StageState doWork(WorkingSetID* out) final;
+    StageState work(WorkingSetID* out) final;
 
     void doInvalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) final;
 
@@ -87,10 +86,6 @@ private:
 
     // The pattern that we're sorting by.
     BSONObj _pattern;
-
-    // Null if this merge sort stage orders strings according to simple binary compare. If non-null,
-    // represents the collator used to compare strings.
-    const CollatorInterface* _collator;
 
     // Are we deduplicating on RecordId?
     bool _dedup;
@@ -127,8 +122,7 @@ private:
     // The comparison function used in our priority queue.
     class StageWithValueComparison {
     public:
-        StageWithValueComparison(WorkingSet* ws, BSONObj pattern, const CollatorInterface* collator)
-            : _ws(ws), _pattern(pattern), _collator(collator) {}
+        StageWithValueComparison(WorkingSet* ws, BSONObj pattern) : _ws(ws), _pattern(pattern) {}
 
         // Is lhs less than rhs?  Note that priority_queue is a max heap by default so we invert
         // the return from the expected value.
@@ -137,7 +131,6 @@ private:
     private:
         WorkingSet* _ws;
         BSONObj _pattern;
-        const CollatorInterface* _collator;
     };
 
     // The min heap of the results we're returning.
@@ -153,14 +146,10 @@ private:
 // Parameters that must be provided to a MergeSortStage
 class MergeSortStageParams {
 public:
-    MergeSortStageParams() : collator(NULL), dedup(true) {}
+    MergeSortStageParams() : dedup(true) {}
 
     // How we're sorting.
     BSONObj pattern;
-
-    // Null if this merge sort stage orders strings according to simple binary compare. If non-null,
-    // represents the collator used to compare strings.
-    const CollatorInterface* collator;
 
     // Do we deduplicate on RecordId?
     bool dedup;

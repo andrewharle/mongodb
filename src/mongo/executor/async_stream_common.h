@@ -31,7 +31,6 @@
 #include <utility>
 
 #include "mongo/util/assert_util.h"
-#include "mongo/util/net/sock.h"
 
 namespace mongo {
 namespace executor {
@@ -94,7 +93,6 @@ void cancelStream(ASIOStream* stream) {
 
 void logFailureInSetStreamNonBlocking(std::error_code ec);
 void logFailureInSetStreamNoDelay(std::error_code ec);
-void logFailureInSetStreamKeepAlive(std::error_code ec);
 
 template <typename ASIOStream>
 std::error_code setStreamNonBlocking(ASIOStream* stream) {
@@ -113,17 +111,6 @@ std::error_code setStreamNoDelay(ASIOStream* stream) {
     if (ec) {
         logFailureInSetStreamNoDelay(ec);
     }
-    return ec;
-}
-
-template <typename ASIOStream>
-std::error_code setStreamKeepAlive(ASIOStream* stream) {
-    std::error_code ec;
-    stream->set_option(asio::socket_base::keep_alive(true), ec);
-    if (ec) {
-        logFailureInSetStreamKeepAlive(ec);
-    }
-    setSocketKeepAliveParams(stream->native_handle());
     return ec;
 }
 
@@ -146,8 +133,7 @@ bool checkIfStreamIsOpen(ASIOStream* stream, bool connected) {
         // If the read worked or we got EWOULDBLOCK or EAGAIN (since we are in non-blocking mode),
         // we assume the socket is still open.
         return true;
-    } else if (ec == asio::error::eof || ec == asio::error::connection_reset ||
-               ec == asio::error::network_reset) {
+    } else if (ec == asio::error::eof) {
         return false;
     }
     // We got a different error. Log it and return false so we throw the connection away.

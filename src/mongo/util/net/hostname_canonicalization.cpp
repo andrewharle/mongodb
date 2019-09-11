@@ -34,10 +34,10 @@
 
 #if !defined(_WIN32)
 #include <arpa/inet.h>
-#include <netdb.h>
 #include <netinet/in.h>
-#include <sys/socket.h>
 #include <sys/types.h>
+#include <sys/socket.h>
+#include <netdb.h>
 #endif
 
 #include "mongo/util/log.h"
@@ -88,8 +88,10 @@ std::vector<std::string> getHostFQDNs(std::string hostName, HostnameCanonicaliza
     shim_addrinfo* info;
     auto nativeHostName = shim_toNativeString(hostName.c_str());
     if ((err = shim_getaddrinfo(nativeHostName.c_str(), nullptr, &hints, &info)) != 0) {
-        LOG(3) << "Failed to obtain address information for hostname " << hostName << ": "
-               << getAddrInfoStrError(err);
+        ONCE {
+            warning() << "Failed to obtain address information for hostname " << hostName << ": "
+                      << getAddrInfoStrError(err);
+        }
         return results;
     }
     const auto guard = MakeGuard([&shim_freeaddrinfo, &info] { shim_freeaddrinfo(info); });
@@ -139,7 +141,9 @@ std::vector<std::string> getHostFQDNs(std::string hostName, HostnameCanonicaliza
     }
 
     if (encounteredErrors) {
-        LOG(3) << getNameInfoErrors.str() << " ]";
+        OCCASIONALLY {
+            warning() << getNameInfoErrors.str() << " ]";
+        }
     }
 
     // Deduplicate the results list

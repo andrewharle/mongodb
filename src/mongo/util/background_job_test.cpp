@@ -32,18 +32,25 @@
 #include "mongo/stdx/thread.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/background.h"
-#include "mongo/util/concurrency/notification.h"
+#include "mongo/util/concurrency/synchronization.h"
 #include "mongo/util/time_support.h"
 
-namespace mongo {
 namespace {
 
-class TestJob final : public BackgroundJob {
+using mongo::AtomicWord;
+using mongo::BackgroundJob;
+using mongo::MsgAssertionException;
+using mongo::stdx::mutex;
+using mongo::Notification;
+
+namespace stdx = mongo::stdx;
+
+class TestJob final : public mongo::BackgroundJob {
 public:
     TestJob(bool selfDelete,
             AtomicWord<bool>* flag,
-            Notification<void>* canProceed = nullptr,
-            Notification<void>* destructorInvoked = nullptr)
+            Notification* canProceed = nullptr,
+            Notification* destructorInvoked = nullptr)
         : BackgroundJob(selfDelete),
           _flag(flag),
           _canProceed(canProceed),
@@ -51,7 +58,7 @@ public:
 
     ~TestJob() override {
         if (_destructorInvoked)
-            _destructorInvoked->set();
+            _destructorInvoked->notifyOne();
     }
 
     std::string name() const override {
@@ -60,14 +67,14 @@ public:
 
     void run() override {
         if (_canProceed)
-            _canProceed->get();
+            _canProceed->waitToBeNotified();
         _flag->store(true);
     }
 
 private:
     AtomicWord<bool>* const _flag;
-    Notification<void>* const _canProceed;
-    Notification<void>* const _destructorInvoked;
+    Notification* const _canProceed;
+    Notification* const _destructorInvoked;
 };
 
 TEST(BackgroundJobBasic, NormalCase) {
@@ -80,24 +87,24 @@ TEST(BackgroundJobBasic, NormalCase) {
 
 TEST(BackgroundJobBasic, TimeOutCase) {
     AtomicWord<bool> flag(false);
-    Notification<void> canProceed;
+    Notification canProceed;
     TestJob tj(false, &flag, &canProceed);
     tj.go();
 
     ASSERT(!tj.wait(1000));
     ASSERT_EQUALS(false, flag.load());
 
-    canProceed.set();
+    canProceed.notifyOne();
     ASSERT(tj.wait());
     ASSERT_EQUALS(true, flag.load());
 }
 
 TEST(BackgroundJobBasic, SelfDeletingCase) {
     AtomicWord<bool> flag(false);
-    Notification<void> destructorInvoked;
+    Notification destructorInvoked;
     // Though it looks like one, this is not a leak since the job is self deleting.
     (new TestJob(true, &flag, nullptr, &destructorInvoked))->go();
-    destructorInvoked.get();
+    destructorInvoked.waitToBeNotified();
     ASSERT_EQUALS(true, flag.load());
 }
 
@@ -117,17 +124,17 @@ TEST(BackgroundJobLifeCycle, Go) {
                 _hasRun = true;
             }
 
-            _n.get();
+            _n.waitToBeNotified();
         }
 
         void notify() {
-            _n.set();
+            _n.notifyOne();
         }
 
     private:
-        stdx::mutex _mutex;
+        mutex _mutex;
         bool _hasRun;
-        Notification<void> _n;
+        Notification _n;
     };
 
     Job j;
@@ -148,4 +155,3 @@ TEST(BackgroundJobLifeCycle, Go) {
 }
 
 }  // namespace
-}  // namespace mongo

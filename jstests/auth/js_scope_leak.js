@@ -21,7 +21,8 @@ function missingOrEquals(string) {
         'var global = function(){return this;}.call();'
         // Uncomment the next line when debugging.
         // + 'print(global.hasOwnProperty("someGlobal") ? someGlobal : "MISSING" );'
-        + 'return !global.hasOwnProperty("someGlobal")' +
+        +
+        'return !global.hasOwnProperty("someGlobal")' +
         '    || someGlobal == unescape("' + escape(string) + '");' +
         '}()';
 }

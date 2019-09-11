@@ -239,11 +239,28 @@ bool BatchedCommandRequest::parseBSON(StringData dbName,
         return false;
 
     // Now parse out the chunk version and optime.
-    auto chunkVersion = ChunkVersion::parseFromBSONForCommands(source);
+    BSONObj metadataObj;
+    bool required = false;
+
+    BSONElement metadataElem;
+    Status metadataStatus = bsonExtractTypedField(source, "metadata", Object, &metadataElem);
+    if (metadataStatus.isOK()) {
+        // Old format, where the shard version is buried under a "metadata" field
+        metadataObj = metadataElem.Obj();
+        required = true;
+    } else if (metadataStatus == ErrorCodes::NoSuchKey) {
+        // New format, where the shard version could be on the first level
+        metadataObj = source;
+    } else {
+        *errMsg = causedBy(metadataStatus);
+        return false;
+    }
+
+    auto chunkVersion = ChunkVersion::parseFromBSONForCommands(metadataObj);
     if (chunkVersion.isOK()) {
         _shardVersion = chunkVersion.getValue();
         return true;
-    } else if (chunkVersion == ErrorCodes::NoSuchKey) {
+    } else if ((chunkVersion == ErrorCodes::NoSuchKey) && !required) {
         return true;
     }
 

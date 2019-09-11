@@ -147,7 +147,6 @@ def mongo_shell_program(logger, executable=None, connection_string=None, filenam
         elif opt_name not in test_data:
             # Only use 'opt_default' if the property wasn't set in the YAML configuration.
             test_data[opt_name] = opt_default
-
     global_vars["TestData"] = test_data
 
     # Pass setParameters for mongos and mongod through TestData. The setParameter parsing in

@@ -61,16 +61,13 @@ __alter_colgroup(
 {
 	WT_COLGROUP *colgroup;
 	WT_DECL_RET;
-	WT_TABLE *table;
 
 	WT_ASSERT(session, F_ISSET(session, WT_SESSION_LOCKED_TABLE));
 
 	/* If we can get the colgroup, perform any potential alterations. */
 	if ((ret = __wt_schema_get_colgroup(
-	    session, uri, false, &table, &colgroup)) == 0) {
+	    session, uri, false, NULL, &colgroup)) == 0)
 		WT_TRET(__wt_schema_alter(session, colgroup->source, cfg));
-		WT_TRET(__wt_schema_release_table(session, table));
-	}
 
 	return (ret);
 }
@@ -85,14 +82,11 @@ __alter_index(
 {
 	WT_INDEX *idx;
 	WT_DECL_RET;
-	WT_TABLE *table;
 
 	/* If we can get the index, perform any potential alterations. */
 	if ((ret = __wt_schema_get_index(
-	    session, uri, false, &table, &idx)) == 0) {
+	    session, uri, false, NULL, &idx)) == 0)
 		WT_TRET(__wt_schema_alter(session, idx->source, cfg));
-		WT_TRET(__wt_schema_release_table(session, table));
-	}
 
 	return (ret);
 }
@@ -133,8 +127,7 @@ __alter_table(WT_SESSION_IMPL *session, const char *uri, const char *cfg[])
 			WT_ERR(__wt_schema_alter(
 			    session, colgroup->source, cfg));
 		}
-
-err:	WT_TRET(__wt_schema_release_table(session, table));
+err:	__wt_schema_release_table(session, table);
 	return (ret);
 }
 

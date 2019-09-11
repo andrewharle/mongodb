@@ -44,7 +44,7 @@ namespace {
 /**
  * Name of FTDC collector to create.
  */
-constexpr auto kSystemMetricsCollector = "systemMetrics";
+auto kSystemMetricsCollector = "systemMetrics";
 
 }  // namespace
 

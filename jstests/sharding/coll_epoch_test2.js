@@ -19,7 +19,10 @@ var coll = st.s.getCollection("foo.bar");
 
 insertMongos.getDB("admin").runCommand({setParameter: 1, traceExceptions: true});
 
-var shards = [st.shard0, st.shard1];
+var shards = {};
+config.shards.find().forEach(function(doc) {
+    shards[doc._id] = new Mongo(doc.host);
+});
 
 //
 // Set up a sharded collection
@@ -35,10 +38,10 @@ assert.writeOK(coll.insert({hello: "world"}));
 
 jsTest.log("Sharding collection across multiple shards...");
 
-var getOtherShard = function(shardId) {
-    for (shard in shards) {
-        if (shard.shardName != shardId)
-            return shard.shardName;
+var getOtherShard = function(shard) {
+    for (id in shards) {
+        if (id != shard)
+            return id;
     }
 };
 

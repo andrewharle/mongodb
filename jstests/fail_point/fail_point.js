@@ -1,25 +1,33 @@
 /**
- * Performs basic checks on the configureFailPoint command. Also check
+ * Performs basic checks on the failpoint command. Also check
  * mongo/util/fail_point_test.cpp for unit tests.
  *
  * @param adminDB {DB} the admin database database object
  */
 var runTest = function(adminDB) {
-    var expectFailPointState = function(fpState, expectedMode, expectedData) {
-        assert.eq(expectedMode, fpState.mode);
+    /**
+     * Checks whether the result object from the configureFailPoint command
+     * matches what we expect.
+     *
+     * @param resultObj {Object}
+     * @param expectedMode {Number}
+     * @param expectedData {Object}
+     */
+    var expectedFPState = function(resultObj, expectedMode, expectedData) {
+        assert(resultObj.ok);
+        assert.eq(expectedMode, resultObj.mode);
 
-        // Check that all expected data is present.
-        for (var field in expectedData) {  // Valid only for 1 level field checks
-            assert.eq(expectedData[field], fpState.data[field]);
+        // Valid only for 1 level field checks
+        for (var field in expectedData) {
+            assert.eq(expectedData[field], resultObj.data[field]);
         }
 
-        // Check that all present data is expected.
-        for (field in fpState.data) {
-            assert.eq(expectedData[field], fpState.data[field]);
+        for (field in resultObj.data) {
+            assert.eq(expectedData[field], resultObj.data[field]);
         }
     };
 
-    // A failpoint's state can be read through getParameter by prefixing its name with "failpoint."
+    expectedFPState(adminDB.runCommand({configureFailPoint: 'dummy'}), 0, {});
 
     // Test non-existing fail point
     assert.commandFailed(
@@ -27,44 +35,28 @@ var runTest = function(adminDB) {
 
     // Test bad mode string
     assert.commandFailed(
-        adminDB.runCommand({configureFailPoint: 'dummy', mode: 'badMode', data: {x: 1}}));
-    var res = adminDB.runCommand({getParameter: 1, "failpoint.dummy": 1});
-    assert.commandWorked(res);
-    expectFailPointState(res["failpoint.dummy"], 0, {});
+        adminDB.runCommand({configureFailPoint: 'dummy', mode: 'madMode', data: {x: 1}}));
+    expectedFPState(adminDB.runCommand({configureFailPoint: 'dummy'}), 0, {});
 
     // Test bad mode obj
     assert.commandFailed(
         adminDB.runCommand({configureFailPoint: 'dummy', mode: {foo: 3}, data: {x: 1}}));
-    var res = adminDB.runCommand({getParameter: 1, "failpoint.dummy": 1});
-    assert.commandWorked(res);
-    expectFailPointState(res["failpoint.dummy"], 0, {});
+    expectedFPState(adminDB.runCommand({configureFailPoint: 'dummy'}), 0, {});
 
     // Test bad mode type
     assert.commandFailed(
         adminDB.runCommand({configureFailPoint: 'dummy', mode: true, data: {x: 1}}));
-    var res = adminDB.runCommand({getParameter: 1, "failpoint.dummy": 1});
-    assert.commandWorked(res);
-    expectFailPointState(res["failpoint.dummy"], 0, {});
+    expectedFPState(adminDB.runCommand({configureFailPoint: 'dummy'}), 0, {});
 
     // Test bad data type
     assert.commandFailed(
         adminDB.runCommand({configureFailPoint: 'dummy', mode: 'alwaysOn', data: 'data'}));
-    var res = adminDB.runCommand({getParameter: 1, "failpoint.dummy": 1});
-    assert.commandWorked(res);
-    expectFailPointState(res["failpoint.dummy"], 0, {});
-
-    // Test setting mode to off.
-    assert.commandWorked(adminDB.runCommand({configureFailPoint: 'dummy', mode: 'off'}));
-    var res = adminDB.runCommand({getParameter: 1, "failpoint.dummy": 1});
-    assert.commandWorked(res);
-    expectFailPointState(res["failpoint.dummy"], 0, {});
+    expectedFPState(adminDB.runCommand({configureFailPoint: 'dummy'}), 0, {});
 
     // Test good command w/ data
     assert.commandWorked(
         adminDB.runCommand({configureFailPoint: 'dummy', mode: 'alwaysOn', data: {x: 1}}));
-    var res = adminDB.runCommand({getParameter: 1, "failpoint.dummy": 1});
-    assert.commandWorked(res);
-    expectFailPointState(res["failpoint.dummy"], 1, {x: 1});
+    expectedFPState(adminDB.runCommand({configureFailPoint: 'dummy'}), 1, {x: 1});
 };
 
 var conn = MongoRunner.runMongod();

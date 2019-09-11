@@ -35,7 +35,6 @@
 namespace mongo {
 
 class CanonicalQuery;
-class OpDebug;
 class OperationContext;
 class PlanExecutor;
 
@@ -45,8 +44,7 @@ struct DeleteStageParams {
           fromMigrate(false),
           isExplain(false),
           returnDeleted(false),
-          canonicalQuery(nullptr),
-          opDebug(nullptr) {}
+          canonicalQuery(NULL) {}
 
     // Should we delete all documents returned from the child (a "multi delete"), or at most one
     // (a "single delete")?
@@ -64,12 +62,6 @@ struct DeleteStageParams {
 
     // The parsed query predicate for this delete. Not owned here.
     CanonicalQuery* canonicalQuery;
-
-    // The user-requested sort specification. Currently used just for findAndModify.
-    BSONObj sort;
-
-    // Optional. When not null, delete metrics are recorded here.
-    OpDebug* opDebug;
 };
 
 /**
@@ -91,7 +83,7 @@ public:
                 PlanStage* child);
 
     bool isEOF() final;
-    StageState doWork(WorkingSetID* out) final;
+    StageState work(WorkingSetID* out) final;
 
     void doRestoreState() final;
 
@@ -106,19 +98,13 @@ public:
     static const char* kStageType;
 
     /**
-     * Extracts the number of documents deleted by the delete plan 'exec'.
+     * Extracts the number of documents deleted by the update plan 'exec'.
      *
-     * Should only be called if the root plan stage of 'exec' is DELETE and if 'exec' is EOF.
+     * Should only be called if the root plan stage of 'exec' is UPDATE and if 'exec' is EOF.
      */
     static long long getNumDeleted(const PlanExecutor& exec);
 
 private:
-    /**
-     * Stores 'idToRetry' in '_idRetrying' so the delete can be retried during the next call to
-     * work(). Always returns NEED_YIELD and sets 'out' to WorkingSet::INVALID_ID.
-     */
-    StageState prepareToRetryWSM(WorkingSetID idToRetry, WorkingSetID* out);
-
     DeleteStageParams _params;
 
     // Not owned by us.

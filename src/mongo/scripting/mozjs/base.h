@@ -61,17 +61,15 @@ struct BaseInfo {
     static void addProperty(JSContext* cx,
                             JS::HandleObject obj,
                             JS::HandleId id,
-                            JS::HandleValue v);
+                            JS::MutableHandleValue v);
     static void call(JSContext* cx, JS::CallArgs args);
     static void construct(JSContext* cx, JS::CallArgs args);
-    static void delProperty(JSContext* cx,
-                            JS::HandleObject obj,
-                            JS::HandleId id,
-                            JS::ObjectOpResult& result);
-    static void enumerate(JSContext* cx,
-                          JS::HandleObject obj,
-                          JS::AutoIdVector& properties,
-                          bool enumerableOnly);
+    static void convert(JSContext* cx,
+                        JS::HandleObject obj,
+                        JSType type,
+                        JS::MutableHandleValue vp);
+    static void delProperty(JSContext* cx, JS::HandleObject obj, JS::HandleId id, bool* succeeded);
+    static void enumerate(JSContext* cx, JS::HandleObject obj, JS::AutoIdVector& properties);
     static void finalize(JSFreeOp* fop, JSObject* obj);
     static void getProperty(JSContext* cx,
                             JS::HandleObject obj,
@@ -81,14 +79,13 @@ struct BaseInfo {
                             JS::HandleObject obj,
                             JS::MutableHandleValue vp,
                             bool* bp);
-    static bool mayResolve(const JSAtomState& names, jsid id, JSObject* maybeObj);
     static void postInstall(JSContext* cx, JS::HandleObject global, JS::HandleObject proto);
     static void resolve(JSContext* cx, JS::HandleObject obj, JS::HandleId id, bool* resolvedp);
     static void setProperty(JSContext* cx,
                             JS::HandleObject obj,
                             JS::HandleId id,
-                            JS::MutableHandleValue vp,
-                            JS::ObjectOpResult& result);
+                            bool strict,
+                            JS::MutableHandleValue vp);
 };
 
 }  // namespace mozjs

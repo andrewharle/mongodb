@@ -46,42 +46,42 @@ const char* CountStage::kStageType = "COUNT";
 
 CountStage::CountStage(OperationContext* txn,
                        Collection* collection,
-                       CountStageParams params,
+                       const CountRequest& request,
                        WorkingSet* ws,
                        PlanStage* child)
     : PlanStage(kStageType, txn),
       _collection(collection),
-      _params(std::move(params)),
-      _leftToSkip(_params.skip),
+      _request(request),
+      _leftToSkip(request.getSkip()),
       _ws(ws) {
     if (child)
         _children.emplace_back(child);
 }
 
 bool CountStage::isEOF() {
-    if (_specificStats.recordStoreCount) {
+    if (_specificStats.trivialCount) {
         return true;
     }
 
-    if (_params.limit > 0 && _specificStats.nCounted >= _params.limit) {
+    if (_request.getLimit() > 0 && _specificStats.nCounted >= _request.getLimit()) {
         return true;
     }
 
     return !_children.empty() && child()->isEOF();
 }
 
-void CountStage::recordStoreCount() {
+void CountStage::trivialCount() {
     invariant(_collection);
     long long nCounted = _collection->numRecords(getOpCtx());
 
-    if (0 != _params.skip) {
-        nCounted -= _params.skip;
+    if (0 != _request.getSkip()) {
+        nCounted -= _request.getSkip();
         if (nCounted < 0) {
             nCounted = 0;
         }
     }
 
-    long long limit = _params.limit;
+    long long limit = _request.getLimit();
     if (limit < 0) {
         limit = -limit;
     }
@@ -91,17 +91,23 @@ void CountStage::recordStoreCount() {
     }
 
     _specificStats.nCounted = nCounted;
-    _specificStats.nSkipped = _params.skip;
-    _specificStats.recordStoreCount = true;
+    _specificStats.nSkipped = _request.getSkip();
+    _specificStats.trivialCount = true;
 }
 
-PlanStage::StageState CountStage::doWork(WorkingSetID* out) {
+PlanStage::StageState CountStage::work(WorkingSetID* out) {
+    ++_commonStats.works;
+
+    // Adds the amount of time taken by work() to executionTimeMillis.
+    ScopedTimer timer(&_commonStats.executionTimeMillis);
+
     // This stage never returns a working set member.
     *out = WorkingSet::INVALID_ID;
 
-    if (_params.useRecordStoreCount) {
-        invariant(_collection);
-        recordStoreCount();
+    // If we don't have a query and we have a non-NULL collection, then we can execute this
+    // as a trivial count (just ask the collection for how many records it has).
+    if (_request.getQuery().isEmpty() && NULL != _collection) {
+        trivialCount();
         return PlanStage::IS_EOF;
     }
 
@@ -110,8 +116,8 @@ PlanStage::StageState CountStage::doWork(WorkingSetID* out) {
         return PlanStage::IS_EOF;
     }
 
-    // For cases where we can't ask the record store directly, we should always have a child stage
-    // from which we can retrieve results.
+    // For non-trivial counts, we should always have a child stage from which we can retrieve
+    // results.
     invariant(child());
     WorkingSetID id = WorkingSet::INVALID_ID;
     PlanStage::StageState state = child()->work(&id);
@@ -148,9 +154,11 @@ PlanStage::StageState CountStage::doWork(WorkingSetID* out) {
         }
     } else if (PlanStage::NEED_YIELD == state) {
         *out = id;
+        _commonStats.needYield++;
         return PlanStage::NEED_YIELD;
     }
 
+    _commonStats.needTime++;
     return PlanStage::NEED_TIME;
 }
 

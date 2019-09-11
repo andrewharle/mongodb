@@ -38,17 +38,16 @@
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/database_holder.h"
-#include "mongo/db/client.h"
 #include "mongo/db/clientcursor.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/exec/update.h"
+#include "mongo/db/operation_context_impl.h"
 #include "mongo/db/op_observer.h"
 #include "mongo/db/ops/update_driver.h"
 #include "mongo/db/ops/update_lifecycle.h"
 #include "mongo/db/query/explain.h"
 #include "mongo/db/query/get_executor.h"
-#include "mongo/db/query/plan_summary_stats.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/replication_coordinator_global.h"
 #include "mongo/db/update_index_data.h"
@@ -57,11 +56,20 @@
 
 namespace mongo {
 
-UpdateResult update(OperationContext* txn, Database* db, const UpdateRequest& request) {
+UpdateResult update(OperationContext* txn,
+                    Database* db,
+                    const UpdateRequest& request,
+                    OpDebug* opDebug) {
     invariant(db);
 
     // Explain should never use this helper.
     invariant(!request.isExplain());
+
+    auto client = txn->getClient();
+    auto lastOpAtOperationStart = repl::ReplClientInfo::forClient(client).getLastOp();
+    ScopeGuard lastOpSetterGuard = MakeObjGuard(repl::ReplClientInfo::forClient(client),
+                                                &repl::ReplClientInfo::setLastOpToSystemLastOpTime,
+                                                txn);
 
     const NamespaceString& nsString = request.getNamespaceString();
     Collection* collection = db->getCollection(nsString.ns());
@@ -83,10 +91,9 @@ UpdateResult update(OperationContext* txn, Database* db, const UpdateRequest& re
                 !repl::getGlobalReplicationCoordinator()->canAcceptWritesFor(nsString);
 
             if (userInitiatedWritesAndNotPrimary) {
-                uassertStatusOK(Status(ErrorCodes::PrimarySteppedDown,
+                uassertStatusOK(Status(ErrorCodes::NotMaster,
                                        str::stream() << "Not primary while creating collection "
-                                                     << nsString.ns()
-                                                     << " during upsert"));
+                                                     << nsString.ns() << " during upsert"));
             }
             WriteUnitOfWork wuow(txn);
             collection = db->createCollection(txn, nsString.ns(), CollectionOptions());
@@ -100,13 +107,21 @@ UpdateResult update(OperationContext* txn, Database* db, const UpdateRequest& re
     ParsedUpdate parsedUpdate(txn, &request);
     uassertStatusOK(parsedUpdate.parseRequest());
 
-    OpDebug* const nullOpDebug = nullptr;
     std::unique_ptr<PlanExecutor> exec =
-        uassertStatusOK(getExecutorUpdate(txn, nullOpDebug, collection, &parsedUpdate));
+        uassertStatusOK(getExecutorUpdate(txn, collection, &parsedUpdate, opDebug));
 
     uassertStatusOK(exec->executePlan());
+    if (repl::ReplClientInfo::forClient(client).getLastOp() != lastOpAtOperationStart) {
+        // If this operation has already generated a new lastOp, don't bother setting it here.
+        // No-op updates will not generate a new lastOp, so we still need the guard to fire in that
+        // case.
+        lastOpSetterGuard.Dismiss();
+    }
 
+    PlanSummaryStats summaryStats;
+    Explain::getSummaryStats(*exec, &summaryStats);
     const UpdateStats* updateStats = UpdateStage::getUpdateStats(exec.get());
+    UpdateStage::fillOutOpDebug(updateStats, &summaryStats, opDebug);
 
     return UpdateStage::makeUpdateResult(updateStats);
 }

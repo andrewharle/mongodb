@@ -29,6 +29,7 @@
 #pragma once
 
 #include "mongo/db/jsobj.h"
+#include "mongo/s/optime_pair.h"
 
 namespace mongo {
 
@@ -51,17 +52,10 @@ class StatusWith;
  */
 struct ChunkVersion {
 public:
-    /**
-     * The name for the shard version information field, which shard-aware commands should include
-     * if they want to convey shard version.
-     */
-    static const char kShardVersionField[];
+    ChunkVersion() : _minor(0), _major(0), _epoch(OID()) {}
 
-    ChunkVersion() : _combined(0), _epoch(OID()) {}
-
-    ChunkVersion(uint32_t major, uint32_t minor, const OID& epoch)
-        : _combined(static_cast<uint64_t>(minor) | (static_cast<uint64_t>(major) << 32)),
-          _epoch(epoch) {}
+    ChunkVersion(int major, int minor, const OID& epoch)
+        : _minor(minor), _major(major), _epoch(epoch) {}
 
     /**
      * Interprets the specified BSON content as the format for commands, which is in the form:
@@ -70,33 +64,11 @@ public:
     static StatusWith<ChunkVersion> parseFromBSONForCommands(const BSONObj& obj);
 
     /**
-     * Parses the BSON formatted by ChunkVersion::appendWithFieldForCommands.
-     *
-     * Interprets the specified BSON content as the format for commands, which is in the form:
-     *  { ..., <field>: [ <combined major/minor>, <OID epoch> ], ... }.
-     */
-    static StatusWith<ChunkVersion> parseFromBSONWithFieldForCommands(const BSONObj& obj,
-                                                                      StringData field);
-
-    /**
-     * Note: if possible, use ChunkVersion::parseFromBSONForCommands or
-     * ChunkVersion::parseFromBSONWithFieldForCommands instead. Phasing out this function.
-     *
      * Interprets the specified BSON content as the format for the setShardVersion command, which
      * is in the form:
      *  { ..., version: [ <combined major/minor> ], versionEpoch: [ <OID epoch> ], ... }
      */
     static StatusWith<ChunkVersion> parseFromBSONForSetShardVersion(const BSONObj& obj);
-
-    /**
-     * Note: if possible, use ChunkVersion::parseFromBSONForCommands or
-     * ChunkVersion::parseFromBSONWithFieldForCommands instead. Phasing out this function.
-     *
-     * Interprets the specified BSON content as the format for chunk persistence, which is in the
-     * form:
-     *  { ..., lastmod: [ <combined major/minor> ], lastmodEpoch: [ <OID epoch> ], ... }
-     */
-    static StatusWith<ChunkVersion> parseFromBSONForChunk(const BSONObj& obj);
 
     /**
      * Indicates a dropped collection. All components are zeroes (OID is zero time, zero
@@ -131,11 +103,12 @@ public:
     }
 
     void incMajor() {
-        _combined = static_cast<uint64_t>(majorVersion() + 1) << 32;
+        _major++;
+        _minor = 0;
     }
 
     void incMinor() {
-        _combined++;
+        _minor++;
     }
 
     // Note: this shouldn't be used as a substitute for version except in specific cases -
@@ -148,12 +121,12 @@ public:
         return _combined > 0;
     }
 
-    uint32_t majorVersion() const {
-        return _combined >> 32;
+    int majorVersion() const {
+        return _major;
     }
 
-    uint32_t minorVersion() const {
-        return _combined & 0xFFFFFFFF;
+    int minorVersion() const {
+        return _minor;
     }
 
     OID epoch() const {
@@ -165,10 +138,6 @@ public:
     // > < operators do not check epoch cases.  Generally if using == we need to handle
     // more complex cases.
     //
-
-    bool operator==(const ChunkVersion& otherVersion) const {
-        return equals(otherVersion);
-    }
 
     bool operator>(const ChunkVersion& otherVersion) const {
         return this->_combined > otherVersion._combined;
@@ -194,7 +163,7 @@ public:
     bool isWriteCompatibleWith(const ChunkVersion& otherVersion) const {
         if (!hasEqualEpoch(otherVersion))
             return false;
-        return otherVersion.majorVersion() == majorVersion();
+        return otherVersion._major == _major;
     }
 
     // Is this the same version?
@@ -223,10 +192,10 @@ public:
         if (otherVersion._epoch != _epoch)
             return false;
 
-        if (majorVersion() != otherVersion.majorVersion())
-            return majorVersion() < otherVersion.majorVersion();
+        if (_major != otherVersion._major)
+            return _major < otherVersion._major;
 
-        return minorVersion() < otherVersion.minorVersion();
+        return _minor < otherVersion._minor;
     }
 
     // Is this in the same epoch?
@@ -276,6 +245,12 @@ public:
     //
     // { version : <TS>, versionEpoch : <OID> } object format
     //
+
+    static bool canParseBSON(const BSONObj& obj, const std::string& prefix = "") {
+        bool canParse;
+        fromBSON(obj, prefix, &canParse);
+        return canParse;
+    }
 
     static ChunkVersion fromBSON(const BSONObj& obj, const std::string& prefix = "") {
         bool canParse;
@@ -351,10 +326,6 @@ public:
         return b.obj();
     }
 
-    /**
-     * Note: if possible, use ChunkVersion::appendForCommands or
-     * ChunkVersion::appendWithFieldForCommands instead. Phasing out this function.
-     */
     void addToBSON(BSONObjBuilder& b, const std::string& prefix) const {
         b.appendElements(toBSONWithPrefix(prefix));
     }
@@ -366,37 +337,27 @@ public:
     void appendForSetShardVersion(BSONObjBuilder* builder) const;
 
     /**
-     * Appends the contents to the specified builder in the format expected by the sharded commands.
+     * Appends the contents to the specified builder in the format expected by the write commands.
      */
     void appendForCommands(BSONObjBuilder* builder) const;
 
-    /**
-     * Appends the contents as an array to "builder" with the field name "field" in the format
-     * expected by the sharded commands.
-     *
-     * { ..., <field>: [ <combined major/minor>, <OID epoch> ], ... }
-     *
-     * Use ChunkVersion::parseFromBSONWithFieldForCommands to retrieve the ChunkVersion from the
-     * BSON created by this function.
-     */
-    void appendWithFieldForCommands(BSONObjBuilder* builder, StringData field) const;
-
-    /**
-     * Appends the contents to the specified builder in the format expected by the chunk
-     * serialization/deserialization code.
-     */
-    void appendForChunk(BSONObjBuilder* builder) const;
-
     std::string toString() const {
         StringBuilder sb;
-        sb << majorVersion() << "|" << minorVersion() << "||" << _epoch;
+        sb << _major << "|" << _minor << "||" << _epoch;
         return sb.str();
     }
 
     BSONObj toBSON() const;
 
 private:
-    uint64_t _combined;
+    union {
+        struct {
+            int _minor;
+            int _major;
+        };
+
+        uint64_t _combined;
+    };
 
     OID _epoch;
 };

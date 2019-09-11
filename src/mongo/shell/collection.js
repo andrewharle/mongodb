@@ -141,8 +141,6 @@ DBCollection.prototype.help = function() {
     print(
         "\tdb." + shortName +
         ".unsetWriteConcern( <write concern doc> ) - unsets the write concern for writes to the collection");
-    print("\tdb." + shortName +
-          ".latencyStats() - display operation latency histograms for this collection");
     // print("\tdb." + shortName + ".getDiskStorageStats({...}) - prints a summary of disk usage
     // statistics");
     // print("\tdb." + shortName + ".getPagesInRAM({...}) - prints a summary of storage pages
@@ -194,21 +192,27 @@ DBCollection.prototype._massageObject = function(q) {
     var type = typeof q;
 
     if (type == "function")
-        return {$where: q};
+        return {
+            $where: q
+        };
 
     if (q.isObjectId)
-        return {_id: q};
+        return {
+            _id: q
+        };
 
     if (type == "object")
         return q;
 
     if (type == "string") {
-        // If the string is 24 hex characters, it is most likely an ObjectId.
-        if (/^[0-9a-fA-F]{24}$/.test(q)) {
-            return {_id: ObjectId(q)};
-        }
+        if (q.length == 24)
+            return {
+                _id: q
+            };
 
-        return {$where: q};
+        return {
+            $where: q
+        };
     }
 
     throw Error("don't know how to massage : " + type);
@@ -272,23 +276,14 @@ DBCollection.prototype.find = function(query, fields, limit, skip, batchSize, op
         cursor.readPref(readPrefMode, connObj.getReadPrefTagSet());
     }
 
-    var rc = connObj.getReadConcern();
-    if (rc) {
-        cursor.readConcern(rc);
-    }
-
     return cursor;
 };
 
-DBCollection.prototype.findOne = function(query, fields, options, readConcern, collation) {
+DBCollection.prototype.findOne = function(query, fields, options, readConcern) {
     var cursor = this.find(query, fields, -1 /* limit */, 0 /* skip*/, 0 /* batchSize */, options);
 
     if (readConcern) {
         cursor = cursor.readConcern(readConcern);
-    }
-
-    if (collation) {
-        cursor = cursor.collation(collation);
     }
 
     if (!cursor.hasNext())
@@ -370,7 +365,9 @@ DBCollection.prototype.insert = function(obj, options, _allow_dot) {
 
         if (typeof(obj._id) == "undefined" && !Array.isArray(obj)) {
             var tmp = obj;  // don't want to modify input
-            obj = {_id: new ObjectId()};
+            obj = {
+                _id: new ObjectId()
+            };
             for (var key in tmp) {
                 obj[key] = tmp[key];
             }
@@ -411,12 +408,10 @@ DBCollection.prototype._parseRemove = function(t, justOne) {
     var query = this._massageObject(t);
 
     var wc = undefined;
-    var collation = undefined;
     if (typeof(justOne) === "object") {
         var opts = justOne;
         wc = opts.writeConcern;
         justOne = opts.justOne;
-        collation = opts.collation;
     }
 
     // Normalize "justOne" to a bool.
@@ -427,7 +422,11 @@ DBCollection.prototype._parseRemove = function(t, justOne) {
         wc = this.getWriteConcern();
     }
 
-    return {"query": query, "justOne": justOne, "wc": wc, "collation": collation};
+    return {
+        "query": query,
+        "justOne": justOne,
+        "wc": wc
+    };
 };
 
 DBCollection.prototype.remove = function(t, justOne) {
@@ -435,7 +434,6 @@ DBCollection.prototype.remove = function(t, justOne) {
     var query = parsed.query;
     var justOne = parsed.justOne;
     var wc = parsed.wc;
-    var collation = parsed.collation;
 
     var result = undefined;
     var startTime =
@@ -444,10 +442,6 @@ DBCollection.prototype.remove = function(t, justOne) {
     if (this.getMongo().writeMode() != "legacy") {
         var bulk = this.initializeOrderedBulkOp();
         var removeOp = bulk.find(query);
-
-        if (collation) {
-            removeOp.collation(collation);
-        }
 
         if (justOne) {
             removeOp.removeOne();
@@ -466,10 +460,6 @@ DBCollection.prototype.remove = function(t, justOne) {
             }
         }
     } else {
-        if (collation) {
-            throw new Error("collation requires use of write commands");
-        }
-
         this._validateRemoveDoc(t);
         this.getMongo().remove(this._fullName, query, justOne);
 
@@ -515,7 +505,6 @@ DBCollection.prototype._parseUpdate = function(query, obj, upsert, multi) {
         throw Error("need an object");
 
     var wc = undefined;
-    var collation = undefined;
     // can pass options via object for improved readability
     if (typeof(upsert) === "object") {
         if (multi) {
@@ -527,7 +516,6 @@ DBCollection.prototype._parseUpdate = function(query, obj, upsert, multi) {
         multi = opts.multi;
         wc = opts.writeConcern;
         upsert = opts.upsert;
-        collation = opts.collation;
     }
 
     // Normalize 'upsert' and 'multi' to booleans.
@@ -543,8 +531,7 @@ DBCollection.prototype._parseUpdate = function(query, obj, upsert, multi) {
         "obj": obj,
         "upsert": upsert,
         "multi": multi,
-        "wc": wc,
-        "collation": collation
+        "wc": wc
     };
 };
 
@@ -555,7 +542,6 @@ DBCollection.prototype.update = function(query, obj, upsert, multi) {
     var upsert = parsed.upsert;
     var multi = parsed.multi;
     var wc = parsed.wc;
-    var collation = parsed.collation;
 
     var result = undefined;
     var startTime =
@@ -567,10 +553,6 @@ DBCollection.prototype.update = function(query, obj, upsert, multi) {
 
         if (upsert) {
             updateOp = updateOp.upsert();
-        }
-
-        if (collation) {
-            updateOp.collation(collation);
         }
 
         if (multi) {
@@ -590,17 +572,12 @@ DBCollection.prototype.update = function(query, obj, upsert, multi) {
             }
         }
     } else {
-        if (collation) {
-            throw new Error("collation requires use of write commands");
-        }
-
         this._validateUpdateDoc(obj);
         this.getMongo().update(this._fullName, query, obj, upsert, multi);
 
-        // Enforce write concern, if required
-        if (wc) {
+        // enforce write concern, if required
+        if (wc)
             result = this.runCommand("getLastError", wc instanceof WriteConcern ? wc.toJSON() : wc);
-        }
     }
 
     this._printExtraInfo("Updated", startTime);
@@ -639,7 +616,11 @@ DBCollection.prototype._genIndexName = function(keys) {
 };
 
 DBCollection.prototype._indexSpec = function(keys, options) {
-    var ret = {ns: this._fullName, key: keys, name: this._genIndexName(keys)};
+    var ret = {
+        ns: this._fullName,
+        key: keys,
+        name: this._genIndexName(keys)
+    };
 
     if (!options) {
     } else if (typeof(options) == "string")
@@ -687,7 +668,7 @@ DBCollection.prototype.createIndexes = function(keys, options) {
     }
 
     if (this.getMongo().writeMode() == "commands") {
-        for (var i = 0; i < indexSpecs.length; i++) {
+        for (i = 0; i++; i < indexSpecs.length) {
             delete (indexSpecs[i].ns);  // ns is passed to the first element in the command.
         }
         return this._db.runCommand({createIndexes: this.getName(), indexes: indexSpecs});
@@ -700,9 +681,15 @@ DBCollection.prototype.createIndexes = function(keys, options) {
             // Return the first error
             var error = result.hasWriteErrors() ? result.getWriteErrors()[0]
                                                 : result.getWriteConcernError();
-            return {ok: 0.0, code: error.code, errmsg: error.errmsg};
+            return {
+                ok: 0.0,
+                code: error.code,
+                errmsg: error.errmsg
+            };
         } else {
-            return {ok: 1.0};
+            return {
+                ok: 1.0
+            };
         }
     } else {
         this._db.getCollection("system.indexes").insert(indexSpecs, 0, true);
@@ -755,7 +742,9 @@ DBCollection.prototype.drop = function() {
 };
 
 DBCollection.prototype.findAndModify = function(args) {
-    var cmd = {findandmodify: this.getName()};
+    var cmd = {
+        findandmodify: this.getName()
+    };
     for (var key in args) {
         cmd[key] = args[key];
     }
@@ -771,19 +760,6 @@ DBCollection.prototype.findAndModify = function(args) {
 };
 
 DBCollection.prototype.renameCollection = function(newName, dropTarget) {
-    if (arguments.length === 1 && typeof newName === 'object') {
-        if (newName.hasOwnProperty('dropTarget')) {
-            dropTarget = newName['dropTarget'];
-        }
-        newName = newName['to'];
-    }
-    if (typeof dropTarget === 'undefined') {
-        dropTarget = false;
-    }
-    if (typeof newName !== 'string' || typeof dropTarget !== 'boolean') {
-        throw Error(
-            'renameCollection must either take a string and an optional boolean or an object.');
-    }
     return this._db._adminCommand({
         renameCollection: this._fullName,
         to: this._db._name + "." + newName,
@@ -820,7 +796,9 @@ DBCollection.prototype._printExtraInfo = function(action, startTime) {
 };
 
 DBCollection.prototype.validate = function(full) {
-    var cmd = {validate: this.getName()};
+    var cmd = {
+        validate: this.getName()
+    };
 
     if (typeof(full) == 'object')  // support arbitrary options here
         Object.extend(cmd, full);
@@ -857,7 +835,10 @@ DBCollection.prototype.validate = function(full) {
  * getDiskStorageStats provides a human-readable summary of the command output
  */
 DBCollection.prototype.diskStorageStats = function(opt) {
-    var cmd = {storageDetails: this.getName(), analyze: 'diskStorage'};
+    var cmd = {
+        storageDetails: this.getName(),
+        analyze: 'diskStorage'
+    };
     if (typeof(opt) == 'object')
         Object.extend(cmd, opt);
 
@@ -884,12 +865,11 @@ DBCollection.prototype.getDiskStorageStats = function(params) {
     var BAR_WIDTH = 70;
 
     var formatSliceData = function(data) {
-        var bar = _barFormat(
-            [
-              [data.bsonBytes / data.onDiskBytes, "="],
-              [(data.recBytes - data.bsonBytes) / data.onDiskBytes, "-"]
-            ],
-            BAR_WIDTH);
+        var bar = _barFormat([
+            [data.bsonBytes / data.onDiskBytes, "="],
+            [(data.recBytes - data.bsonBytes) / data.onDiskBytes, "-"]
+        ],
+                             BAR_WIDTH);
 
         return sh._dataFormat(data.onDiskBytes).pad(9) + " " + data.numEntries.toFixed(0).pad(10) +
             " " + bar + "  " + (data.bsonBytes / data.onDiskBytes).toPercentStr().pad(8) + " " +
@@ -934,7 +914,10 @@ DBCollection.prototype.getDiskStorageStats = function(params) {
  * getPagesInRAM provides a human-readable summary of the command output
  */
 DBCollection.prototype.pagesInRAM = function(opt) {
-    var cmd = {storageDetails: this.getName(), analyze: 'pagesInRAM'};
+    var cmd = {
+        storageDetails: this.getName(),
+        analyze: 'pagesInRAM'
+    };
     if (typeof(opt) == 'object')
         Object.extend(cmd, opt);
 
@@ -1019,7 +1002,9 @@ DBCollection.prototype.getShardVersion = function() {
 
 DBCollection.prototype._getIndexesSystemIndexes = function(filter) {
     var si = this.getDB().getCollection("system.indexes");
-    var query = {ns: this.getFullName()};
+    var query = {
+        ns: this.getFullName()
+    };
     if (filter)
         query = Object.extend(query, filter);
     return si.find(query).toArray();
@@ -1046,7 +1031,7 @@ DBCollection.prototype._getIndexesCommand = function(filter) {
         throw _getErrorWithCode(res, "listIndexes failed: " + tojson(res));
     }
 
-    return new DBCommandCursor(res._mongo, res).toArray();
+    return new DBCommandCursor(this._mongo, res).toArray();
 };
 
 DBCollection.prototype.getIndexes = function(filter) {
@@ -1067,7 +1052,10 @@ DBCollection.prototype.getIndexKeys = function() {
 };
 
 DBCollection.prototype.hashAllDocs = function() {
-    var cmd = {dbhash: 1, collections: [this._shortName]};
+    var cmd = {
+        dbhash: 1,
+        collections: [this._shortName]
+    };
     var res = this._dbCommand(cmd);
     var hash = res.collections[this._shortName];
     assert(hash);
@@ -1221,7 +1209,7 @@ DBCollection.prototype.convertToCapped = function(bytes) {
 DBCollection.prototype.exists = function() {
     var res = this._db.runCommand("listCollections", {filter: {name: this._shortName}});
     if (res.ok) {
-        var cursor = new DBCommandCursor(res._mongo, res);
+        var cursor = new DBCommandCursor(this._mongo, res);
         if (!cursor.hasNext())
             return null;
         return cursor.next();
@@ -1245,7 +1233,7 @@ DBCollection.prototype.isCapped = function() {
 DBCollection.prototype.aggregate = function(pipeline, aggregateOptions) {
     if (!(pipeline instanceof Array)) {
         // support legacy varargs form. (Also handles db.foo.aggregate())
-        pipeline = Array.from(arguments);
+        pipeline = argumentsToArray(arguments);
         aggregateOptions = {};
     } else if (aggregateOptions === undefined) {
         aggregateOptions = {};
@@ -1279,7 +1267,9 @@ DBCollection.prototype.aggregate = function(pipeline, aggregateOptions) {
     // Assign the cleaned up options
     aggregateOptions = copy;
     // Create the initial command document
-    var cmd = {pipeline: pipeline};
+    var cmd = {
+        pipeline: pipeline
+    };
     Object.extend(cmd, aggregateOptions);
 
     if (!('cursor' in cmd)) {
@@ -1310,7 +1300,10 @@ DBCollection.prototype.aggregate = function(pipeline, aggregateOptions) {
 
         if ('result' in res && !("cursor" in res)) {
             // convert old-style output to cursor-style output
-            res.cursor = {ns: '', id: NumberLong(0)};
+            res.cursor = {
+                ns: '',
+                id: NumberLong(0)
+            };
             res.cursor.firstBatch = res.result;
             delete res.result;
         }
@@ -1319,10 +1312,7 @@ DBCollection.prototype.aggregate = function(pipeline, aggregateOptions) {
     assert.commandWorked(res, "aggregate failed");
 
     if ("cursor" in res) {
-        if (cmd["cursor"]["batchSize"] > 0) {
-            var batchSizeValue = cmd["cursor"]["batchSize"];
-        }
-        return new DBCommandCursor(res._mongo, res, batchSizeValue);
+        return new DBCommandCursor(this._mongo, res);
     }
 
     return res;
@@ -1388,7 +1378,11 @@ DBCollection.prototype.convertToSingleObject = function(valueField) {
 * @param optional object of optional fields;
 */
 DBCollection.prototype.mapReduce = function(map, reduce, optionsOrOutString) {
-    var c = {mapreduce: this._shortName, map: map, reduce: reduce};
+    var c = {
+        mapreduce: this._shortName,
+        map: map,
+        reduce: reduce
+    };
     assert(optionsOrOutString, "need to supply an optionsOrOutString");
 
     if (typeof(optionsOrOutString) == "string")
@@ -1689,15 +1683,34 @@ DBCollection.prototype.unsetWriteConcern = function() {
 * @param {string|object} [options.hint=null] An index name hint or specification for the query.
 * @param {number} [options.maxTimeMS=null] The maximum amount of time to allow the query to run.
 * @param {string} [options.readConcern=null] The level of readConcern passed to the count command
-* @param {object} [options.collation=null] The collation that should be used for string comparisons
-* for this count op.
 * @return {number}
 */
 DBCollection.prototype.count = function(query, options) {
-    query = this.find(query);
+    var opts = Object.extend({}, options || {});
 
-    // Apply options and return the result of the find
-    return QueryHelpers._applyCountOptions(query, options).count(true);
+    var query = this.find(query);
+    if (typeof opts.skip == 'number') {
+        query.skip(opts.skip);
+    }
+
+    if (typeof opts.limit == 'number') {
+        query.limit(opts.limit);
+    }
+
+    if (typeof opts.maxTimeMS == 'number') {
+        query.maxTimeMS(opts.maxTimeMS);
+    }
+
+    if (opts.hint) {
+        query.hint(opts.hint);
+    }
+
+    if (typeof opts.readConcern == 'string') {
+        query.readConcern(opts.readConcern);
+    }
+
+    // Return the result of the find
+    return query.count(true);
 };
 
 /**
@@ -1728,15 +1741,15 @@ DBCollection.prototype.distinct = function(keyString, query, options) {
     }
 
     // Distinct command
-    var cmd = {distinct: this.getName(), key: keyString, query: query || {}};
+    var cmd = {
+        distinct: this.getName(),
+        key: keyString,
+        query: query || {}
+    };
 
     // Set maxTimeMS if provided
     if (opts.maxTimeMS) {
         cmd.maxTimeMS = opts.maxTimeMS;
-    }
-
-    if (opts.collation) {
-        cmd.collation = opts.collation;
     }
 
     // Execute distinct command
@@ -1750,11 +1763,6 @@ DBCollection.prototype.distinct = function(keyString, query, options) {
 
 DBCollection.prototype._distinct = function(keyString, query) {
     return this._dbReadCommand({distinct: this._shortName, key: keyString, query: query || {}});
-};
-
-DBCollection.prototype.latencyStats = function(options) {
-    options = options || {};
-    return this.aggregate([{$collStats: {latencyStats: options}}]);
 };
 
 /**
@@ -1796,11 +1804,9 @@ PlanCache.prototype.help = function() {
           "displays all query shapes in a collection");
     print("\tdb." + shortName + ".getPlanCache().clear() - " +
           "drops all cached queries in a collection");
-    print("\tdb." + shortName +
-          ".getPlanCache().clearPlansByQuery(query[, projection, sort, collation]) - " +
+    print("\tdb." + shortName + ".getPlanCache().clearPlansByQuery(query[, projection, sort]) - " +
           "drops query shape from plan cache");
-    print("\tdb." + shortName +
-          ".getPlanCache().getPlansByQuery(query[, projection, sort, collation]) - " +
+    print("\tdb." + shortName + ".getPlanCache().getPlansByQuery(query[, projection, sort]) - " +
           "displays the cached plans for a query shape");
     return __magicNoPrint;
 };
@@ -1808,30 +1814,23 @@ PlanCache.prototype.help = function() {
 /**
  * Internal function to parse query shape.
  */
-PlanCache.prototype._parseQueryShape = function(query, projection, sort, collation) {
+PlanCache.prototype._parseQueryShape = function(query, projection, sort) {
     if (query == undefined) {
         throw new Error("required parameter query missing");
     }
 
     // Accept query shape object as only argument.
-    // Query shape must contain 'query', 'projection', and 'sort', and may optionally contain
-    // 'collation'. 'collation' must be non-empty if present.
-    if (typeof(query) == 'object' && projection == undefined && sort == undefined &&
-        collation == undefined) {
+    // Query shape contains exactly 3 fields (query, projection and sort)
+    // as generated in the listQueryShapes() result.
+    if (typeof(query) == 'object' && projection == undefined && sort == undefined) {
         var keysSorted = Object.keys(query).sort();
         // Expected keys must be sorted for the comparison to work.
         if (bsonWoCompare(keysSorted, ['projection', 'query', 'sort']) == 0) {
             return query;
         }
-        if (bsonWoCompare(keysSorted, ['collation', 'projection', 'query', 'sort']) == 0) {
-            if (Object.keys(query.collation).length === 0) {
-                throw new Error("collation object must not be empty");
-            }
-            return query;
-        }
     }
 
-    // Extract query shape, projection, sort and collation from DBQuery if it is the first
+    // Extract query shape, projection and sort from DBQuery if it is the first
     // argument. If a sort or projection is provided in addition to DBQuery, do not
     // overwrite with the DBQuery value.
     if (query instanceof DBQuery) {
@@ -1841,14 +1840,10 @@ PlanCache.prototype._parseQueryShape = function(query, projection, sort, collati
         if (sort != undefined) {
             throw new Error("cannot pass DBQuery with sort");
         }
-        if (collation != undefined) {
-            throw new Error("cannot pass DBQuery with collation");
-        }
 
         var queryObj = query._query["query"] || {};
         projection = query._fields || {};
         sort = query._query["orderby"] || {};
-        collation = query._query["collation"] || undefined;
         // Overwrite DBQuery with the BSON query.
         query = queryObj;
     }
@@ -1858,11 +1853,6 @@ PlanCache.prototype._parseQueryShape = function(query, projection, sort, collati
         projection: projection == undefined ? {} : projection,
         sort: sort == undefined ? {} : sort,
     };
-
-    if (collation !== undefined) {
-        shape.collation = collation;
-    }
-
     return shape;
 };
 
@@ -1895,18 +1885,15 @@ PlanCache.prototype.clear = function() {
 /**
  * List plans for a query shape.
  */
-PlanCache.prototype.getPlansByQuery = function(query, projection, sort, collation) {
-    return this
-        ._runCommandThrowOnError("planCacheListPlans",
-                                 this._parseQueryShape(query, projection, sort, collation))
-        .plans;
+PlanCache.prototype.getPlansByQuery = function(query, projection, sort) {
+    return this._runCommandThrowOnError("planCacheListPlans",
+                                        this._parseQueryShape(query, projection, sort)).plans;
 };
 
 /**
  * Drop query shape from the plan cache.
  */
-PlanCache.prototype.clearPlansByQuery = function(query, projection, sort, collation) {
-    this._runCommandThrowOnError("planCacheClear",
-                                 this._parseQueryShape(query, projection, sort, collation));
+PlanCache.prototype.clearPlansByQuery = function(query, projection, sort) {
+    this._runCommandThrowOnError("planCacheClear", this._parseQueryShape(query, projection, sort));
     return;
 };

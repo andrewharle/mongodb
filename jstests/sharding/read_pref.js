@@ -3,9 +3,9 @@
  * can be found in dbtests/replica_set_monitor_test.cpp.
  */
 
-load("jstests/replsets/rslib.js");
-
-var PRI_TAG = {dc: 'ny'};
+var PRI_TAG = {
+    dc: 'ny'
+};
 var SEC_TAGS = [{dc: 'sf', s: "1"}, {dc: 'ma', s: "2"}, {dc: 'eu', s: "3"}, {dc: 'jp', s: "4"}];
 var NODES = SEC_TAGS.length + 1;
 
@@ -71,11 +71,7 @@ var doTest = function(useDollarQuerySyntax) {
     var conn = st.s;
 
     // Wait until the ReplicaSetMonitor refreshes its view and see the tags
-    var replConfig = replTest.getReplSetConfigFromNode();
-    replConfig.members.forEach(function(node) {
-        var nodeConn = new Mongo(node.host);
-        awaitRSClientHosts(conn, nodeConn, {ok: true, tags: node.tags}, replTest);
-    });
+    ReplSetTest.awaitRSClientHosts(conn, primaryNode, {ok: true, tags: PRI_TAG}, replTest.name);
     replTest.awaitReplication();
 
     jsTest.log('New rs config: ' + tojson(primaryNode.getDB('local').system.replset.findOne()));
@@ -99,7 +95,9 @@ var doTest = function(useDollarQuerySyntax) {
 
     var getExplain = function(readPrefMode, readPrefTags) {
         if (useDollarQuerySyntax) {
-            var readPrefObj = {mode: readPrefMode};
+            var readPrefObj = {
+                mode: readPrefMode
+            };
 
             if (readPrefTags) {
                 readPrefObj.tags = readPrefTags;
@@ -174,11 +172,11 @@ var doTest = function(useDollarQuerySyntax) {
     }
 
     // Wait for ReplicaSetMonitor to realize nodes are down
-    awaitRSClientHosts(conn, stoppedNodes, {ok: false}, replTest.name);
+    ReplSetTest.awaitRSClientHosts(conn, stoppedNodes, {ok: false}, replTest.name);
 
     // Wait for the last node to be in steady state -> secondary (not recovering)
     var lastNode = replTest.nodes[NODES - 1];
-    awaitRSClientHosts(conn, lastNode, {ok: true, secondary: true}, replTest.name);
+    ReplSetTest.awaitRSClientHosts(conn, lastNode, {ok: true, secondary: true}, replTest.name);
 
     jsTest.log('connpool: ' + tojson(conn.getDB('admin').runCommand({connPoolStats: 1})));
 

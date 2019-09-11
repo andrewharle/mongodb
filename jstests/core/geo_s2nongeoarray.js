@@ -4,7 +4,11 @@ t = db.geo_s2nongeoarray;
 
 oldPoint = [40, 5];
 
-var data = {geo: oldPoint, nonGeo: [123, 456], otherNonGeo: [{b: [1, 2]}, {b: [3, 4]}]};
+var data = {
+    geo: oldPoint,
+    nonGeo: [123, 456],
+    otherNonGeo: [{b: [1, 2]}, {b: [3, 4]}]
+};
 
 t.drop();
 assert.writeOK(t.insert(data));

@@ -27,17 +27,14 @@ DBCollection.prototype._createWriteConcern = function(options) {
  *     Otherwise, returns the same object passed.
  */
 DBCollection.prototype.addIdIfNeeded = function(obj) {
-    if (typeof obj !== "object") {
-        throw new Error('argument passed to addIdIfNeeded is not an object');
-    }
     if (typeof(obj._id) == "undefined" && !Array.isArray(obj)) {
         var tmp = obj;  // don't want to modify input
-        obj = {_id: new ObjectId()};
+        obj = {
+            _id: new ObjectId()
+        };
 
         for (var key in tmp) {
-            if (tmp.hasOwnProperty(key)) {
-                obj[key] = tmp[key];
-            }
+            obj[key] = tmp[key];
         }
     }
 
@@ -51,15 +48,15 @@ DBCollection.prototype.addIdIfNeeded = function(obj) {
 *
 *  { insertOne: { document: { a: 1 } } }
 *
-*  { updateOne: { filter: {a:2}, update: {$set: {a:2}}, upsert:true, collation: {locale: "fr"} } }
+*  { updateOne: { filter: {a:2}, update: {$set: {a:2}}, upsert:true } }
 *
-*  { updateMany: { filter: {a:2}, update: {$set: {a:2}}, upsert:true collation: {locale: "fr"} } }
+*  { updateMany: { filter: {a:2}, update: {$set: {a:2}}, upsert:true } }
 *
-*  { deleteOne: { filter: {c:1}, collation: {locale: "fr"} } }
+*  { deleteOne: { filter: {c:1} } }
 *
-*  { deleteMany: { filter: {c:1}, collation: {locale: "fr"} } }
+*  { deleteMany: { filter: {c:1} } }
 *
-*  { replaceOne: { filter: {c:3}, replacement: {c:4}, upsert:true, collation: {locale: "fr"} } }
+*  { replaceOne: { filter: {c:3}, replacement: {c:4}, upsert:true}}
 *
 * @method
 * @param {object[]} operations Bulk operations to perform.
@@ -77,7 +74,9 @@ DBCollection.prototype.bulkWrite = function(operations, options) {
     var writeConcern = this._createWriteConcern(opts);
 
     // Result
-    var result = {acknowledged: (writeConcern && writeConcern.w == 0) ? false : true};
+    var result = {
+        acknowledged: (writeConcern && writeConcern.w == 0) ? false : true
+    };
 
     // Use bulk operation API already in the shell
     var bulkOp = opts.ordered ? this.initializeOrderedBulkOp() : this.initializeUnorderedBulkOp();
@@ -113,10 +112,6 @@ DBCollection.prototype.bulkWrite = function(operations, options) {
                 operation = operation.upsert();
             }
 
-            if (op.updateOne.collation) {
-                operation.collation(op.updateOne.collation);
-            }
-
             operation.updateOne(op.updateOne.update);
         } else if (op.updateMany) {
             if (!op.updateMany.filter) {
@@ -131,10 +126,6 @@ DBCollection.prototype.bulkWrite = function(operations, options) {
             var operation = bulkOp.find(op.updateMany.filter);
             if (op.updateMany.upsert) {
                 operation = operation.upsert();
-            }
-
-            if (op.updateMany.collation) {
-                operation.collation(op.updateMany.collation);
             }
 
             operation.update(op.updateMany.update);
@@ -153,37 +144,21 @@ DBCollection.prototype.bulkWrite = function(operations, options) {
                 operation = operation.upsert();
             }
 
-            if (op.replaceOne.collation) {
-                operation.collation(op.replaceOne.collation);
-            }
-
             operation.replaceOne(op.replaceOne.replacement);
         } else if (op.deleteOne) {
             if (!op.deleteOne.filter) {
                 throw new Error('deleteOne bulkWrite operation expects the filter field');
             }
 
-            // Translate operation to bulkOp operation.
-            var deleteOp = bulkOp.find(op.deleteOne.filter);
-
-            if (op.deleteOne.collation) {
-                deleteOp.collation(op.deleteOne.collation);
-            }
-
-            deleteOp.removeOne();
+            // Translate operation to bulkOp operation
+            bulkOp.find(op.deleteOne.filter).removeOne();
         } else if (op.deleteMany) {
             if (!op.deleteMany.filter) {
                 throw new Error('deleteMany bulkWrite operation expects the filter field');
             }
 
-            // Translate operation to bulkOp operation.
-            var deleteOp = bulkOp.find(op.deleteMany.filter);
-
-            if (op.deleteMany.collation) {
-                deleteOp.collation(op.deleteMany.collation);
-            }
-
-            deleteOp.remove();
+            // Translate operation to bulkOp operation
+            bulkOp.find(op.deleteMany.filter).remove();
         }
     }, this);
 
@@ -231,7 +206,9 @@ DBCollection.prototype.insertOne = function(document, options) {
     var writeConcern = this._createWriteConcern(opts);
 
     // Result
-    var result = {acknowledged: (writeConcern && writeConcern.w == 0) ? false : true};
+    var result = {
+        acknowledged: (writeConcern && writeConcern.w == 0) ? false : true
+    };
 
     // Use bulk operation API already in the shell
     var bulk = this.initializeOrderedBulkOp();
@@ -288,7 +265,9 @@ DBCollection.prototype.insertMany = function(documents, options) {
     var writeConcern = this._createWriteConcern(opts);
 
     // Result
-    var result = {acknowledged: (writeConcern && writeConcern.w == 0) ? false : true};
+    var result = {
+        acknowledged: (writeConcern && writeConcern.w == 0) ? false : true
+    };
 
     // Use bulk operation API already in the shell
     var bulk = opts.ordered ? this.initializeOrderedBulkOp() : this.initializeUnorderedBulkOp();
@@ -332,19 +311,15 @@ DBCollection.prototype.deleteOne = function(filter, options) {
     var writeConcern = this._createWriteConcern(opts);
 
     // Result
-    var result = {acknowledged: (writeConcern && writeConcern.w == 0) ? false : true};
+    var result = {
+        acknowledged: (writeConcern && writeConcern.w == 0) ? false : true
+    };
 
     // Use bulk operation API already in the shell
     var bulk = this.initializeOrderedBulkOp();
-    var removeOp = bulk.find(filter);
 
-    // Add the collation, if there is one.
-    if (opts.collation) {
-        removeOp.collation(opts.collation);
-    }
-
-    // Add the deleteOne operation.
-    removeOp.removeOne();
+    // Add the deleteOne operation
+    bulk.find(filter).removeOne();
 
     try {
         // Remove the first document that matches the selector
@@ -387,19 +362,15 @@ DBCollection.prototype.deleteMany = function(filter, options) {
     var writeConcern = this._createWriteConcern(opts);
 
     // Result
-    var result = {acknowledged: (writeConcern && writeConcern.w == 0) ? false : true};
+    var result = {
+        acknowledged: (writeConcern && writeConcern.w == 0) ? false : true
+    };
 
     // Use bulk operation API already in the shell
     var bulk = this.initializeOrderedBulkOp();
-    var removeOp = bulk.find(filter);
 
-    // Add the collation, if there is one.
-    if (opts.collation) {
-        removeOp.collation(opts.collation);
-    }
-
-    // Add the deleteOne operation.
-    removeOp.remove();
+    // Add the deleteOne operation
+    bulk.find(filter).remove();
 
     try {
         // Remove all documents that matche the selector
@@ -451,7 +422,9 @@ DBCollection.prototype.replaceOne = function(filter, replacement, options) {
     var writeConcern = this._createWriteConcern(opts);
 
     // Result
-    var result = {acknowledged: (writeConcern && writeConcern.w == 0) ? false : true};
+    var result = {
+        acknowledged: (writeConcern && writeConcern.w == 0) ? false : true
+    };
 
     // Use bulk operation API already in the shell
     var bulk = this.initializeOrderedBulkOp();
@@ -460,10 +433,6 @@ DBCollection.prototype.replaceOne = function(filter, replacement, options) {
     var op = bulk.find(filter);
     if (opts.upsert) {
         op = op.upsert();
-    }
-
-    if (opts.collation) {
-        op.collation(opts.collation);
     }
 
     op.replaceOne(replacement);
@@ -528,7 +497,9 @@ DBCollection.prototype.updateOne = function(filter, update, options) {
     var writeConcern = this._createWriteConcern(opts);
 
     // Result
-    var result = {acknowledged: (writeConcern && writeConcern.w == 0) ? false : true};
+    var result = {
+        acknowledged: (writeConcern && writeConcern.w == 0) ? false : true
+    };
 
     // Use bulk operation API already in the shell
     var bulk = this.initializeOrderedBulkOp();
@@ -537,10 +508,6 @@ DBCollection.prototype.updateOne = function(filter, update, options) {
     var op = bulk.find(filter);
     if (opts.upsert) {
         op = op.upsert();
-    }
-
-    if (opts.collation) {
-        op.collation(opts.collation);
     }
 
     op.updateOne(update);
@@ -605,7 +572,9 @@ DBCollection.prototype.updateMany = function(filter, update, options) {
     var writeConcern = this._createWriteConcern(opts);
 
     // Result
-    var result = {acknowledged: (writeConcern && writeConcern.w == 0) ? false : true};
+    var result = {
+        acknowledged: (writeConcern && writeConcern.w == 0) ? false : true
+    };
 
     // Use bulk operation API already in the shell
     var bulk = this.initializeOrderedBulkOp();
@@ -614,10 +583,6 @@ DBCollection.prototype.updateMany = function(filter, update, options) {
     var op = bulk.find(filter);
     if (opts.upsert) {
         op = op.upsert();
-    }
-
-    if (opts.collation) {
-        op.collation(opts.collation);
     }
 
     op.update(update);
@@ -667,7 +632,10 @@ DBCollection.prototype.updateMany = function(filter, update, options) {
 DBCollection.prototype.findOneAndDelete = function(filter, options) {
     var opts = Object.extend({}, options || {});
     // Set up the command
-    var cmd = {query: filter, remove: true};
+    var cmd = {
+        query: filter,
+        remove: true
+    };
 
     if (opts.sort) {
         cmd.sort = opts.sort;
@@ -679,10 +647,6 @@ DBCollection.prototype.findOneAndDelete = function(filter, options) {
 
     if (opts.maxTimeMS) {
         cmd.maxTimeMS = opts.maxTimeMS;
-    }
-
-    if (opts.collation) {
-        cmd.collation = opts.collation;
     }
 
     // Get the write concern
@@ -725,7 +689,10 @@ DBCollection.prototype.findOneAndReplace = function(filter, replacement, options
     }
 
     // Set up the command
-    var cmd = {query: filter, update: replacement};
+    var cmd = {
+        query: filter,
+        update: replacement
+    };
     if (opts.sort) {
         cmd.sort = opts.sort;
     }
@@ -736,10 +703,6 @@ DBCollection.prototype.findOneAndReplace = function(filter, replacement, options
 
     if (opts.maxTimeMS) {
         cmd.maxTimeMS = opts.maxTimeMS;
-    }
-
-    if (opts.collation) {
-        cmd.collation = opts.collation;
     }
 
     // Set flags
@@ -790,7 +753,10 @@ DBCollection.prototype.findOneAndUpdate = function(filter, update, options) {
     }
 
     // Set up the command
-    var cmd = {query: filter, update: update};
+    var cmd = {
+        query: filter,
+        update: update
+    };
     if (opts.sort) {
         cmd.sort = opts.sort;
     }
@@ -801,10 +767,6 @@ DBCollection.prototype.findOneAndUpdate = function(filter, update, options) {
 
     if (opts.maxTimeMS) {
         cmd.maxTimeMS = opts.maxTimeMS;
-    }
-
-    if (opts.collation) {
-        cmd.collation = opts.collation;
     }
 
     // Set flags

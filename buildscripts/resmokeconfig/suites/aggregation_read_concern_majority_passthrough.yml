@@ -3,12 +3,7 @@ selector:
     roots:
     - jstests/aggregation/*.js
     - jstests/aggregation/bugs/*.js
-    - jstests/aggregation/expressions/*.js
-    - jstests/aggregation/sources/*/*.js
     exclude_files:
-    # These tests fail due to the inability to specify a writeConcern when secondaryThrottle is not
-    # set as part of the moveChunk command.
-    - jstests/aggregation/sources/facet/use_cases.js
     # These test fail because afterOpTime is required to guarantee a secondary has advanced its
     # majority-committed snapshot.
     - jstests/aggregation/mongos_slaveok.js
@@ -31,11 +26,6 @@ selector:
 
 executor:
   js_test:
-    archive:
-      hooks:
-        - CheckReplOplogs
-        - CheckReplDBHash
-        - ValidateCollections
     config:
       shell_options:
         global_vars:
@@ -50,7 +40,6 @@ executor:
     # The CheckReplDBHash hook waits until all operations have replicated to and have been applied
     # on the secondaries, so we run the ValidateCollections hook after it to ensure we're
     # validating the entire contents of the collection.
-    - class: CheckReplOplogs
     - class: CheckReplDBHash
     - class: ValidateCollections
     fixture:
@@ -59,5 +48,4 @@ executor:
         enableMajorityReadConcern: ''
         set_parameters:
           enableTestCommands: 1
-          numInitialSyncAttempts: 1
       num_nodes: 2

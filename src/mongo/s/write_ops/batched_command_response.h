@@ -34,10 +34,10 @@
 #include "mongo/base/string_data.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/repl/optime.h"
-#include "mongo/rpc/write_concern_error_detail.h"
 #include "mongo/s/bson_serializable.h"
-#include "mongo/s/write_ops/batched_upsert_detail.h"
 #include "mongo/s/write_ops/write_error_detail.h"
+#include "mongo/s/write_ops/batched_upsert_detail.h"
+#include "mongo/s/write_ops/wc_error_detail.h"
 
 namespace mongo {
 
@@ -46,6 +46,7 @@ namespace mongo {
  * the response side.
  */
 class BatchedCommandResponse : public BSONSerializable {
+    MONGO_DISALLOW_COPYING(BatchedCommandResponse);
 
 public:
     //
@@ -60,7 +61,7 @@ public:
     static const BSONField<std::vector<BatchedUpsertDetail*>> upsertDetails;
     static const BSONField<OID> electionId;
     static const BSONField<std::vector<WriteErrorDetail*>> writeErrors;
-    static const BSONField<WriteConcernErrorDetail*> writeConcernError;
+    static const BSONField<WCErrorDetail*> writeConcernError;
 
     //
     // construction / destruction
@@ -68,13 +69,6 @@ public:
 
     BatchedCommandResponse();
     virtual ~BatchedCommandResponse();
-
-    //
-    // BatchedCommandResponse should have a move constructor but not a copy constructor
-    //
-
-    BatchedCommandResponse(BatchedCommandResponse&&) = default;
-    BatchedCommandResponse& operator=(BatchedCommandResponse&&) = default;
 
     /** Copies all the fields present in 'this' to 'other'. */
     void cloneTo(BatchedCommandResponse* other) const;
@@ -142,10 +136,10 @@ public:
     const std::vector<WriteErrorDetail*>& getErrDetails() const;
     const WriteErrorDetail* getErrDetailsAt(std::size_t pos) const;
 
-    void setWriteConcernError(WriteConcernErrorDetail* error);
+    void setWriteConcernError(WCErrorDetail* error);
     void unsetWriteConcernError();
     bool isWriteConcernErrorSet() const;
-    const WriteConcernErrorDetail* getWriteConcernError() const;
+    const WCErrorDetail* getWriteConcernError() const;
 
     /**
      * Converts the specified command response into a status, based on its contents.
@@ -202,7 +196,7 @@ private:
     std::unique_ptr<std::vector<WriteErrorDetail*>> _writeErrorDetails;
 
     // (O)  errors that occurred while trying to satisfy the write concern.
-    std::unique_ptr<WriteConcernErrorDetail> _wcErrDetails;
+    std::unique_ptr<WCErrorDetail> _wcErrDetails;
 };
 
 }  // namespace mongo

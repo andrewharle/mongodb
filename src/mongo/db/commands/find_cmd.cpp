@@ -48,11 +48,12 @@
 #include "mongo/db/query/find_common.h"
 #include "mongo/db/query/get_executor.h"
 #include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/s/collection_sharding_state.h"
-#include "mongo/db/server_options.h"
+#include "mongo/db/s/operation_shard_version.h"
+#include "mongo/db/s/sharding_state.h"
 #include "mongo/db/server_parameters.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/stats/counters.h"
+#include "mongo/s/stale_exception.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
@@ -72,8 +73,7 @@ class FindCmd : public Command {
 public:
     FindCmd() : Command("find") {}
 
-
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    bool isWriteCommandForConfigServer() const override {
         return false;
     }
 
@@ -105,10 +105,6 @@ public:
         return LogicalOp::opQuery;
     }
 
-    ReadWriteType getReadWriteType() const {
-        return ReadWriteType::kRead;
-    }
-
     std::size_t reserveBytesForReply() const override {
         return FindCommon::kInitReplyBufferSize;
     }
@@ -121,7 +117,7 @@ public:
         return false;
     }
 
-    Status checkAuthForCommand(Client* client,
+    Status checkAuthForCommand(ClientBasic* client,
                                const std::string& dbname,
                                const BSONObj& cmdObj) override {
         NamespaceString nss(parseNs(dbname, cmdObj));
@@ -135,68 +131,33 @@ public:
                    ExplainCommon::Verbosity verbosity,
                    const rpc::ServerSelectionMetadata&,
                    BSONObjBuilder* out) const override {
-        const NamespaceString nss(parseNs(dbname, cmdObj));
+        const std::string fullns = parseNs(dbname, cmdObj);
+        const NamespaceString nss(fullns);
         if (!nss.isValid()) {
             return {ErrorCodes::InvalidNamespace,
                     str::stream() << "Invalid collection name: " << nss.ns()};
         }
 
-        // Parse the command BSON to a QueryRequest.
+        // Parse the command BSON to a LiteParsedQuery.
         const bool isExplain = true;
-        auto qrStatus = QueryRequest::makeFromFindCommand(nss, cmdObj, isExplain);
-        if (!qrStatus.isOK()) {
-            return qrStatus.getStatus();
+        auto lpqStatus = LiteParsedQuery::makeFromFindCommand(nss, cmdObj, isExplain);
+        if (!lpqStatus.isOK()) {
+            return lpqStatus.getStatus();
         }
 
-        if (!qrStatus.getValue()->getCollation().isEmpty() &&
-            serverGlobalParams.featureCompatibility.version.load() ==
-                ServerGlobalParams::FeatureCompatibility::Version::k32) {
-            return Status(ErrorCodes::InvalidOptions,
-                          "The featureCompatibilityVersion must be 3.4 to use collation. See "
-                          "http://dochub.mongodb.org/core/3.4-feature-compatibility.");
-        }
-
-        // Finish the parsing step by using the QueryRequest to create a CanonicalQuery.
+        // Finish the parsing step by using the LiteParsedQuery to create a CanonicalQuery.
 
         ExtensionsCallbackReal extensionsCallback(txn, &nss);
         auto statusWithCQ =
-            CanonicalQuery::canonicalize(txn, std::move(qrStatus.getValue()), extensionsCallback);
+            CanonicalQuery::canonicalize(lpqStatus.getValue().release(), extensionsCallback);
         if (!statusWithCQ.isOK()) {
             return statusWithCQ.getStatus();
         }
         std::unique_ptr<CanonicalQuery> cq = std::move(statusWithCQ.getValue());
 
-        // Acquire locks. If the namespace is a view, we release our locks and convert the query
-        // request into an aggregation command.
-        AutoGetCollectionOrViewForRead ctx(txn, nss);
-        if (ctx.getView()) {
-            // Relinquish locks. The aggregation command will re-acquire them.
-            ctx.releaseLocksForView();
-
-            // Convert the find command into an aggregation using $match (and other stages, as
-            // necessary), if possible.
-            const auto& qr = cq->getQueryRequest();
-            auto viewAggregationCommand = qr.asAggregationCommand();
-            if (!viewAggregationCommand.isOK())
-                return viewAggregationCommand.getStatus();
-
-            Command* agg = Command::findCommand("aggregate");
-            std::string errmsg;
-
-            try {
-                agg->run(txn, dbname, viewAggregationCommand.getValue(), 0, errmsg, *out);
-            } catch (DBException& error) {
-                if (error.getCode() == ErrorCodes::InvalidPipelineOperator) {
-                    return {ErrorCodes::InvalidPipelineOperator,
-                            str::stream() << "Unsupported in view pipeline: " << error.what()};
-                }
-                return error.toStatus();
-            }
-            return Status::OK();
-        }
-
-        // The collection may be NULL. If so, getExecutor() should handle it by returning an
-        // execution tree with an EOFStage.
+        AutoGetCollectionForRead ctx(txn, nss);
+        // The collection may be NULL. If so, getExecutor() should handle it by returning
+        // an execution tree with an EOFStage.
         Collection* collection = ctx.getCollection();
 
         // We have a parsed query. Time to get the execution plan for it.
@@ -208,7 +169,7 @@ public:
         std::unique_ptr<PlanExecutor> exec = std::move(statusWithPlanExecutor.getValue());
 
         // Got the execution tree. Explain it.
-        Explain::explainStages(exec.get(), collection, verbosity, out);
+        Explain::explainStages(exec.get(), verbosity, out);
         return Status::OK();
     }
 
@@ -227,7 +188,8 @@ public:
              int options,
              std::string& errmsg,
              BSONObjBuilder& result) override {
-        const NamespaceString nss(parseNs(dbname, cmdObj));
+        const std::string fullns = parseNs(dbname, cmdObj);
+        const NamespaceString nss(fullns);
         if (!nss.isValid() || nss.isCommand() || nss.isSpecialCommand()) {
             return appendCommandStatus(result,
                                        {ErrorCodes::InvalidNamespace,
@@ -243,27 +205,17 @@ public:
                 Status(ErrorCodes::IllegalOperation, "Cannot run find command from eval()"));
         }
 
-        // Parse the command BSON to a QueryRequest.
+        // Parse the command BSON to a LiteParsedQuery.
         const bool isExplain = false;
-        auto qrStatus = QueryRequest::makeFromFindCommand(nss, cmdObj, isExplain);
-        if (!qrStatus.isOK()) {
-            return appendCommandStatus(result, qrStatus.getStatus());
+        auto lpqStatus = LiteParsedQuery::makeFromFindCommand(nss, cmdObj, isExplain);
+        if (!lpqStatus.isOK()) {
+            return appendCommandStatus(result, lpqStatus.getStatus());
         }
 
-        auto& qr = qrStatus.getValue();
-
-        if (!qr->getCollation().isEmpty() &&
-            serverGlobalParams.featureCompatibility.version.load() ==
-                ServerGlobalParams::FeatureCompatibility::Version::k32) {
-            return appendCommandStatus(
-                result,
-                Status(ErrorCodes::InvalidOptions,
-                       "The featureCompatibilityVersion must be 3.4 to use collation. See "
-                       "http://dochub.mongodb.org/core/3.4-feature-compatibility."));
-        }
+        auto& lpq = lpqStatus.getValue();
 
         // Validate term before acquiring locks, if provided.
-        if (auto term = qr->getReplicationTerm()) {
+        if (auto term = lpq->getReplicationTerm()) {
             auto replCoord = repl::ReplicationCoordinator::get(txn);
             Status status = replCoord->updateTerm(txn, *term);
             // Note: updateTerm returns ok if term stayed the same.
@@ -281,43 +233,45 @@ public:
         const int ntoskip = -1;
         beginQueryOp(txn, nss, cmdObj, ntoreturn, ntoskip);
 
-        // Finish the parsing step by using the QueryRequest to create a CanonicalQuery.
+        // Finish the parsing step by using the LiteParsedQuery to create a CanonicalQuery.
         ExtensionsCallbackReal extensionsCallback(txn, &nss);
-        auto statusWithCQ = CanonicalQuery::canonicalize(txn, std::move(qr), extensionsCallback);
+        auto statusWithCQ = CanonicalQuery::canonicalize(lpq.release(), extensionsCallback);
         if (!statusWithCQ.isOK()) {
             return appendCommandStatus(result, statusWithCQ.getStatus());
         }
         std::unique_ptr<CanonicalQuery> cq = std::move(statusWithCQ.getValue());
 
-        // Acquire locks. If the query is on a view, we release our locks and convert the query
-        // request into an aggregation command.
-        AutoGetCollectionOrViewForRead ctx(txn, nss);
-        Collection* collection = ctx.getCollection();
-        if (ctx.getView()) {
-            // Relinquish locks. The aggregation command will re-acquire them.
-            ctx.releaseLocksForView();
+        ShardingState* const shardingState = ShardingState::get(txn);
 
-            // Convert the find command into an aggregation using $match (and other stages, as
-            // necessary), if possible.
-            const auto& qr = cq->getQueryRequest();
-            auto viewAggregationCommand = qr.asAggregationCommand();
-            if (!viewAggregationCommand.isOK())
-                return appendCommandStatus(result, viewAggregationCommand.getStatus());
-
-            Command* agg = Command::findCommand("aggregate");
-            try {
-                agg->run(txn, dbname, viewAggregationCommand.getValue(), options, errmsg, result);
-            } catch (DBException& error) {
-                if (error.getCode() == ErrorCodes::InvalidPipelineOperator) {
-                    return appendCommandStatus(
-                        result,
-                        {ErrorCodes::InvalidPipelineOperator,
-                         str::stream() << "Unsupported in view pipeline: " << error.what()});
-                }
-                return appendCommandStatus(result, error.toStatus());
+        // Parse, canonicalize, plan, transcribe, and get a plan executor.
+        boost::optional<AutoGetCollectionForRead> optionalCtx;
+        try {
+            optionalCtx.emplace(txn, nss);
+        } catch (const StaleConfigException& sce) {
+            // Wait for migration completion to get the correct chunk version
+            const int maxTimeoutSec = 30;
+            int timeoutSec = cq->getParsed().getMaxTimeMS() / 1000;
+            if (!timeoutSec || timeoutSec > maxTimeoutSec) {
+                timeoutSec = maxTimeoutSec;
             }
-            return true;
+
+            if (shardingState->waitTillNotInCriticalSection(maxTimeoutSec)) {
+                ChunkVersion unused;
+                shardingState->refreshMetadataIfNeeded(
+                    txn, nss.ns(), sce.getVersionReceived(), &unused);
+            }
+            throw;
         }
+
+        const auto& ctx = *optionalCtx;
+        Collection* collection = ctx.getCollection();
+
+        const int dbProfilingLevel =
+            ctx.getDb() ? ctx.getDb()->getProfilingLevel() : serverGlobalParams.defaultProfile;
+
+        // It is possible that the sharding version will change during yield while we are retrieving
+        // a plan executor. If this happens we will throw an error and mongos will retry.
+        const ChunkVersion shardingVersionAtStart = shardingState->getVersion(nss.ns());
 
         // Get the execution plan for the query.
         auto statusWithPlanExecutor =
@@ -328,32 +282,28 @@ public:
 
         std::unique_ptr<PlanExecutor> exec = std::move(statusWithPlanExecutor.getValue());
 
-        {
-            stdx::lock_guard<Client> lk(*txn->getClient());
-            CurOp::get(txn)->setPlanSummary_inlock(Explain::getPlanSummary(exec.get()));
-        }
-
         if (!collection) {
             // No collection. Just fill out curop indicating that there were zero results and
             // there is no ClientCursor id, and then return.
             const long long numResults = 0;
             const CursorId cursorId = 0;
-            endQueryOp(txn, collection, *exec, numResults, cursorId);
+            endQueryOp(txn, collection, *exec, dbProfilingLevel, numResults, cursorId);
             appendCursorResponseObject(cursorId, nss.ns(), BSONArray(), &result);
             return true;
         }
 
-        const QueryRequest& originalQR = exec->getCanonicalQuery()->getQueryRequest();
+        const LiteParsedQuery& pq = exec->getCanonicalQuery()->getParsed();
 
         // Stream query results, adding them to a BSONArray as we go.
         CursorResponseBuilder firstBatch(/*isInitialResponse*/ true, &result);
         BSONObj obj;
         PlanExecutor::ExecState state = PlanExecutor::ADVANCED;
         long long numResults = 0;
-        while (!FindCommon::enoughForFirstBatch(originalQR, numResults) &&
+        while (!FindCommon::enoughForFirstBatch(pq, numResults, firstBatch.bytesUsed()) &&
                PlanExecutor::ADVANCED == (state = exec->getNext(&obj, NULL))) {
-            // If we can't fit this result inside the current batch, then we stash it for later.
-            if (!FindCommon::haveSpaceForNext(obj, numResults, firstBatch.bytesUsed())) {
+            // If adding this object will cause us to exceed the BSON size limit, then we stash
+            // it for later.
+            if (firstBatch.bytesUsed() + obj.objsize() > BSONObjMaxUserSize && numResults > 0) {
                 exec->enqueue(obj);
                 break;
             }
@@ -367,7 +317,7 @@ public:
         if (PlanExecutor::FAILURE == state || PlanExecutor::DEAD == state) {
             firstBatch.abandon();
             error() << "Plan executor error during find command: " << PlanExecutor::statestr(state)
-                    << ", stats: " << redact(Explain::getWinningPlanStats(exec.get()));
+                    << ", stats: " << Explain::getWinningPlanStats(exec.get());
 
             return appendCommandStatus(result,
                                        Status(ErrorCodes::OperationFailed,
@@ -376,10 +326,17 @@ public:
                                                   << WorkingSetCommon::toStatusString(obj)));
         }
 
-        // Before saving the cursor, ensure that whatever plan we established happened with the
-        // expected collection version
-        auto css = CollectionShardingState::get(txn, nss);
-        css->checkShardVersionOrThrow(txn);
+        // TODO: Currently, chunk ranges are kept around until all ClientCursors created while the
+        // chunk belonged on this node are gone. Separating chunk lifetime management from
+        // ClientCursor should allow this check to go away.
+        if (!shardingState->getVersion(nss.ns()).isWriteCompatibleWith(shardingVersionAtStart)) {
+            // Version changed while retrieving a PlanExecutor. Terminate the operation,
+            // signaling that mongos should retry.
+            throw SendStaleConfigException(nss.ns(),
+                                           "version changed during find command",
+                                           shardingVersionAtStart,
+                                           shardingState->getVersion(nss.ns()));
+        }
 
         // Set up the cursor for getMore.
         CursorId cursorId = 0;
@@ -397,8 +354,8 @@ public:
                                  exec.release(),
                                  nss.ns(),
                                  txn->recoveryUnit()->isReadingFromMajorityCommittedSnapshot(),
-                                 originalQR.getOptions(),
-                                 cmdObj.getOwned());
+                                 pq.getOptions(),
+                                 pq.getFilter());
             cursorId = cursor->cursorid();
 
             invariant(!exec);
@@ -408,17 +365,13 @@ public:
             cursorExec->saveState();
             cursorExec->detachFromOperationContext();
 
-            // We assume that cursors created through a DBDirectClient are always used from their
-            // original OperationContext, so we do not need to move time to and from the cursor.
-            if (!txn->getClient()->isInDirectClient()) {
-                cursor->setLeftoverMaxTimeMicros(txn->getRemainingMaxTimeMicros());
-            }
+            cursor->setLeftoverMaxTimeMicros(CurOp::get(txn)->getRemainingMaxTimeMicros());
             cursor->setPos(numResults);
 
             // Fill out curop based on the results.
-            endQueryOp(txn, collection, *cursorExec, numResults, cursorId);
+            endQueryOp(txn, collection, *cursorExec, dbProfilingLevel, numResults, cursorId);
         } else {
-            endQueryOp(txn, collection, *exec, numResults, cursorId);
+            endQueryOp(txn, collection, *exec, dbProfilingLevel, numResults, cursorId);
         }
 
         // Generate the response object to send to the client.

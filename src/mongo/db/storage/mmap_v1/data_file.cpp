@@ -38,12 +38,11 @@
 #include <utility>
 #include <vector>
 
-#include "mongo/base/static_assert.h"
-#include "mongo/db/operation_context.h"
 #include "mongo/db/storage/mmap_v1/dur.h"
 #include "mongo/db/storage/mmap_v1/durable_mapped_file.h"
-#include "mongo/db/storage/mmap_v1/file_allocator.h"
 #include "mongo/db/storage/mmap_v1/mmap_v1_options.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/storage/mmap_v1/file_allocator.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
@@ -65,10 +64,13 @@ void data_file_check(void* _mb) {
 }  // namespace
 
 
-MONGO_STATIC_ASSERT(DataFileHeader::HeaderSize == 8192);
-MONGO_STATIC_ASSERT(sizeof(static_cast<DataFileHeader*>(NULL)->data) == 4);
-MONGO_STATIC_ASSERT(sizeof(DataFileHeader) - sizeof(static_cast<DataFileHeader*>(NULL)->data) ==
-                    DataFileHeader::HeaderSize);
+static_assert(DataFileHeader::HeaderSize == 8192, "DataFileHeader::HeaderSize == 8192");
+static_assert(sizeof(static_cast<DataFileHeader*>(NULL)->data) == 4,
+              "sizeof(static_cast<DataFileHeader*>(NULL)->data) == 4");
+static_assert(sizeof(DataFileHeader) - sizeof(static_cast<DataFileHeader*>(NULL)->data) ==
+                  DataFileHeader::HeaderSize,
+              "sizeof(DataFileHeader) - sizeof(static_cast<DataFileHeader*>(NULL)->data) == "
+              "DataFileHeader::HeaderSize");
 
 
 int DataFile::maxSize() {
@@ -111,7 +113,7 @@ Status DataFile::openExisting(const char* filename) {
         return Status(ErrorCodes::InvalidPath, "DataFile::openExisting - file does not exist");
     }
 
-    if (!mmf.open(filename)) {
+    if (!mmf.open(filename, false)) {
         return Status(ErrorCodes::InternalError, "DataFile::openExisting - mmf.open failed");
     }
 
@@ -170,7 +172,7 @@ void DataFile::open(OperationContext* txn,
     {
         invariant(_mb == 0);
         unsigned long long sz = size;
-        if (mmf.create(filename, sz)) {
+        if (mmf.create(filename, sz, false)) {
             _mb = mmf.getView();
         }
 
@@ -209,9 +211,7 @@ void DataFileHeader::init(OperationContext* txn, int fileno, int filelength, con
 
         massert(13640,
                 str::stream() << "DataFileHeader looks corrupt at file open filelength:"
-                              << filelength
-                              << " fileno:"
-                              << fileno,
+                              << filelength << " fileno:" << fileno,
                 filelength > 32768);
 
         // The writes done in this function must not be rolled back. If the containing

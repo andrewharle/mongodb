@@ -32,13 +32,11 @@
 
 #include "mongo/db/exec/projection_exec.h"
 
-#include "mongo/db/exec/working_set_computed_data.h"
-#include "mongo/db/json.h"
-#include "mongo/db/matcher/expression_parser.h"
-#include "mongo/db/matcher/extensions_callback_disallow_extensions.h"
-#include "mongo/db/query/collation/collator_interface_mock.h"
-#include "mongo/unittest/unittest.h"
 #include <memory>
+#include "mongo/db/json.h"
+#include "mongo/db/exec/working_set_computed_data.h"
+#include "mongo/db/matcher/expression_parser.h"
+#include "mongo/unittest/unittest.h"
 
 using namespace mongo;
 
@@ -50,9 +48,7 @@ using std::unique_ptr;
  * Utility function to create MatchExpression
  */
 unique_ptr<MatchExpression> parseMatchExpression(const BSONObj& obj) {
-    const CollatorInterface* collator = nullptr;
-    StatusWithMatchExpression status =
-        MatchExpressionParser::parse(obj, ExtensionsCallbackDisallowExtensions(), collator);
+    StatusWithMatchExpression status = MatchExpressionParser::parse(obj);
     ASSERT_TRUE(status.isOK());
     return std::move(status.getValue());
 }
@@ -78,15 +74,13 @@ void testTransform(const char* specStr,
                    const char* queryStr,
                    const char* objStr,
                    WorkingSetComputedData* data,
-                   const CollatorInterface* collator,
                    bool expectedStatusOK,
                    const char* expectedObjStr) {
     // Create projection exec object.
     BSONObj spec = fromjson(specStr);
     BSONObj query = fromjson(queryStr);
     unique_ptr<MatchExpression> queryExpression = parseMatchExpression(query);
-    ProjectionExec exec(
-        spec, queryExpression.get(), collator, ExtensionsCallbackDisallowExtensions());
+    ProjectionExec exec(spec, queryExpression.get());
 
     // Create working set member.
     WorkingSetMember wsm;
@@ -125,7 +119,7 @@ void testTransform(const char* specStr,
     // Finally, we compare the projected object.
     const BSONObj& obj = wsm.obj.value();
     BSONObj expectedObj = fromjson(expectedObjStr);
-    if (SimpleBSONObjComparator::kInstance.evaluate(obj != expectedObj)) {
+    if (obj != expectedObj) {
         mongoutils::str::stream ss;
         ss << "transform() test failed: unexpected projected object."
            << "\nprojection spec: " << specStr << "\nquery: " << queryStr
@@ -137,20 +131,20 @@ void testTransform(const char* specStr,
 }
 
 /**
- * testTransform without computed data or collator arguments.
+ * testTransform without computed data argument.
  */
 void testTransform(const char* specStr,
                    const char* queryStr,
                    const char* objStr,
                    bool expectedStatusOK,
                    const char* expectedObjStr) {
-    testTransform(specStr, queryStr, objStr, nullptr, nullptr, expectedStatusOK, expectedObjStr);
+    testTransform(specStr, queryStr, objStr, NULL, expectedStatusOK, expectedObjStr);
 }
 
 /**
  * Test function to verify the results of projecting the $meta sortKey while under a covered
  * projection. In particular, it tests that ProjectionExec can take a WorkingSetMember in
- * RID_AND_IDX state and use the sortKey along with the index data to generate the final output
+ * LOC_AND_IDX state and use the sortKey along with the index data to generate the final output
  * document. For SERVER-20117.
  *
  * sortKey - The sort key in BSONObj form.
@@ -167,10 +161,9 @@ BSONObj transformMetaSortKeyCovered(const BSONObj& sortKey,
     WorkingSetMember* wsm = ws.get(wsid);
     wsm->keyData.push_back(ikd);
     wsm->addComputed(new SortKeyComputedData(sortKey));
-    ws.transitionToRecordIdAndIdx(wsid);
+    ws.transitionToLocAndIdx(wsid);
 
-    ProjectionExec projExec(
-        fromjson(projSpec), nullptr, nullptr, ExtensionsCallbackDisallowExtensions());
+    ProjectionExec projExec(fromjson(projSpec), nullptr);
     ASSERT_OK(projExec.transform(wsm));
 
     return wsm->obj.value();
@@ -206,17 +199,6 @@ TEST(ProjectionExecTest, TransformElemMatch) {
 
     // $elemMatch on unknown field z
     testTransform("{a: {$elemMatch: {z: 1}}}", "{}", s, true, "{}");
-}
-
-TEST(ProjectionExecTest, ElemMatchProjectionRespectsCollator) {
-    CollatorInterfaceMock collator(CollatorInterfaceMock::MockType::kReverseString);
-    testTransform("{a: {$elemMatch: {$gte: 'abc'}}}",
-                  "{}",
-                  "{a: ['zaa', 'zbb', 'zdd', 'zee']}",
-                  nullptr,  // WSM computed data
-                  &collator,
-                  true,
-                  "{a: ['zdd']}");
 }
 
 //
@@ -259,7 +241,6 @@ TEST(ProjectionExecTest, TransformMetaTextScore) {
                   "{}",
                   "{a: 'hello'}",
                   new mongo::TextScoreComputedData(100),
-                  nullptr,  // collator
                   true,
                   "{a: 'hello', b: 100}");
     // Projected meta field should overwrite existing field.
@@ -267,7 +248,6 @@ TEST(ProjectionExecTest, TransformMetaTextScore) {
                   "{}",
                   "{a: 'hello', b: -1}",
                   new mongo::TextScoreComputedData(100),
-                  nullptr,  // collator
                   true,
                   "{a: 'hello', b: 100}");
 }
@@ -277,7 +257,6 @@ TEST(ProjectionExecTest, TransformMetaSortKey) {
                   "{}",
                   "{a: 'hello'}",
                   new mongo::SortKeyComputedData(BSON("" << 99)),
-                  nullptr,  // collator
                   true,
                   "{a: 'hello', b: {'': 99}}");
 
@@ -286,7 +265,6 @@ TEST(ProjectionExecTest, TransformMetaSortKey) {
                   "{}",
                   "{a: 'hello'}",
                   new mongo::SortKeyComputedData(BSON("" << 99)),
-                  nullptr,  // collator
                   true,
                   "{a: {'': 99}}");
 }
@@ -297,7 +275,7 @@ TEST(ProjectionExecTest, TransformMetaSortKeyCoveredNormal) {
                                     "{_id: 0, a: 1, b: {$meta: 'sortKey'}}",
                                     IndexKeyDatum(BSON("a" << 1), BSON("" << 5), nullptr));
     BSONObj expectedOut = BSON("a" << 5 << "b" << BSON("" << 5));
-    ASSERT_BSONOBJ_EQ(actualOut, expectedOut);
+    ASSERT_EQ(actualOut, expectedOut);
 }
 
 TEST(ProjectionExecTest, TransformMetaSortKeyCoveredOverwrite) {
@@ -306,7 +284,7 @@ TEST(ProjectionExecTest, TransformMetaSortKeyCoveredOverwrite) {
                                     "{_id: 0, a: 1, a: {$meta: 'sortKey'}}",
                                     IndexKeyDatum(BSON("a" << 1), BSON("" << 5), nullptr));
     BSONObj expectedOut = BSON("a" << BSON("" << 5));
-    ASSERT_BSONOBJ_EQ(actualOut, expectedOut);
+    ASSERT_EQ(actualOut, expectedOut);
 }
 
 TEST(ProjectionExecTest, TransformMetaSortKeyCoveredAdditionalData) {
@@ -315,7 +293,7 @@ TEST(ProjectionExecTest, TransformMetaSortKeyCoveredAdditionalData) {
         "{_id: 0, a: 1, b: {$meta: 'sortKey'}, c: 1}",
         IndexKeyDatum(BSON("a" << 1 << "c" << 1), BSON("" << 5 << "" << 6), nullptr));
     BSONObj expectedOut = BSON("a" << 5 << "c" << 6 << "b" << BSON("" << 5));
-    ASSERT_BSONOBJ_EQ(actualOut, expectedOut);
+    ASSERT_EQ(actualOut, expectedOut);
 }
 
 TEST(ProjectionExecTest, TransformMetaSortKeyCoveredCompound) {
@@ -324,7 +302,7 @@ TEST(ProjectionExecTest, TransformMetaSortKeyCoveredCompound) {
         "{_id: 0, a: 1, b: {$meta: 'sortKey'}}",
         IndexKeyDatum(BSON("a" << 1 << "c" << 1), BSON("" << 5 << "" << 6), nullptr));
     BSONObj expectedOut = BSON("a" << 5 << "b" << BSON("" << 5 << "" << 6));
-    ASSERT_BSONOBJ_EQ(actualOut, expectedOut);
+    ASSERT_EQ(actualOut, expectedOut);
 }
 
 TEST(ProjectionExecTest, TransformMetaSortKeyCoveredCompound2) {
@@ -334,7 +312,7 @@ TEST(ProjectionExecTest, TransformMetaSortKeyCoveredCompound2) {
         IndexKeyDatum(
             BSON("a" << 1 << "b" << 1 << "c" << 1), BSON("" << 5 << "" << 6 << "" << 4), nullptr));
     BSONObj expectedOut = BSON("a" << 5 << "c" << 4 << "b" << BSON("" << 5 << "" << 6));
-    ASSERT_BSONOBJ_EQ(actualOut, expectedOut);
+    ASSERT_EQ(actualOut, expectedOut);
 }
 
 TEST(ProjectionExecTest, TransformMetaSortKeyCoveredCompound3) {
@@ -345,7 +323,7 @@ TEST(ProjectionExecTest, TransformMetaSortKeyCoveredCompound3) {
                       BSON("" << 5 << "" << 6 << "" << 4 << "" << 9000),
                       nullptr));
     BSONObj expectedOut = BSON("c" << 4 << "d" << 9000 << "b" << BSON("" << 6 << "" << 4));
-    ASSERT_BSONOBJ_EQ(actualOut, expectedOut);
+    ASSERT_EQ(actualOut, expectedOut);
 }
 
 }  // namespace

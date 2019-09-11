@@ -37,7 +37,10 @@
     }
 
     function setLastVoteDoc(conn, term, candidate) {
-        var newLastVote = {term: term, candidateIndex: rst.getNodeId(candidate)};
+        var newLastVote = {
+            term: term,
+            candidateIndex: rst.getNodeId(candidate)
+        };
         return assert.writeOK(conn.getCollection(lastVoteNS).update({}, newLastVote));
     }
 
@@ -63,15 +66,12 @@
         var secondary = rst.getSecondary();
         var term = getLatestOp(primary).t;
 
-        // SERVER-20844 ReplSetTest starts up a single node replica set then reconfigures to the
-        // correct size, so secondaries didn't vote in the first election.
-        if (i > 0) {
-            jsTestLog("Last vote should have term: " + term + " and candidate: " + primary.host +
-                      ", index: " + rst.getNodeId(primary));
-            rst.nodes.forEach(function(node) {
-                assertNodeHasLastVote(node, term, primary);
-            });
-        }
+        jsTestLog("Last vote should have term: " + term + " and candidate: " + primary.host +
+                  ", index: " + rst.getNodeId(primary));
+        rst.nodes.forEach(function(node) {
+            assertNodeHasLastVote(node, term, primary);
+        });
+
         assert.throws(function() {
             primary.adminCommand({replSetStepDown: 60 * 10, force: true});
         });
@@ -113,10 +113,7 @@
 
     jsTestLog("Restarting node 0 in replica set mode");
     node0 = rst.restart(0);  // Restart in replSet mode again.
-    assert.soonNoExcept(function() {
-        assertCurrentTerm(node0, term);
-        return true;
-    });
+    assertCurrentTerm(node0, term);
 
     jsTestLog("Manually sending node 0 a dryRun replSetRequestVotes command, " +
               "expecting failure in old term");
@@ -126,7 +123,7 @@
         dryRun: true,
         term: term - 1,
         candidateIndex: 1,
-        configVersion: conf.version,
+        configVersion: 2,
         lastCommittedOp: getLatestOp(node0)
     }));
     assert.eq(response.term,
@@ -134,6 +131,9 @@
               "replSetRequestVotes response had the wrong term: " + tojson(response));
     assert(!response.voteGranted,
            "node granted vote in term before last vote doc: " + tojson(response));
+    assert.eq(response.reason,
+              "candidate's term is lower than mine",
+              "replSetRequestVotes response had the wrong reason: " + tojson(response));
     assertNodeHasLastVote(node0, term, rst.nodes[0]);
     assertCurrentTerm(node0, term);
 
@@ -145,7 +145,7 @@
         dryRun: true,
         term: term,
         candidateIndex: 1,
-        configVersion: conf.version,
+        configVersion: 2,
         lastCommittedOp: getLatestOp(node0)
     }));
     assert.eq(response.term,
@@ -167,7 +167,7 @@
         dryRun: false,
         term: term,
         candidateIndex: 1,
-        configVersion: conf.version,
+        configVersion: 2,
         lastCommittedOp: getLatestOp(node0)
     }));
     assert.eq(response.term,
@@ -175,6 +175,9 @@
               "replSetRequestVotes response had the wrong term: " + tojson(response));
     assert(!response.voteGranted,
            "node granted vote in term of last vote doc: " + tojson(response));
+    assert.eq(response.reason,
+              "already voted for another candidate this term",
+              "replSetRequestVotes response had the wrong reason: " + tojson(response));
     assertNodeHasLastVote(node0, term, rst.nodes[0]);
     assertCurrentTerm(node0, term);
 
@@ -186,7 +189,7 @@
         dryRun: false,
         term: term + 1,
         candidateIndex: 1,
-        configVersion: conf.version,
+        configVersion: 2,
         lastCommittedOp: getLatestOp(node0)
     }));
     assert.eq(response.term,
@@ -208,7 +211,7 @@
         dryRun: true,
         term: term + 2,
         candidateIndex: 1,
-        configVersion: conf.version,
+        configVersion: 2,
         lastCommittedOp: getLatestOp(node0)
     }));
     assert.eq(response.term,

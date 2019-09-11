@@ -31,7 +31,6 @@
 
 #include "mongo/platform/basic.h"
 
-#include "mongo/platform/pause.h"
 #include "mongo/util/concurrency/spin_lock.h"
 
 #include <sched.h>
@@ -53,8 +52,9 @@ void SpinLock::_lockSlowPath() {
     for (int i = 0; i < 1000; i++) {
         if (_tryLock())
             return;
-
-        MONGO_YIELD_CORE_FOR_SMT();
+#if defined(__i386__) || defined(__x86_64__)
+        asm volatile("pause");
+#endif
     }
 
     for (int i = 0; i < 1000; i++) {

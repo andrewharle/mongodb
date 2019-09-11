@@ -30,12 +30,10 @@
  * This file tests db/exec/fetch.cpp.  Fetch goes to disk so we cannot test outside of a dbtest.
  */
 
-#include "mongo/platform/basic.h"
 
 #include "mongo/client/dbclientcursor.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/database.h"
-#include "mongo/db/client.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/exec/fetch.h"
@@ -43,7 +41,7 @@
 #include "mongo/db/exec/queued_data_stage.h"
 #include "mongo/db/json.h"
 #include "mongo/db/matcher/expression_parser.h"
-#include "mongo/db/matcher/extensions_callback_disallow_extensions.h"
+#include "mongo/db/operation_context_impl.h"
 #include "mongo/dbtests/dbtests.h"
 #include "mongo/stdx/memory.h"
 
@@ -62,7 +60,7 @@ public:
         _client.dropCollection(ns());
     }
 
-    void getRecordIds(set<RecordId>* out, Collection* coll) {
+    void getLocs(set<RecordId>* out, Collection* coll) {
         auto cursor = coll->getCursor(&_txn);
         while (auto record = cursor->next()) {
             out->insert(record->id);
@@ -82,8 +80,7 @@ public:
     }
 
 protected:
-    const ServiceContext::UniqueOperationContext _txnPtr = cc().makeOperationContext();
-    OperationContext& _txn = *_txnPtr;
+    OperationContextImpl _txn;
     DBDirectClient _client;
 };
 
@@ -107,9 +104,9 @@ public:
 
         // Add an object to the DB.
         insert(BSON("foo" << 5));
-        set<RecordId> recordIds;
-        getRecordIds(&recordIds, coll);
-        ASSERT_EQUALS(size_t(1), recordIds.size());
+        set<RecordId> locs;
+        getLocs(&locs, coll);
+        ASSERT_EQUALS(size_t(1), locs.size());
 
         // Create a mock stage that returns the WSM.
         auto mockStage = make_unique<QueuedDataStage>(&_txn, &ws);
@@ -118,16 +115,16 @@ public:
         {
             WorkingSetID id = ws.allocate();
             WorkingSetMember* mockMember = ws.get(id);
-            mockMember->recordId = *recordIds.begin();
-            mockMember->obj = coll->docFor(&_txn, mockMember->recordId);
-            ws.transitionToRecordIdAndObj(id);
+            mockMember->loc = *locs.begin();
+            mockMember->obj = coll->docFor(&_txn, mockMember->loc);
+            ws.transitionToLocAndObj(id);
             // Points into our DB.
             mockStage->pushBack(id);
         }
         {
             WorkingSetID id = ws.allocate();
             WorkingSetMember* mockMember = ws.get(id);
-            mockMember->recordId = RecordId();
+            mockMember->loc = RecordId();
             mockMember->obj = Snapshotted<BSONObj>(SnapshotId(), BSON("foo" << 6));
             mockMember->transitionToOwnedObj();
             ASSERT_TRUE(mockMember->obj.value().isOwned());
@@ -173,9 +170,9 @@ public:
 
         // Add an object to the DB.
         insert(BSON("foo" << 5));
-        set<RecordId> recordIds;
-        getRecordIds(&recordIds, coll);
-        ASSERT_EQUALS(size_t(1), recordIds.size());
+        set<RecordId> locs;
+        getLocs(&locs, coll);
+        ASSERT_EQUALS(size_t(1), locs.size());
 
         // Create a mock stage that returns the WSM.
         auto mockStage = make_unique<QueuedDataStage>(&_txn, &ws);
@@ -184,10 +181,10 @@ public:
         {
             WorkingSetID id = ws.allocate();
             WorkingSetMember* mockMember = ws.get(id);
-            mockMember->recordId = *recordIds.begin();
-            ws.transitionToRecordIdAndIdx(id);
+            mockMember->loc = *locs.begin();
+            ws.transitionToLocAndIdx(id);
 
-            // State is RecordId and index, shouldn't be able to get the foo data inside.
+            // State is loc and index, shouldn't be able to get the foo data inside.
             BSONElement elt;
             ASSERT_FALSE(mockMember->getFieldDotted("foo", &elt));
             mockStage->pushBack(id);
@@ -195,9 +192,7 @@ public:
 
         // Make the filter.
         BSONObj filterObj = BSON("foo" << 6);
-        const CollatorInterface* collator = nullptr;
-        StatusWithMatchExpression statusWithMatcher = MatchExpressionParser::parse(
-            filterObj, ExtensionsCallbackDisallowExtensions(), collator);
+        StatusWithMatchExpression statusWithMatcher = MatchExpressionParser::parse(filterObj);
         verify(statusWithMatcher.isOK());
         unique_ptr<MatchExpression> filterExpr = std::move(statusWithMatcher.getValue());
 

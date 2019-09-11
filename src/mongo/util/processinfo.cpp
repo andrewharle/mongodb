@@ -34,9 +34,8 @@
 #include "mongo/base/init.h"
 #include "mongo/util/processinfo.h"
 
-#include <boost/filesystem/path.hpp>
-#include <fstream>
 #include <iostream>
+#include <fstream>
 
 #include "mongo/util/log.h"
 
@@ -55,29 +54,22 @@ public:
         out.close();
     }
 
-    bool write(const boost::filesystem::path& p) {
+    bool write(const string& p) {
         path = p;
         ofstream out(path.c_str(), ios_base::out);
         out << ProcessId::getCurrent() << endl;
-        if (!out.good()) {
-            auto errAndStr = errnoAndDescription();
-            if (errAndStr.first == 0) {
-                log() << "ERROR: Cannot write pid file to " << path.string()
-                      << ": Unable to determine OS error";
-            } else {
-                log() << "ERROR: Cannot write pid file to " << path.string() << ": "
-                      << errAndStr.second;
-            }
-        }
         return out.good();
     }
 
-private:
-    boost::filesystem::path path;
+    string path;
 } pidFileWiper;
 
 bool writePidFile(const string& path) {
-    return pidFileWiper.write(path);
+    bool e = pidFileWiper.write(path);
+    if (!e) {
+        log() << "ERROR: Cannot write pid file to " << path << ": " << strerror(errno);
+    }
+    return e;
 }
 
 ProcessInfo::SystemInfo* ProcessInfo::systemInfo = NULL;
@@ -92,8 +84,9 @@ void ProcessInfo::initializeSystemInfo() {
  * We need this get the system page size for the secure allocator, which the enterprise modules need
  * for storage for command line parameters.
  */
-MONGO_INITIALIZER_GENERAL(SystemInfo, MONGO_NO_PREREQUISITES, MONGO_NO_DEPENDENTS)
-(InitializerContext* context) {
+MONGO_INITIALIZER_GENERAL(SystemInfo,
+                          MONGO_NO_PREREQUISITES,
+                          MONGO_NO_DEPENDENTS)(InitializerContext* context) {
     ProcessInfo::initializeSystemInfo();
     return Status::OK();
 }

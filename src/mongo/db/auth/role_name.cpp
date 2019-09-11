@@ -29,7 +29,6 @@
 #include "mongo/db/auth/role_name.h"
 
 #include <algorithm>
-#include <iostream>
 #include <string>
 
 #include "mongo/base/string_data.h"

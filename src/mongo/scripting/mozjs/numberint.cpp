@@ -40,10 +40,9 @@
 namespace mongo {
 namespace mozjs {
 
-const JSFunctionSpec NumberIntInfo::methods[5] = {
+const JSFunctionSpec NumberIntInfo::methods[4] = {
     MONGO_ATTACH_JS_CONSTRAINED_METHOD(toNumber, NumberIntInfo),
     MONGO_ATTACH_JS_CONSTRAINED_METHOD(toString, NumberIntInfo),
-    MONGO_ATTACH_JS_CONSTRAINED_METHOD(toJSON, NumberIntInfo),
     MONGO_ATTACH_JS_CONSTRAINED_METHOD(valueOf, NumberIntInfo),
     JS_FS_END,
 };
@@ -54,7 +53,7 @@ void NumberIntInfo::finalize(JSFreeOp* fop, JSObject* obj) {
     auto x = static_cast<int*>(JS_GetPrivate(obj));
 
     if (x)
-        getScope(fop)->trackedDelete(x);
+        delete x;
 }
 
 int NumberIntInfo::ToNumberInt(JSContext* cx, JS::HandleValue thisv) {
@@ -88,12 +87,6 @@ void NumberIntInfo::Functions::toString::call(JSContext* cx, JS::CallArgs args) 
     ValueReader(cx, args.rval()).fromStringData(ss.operator std::string());
 }
 
-void NumberIntInfo::Functions::toJSON::call(JSContext* cx, JS::CallArgs args) {
-    int val = NumberIntInfo::ToNumberInt(cx, args.thisv());
-
-    args.rval().setInt32(val);
-}
-
 void NumberIntInfo::construct(JSContext* cx, JS::CallArgs args) {
     auto scope = getScope(cx);
 
@@ -111,7 +104,7 @@ void NumberIntInfo::construct(JSContext* cx, JS::CallArgs args) {
         uasserted(ErrorCodes::BadValue, "NumberInt takes 0 or 1 arguments");
     }
 
-    JS_SetPrivate(thisv, scope->trackedNew<int>(x));
+    JS_SetPrivate(thisv, new int(x));
 
     args.rval().setObjectOrNull(thisv);
 }

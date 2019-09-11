@@ -15,18 +15,17 @@
         test.createUser({user: 'user', pwd: 'pass', roles: jsTest.basicUserRoles});
 
         // Give the test user an invalid set of SCRAM-SHA-1 credentials.
-        assert.eq(admin.system.users
-                      .update({_id: "test.user"}, {
-                          $set: {
-                              "credentials.SCRAM-SHA-1": {
-                                  salt: "AAAA",
-                                  storedKey: "AAAA",
-                                  serverKey: "AAAA",
-                                  iterationCount: 10000
-                              }
-                          }
-                      })
-                      .nModified,
+        assert.eq(admin.system.users.update({_id: "test.user"},
+                                            {
+                                              $set: {
+                                                  "credentials.SCRAM-SHA-1": {
+                                                      salt: "AAAA",
+                                                      storedKey: "AAAA",
+                                                      serverKey: "AAAA",
+                                                      iterationCount: 10000
+                                                  }
+                                              }
+                                            }).nModified,
                   1,
                   "Should have updated one document for user@test");
         admin.logout();

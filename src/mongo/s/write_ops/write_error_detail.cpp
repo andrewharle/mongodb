@@ -154,6 +154,10 @@ void WriteErrorDetail::setIndex(int index) {
     _isIndexSet = true;
 }
 
+void WriteErrorDetail::unsetIndex() {
+    _isIndexSet = false;
+}
+
 bool WriteErrorDetail::isIndexSet() const {
     return _isIndexSet;
 }
@@ -168,6 +172,10 @@ void WriteErrorDetail::setErrCode(int errCode) {
     _isErrCodeSet = true;
 }
 
+void WriteErrorDetail::unsetErrCode() {
+    _isErrCodeSet = false;
+}
+
 bool WriteErrorDetail::isErrCodeSet() const {
     return _isErrCodeSet;
 }
@@ -180,6 +188,10 @@ int WriteErrorDetail::getErrCode() const {
 void WriteErrorDetail::setErrInfo(const BSONObj& errInfo) {
     _errInfo = errInfo.getOwned();
     _isErrInfoSet = true;
+}
+
+void WriteErrorDetail::unsetErrInfo() {
+    _isErrInfoSet = false;
 }
 
 bool WriteErrorDetail::isErrInfoSet() const {

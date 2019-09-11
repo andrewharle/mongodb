@@ -44,13 +44,13 @@ TEST(SortedDataInterface, FullValidate) {
     const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
 
     {
-        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT(sorted->isEmpty(opCtx.get()));
     }
 
     int nToInsert = 10;
     for (int i = 0; i < nToInsert; i++) {
-        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             BSONObj key = BSON("" << i);
@@ -61,14 +61,14 @@ TEST(SortedDataInterface, FullValidate) {
     }
 
     {
-        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(nToInsert, sorted->numEntries(opCtx.get()));
     }
 
     {
         long long numKeysOut;
-        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-        sorted->fullValidate(opCtx.get(), &numKeysOut, NULL);
+        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        sorted->fullValidate(opCtx.get(), false, &numKeysOut, NULL);
         // fullValidate() can set numKeysOut as the number of existing keys or -1.
         ASSERT(numKeysOut == nToInsert || numKeysOut == -1);
     }

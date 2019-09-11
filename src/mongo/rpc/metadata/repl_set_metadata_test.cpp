@@ -26,8 +26,6 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/jsobj.h"
 #include "mongo/rpc/metadata/repl_set_metadata.h"
 #include "mongo/unittest/unittest.h"
@@ -60,17 +58,11 @@ TEST(ReplResponseMetadataTest, Roundtrip) {
                             << BSON("ts" << opTime.getTimestamp() << "t" << opTime.getTerm())
                             << "lastOpVisible"
                             << BSON("ts" << opTime2.getTimestamp() << "t" << opTime2.getTerm())
-                            << "configVersion"
-                            << 6
-                            << "replicaSetId"
-                            << metadata.getReplicaSetId()
-                            << "primaryIndex"
-                            << 12
-                            << "syncSourceIndex"
-                            << -1)));
+                            << "configVersion" << 6 << "replicaSetId" << metadata.getReplicaSetId()
+                            << "primaryIndex" << 12 << "syncSourceIndex" << -1)));
 
     BSONObj serializedObj = builder.obj();
-    ASSERT_BSONOBJ_EQ(expectedObj, serializedObj);
+    ASSERT_EQ(expectedObj, serializedObj);
 
     auto cloneStatus = ReplSetMetadata::readFromMetadata(serializedObj);
     ASSERT_OK(cloneStatus.getStatus());
@@ -85,21 +77,7 @@ TEST(ReplResponseMetadataTest, Roundtrip) {
     clonedMetadata.writeToMetadata(&clonedBuilder);
 
     BSONObj clonedSerializedObj = clonedBuilder.obj();
-    ASSERT_BSONOBJ_EQ(expectedObj, clonedSerializedObj);
-}
-
-TEST(ReplResponseMetadataTest, MetadataCanBeConstructedWhenMissingOplogQueryMetadataFields) {
-    auto id = OID::gen();
-    BSONObj obj(BSON(kReplSetMetadataFieldName
-                     << BSON("term" << 3 << "configVersion" << 6 << "replicaSetId" << id)));
-
-    auto status = ReplSetMetadata::readFromMetadata(obj);
-    ASSERT_OK(status.getStatus());
-
-    const auto& metadata = status.getValue();
-    ASSERT_EQ(metadata.getConfigVersion(), 6);
-    ASSERT_EQ(metadata.getReplicaSetId(), id);
-    ASSERT_EQ(metadata.getTerm(), 3);
+    ASSERT_EQ(expectedObj, clonedSerializedObj);
 }
 
 }  // unnamed namespace

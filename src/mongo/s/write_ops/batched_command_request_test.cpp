@@ -41,12 +41,8 @@ TEST(BatchedCommandRequest, BasicInsert) {
 
     BSONObj origInsertRequestObj = BSON("insert"
                                         << "test"
-                                        << "documents"
-                                        << insertArray
-                                        << "writeConcern"
-                                        << BSON("w" << 1)
-                                        << "ordered"
-                                        << true);
+                                        << "documents" << insertArray << "writeConcern"
+                                        << BSON("w" << 1) << "ordered" << true);
 
     std::string errMsg;
     BatchedCommandRequest insertRequest(BatchedCommandRequest::BatchType_Insert);
@@ -63,14 +59,34 @@ TEST(BatchedCommandRequest, InsertWithShardVersion) {
 
     BSONObj origInsertRequestObj = BSON("insert"
                                         << "test"
-                                        << "documents"
-                                        << insertArray
-                                        << "writeConcern"
-                                        << BSON("w" << 1)
-                                        << "ordered"
-                                        << true
-                                        << "shardVersion"
-                                        << BSON_ARRAY(Timestamp(1, 2) << epoch));
+                                        << "documents" << insertArray << "writeConcern"
+                                        << BSON("w" << 1) << "ordered" << true << "shardVersion"
+                                        << BSON_ARRAY(Timestamp(1, 2) << epoch) << "configsvrOpTime"
+                                        << BSON("ts" << Timestamp(3, 4) << "t" << 5));
+
+    std::string errMsg;
+    BatchedCommandRequest insertRequest(BatchedCommandRequest::BatchType_Insert);
+    ASSERT_TRUE(insertRequest.parseBSON("TestDB", origInsertRequestObj, &errMsg));
+
+    ASSERT_EQ("TestDB.test", insertRequest.getInsertRequest()->getNS().toString());
+    ASSERT(insertRequest.hasShardVersion());
+    ASSERT_EQ(ChunkVersion(1, 2, epoch).toString(), insertRequest.getShardVersion().toString());
+}
+
+TEST(BatchedCommandRequest, InsertWithShardVersionInLegacyMetadata) {
+    BSONArray insertArray = BSON_ARRAY(BSON("a" << 1) << BSON("b" << 1));
+
+    const OID epoch = OID::gen();
+
+    BSONObj origInsertRequestObj = BSON("insert"
+                                        << "test"
+                                        << "documents" << insertArray << "writeConcern"
+                                        << BSON("w" << 1) << "ordered" << true << "metadata"
+                                        << BSON("shardVersion"
+                                                << BSON_ARRAY(Timestamp(1, 2) << epoch)
+                                                << "configsvrOpTime"
+                                                << BSON("ts" << Timestamp(3, 4) << "t" << 5)
+                                                << "session" << 0LL));
 
     std::string errMsg;
     BatchedCommandRequest insertRequest(BatchedCommandRequest::BatchType_Insert);
@@ -96,7 +112,7 @@ TEST(BatchedCommandRequest, InsertClone) {
     ASSERT_EQ("xyz.abc", clonedRequest.getNS().toString());
     ASSERT_EQ("xyz.abc", clonedRequest.getTargetingNSS().toString());
     ASSERT_TRUE(clonedRequest.getOrdered());
-    ASSERT_BSONOBJ_EQ(BSON("w" << 2), clonedRequest.getWriteConcern());
+    ASSERT_EQ(BSON("w" << 2), clonedRequest.getWriteConcern());
     ASSERT_TRUE(clonedRequest.shouldBypassValidation());
 
     batchedRequest.setShouldBypassValidation(false);
@@ -107,9 +123,7 @@ TEST(BatchedCommandRequest, InsertClone) {
 TEST(BatchedCommandRequest, InsertIndexClone) {
     BSONObj indexSpec(BSON("ns"
                            << "xyz.user"
-                           << "key"
-                           << BSON("x" << 1)
-                           << "name"
+                           << "key" << BSON("x" << 1) << "name"
                            << "y"));
 
     auto insertRequest = stdx::make_unique<BatchedInsertRequest>();
@@ -126,14 +140,14 @@ TEST(BatchedCommandRequest, InsertIndexClone) {
     ASSERT_EQ("xyz.system.indexes", clonedRequest.getNS().toString());
     ASSERT_EQ("xyz.user", clonedRequest.getTargetingNSS().toString());
     ASSERT_TRUE(clonedRequest.getOrdered());
-    ASSERT_BSONOBJ_EQ(BSON("w" << 2), clonedRequest.getWriteConcern());
+    ASSERT_EQ(BSON("w" << 2), clonedRequest.getWriteConcern());
 
     auto* clonedInsert = clonedRequest.getInsertRequest();
     ASSERT_TRUE(clonedInsert != nullptr);
 
     auto insertDocs = clonedInsert->getDocuments();
     ASSERT_EQ(1u, insertDocs.size());
-    ASSERT_BSONOBJ_EQ(indexSpec, insertDocs.front());
+    ASSERT_EQ(indexSpec, insertDocs.front());
 }
 
 TEST(BatchedCommandRequest, InsertCloneWithId) {
@@ -152,7 +166,7 @@ TEST(BatchedCommandRequest, InsertCloneWithId) {
     ASSERT_EQ("xyz.abc", clonedRequest->getNS().toString());
     ASSERT_EQ("xyz.abc", clonedRequest->getTargetingNSS().toString());
     ASSERT_TRUE(clonedRequest->getOrdered());
-    ASSERT_BSONOBJ_EQ(BSON("w" << 2), clonedRequest->getWriteConcern());
+    ASSERT_EQ(BSON("w" << 2), clonedRequest->getWriteConcern());
     ASSERT_TRUE(clonedRequest->shouldBypassValidation());
 
     auto* clonedInsert = clonedRequest->getInsertRequest();
@@ -181,7 +195,7 @@ TEST(BatchedCommandRequest, UpdateClone) {
     ASSERT_EQ("xyz.abc", clonedRequest.getNS().toString());
     ASSERT_EQ("xyz.abc", clonedRequest.getTargetingNSS().toString());
     ASSERT_TRUE(clonedRequest.getOrdered());
-    ASSERT_BSONOBJ_EQ(BSON("w" << 2), clonedRequest.getWriteConcern());
+    ASSERT_EQ(BSON("w" << 2), clonedRequest.getWriteConcern());
     ASSERT_TRUE(clonedRequest.shouldBypassValidation());
 }
 
@@ -199,7 +213,7 @@ TEST(BatchedCommandRequest, DeleteClone) {
     ASSERT_EQ("xyz.abc", clonedRequest.getNS().toString());
     ASSERT_EQ("xyz.abc", clonedRequest.getTargetingNSS().toString());
     ASSERT_TRUE(clonedRequest.getOrdered());
-    ASSERT_BSONOBJ_EQ(BSON("w" << 2), clonedRequest.getWriteConcern());
+    ASSERT_EQ(BSON("w" << 2), clonedRequest.getWriteConcern());
 }
 
 }  // namespace

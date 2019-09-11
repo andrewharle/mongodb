@@ -32,8 +32,8 @@
 
 #include <algorithm>
 #include <cmath>
-#include <utility>
 #include <vector>
+#include <utility>
 
 #include "mongo/db/query/plan_ranker.h"
 
@@ -93,15 +93,15 @@ size_t PlanRanker::pickBestPlan(const vector<CandidatePlan>& candidates, PlanRan
     // Compute score for each tree.  Record the best.
     for (size_t i = 0; i < statTrees.size(); ++i) {
         LOG(5) << "Scoring plan " << i << ":" << endl
-               << redact(candidates[i].solution->toString()) << "Stats:\n"
-               << redact(Explain::statsToBSON(*statTrees[i]).jsonString(Strict, true));
+               << candidates[i].solution->toString() << "Stats:\n"
+               << Explain::statsToBSON(*statTrees[i]).jsonString(Strict, true);
         LOG(2) << "Scoring query plan: " << Explain::getPlanSummary(candidates[i].root)
                << " planHitEOF=" << statTrees[i]->common.isEOF;
 
         double score = scoreTree(statTrees[i]);
-        LOG(5) << "score = " << score;
+        LOG(5) << "score = " << score << endl;
         if (statTrees[i]->common.isEOF) {
-            LOG(5) << "Adding +" << eofBonus << " EOF bonus to score.";
+            LOG(5) << "Adding +" << eofBonus << " EOF bonus to score." << endl;
             score += 1;
         }
         scoresAndCandidateindices.push_back(std::make_pair(score, i));
@@ -196,7 +196,6 @@ double PlanRanker::scoreTree(const PlanStageStats* stats) {
     // How many "units of work" did the plan perform. Each call to work(...)
     // counts as one unit.
     size_t workUnits = stats->common.works;
-    invariant(workUnits != 0);
 
     // How much did a plan produce?
     // Range: [0, 1]
@@ -254,7 +253,7 @@ double PlanRanker::scoreTree(const PlanStageStats* stats) {
             // The boost should be >2.001 to make absolutely sure the ixisect plan will win due
             // to the combination of 1) productivity, 2) eof bonus, and 3) no ixisect bonus.
             score += 3;
-            LOG(5) << "Score boosted to " << score << " due to intersection forcing.";
+            LOG(5) << "Score boosted to " << score << " due to intersection forcing." << endl;
         }
     }
 

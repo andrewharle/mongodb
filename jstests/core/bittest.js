@@ -144,13 +144,14 @@
     assertQueryCorrect({a: {$bitsAnyClear: BinData(0, "////////////////////////////")}}, 3);
 
     // Tests with multiple predicates.
-    assertQueryCorrect({
-        a: {
-            $bitsAllSet: BinData(0, "AANgAAAAAAAAAAAAAAAAAAAAAAAA"),
-            $bitsAllClear: BinData(0, "//yf////////////////////////")
-        }
-    },
-                       1);
+    assertQueryCorrect(
+        {
+          a: {
+              $bitsAllSet: BinData(0, "AANgAAAAAAAAAAAAAAAAAAAAAAAA"),
+              $bitsAllClear: BinData(0, "//yf////////////////////////")
+          }
+        },
+        1);
 
     coll.drop();
 })();

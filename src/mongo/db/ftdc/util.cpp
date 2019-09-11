@@ -63,7 +63,7 @@ const char kFTDCDocsField[] = "docs";
 const char kFTDCCollectStartField[] = "start";
 const char kFTDCCollectEndField[] = "end";
 
-const std::int64_t FTDCConfig::kPeriodMillisDefault = 1000;
+const std::uint64_t FTDCConfig::kPeriodMillisDefault = 1000;
 
 const std::size_t kMaxRecursion = 10;
 
@@ -103,66 +103,12 @@ Date_t roundTime(Date_t now, Milliseconds period) {
     return Date_t::fromMillisSinceEpoch(next_time);
 }
 
-boost::filesystem::path getMongoSPath(const boost::filesystem::path& logFile) {
-    auto base = logFile;
-
-    // Keep stripping file extensions until we are only left with the file name
-    while (base.has_extension()) {
-        auto full_path = base.generic_string();
-        base = full_path.substr(0, full_path.size() - base.extension().size());
-    }
-
-    base += "." + kFTDCDefaultDirectory.toString();
-    return base;
-}
-
 }  // namespace FTDCUtil
 
 
 namespace FTDCBSONUtil {
 
 namespace {
-
-/**
- * Iterate a BSONObj but only return fields that have types that FTDC cares about.
- */
-class FTDCBSONObjIterator {
-public:
-    FTDCBSONObjIterator(const BSONObj& obj) : _iterator(obj) {
-        advance();
-    }
-
-    bool more() {
-        return !_current.eoo();
-    }
-
-    BSONElement next() {
-        auto ret = _current;
-        advance();
-        return ret;
-    }
-
-private:
-    /**
-     * Find the next element that is a valid FTDC type.
-     */
-    void advance() {
-        _current = BSONElement();
-
-        while (_iterator.more()) {
-
-            auto elem = _iterator.next();
-            if (isFTDCType(elem.type())) {
-                _current = elem;
-                break;
-            }
-        }
-    }
-
-private:
-    BSONObjIterator _iterator;
-    BSONElement _current;
-};
 
 StatusWith<bool> extractMetricsFromDocument(const BSONObj& referenceDoc,
                                             const BSONObj& currentDoc,
@@ -173,14 +119,15 @@ StatusWith<bool> extractMetricsFromDocument(const BSONObj& referenceDoc,
         return {ErrorCodes::BadValue, "Recursion limit reached."};
     }
 
-    FTDCBSONObjIterator itCurrent(currentDoc);
-    FTDCBSONObjIterator itReference(referenceDoc);
+    BSONObjIterator itCurrent(currentDoc);
+    BSONObjIterator itReference(referenceDoc);
 
     while (itCurrent.more()) {
         // Schema mismatch if current document is longer than reference document
         if (matches && !itReference.more()) {
             LOG(4) << "full-time diagnostic data capture schema change: currrent document is "
-                      "longer than reference document";
+                      "longer than "
+                      "reference document";
             matches = false;
         }
 
@@ -205,8 +152,7 @@ StatusWith<bool> extractMetricsFromDocument(const BSONObj& referenceDoc,
                 !(referenceElement.isNumber() == true &&
                   currentElement.isNumber() == referenceElement.isNumber())) {
                 LOG(4) << "full-time diagnostic data capture  schema change: field type change for "
-                          "field '"
-                       << referenceElement.fieldNameStringData() << "' from '"
+                          "field '" << referenceElement.fieldNameStringData() << "' from '"
                        << static_cast<int>(referenceElement.type()) << "' to '"
                        << static_cast<int>(currentElement.type()) << "'";
                 matches = false;
@@ -269,24 +215,6 @@ StatusWith<bool> extractMetricsFromDocument(const BSONObj& referenceDoc,
 }
 
 }  // namespace
-
-bool isFTDCType(BSONType type) {
-    switch (type) {
-        case NumberDouble:
-        case NumberInt:
-        case NumberLong:
-        case NumberDecimal:
-        case Bool:
-        case Date:
-        case bsonTimestamp:
-        case Object:
-        case Array:
-            return true;
-
-        default:
-            return false;
-    }
-}
 
 StatusWith<bool> extractMetricsFromDocument(const BSONObj& referenceDoc,
                                             const BSONObj& currentDoc,
@@ -443,9 +371,7 @@ StatusWith<FTDCType> getBSONDocumentType(const BSONObj& obj) {
         static_cast<FTDCType>(value) != FTDCType::kMetadata) {
         return {ErrorCodes::BadValue,
                 str::stream() << "Field '" << std::string(kFTDCTypeField)
-                              << "' is not an expected value, found '"
-                              << value
-                              << "'"};
+                              << "' is not an expected value, found '" << value << "'"};
     }
 
     return {static_cast<FTDCType>(value)};

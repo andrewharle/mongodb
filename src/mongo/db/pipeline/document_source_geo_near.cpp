@@ -30,36 +30,29 @@
 
 #include "mongo/platform/basic.h"
 
-#include "mongo/db/pipeline/document_source_geo_near.h"
-
+#include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document.h"
-#include "mongo/db/pipeline/document_source_limit.h"
-#include "mongo/db/pipeline/document_source_sort.h"
-#include "mongo/db/pipeline/lite_parsed_document_source.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
 
 using boost::intrusive_ptr;
+using std::min;
 
-REGISTER_DOCUMENT_SOURCE(geoNear,
-                         LiteParsedDocumentSourceDefault::parse,
-                         DocumentSourceGeoNear::createFromBson);
-
-const long long DocumentSourceGeoNear::kDefaultLimit = 100;
+REGISTER_DOCUMENT_SOURCE(geoNear, DocumentSourceGeoNear::createFromBson);
 
 const char* DocumentSourceGeoNear::getSourceName() const {
     return "$geoNear";
 }
 
-DocumentSource::GetNextResult DocumentSourceGeoNear::getNext() {
+boost::optional<Document> DocumentSourceGeoNear::getNext() {
     pExpCtx->checkForInterrupt();
 
     if (!resultsIterator)
         runCommand();
 
     if (!resultsIterator->more())
-        return GetNextResult::makeEOF();
+        return boost::none;
 
     // each result from the geoNear command is wrapped in a wrapper object with "obj",
     // "dis" and maybe "loc" fields. We want to take the object from "obj" and inject the
@@ -73,19 +66,14 @@ DocumentSource::GetNextResult DocumentSourceGeoNear::getNext() {
     return output.freeze();
 }
 
-Pipeline::SourceContainer::iterator DocumentSourceGeoNear::doOptimizeAt(
-    Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container) {
-    invariant(*itr == this);
-
-    auto nextLimit = dynamic_cast<DocumentSourceLimit*>((*std::next(itr)).get());
-
-    if (nextLimit) {
-        // If the next stage is a $limit, we can combine it with ourselves.
-        limit = std::min(limit, nextLimit->getLimit());
-        container->erase(std::next(itr));
-        return itr;
+bool DocumentSourceGeoNear::coalesce(const intrusive_ptr<DocumentSource>& pNextSource) {
+    DocumentSourceLimit* limitSrc = dynamic_cast<DocumentSourceLimit*>(pNextSource.get());
+    if (limitSrc) {
+        limit = min(limit, limitSrc->getLimit());
+        return true;
     }
-    return std::next(itr);
+
+    return false;
 }
 
 // This command is sent as-is to the shards.
@@ -94,7 +82,7 @@ intrusive_ptr<DocumentSource> DocumentSourceGeoNear::getShardSource() {
     return this;
 }
 intrusive_ptr<DocumentSource> DocumentSourceGeoNear::getMergeSource() {
-    return DocumentSourceSort::create(pExpCtx, BSON(distanceField->fullPath() << 1), limit);
+    return DocumentSourceSort::create(pExpCtx, BSON(distanceField->getPath(false) << 1), limit);
 }
 
 Value DocumentSourceGeoNear::serialize(bool explain) const {
@@ -107,7 +95,7 @@ Value DocumentSourceGeoNear::serialize(bool explain) const {
     }
 
     // not in buildGeoNearCmd
-    result.setField("distanceField", Value(distanceField->fullPath()));
+    result.setField("distanceField", Value(distanceField->getPath(false)));
 
     result.setField("limit", Value(limit));
 
@@ -122,7 +110,7 @@ Value DocumentSourceGeoNear::serialize(bool explain) const {
     result.setField("distanceMultiplier", Value(distanceMultiplier));
 
     if (includeLocs)
-        result.setField("includeLocs", Value(includeLocs->fullPath()));
+        result.setField("includeLocs", Value(includeLocs->getPath(false)));
 
     return Value(DOC(getSourceName() << result.freeze()));
 }
@@ -150,14 +138,6 @@ BSONObj DocumentSourceGeoNear::buildGeoNearCmd() const {
         geoNear.append("minDistance", minDistance);
 
     geoNear.append("query", query);
-    if (!pExpCtx->collation.isEmpty()) {
-        if (pExpCtx->getCollator()) {
-            geoNear.append("collation", pExpCtx->getCollator()->getSpec().toBSON());
-        } else {
-            geoNear.append("collation", CollationSpec::kSimpleSpec);
-        }
-    }
-
     geoNear.append("spherical", spherical);
     geoNear.append("distanceMultiplier", distanceMultiplier);
 
@@ -179,8 +159,7 @@ void DocumentSourceGeoNear::runCommand() {
 
 intrusive_ptr<DocumentSourceGeoNear> DocumentSourceGeoNear::create(
     const intrusive_ptr<ExpressionContext>& pCtx) {
-    intrusive_ptr<DocumentSourceGeoNear> source(new DocumentSourceGeoNear(pCtx));
-    return source;
+    return new DocumentSourceGeoNear(pCtx);
 }
 
 intrusive_ptr<DocumentSource> DocumentSourceGeoNear::createFromBson(
@@ -235,19 +214,12 @@ void DocumentSourceGeoNear::parseOptions(BSONObj options) {
 
     if (options.hasField("uniqueDocs"))
         warning() << "ignoring deprecated uniqueDocs option in $geoNear aggregation stage";
-
-    // The collation field is disallowed, even though it is accepted by the geoNear command, since
-    // the $geoNear operation should respect the collation associated with the entire pipeline.
-    uassert(40227,
-            "$geoNear does not accept the 'collation' parameter. Instead, specify a collation "
-            "for the entire aggregation command.",
-            !options["collation"]);
 }
 
 DocumentSourceGeoNear::DocumentSourceGeoNear(const intrusive_ptr<ExpressionContext>& pExpCtx)
-    : DocumentSourceNeedsMongod(pExpCtx),
+    : DocumentSource(pExpCtx),
       coordsIsArray(false),
-      limit(DocumentSourceGeoNear::kDefaultLimit),
+      limit(100),
       maxDistance(-1.0),
       minDistance(-1.0),
       spherical(false),

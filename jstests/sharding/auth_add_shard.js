@@ -11,10 +11,15 @@
     }
 
     // admin user object
-    var adminUser = {db: "admin", username: "foo", password: "bar"};
+    var adminUser = {
+        db: "admin",
+        username: "foo",
+        password: "bar"
+    };
 
     // set up a 2 shard cluster with keyfile
-    var st = new ShardingTest({shards: 1, mongos: 1, other: {keyFile: 'jstests/libs/key1'}});
+    var st = new ShardingTest(
+        {name: "auth_add_shard1", shards: 1, mongos: 1, keyFile: "jstests/libs/key1"});
 
     var mongos = st.s0;
     var admin = mongos.getDB("admin");
@@ -23,11 +28,9 @@
 
     // add the admin user
     print("adding user");
-    mongos.getDB(adminUser.db).createUser({
-        user: adminUser.username,
-        pwd: adminUser.password,
-        roles: jsTest.adminUserRoles
-    });
+    mongos.getDB(adminUser.db)
+        .createUser(
+            {user: adminUser.username, pwd: adminUser.password, roles: jsTest.adminUserRoles});
 
     // login as admin user
     login(adminUser);
@@ -35,7 +38,7 @@
     assert.eq(1, st.config.shards.count(), "initial server count wrong");
 
     // start a mongod with NO keyfile
-    var conn = MongoRunner.runMongod({shardsvr: ""});
+    var conn = MongoRunner.runMongod({});
     print(conn);
 
     // --------------- Test 1 --------------------
@@ -47,9 +50,9 @@
 
     //--------------- Test 2 --------------------
     // start mongod again, this time with keyfile
-    var conn = MongoRunner.runMongod({keyFile: "jstests/libs/key1", shardsvr: ""});
+    var conn = MongoRunner.runMongod({keyFile: "jstests/libs/key1"});
     // try adding the new shard
-    assert.commandWorked(admin.runCommand({addShard: conn.host}));
+    printjson(assert.commandWorked(admin.runCommand({addShard: conn.host})));
 
     // Add some data
     var db = mongos.getDB("foo");
@@ -74,14 +77,14 @@
     admin.runCommand({flushRouterConfig: 1});
 
     var config = mongos.getDB("config");
-    st.printShardingStatus(true);
+    config.printShardingStatus(true);
 
     // start balancer before removing the shard
     st.startBalancer();
 
     //--------------- Test 3 --------------------
     // now drain the shard
-    assert.commandWorked(admin.runCommand({removeShard: conn.host}));
+    printjson(assert.commandWorked(admin.runCommand({removeShard: conn.host})));
 
     // give it some time to drain
     assert.soon(function() {
@@ -96,4 +99,5 @@
     MongoRunner.stopMongod(conn);
 
     st.stop();
+
 })();

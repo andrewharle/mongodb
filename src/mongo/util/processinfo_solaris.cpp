@@ -28,8 +28,6 @@
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kControl
 
 #include <boost/filesystem.hpp>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
 #include <fstream>
 #include <iostream>
 #include <malloc.h>
@@ -70,15 +68,15 @@ struct ProcPsinfo {
     ProcPsinfo() {
         FILE* f = fopen("/proc/self/psinfo", "r");
         massert(16846,
-                mongoutils::str::stream() << "couldn't open \"/proc/self/psinfo\": "
-                                          << errnoWithDescription(),
+                mongoutils::str::stream()
+                    << "couldn't open \"/proc/self/psinfo\": " << errnoWithDescription(),
                 f);
         size_t num = fread(&psinfo, sizeof(psinfo), 1, f);
         int err = errno;
         fclose(f);
         massert(16847,
-                mongoutils::str::stream() << "couldn't read from \"/proc/self/psinfo\": "
-                                          << errnoWithDescription(err),
+                mongoutils::str::stream()
+                    << "couldn't read from \"/proc/self/psinfo\": " << errnoWithDescription(err),
                 num == 1);
     }
     psinfo_t psinfo;
@@ -88,15 +86,15 @@ struct ProcUsage {
     ProcUsage() {
         FILE* f = fopen("/proc/self/usage", "r");
         massert(16848,
-                mongoutils::str::stream() << "couldn't open \"/proc/self/usage\": "
-                                          << errnoWithDescription(),
+                mongoutils::str::stream()
+                    << "couldn't open \"/proc/self/usage\": " << errnoWithDescription(),
                 f);
         size_t num = fread(&prusage, sizeof(prusage), 1, f);
         int err = errno;
         fclose(f);
         massert(16849,
-                mongoutils::str::stream() << "couldn't read from \"/proc/self/usage\": "
-                                          << errnoWithDescription(err),
+                mongoutils::str::stream()
+                    << "couldn't read from \"/proc/self/usage\": " << errnoWithDescription(err),
                 num == 1);
     }
     prusage_t prusage;
@@ -107,14 +105,6 @@ ProcessInfo::~ProcessInfo() {}
 
 bool ProcessInfo::supported() {
     return true;
-}
-
-// get the number of CPUs available to the scheduler
-boost::optional<unsigned long> ProcessInfo::getNumAvailableCores() {
-    long nprocs = sysconf(_SC_NPROCESSORS_ONLN);
-    if (nprocs)
-        return nprocs;
-    return boost::none;
 }
 
 int ProcessInfo::getVirtualMemorySize() {
@@ -142,7 +132,7 @@ void ProcessInfo::getExtraInfo(BSONObjBuilder& info) {
 void ProcessInfo::SystemInfo::collectSystemInfo() {
     struct utsname unameData;
     if (uname(&unameData) == -1) {
-        log() << "Unable to collect detailed system information: " << strerror(errno);
+        log() << "Unable to collect detailed system information: " << strerror(errno) << endl;
     }
 
     char buf_64[32];
@@ -151,7 +141,7 @@ void ProcessInfo::SystemInfo::collectSystemInfo() {
         sysinfo(SI_ARCHITECTURE_NATIVE, buf_native, sizeof(buf_native)) != -1) {
         addrSize = mongoutils::str::equals(buf_64, buf_native) ? 64 : 32;
     } else {
-        log() << "Unable to determine system architecture: " << strerror(errno);
+        log() << "Unable to determine system architecture: " << strerror(errno) << endl;
     }
 
     osType = unameData.sysname;
@@ -225,7 +215,7 @@ bool ProcessInfo::blockInMemory(const void* start) {
     char x = 0;
     if (mincore(
             static_cast<char*>(const_cast<void*>(alignToStartOfPage(start))), getPageSize(), &x)) {
-        log() << "mincore failed: " << errnoWithDescription();
+        log() << "mincore failed: " << errnoWithDescription() << endl;
         return 1;
     }
     return x & 0x1;
@@ -236,7 +226,7 @@ bool ProcessInfo::pagesInMemory(const void* start, size_t numPages, std::vector<
     if (mincore(static_cast<char*>(const_cast<void*>(alignToStartOfPage(start))),
                 numPages * getPageSize(),
                 &out->front())) {
-        log() << "mincore failed: " << errnoWithDescription();
+        log() << "mincore failed: " << errnoWithDescription() << endl;
         return false;
     }
     for (size_t i = 0; i < numPages; ++i) {

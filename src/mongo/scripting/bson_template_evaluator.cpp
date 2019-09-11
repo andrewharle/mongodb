@@ -31,7 +31,6 @@
 #include <cstddef>
 #include <cstdlib>
 
-#include "mongo/base/static_assert.h"
 #include "mongo/util/map_util.h"
 #include "mongo/util/mongoutils/str.h"
 
@@ -240,8 +239,6 @@ BsonTemplateEvaluator::Status BsonTemplateEvaluator::evalSeqInt(BsonTemplateEval
         if (!spec["mod"].isNumber())
             return StatusOpEvaluationError;
         int modval = spec["mod"].numberInt();
-        if (modval <= 0)
-            return StatusOpEvaluationError;
         curr_seqval = (curr_seqval % modval);
     }
 
@@ -270,7 +267,7 @@ BsonTemplateEvaluator::Status BsonTemplateEvaluator::evalRandString(BsonTemplate
         "abcdefghijklmnopqrstuvwxyz"
         "0123456789+/";
     static const size_t alphaNumLength = sizeof(alphanum) - 1;
-    MONGO_STATIC_ASSERT(alphaNumLength == 64);
+    static_assert(alphaNumLength == 64, "alphaNumLength == 64");
     uint32_t currentRand = 0;
     std::string str;
     for (int i = 0; i < length; ++i, currentRand >>= 6) {

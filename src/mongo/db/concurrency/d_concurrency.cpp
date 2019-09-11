@@ -26,24 +26,25 @@
  *    it in the license file.
  */
 
-#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kDefault
-
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/concurrency/d_concurrency.h"
 
 #include <string>
 
-#include "mongo/db/concurrency/global_lock_acquisition_tracker.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/server_parameters.h"
-#include "mongo/db/service_context.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
 #include "mongo/util/stacktrace.h"
 
 namespace mongo {
+namespace {
+
+//  SERVER-14668: Remove or invert sense once MMAPv1 CLL can be default
+MONGO_EXPORT_STARTUP_SERVER_PARAMETER(enableCollectionLocking, bool, true);
+}  // namespace
 
 Lock::TempRelease::TempRelease(Locker* lockState)
     : _lockState(lockState),
@@ -57,53 +58,40 @@ Lock::TempRelease::~TempRelease() {
     }
 }
 
-namespace {
-AtomicWord<uint64_t> lastResourceMutexHash{0};
-}  // namespace
-
-Lock::ResourceMutex::ResourceMutex() : _rid(RESOURCE_MUTEX, lastResourceMutexHash.fetchAndAdd(1)) {}
+Lock::GlobalLock::GlobalLock(Locker* locker)
+    : _locker(locker), _result(LOCK_INVALID), _pbwm(locker, resourceIdParallelBatchWriterMode) {}
 
 Lock::GlobalLock::GlobalLock(Locker* locker, LockMode lockMode, unsigned timeoutMs)
-    : GlobalLock(locker, lockMode, timeoutMs, EnqueueOnly()) {
+    : GlobalLock(locker, lockMode, EnqueueOnly()) {
     waitForLock(timeoutMs);
 }
 
-Lock::GlobalLock::GlobalLock(Locker* locker,
-                             LockMode lockMode,
-                             unsigned timeoutMs,
-                             EnqueueOnly enqueueOnly)
+Lock::GlobalLock::GlobalLock(Locker* locker, LockMode lockMode, EnqueueOnly enqueueOnly)
     : _locker(locker), _result(LOCK_INVALID), _pbwm(locker, resourceIdParallelBatchWriterMode) {
-    _enqueue(lockMode, timeoutMs);
+    _enqueue(lockMode);
 }
 
-void Lock::GlobalLock::_enqueue(LockMode lockMode, unsigned timeoutMs) {
-    if (_locker->shouldConflictWithSecondaryBatchApplication()) {
+void Lock::GlobalLock::_enqueue(LockMode lockMode) {
+    if (!_locker->isBatchWriter()) {
         _pbwm.lock(MODE_IS);
     }
 
-    _result = _locker->lockGlobalBegin(lockMode, Milliseconds(timeoutMs));
+    _result = _locker->lockGlobalBegin(lockMode);
 }
 
 void Lock::GlobalLock::waitForLock(unsigned timeoutMs) {
     if (_result == LOCK_WAITING) {
-        _result = _locker->lockGlobalComplete(Milliseconds(timeoutMs));
+        _result = _locker->lockGlobalComplete(timeoutMs);
     }
 
-    if (_result != LOCK_OK && _locker->shouldConflictWithSecondaryBatchApplication()) {
+    if (_result != LOCK_OK && !_locker->isBatchWriter()) {
         _pbwm.unlock();
-    }
-
-    if (_locker->isWriteLocked() && haveClient()) {
-        auto opCtx = cc().getOperationContext();
-        if (opCtx) {
-            GlobalLockAcquisitionTracker::get(opCtx).setGlobalExclusiveLockTaken();
-        }
     }
 }
 
 void Lock::GlobalLock::_unlock() {
     if (isLocked()) {
-        _locker->unlockGlobal();
+        _locker->unlockAll();
         _result = LOCK_INVALID;
     }
 }
@@ -119,13 +107,17 @@ Lock::DBLock::DBLock(Locker* locker, StringData db, LockMode mode)
     // Need to acquire the flush lock
     _locker->lockMMAPV1Flush();
 
-    // The check for the admin db is to ensure direct writes to auth collections
-    // are serialized (see SERVER-16092).
-    if ((_id == resourceIdAdminDB) && !isSharedLockMode(_mode)) {
-        _mode = MODE_X;
-    }
+    if (supportsDocLocking() || enableCollectionLocking) {
+        // The check for the admin db is to ensure direct writes to auth collections
+        // are serialized (see SERVER-16092).
+        if ((_id == resourceIdAdminDB) && !isSharedLockMode(_mode)) {
+            _mode = MODE_X;
+        }
 
-    invariant(LOCK_OK == _locker->lock(_id, _mode));
+        invariant(LOCK_OK == _locker->lock(_id, _mode));
+    } else {
+        invariant(LOCK_OK == _locker->lock(_id, isSharedLockMode(_mode) ? MODE_S : MODE_X));
+    }
 }
 
 Lock::DBLock::~DBLock() {
@@ -142,7 +134,11 @@ void Lock::DBLock::relockWithMode(LockMode newMode) {
     _locker->unlock(_id);
     _mode = newMode;
 
-    invariant(LOCK_OK == _locker->lock(_id, _mode));
+    if (supportsDocLocking() || enableCollectionLocking) {
+        invariant(LOCK_OK == _locker->lock(_id, _mode));
+    } else {
+        invariant(LOCK_OK == _locker->lock(_id, isSharedLockMode(_mode) ? MODE_S : MODE_X));
+    }
 }
 
 
@@ -154,22 +150,28 @@ Lock::CollectionLock::CollectionLock(Locker* lockState, StringData ns, LockMode 
                                           isSharedLockMode(mode) ? MODE_IS : MODE_IX));
     if (supportsDocLocking()) {
         _lockState->lock(_id, mode);
-    } else {
+    } else if (enableCollectionLocking) {
         _lockState->lock(_id, isSharedLockMode(mode) ? MODE_S : MODE_X);
     }
 }
 
 Lock::CollectionLock::~CollectionLock() {
-    _lockState->unlock(_id);
+    if (supportsDocLocking() || enableCollectionLocking) {
+        _lockState->unlock(_id);
+    }
 }
 
 void Lock::CollectionLock::relockAsDatabaseExclusive(Lock::DBLock& dbLock) {
-    _lockState->unlock(_id);
+    if (supportsDocLocking() || enableCollectionLocking) {
+        _lockState->unlock(_id);
+    }
 
     dbLock.relockWithMode(MODE_X);
 
-    // don't need the lock, but need something to unlock in the destructor
-    _lockState->lock(_id, MODE_IX);
+    if (supportsDocLocking() || enableCollectionLocking) {
+        // don't need the lock, but need something to unlock in the destructor
+        _lockState->lock(_id, MODE_IX);
+    }
 }
 
 namespace {
@@ -196,15 +198,7 @@ void Lock::OplogIntentWriteLock::serializeIfNeeded() {
 }
 
 Lock::ParallelBatchWriterMode::ParallelBatchWriterMode(Locker* lockState)
-    : _pbwm(lockState, resourceIdParallelBatchWriterMode, MODE_X),
-      _lockState(lockState),
-      _orginalShouldConflict(_lockState->shouldConflictWithSecondaryBatchApplication()) {
-    _lockState->setShouldConflictWithSecondaryBatchApplication(false);
-}
-
-Lock::ParallelBatchWriterMode::~ParallelBatchWriterMode() {
-    _lockState->setShouldConflictWithSecondaryBatchApplication(_orginalShouldConflict);
-}
+    : _pbwm(lockState, resourceIdParallelBatchWriterMode, MODE_X) {}
 
 void Lock::ResourceLock::lock(LockMode mode) {
     invariant(_result == LOCK_INVALID);

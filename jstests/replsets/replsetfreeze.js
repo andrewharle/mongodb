@@ -37,7 +37,7 @@ var reconnect = function(a) {
     });
 };
 
-jsTestLog('1: initialize set');
+print("1: initialize set");
 var replTest = new ReplSetTest({name: 'unicomplex', nodes: 3});
 var nodes = replTest.nodeList();
 var conns = replTest.startSet();
@@ -50,36 +50,30 @@ var config = {
     ]
 };
 var r = replTest.initiate(config);
-
-replTest.awaitNodesAgreeOnPrimary();
-
 var master = replTest.getPrimary();
-
 var secondary = replTest.getSecondary();
-jsTestLog('2: freeze secondary ' + secondary.host +
-          ' so that it does not run for election for the rest of the test');
 
-assert.commandWorked(secondary.getDB("admin").runCommand({replSetFreeze: 600}));
+assert.commandFailedWithCode(master.getDB("admin").runCommand({replSetFreeze: 30}),
+                             ErrorCodes.NotSecondary,
+                             'replSetFreeze should return error when run on primary');
 
-assert.commandFailedWithCode(
-    master.getDB("admin").runCommand({replSetFreeze: 30}),
-    ErrorCodes.NotSecondary,
-    'replSetFreeze should return error when run on primary ' + master.host);
+replTest.awaitSecondaryNodes();
 
-jsTestLog('3: step down primary ' + master.host);
+print("2: step down m1");
 try {
-    master.getDB("admin").runCommand({replSetStepDown: 10, force: 1});
+    master.getDB("admin").runCommand({replSetStepDown: 1, force: 1});
 } catch (e) {
     print(e);
 }
 reconnect(master);
 printjson(master.getDB("admin").runCommand({replSetGetStatus: 1}));
 
-jsTestLog('4: freeze stepped down primary ' + master.host + ' for 30 seconds');
-var start = (new Date()).getTime();
-assert.commandWorked(master.getDB("admin").runCommand({replSetFreeze: 30}));
+print("3: freeze set for 30 seconds");
+secondary.getDB("admin").runCommand({replSetFreeze: 30});
+master.getDB("admin").runCommand({replSetFreeze: 30});
 
-jsTestLog('5: check no one is master for 30 seconds');
+print("4: check no one is master for 30 seconds");
+var start = (new Date()).getTime();
 while ((new Date()).getTime() - start <
        (28 * 1000)) {  // we need less 30 since it takes some time to return... hacky
     var result = master.getDB("admin").runCommand({isMaster: 1});
@@ -88,33 +82,25 @@ while ((new Date()).getTime() - start <
     sleep(1000);
 }
 
-jsTestLog('6: check for new primary');
-var newPrimary = replTest.getPrimary();
-assert.eq(master.host,
-          newPrimary.host,
-          'new primary should be the same node as primary that previously stepped down');
+print("5: check for new master");
+master = replTest.getPrimary();
 
-jsTestLog('7: step down new master ' + master.host);
+print("6: step down new master");
 try {
-    master.getDB("admin").runCommand({replSetStepDown: 10, force: 1});
+    master.getDB("admin").runCommand({replSetStepDown: 1, force: 1});
 } catch (e) {
-    jsTestLog('step down command threw exception' + e);
+    print(e);
 }
 reconnect(master);
 
-jsTestLog('8: freeze stepped down primary ' + master.host + ' for 30 seconds');
+print("7: freeze for 30 seconds");
 master.getDB("admin").runCommand({replSetFreeze: 30});
 sleep(1000);
 
-jsTestLog('9: unfreeze stepped down primary ' + master.host + ' after waiting for 1 second');
+print("8: unfreeze");
 master.getDB("admin").runCommand({replSetFreeze: 0});
 
-jsTestLog('10: wait for unfrozen node ' + master.host + ' to become primary again');
-newPrimary = replTest.getPrimary();
-jsTestLog('Primary after unfreezing node: ' + newPrimary.host);
-assert.eq(
-    master.host,
-    newPrimary.host,
-    'new primary after unfreezing should be the same node as primary that previously stepped down');
+print("9: check we get a new master within 30 seconds");
+master = replTest.getPrimary();
 
 replTest.stopSet(15);

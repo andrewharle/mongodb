@@ -2,8 +2,8 @@
 // checks that cursors survive a chunk's move
 (function() {
 
+    // Turn off auto-splitting, because this test handles chunk splitting manually.
     var s = new ShardingTest({name: "sharding_cursor1", shards: 2});
-
     s.config.settings.find().forEach(printjson);
 
     // create a sharded 'test.foo', for the moment with just one chunk
@@ -12,7 +12,7 @@
     s.adminCommand({shardcollection: "test.foo", key: {_id: 1}});
 
     db = s.getDB("test");
-    primary = s.getPrimaryShard("test").getDB("test");
+    primary = s.getServer("test").getDB("test");
     secondary = s.getOther(primary).getDB("test");
 
     var numObjs = 30;

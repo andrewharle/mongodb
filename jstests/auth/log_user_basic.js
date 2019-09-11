@@ -26,7 +26,10 @@ if (0) {
             return null;
         }
 
-        var logInfo = {id: res[1], users: {}};
+        var logInfo = {
+            id: res[1],
+            users: {}
+        };
 
         var userLog = null;
         res = ID_USER_PATTERN.exec(line);
@@ -61,7 +64,11 @@ if (0) {
             users: {}      // contains authenticated users represented as a map of db to user names.
         };
 
-        var connInfo2 = {id: null, mongo: conn2, users: {}};
+        var connInfo2 = {
+            id: null,
+            mongo: conn2,
+            users: {}
+        };
 
         var conn1Auth =
             [{user: 'foo', pwd: 'bar', db: 'test'}, {user: 'chun', pwd: 'li', db: 'sf'}];

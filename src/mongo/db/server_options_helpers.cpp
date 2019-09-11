@@ -36,10 +36,10 @@
 #define SYSLOG_NAMES
 #include <syslog.h>
 #endif
-#include <boost/filesystem.hpp>
-#include <boost/filesystem/operations.hpp>
 #include <ios>
 #include <iostream>
+#include <boost/filesystem.hpp>
+#include <boost/filesystem/operations.hpp>
 
 #include "mongo/base/status.h"
 #include "mongo/bson/util/builder.h"
@@ -48,9 +48,7 @@
 #include "mongo/db/server_parameters.h"
 #include "mongo/logger/log_component.h"
 #include "mongo/logger/message_event_utf8_encoder.h"
-#include "mongo/transport/message_compressor_registry.h"
 #include "mongo/util/cmdline_utils/censor_cmdline.h"
-#include "mongo/util/fail_point_service.h"
 #include "mongo/util/log.h"
 #include "mongo/util/map_util.h"
 #include "mongo/util/mongoutils/str.h"
@@ -84,13 +82,26 @@ typedef struct _code {
     int c_val;
 } CODE;
 
-CODE facilitynames[] = {{"auth", LOG_AUTH},     {"cron", LOG_CRON},     {"daemon", LOG_DAEMON},
-                        {"kern", LOG_KERN},     {"lpr", LOG_LPR},       {"mail", LOG_MAIL},
-                        {"news", LOG_NEWS},     {"security", LOG_AUTH}, /* DEPRECATED */
-                        {"syslog", LOG_SYSLOG}, {"user", LOG_USER},     {"uucp", LOG_UUCP},
-                        {"local0", LOG_LOCAL0}, {"local1", LOG_LOCAL1}, {"local2", LOG_LOCAL2},
-                        {"local3", LOG_LOCAL3}, {"local4", LOG_LOCAL4}, {"local5", LOG_LOCAL5},
-                        {"local6", LOG_LOCAL6}, {"local7", LOG_LOCAL7}, {NULL, -1}};
+CODE facilitynames[] = {{"auth", LOG_AUTH},
+                        {"cron", LOG_CRON},
+                        {"daemon", LOG_DAEMON},
+                        {"kern", LOG_KERN},
+                        {"lpr", LOG_LPR},
+                        {"mail", LOG_MAIL},
+                        {"news", LOG_NEWS},
+                        {"security", LOG_AUTH}, /* DEPRECATED */
+                        {"syslog", LOG_SYSLOG},
+                        {"user", LOG_USER},
+                        {"uucp", LOG_UUCP},
+                        {"local0", LOG_LOCAL0},
+                        {"local1", LOG_LOCAL1},
+                        {"local2", LOG_LOCAL2},
+                        {"local3", LOG_LOCAL3},
+                        {"local4", LOG_LOCAL4},
+                        {"local5", LOG_LOCAL5},
+                        {"local6", LOG_LOCAL6},
+                        {"local7", LOG_LOCAL7},
+                        {NULL, -1}};
 
 #endif  // !defined(INTERNAL_NOPRI)
 #endif  // defined(SYSLOG_NAMES)
@@ -116,9 +127,10 @@ Status addGeneralServerOptions(moe::OptionSection* options) {
     options->addOptionChaining("version", "version", moe::Switch, "show version information")
         .setSources(moe::SourceAllLegacy);
 
-    options
-        ->addOptionChaining(
-            "config", "config,f", moe::String, "configuration file specifying additional options")
+    options->addOptionChaining("config",
+                               "config,f",
+                               moe::String,
+                               "configuration file specifying additional options")
         .setSources(moe::SourceAllLegacy);
 
     // The verbosity level can be set at startup in the following ways.  Note that if multiple
@@ -128,10 +140,9 @@ Status addGeneralServerOptions(moe::OptionSection* options) {
     // Command Line Option | Resulting Verbosity
     // _________________________________________
     // (none)              | 0
-    // --verbose ""        | Error after Boost 1.59
     // --verbose           | 1
-    // --verbose v         | 1
-    // --verbose vv        | 2 (etc.)
+    // --verbose=v         | 1
+    // --verbose=vv        | 2 (etc.)
     // -v                  | 1
     // -vv                 | 2 (etc.)
     //
@@ -154,12 +165,11 @@ Status addGeneralServerOptions(moe::OptionSection* options) {
     //   component:        |
     //     Sharding:       |
     //       verbosity: 5  | 5 (for Sharding only, 0 for default)
-    options
-        ->addOptionChaining(
-            "verbose",
-            "verbose,v",
-            moe::String,
-            "be more verbose (include multiple times for more verbosity e.g. -vvvvv)")
+    options->addOptionChaining(
+                 "verbose",
+                 "verbose,v",
+                 moe::String,
+                 "be more verbose (include multiple times for more verbosity e.g. -vvvvv)")
         .setImplicit(moe::Value(std::string("v")))
         .setSources(moe::SourceAllLegacy);
 
@@ -172,11 +182,11 @@ Status addGeneralServerOptions(moe::OptionSection* options) {
         if (component == logger::LogComponent::kDefault) {
             continue;
         }
-        options
-            ->addOptionChaining("systemLog.component." + component.getDottedName() + ".verbosity",
-                                "",
-                                moe::Int,
-                                "set component verbose level for " + component.getDottedName())
+        options->addOptionChaining("systemLog.component." + component.getDottedName() +
+                                       ".verbosity",
+                                   "",
+                                   moe::Int,
+                                   "set component verbose level for " + component.getDottedName())
             .setSources(moe::SourceYAMLConfig);
     }
 
@@ -196,39 +206,36 @@ Status addGeneralServerOptions(moe::OptionSection* options) {
     options->addOptionChaining(
         "net.maxIncomingConnections", "maxConns", moe::Int, maxConnInfoBuilder.str().c_str());
 
-    options
-        ->addOptionChaining(
-            "logpath",
-            "logpath",
-            moe::String,
-            "log file to send write to instead of stdout - has to be a file, not directory")
+    options->addOptionChaining(
+                 "logpath",
+                 "logpath",
+                 moe::String,
+                 "log file to send write to instead of stdout - has to be a file, not directory")
         .setSources(moe::SourceAllLegacy)
         .incompatibleWith("syslog");
 
     options
         ->addOptionChaining(
-            "systemLog.path",
-            "",
-            moe::String,
-            "log file to send writes to if logging to a file - has to be a file, not directory")
+              "systemLog.path",
+              "",
+              moe::String,
+              "log file to send writes to if logging to a file - has to be a file, not directory")
         .setSources(moe::SourceYAMLConfig)
         .hidden();
 
-    options
-        ->addOptionChaining("systemLog.destination",
-                            "",
-                            moe::String,
-                            "Destination of system log output.  (syslog/file)")
+    options->addOptionChaining("systemLog.destination",
+                               "",
+                               moe::String,
+                               "Destination of system log output.  (syslog/file)")
         .setSources(moe::SourceYAMLConfig)
         .hidden()
         .format("(:?syslog)|(:?file)", "(syslog/file)");
 
 #ifndef _WIN32
-    options
-        ->addOptionChaining("syslog",
-                            "syslog",
-                            moe::Switch,
-                            "log to system's syslog facility instead of file or stdout")
+    options->addOptionChaining("syslog",
+                               "syslog",
+                               moe::Switch,
+                               "log to system's syslog facility instead of file or stdout")
         .incompatibleWith("logpath")
         .setSources(moe::SourceAllLegacy);
 
@@ -254,76 +261,54 @@ Status addGeneralServerOptions(moe::OptionSection* options) {
                                "Desired format for timestamps in log messages. One of ctime, "
                                "iso8601-utc or iso8601-local");
 
-#if MONGO_ENTERPRISE_VERSION
-    options->addOptionChaining("security.redactClientLogData",
-                               "redactClientLogData",
-                               moe::Switch,
-                               "Redact client data written to the diagnostics log");
-#endif
-
     options->addOptionChaining("processManagement.pidFilePath",
                                "pidfilepath",
                                moe::String,
                                "full path to pidfile (if not set, no pidfile is created)");
 
-    options
-        ->addOptionChaining(
-            "security.keyFile", "keyFile", moe::String, "private key for cluster authentication")
-        .incompatibleWith("noauth");
+    options->addOptionChaining("security.keyFile",
+                               "keyFile",
+                               moe::String,
+                               "private key for cluster authentication").incompatibleWith("noauth");
 
     options->addOptionChaining("noauth", "noauth", moe::Switch, "run without security")
         .setSources(moe::SourceAllLegacy)
         .incompatibleWith("auth")
         .incompatibleWith("keyFile")
-        .incompatibleWith("transitionToAuth")
         .incompatibleWith("clusterAuthMode");
 
-    options
-        ->addOptionChaining(
-            "setParameter", "setParameter", moe::StringMap, "Set a configurable parameter")
+    options->addOptionChaining(
+                 "setParameter", "setParameter", moe::StringMap, "Set a configurable parameter")
         .composing();
 
-    options
-        ->addOptionChaining("httpinterface", "httpinterface", moe::Switch, "enable http interface")
+    options->addOptionChaining(
+                 "httpinterface", "httpinterface", moe::Switch, "enable http interface")
         .setSources(moe::SourceAllLegacy)
         .incompatibleWith("nohttpinterface");
 
     options->addOptionChaining("net.http.enabled", "", moe::Bool, "enable http interface")
         .setSources(moe::SourceYAMLConfig);
 
-    options
-        ->addOptionChaining(
-            "net.http.port", "", moe::Switch, "port to listen on for http interface")
+    options->addOptionChaining(
+                 "net.http.port", "", moe::Switch, "port to listen on for http interface")
         .setSources(moe::SourceYAMLConfig);
 
-    options
-        ->addOptionChaining(
-            "security.transitionToAuth",
-            "transitionToAuth",
-            moe::Switch,
-            "For rolling access control upgrade. Attempt to authenticate over outgoing "
-            "connections and proceed regardless of success. Accept incoming connections "
-            "with or without authentication.")
-        .incompatibleWith("noauth");
-
-    options
-        ->addOptionChaining("security.clusterAuthMode",
-                            "clusterAuthMode",
-                            moe::String,
-                            "Authentication mode used for cluster authentication. Alternatives are "
-                            "(keyFile|sendKeyFile|sendX509|x509)")
+    options->addOptionChaining(
+                 "security.clusterAuthMode",
+                 "clusterAuthMode",
+                 moe::String,
+                 "Authentication mode used for cluster authentication. Alternatives are "
+                 "(keyFile|sendKeyFile|sendX509|x509)")
         .format("(:?keyFile)|(:?sendKeyFile)|(:?sendX509)|(:?x509)",
                 "(keyFile/sendKeyFile/sendX509/x509)");
 
 #ifndef _WIN32
-    options
-        ->addOptionChaining(
-            "nounixsocket", "nounixsocket", moe::Switch, "disable listening on unix sockets")
+    options->addOptionChaining(
+                 "nounixsocket", "nounixsocket", moe::Switch, "disable listening on unix sockets")
         .setSources(moe::SourceAllLegacy);
 
-    options
-        ->addOptionChaining(
-            "net.unixDomainSocket.enabled", "", moe::Bool, "disable listening on unix sockets")
+    options->addOptionChaining(
+                 "net.unixDomainSocket.enabled", "", moe::Bool, "disable listening on unix sockets")
         .setSources(moe::SourceYAMLConfig);
 
     options->addOptionChaining("net.unixDomainSocket.pathPrefix",
@@ -349,59 +334,47 @@ Status addGeneralServerOptions(moe::OptionSection* options) {
     }
 
     // Extra hidden options
-    options
-        ->addOptionChaining(
-            "nohttpinterface", "nohttpinterface", moe::Switch, "disable http interface")
+    options->addOptionChaining(
+                 "nohttpinterface", "nohttpinterface", moe::Switch, "disable http interface")
         .hidden()
         .setSources(moe::SourceAllLegacy)
         .incompatibleWith("httpinterface");
 
-    options
-        ->addOptionChaining("objcheck",
-                            "objcheck",
-                            moe::Switch,
-                            "inspect client data for validity on receipt (DEFAULT)")
+    options->addOptionChaining("objcheck",
+                               "objcheck",
+                               moe::Switch,
+                               "inspect client data for validity on receipt (DEFAULT)")
         .hidden()
         .setSources(moe::SourceAllLegacy)
         .incompatibleWith("noobjcheck");
 
-    options
-        ->addOptionChaining("noobjcheck",
-                            "noobjcheck",
-                            moe::Switch,
-                            "do NOT inspect client data for validity on receipt")
+    options->addOptionChaining("noobjcheck",
+                               "noobjcheck",
+                               moe::Switch,
+                               "do NOT inspect client data for validity on receipt")
         .hidden()
         .setSources(moe::SourceAllLegacy)
         .incompatibleWith("objcheck");
 
-    options
-        ->addOptionChaining("net.wireObjectCheck",
-                            "",
-                            moe::Bool,
-                            "inspect client data for validity on receipt (DEFAULT)")
+    options->addOptionChaining("net.wireObjectCheck",
+                               "",
+                               moe::Bool,
+                               "inspect client data for validity on receipt (DEFAULT)")
         .hidden()
         .setSources(moe::SourceYAMLConfig);
 
-    options
-        ->addOptionChaining("systemLog.traceAllExceptions",
-                            "traceExceptions",
-                            moe::Switch,
-                            "log stack traces for every exception")
-        .hidden();
+    options->addOptionChaining("systemLog.traceAllExceptions",
+                               "traceExceptions",
+                               moe::Switch,
+                               "log stack traces for every exception").hidden();
 
-    options
-        ->addOptionChaining("enableExperimentalStorageDetailsCmd",
-                            "enableExperimentalStorageDetailsCmd",
-                            moe::Switch,
-                            "EXPERIMENTAL (UNSUPPORTED). "
-                            "Enable command computing aggregate statistics on storage.")
+    options->addOptionChaining("enableExperimentalStorageDetailsCmd",
+                               "enableExperimentalStorageDetailsCmd",
+                               moe::Switch,
+                               "EXPERIMENTAL (UNSUPPORTED). "
+                               "Enable command computing aggregate statistics on storage.")
         .hidden()
         .setSources(moe::SourceAllLegacy);
-
-    auto ret = addMessageCompressionOptions(options, false);
-    if (!ret.isOK()) {
-        return ret;
-    }
 
     return Status::OK();
 }
@@ -413,12 +386,11 @@ Status addWindowsServerOptions(moe::OptionSection* options) {
     options->addOptionChaining("remove", "remove", moe::Switch, "remove Windows service")
         .setSources(moe::SourceAllLegacy);
 
-    options
-        ->addOptionChaining(
-            "reinstall",
-            "reinstall",
-            moe::Switch,
-            "reinstall Windows service (equivalent to --remove followed by --install)")
+    options->addOptionChaining(
+                 "reinstall",
+                 "reinstall",
+                 moe::Switch,
+                 "reinstall Windows service (equivalent to --remove followed by --install)")
         .setSources(moe::SourceAllLegacy);
 
     options->addOptionChaining("processManagement.windowsService.serviceName",
@@ -457,7 +429,7 @@ namespace {
 // Helpers for option storage
 Status setupBinaryName(const std::vector<std::string>& argv) {
     if (argv.empty()) {
-        return Status(ErrorCodes::UnknownError, "Cannot get binary name: argv array is empty");
+        return Status(ErrorCodes::InternalError, "Cannot get binary name: argv array is empty");
     }
 
     // setup binary name
@@ -471,13 +443,13 @@ Status setupBinaryName(const std::vector<std::string>& argv) {
 
 Status setupCwd() {
     // setup cwd
-    boost::system::error_code ec;
-    boost::filesystem::path cwd = boost::filesystem::current_path(ec);
-    if (ec) {
-        return Status(ErrorCodes::UnknownError,
-                      "Cannot get current working directory: " + ec.message());
-    }
-    serverGlobalParams.cwd = cwd.string();
+    char buffer[1024];
+#ifdef _WIN32
+    verify(_getcwd(buffer, 1000));
+#else
+    verify(getcwd(buffer, 1000));
+#endif
+    serverGlobalParams.cwd = buffer;
     return Status::OK();
 }
 
@@ -570,23 +542,15 @@ Status validateServerOptions(const moe::Environment& params) {
             haveAuthenticationMechanisms = false;
         }
 
-        // Only register failpoint server parameters if enableTestCommands=1.
+        // Make sure 'internalLookupStageBatchSize' can only be set if test commands are enabled.
+        auto lookupBatchSizeParameter = parameters.find("internalLookupStageBatchSize");
         auto enableTestCommandsParameter = parameters.find("enableTestCommands");
-        if (enableTestCommandsParameter != parameters.end() &&
-            enableTestCommandsParameter->second.compare("1") == 0) {
-            getGlobalFailPointRegistry()->registerAllFailPointsAsServerParameters();
-        }
-
-        if (parameters.find("internalValidateFeaturesAsMaster") != parameters.end()) {
-            // Command line options that are disallowed when internalValidateFeaturesAsMaster is
-            // specified.
-            for (const auto& disallowedOption : {"replication.replSet", "master", "slave"}) {
-                if (params.count(disallowedOption)) {
-                    return Status(ErrorCodes::BadValue,
-                                  str::stream()
-                                      << "Cannot specify both internalValidateFeaturesAsMaster and "
-                                      << disallowedOption);
-                }
+        if (lookupBatchSizeParameter != parameters.end()) {
+            if (enableTestCommandsParameter == parameters.end() ||
+                enableTestCommandsParameter->second != "1") {
+                return Status(
+                    ErrorCodes::BadValue,
+                    "internalLookupStageBatchSize can only be set if test commands are enabled.");
             }
         }
     }
@@ -758,7 +722,7 @@ Status canonicalizeServerOptions(moe::Environment* params) {
     return Status::OK();
 }
 
-Status setupServerOptions(const std::vector<std::string>& args) {
+Status storeServerOptions(const moe::Environment& params, const std::vector<std::string>& args) {
     Status ret = setupBinaryName(args);
     if (!ret.isOK()) {
         return ret;
@@ -774,11 +738,7 @@ Status setupServerOptions(const std::vector<std::string>& args) {
         return ret;
     }
 
-    return Status::OK();
-}
-
-Status storeServerOptions(const moe::Environment& params) {
-    Status ret = setParsedOpts(params);
+    ret = setParsedOpts(params);
     if (!ret.isOK()) {
         return ret;
     }
@@ -836,10 +796,6 @@ Status storeServerOptions(const moe::Environment& params) {
 
     if (params.count("net.http.enabled")) {
         serverGlobalParams.isHttpInterfaceEnabled = params["net.http.enabled"].as<bool>();
-    }
-
-    if (params.count("security.transitionToAuth")) {
-        serverGlobalParams.transitionToAuth = params["security.transitionToAuth"].as<bool>();
     }
 
     if (params.count("security.clusterAuthMode")) {
@@ -1015,9 +971,8 @@ Status storeServerOptions(const moe::Environment& params) {
         serverGlobalParams.authState = ServerGlobalParams::AuthState::kEnabled;
     }
 
-    if (serverGlobalParams.transitionToAuth ||
-        (params.count("security.authorization") &&
-         params["security.authorization"].as<std::string>() == "disabled")) {
+    if (params.count("security.authorization") &&
+        params["security.authorization"].as<std::string>() == "disabled") {
         serverGlobalParams.authState = ServerGlobalParams::AuthState::kDisabled;
     } else if (params.count("security.authorization") &&
                params["security.authorization"].as<std::string>() == "enabled") {
@@ -1058,28 +1013,16 @@ Status storeServerOptions(const moe::Environment& params) {
             }
         }
     }
-
     if (!params.count("security.clusterAuthMode") && params.count("security.keyFile")) {
         serverGlobalParams.clusterAuthMode.store(ServerGlobalParams::ClusterAuthMode_keyFile);
     }
-    int clusterAuthMode = serverGlobalParams.clusterAuthMode.load();
-    if (serverGlobalParams.transitionToAuth &&
-        (clusterAuthMode != ServerGlobalParams::ClusterAuthMode_keyFile &&
-         clusterAuthMode != ServerGlobalParams::ClusterAuthMode_x509)) {
-        return Status(ErrorCodes::BadValue,
-                      "--transitionToAuth must be used with keyFile or x509 authentication");
-    }
+
 #ifdef MONGO_CONFIG_SSL
     ret = storeSSLServerOptions(params);
     if (!ret.isOK()) {
         return ret;
     }
 #endif
-
-    ret = storeMessageCompressionOptions(params);
-    if (!ret.isOK()) {
-        return ret;
-    }
 
     return Status::OK();
 }

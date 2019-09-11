@@ -8,12 +8,6 @@
 
     load("jstests/libs/check_log.js");
 
-    var parameters = TestData.setParameters;
-    if (parameters && parameters.indexOf("use3dot2InitialSync=true") != -1) {
-        jsTest.log("Skipping this test because use3dot2InitialSync was provided.");
-        return;
-    }
-
     const basename = 'initial_sync_rename_collection_unsafe';
 
     const rst = new ReplSetTest({name: basename, nodes: 1});
@@ -27,15 +21,10 @@
     assert.writeOK(primaryDB['foo'].save({}));
 
     jsTestLog('Bring up a new node');
-    const secondary = rst.add({setParameter: {allowUnsafeRenamesDuringInitialSync: true}});
+    const secondary = rst.add({setParameter: "allowUnsafeRenamesDuringInitialSync=true"});
     assert.commandWorked(secondary.adminCommand(
         {configureFailPoint: 'initialSyncHangBeforeCopyingDatabases', mode: 'alwaysOn'}));
-
-    jsTestLog('Begin initial sync on secondary');
-    let conf = rst.getPrimary().getDB('admin').runCommand({replSetGetConfig: 1}).config;
-    conf.members.push({_id: 1, host: secondary.host, priority: 0, votes: 0});
-    conf.version++;
-    assert.commandWorked(rst.getPrimary().getDB('admin').runCommand({replSetReconfig: conf}));
+    rst.reInitiate();
     assert.eq(primary, rst.getPrimary(), 'Primary changed after reconfig');
 
     // Wait for fail point message to be logged.
@@ -50,6 +39,8 @@
 
     checkLog.contains(secondary, 'allowUnsafeRenamesDuringInitialSync set to true');
 
+    checkLog.contains(secondary, 'initial sync succeeded after 1 attempt(s).');
+
     jsTestLog('Wait for both nodes to be up-to-date');
     rst.awaitSecondaryNodes();
     rst.awaitReplication();
@@ -58,9 +49,6 @@
     const secondaryDB = secondary.getDB(dbName);
     assert.eq(secondaryDB['renamed'].find().itcount(), 1, 'renamed collection does not exist');
     assert.eq(secondaryDB['foo'].find().itcount(), 0, 'collection `foo` exists after rename');
-
-    let res = assert.commandWorked(secondary.adminCommand({replSetGetStatus: 1, initialSync: 1}));
-    assert.eq(res.initialSyncStatus.failedInitialSyncAttempts, 0);
 
     rst.stopSet();
 })();

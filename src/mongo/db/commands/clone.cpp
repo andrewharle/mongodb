@@ -30,8 +30,8 @@
 
 #include "mongo/base/status.h"
 #include "mongo/db/auth/action_set.h"
-#include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/resource_pattern.h"
+#include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/cloner.h"
 #include "mongo/db/commands.h"
@@ -59,8 +59,7 @@ public:
         return false;
     }
 
-
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    virtual bool isWriteCommandForConfigServer() const {
         return true;
     }
 
@@ -69,7 +68,7 @@ public:
         help << "{clone: \"host13\"[, slaveOk: <bool>]}";
     }
 
-    virtual Status checkAuthForCommand(Client* client,
+    virtual Status checkAuthForCommand(ClientBasic* client,
                                        const std::string& dbname,
                                        const BSONObj& cmdObj) {
         ActionSet actions;
@@ -104,6 +103,19 @@ public:
         CloneOptions opts;
         opts.fromDB = dbname;
         opts.slaveOk = cmdObj["slaveOk"].trueValue();
+        opts.checkForCatalogChange = cmdObj["_checkForCatalogChange"].trueValue();
+
+        if (opts.checkForCatalogChange) {
+            auto catalogManager = grid.catalogManager(txn);
+            if (!catalogManager) {
+                return appendCommandStatus(
+                    result,
+                    Status(ErrorCodes::NotYetInitialized,
+                           "Cannot run clone command for use by sharding movePrimary command on a "
+                           "node that isn't yet sharding aware"));
+            }
+            opts.initialCatalogMode = catalogManager->getMode();
+        }
 
         // See if there's any collections we should ignore
         if (cmdObj["collsToIgnore"].type() == Array) {

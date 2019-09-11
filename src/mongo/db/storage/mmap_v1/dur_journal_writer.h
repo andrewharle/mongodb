@@ -31,9 +31,9 @@
 #include "mongo/base/disallow_copying.h"
 #include "mongo/db/storage/journal_listener.h"
 #include "mongo/db/storage/mmap_v1/aligned_builder.h"
-#include "mongo/db/storage/mmap_v1/commit_notifier.h"
 #include "mongo/db/storage/mmap_v1/dur_journalformat.h"
 #include "mongo/stdx/thread.h"
+#include "mongo/util/concurrency/synchronization.h"
 #include "mongo/util/queue.h"
 
 namespace mongo {
@@ -84,7 +84,7 @@ public:
 
         // Specifies the commit number which flushing this buffer would notify. This value is
         // zero, if there is no data to be flushed or if the buffer is noop/shutdown.
-        CommitNotifier::When _commitNumber;
+        NotifyAll::When _commitNumber;
 
         // Special buffer that's posted when there is nothing to be written to the journal,
         // but we want to order a notification so it happens after all other writes have
@@ -115,9 +115,7 @@ public:
      *      more than this number of journal writes that have not completed, the write calls
      *      will block.
      */
-    JournalWriter(CommitNotifier* commitNotify,
-                  CommitNotifier* applyToDataFilesNotify,
-                  size_t numBuffers);
+    JournalWriter(NotifyAll* commitNotify, NotifyAll* applyToDataFilesNotify, size_t numBuffers);
     ~JournalWriter();
 
     /**
@@ -156,7 +154,7 @@ public:
      * @param commitNumber What commit number to be notified once the buffer has been written
      *      to disk.
      */
-    void writeBuffer(Buffer* buffer, CommitNotifier::When commitNumber);
+    void writeBuffer(Buffer* buffer, NotifyAll::When commitNumber);
 
     /**
      * Ensures that all previously submitted write requests complete. This call is blocking.
@@ -177,10 +175,10 @@ private:
 
     // This gets notified as journal buffers are written. It is not owned and needs to outlive
     // the journal writer object.
-    CommitNotifier* const _commitNotify;
+    NotifyAll* const _commitNotify;
 
     // This gets notified as journal buffers are done being applied to the shared view
-    CommitNotifier* const _applyToDataFilesNotify;
+    NotifyAll* const _applyToDataFilesNotify;
 
     // Wraps and controls the journal writer thread
     stdx::thread _journalWriterThreadHandle;
@@ -190,7 +188,7 @@ private:
 
     // Queue of buffers, which need to be written by the journal writer thread
     BufferQueue _journalQueue;
-    CommitNotifier::When _lastCommitNumber;
+    NotifyAll::When _lastCommitNumber;
 
     // Queue of buffers, whose write has been completed by the journal writer thread.
     BufferQueue _readyQueue;

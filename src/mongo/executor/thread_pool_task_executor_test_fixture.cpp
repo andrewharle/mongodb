@@ -37,20 +37,15 @@ namespace mongo {
 namespace executor {
 
 std::unique_ptr<ThreadPoolTaskExecutor> makeThreadPoolTestExecutor(
-    std::unique_ptr<NetworkInterfaceMock> net, ThreadPoolMock::Options options) {
+    std::unique_ptr<NetworkInterfaceMock> net) {
     auto netPtr = net.get();
-    return stdx::make_unique<ThreadPoolTaskExecutor>(
-        stdx::make_unique<ThreadPoolMock>(netPtr, 1, std::move(options)), std::move(net));
-}
-
-ThreadPoolMock::Options ThreadPoolExecutorTest::makeThreadPoolMockOptions() const {
-    return ThreadPoolMock::Options();
+    return stdx::make_unique<ThreadPoolTaskExecutor>(stdx::make_unique<ThreadPoolMock>(netPtr, 1),
+                                                     std::move(net));
 }
 
 std::unique_ptr<TaskExecutor> ThreadPoolExecutorTest::makeTaskExecutor(
     std::unique_ptr<NetworkInterfaceMock> net) {
-    auto options = makeThreadPoolMockOptions();
-    return makeThreadPoolTestExecutor(std::move(net), std::move(options));
+    return makeThreadPoolTestExecutor(std::move(net));
 }
 
 }  // namespace executor

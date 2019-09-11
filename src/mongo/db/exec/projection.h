@@ -37,7 +37,6 @@
 
 namespace mongo {
 
-class CollatorInterface;
 class ExtensionsCallback;
 
 struct ProjectionStageParams {
@@ -52,9 +51,10 @@ struct ProjectionStageParams {
         SIMPLE_DOC
     };
 
-    ProjectionStageParams(const ExtensionsCallback& wc) : extensionsCallback(&wc) {}
+    ProjectionStageParams(const ExtensionsCallback& wc)
+        : projImpl(NO_FAST_PATH), fullExpression(NULL), extensionsCallback(&wc) {}
 
-    ProjectionImplementation projImpl = NO_FAST_PATH;
+    ProjectionImplementation projImpl;
 
     // The projection object.  We lack a ProjectionExpression or similar so we use a BSONObj.
     BSONObj projObj;
@@ -62,7 +62,7 @@ struct ProjectionStageParams {
     // If we have a positional or elemMatch projection we need a MatchExpression to pull out the
     // right data.
     // Not owned here, we do not take ownership.
-    const MatchExpression* fullExpression = nullptr;
+    const MatchExpression* fullExpression;
 
     // If (COVERED_ONE_INDEX == projObj) this is the key pattern we're extracting covered data
     // from.  Otherwise, this field is ignored.
@@ -70,10 +70,6 @@ struct ProjectionStageParams {
 
     // Used for creating context for the match extensions processing. Not owned.
     const ExtensionsCallback* extensionsCallback;
-
-    // The collator this operation should use to compare strings. If null, the collation is a simple
-    // binary compare.
-    const CollatorInterface* collator = nullptr;
 };
 
 /**
@@ -87,7 +83,7 @@ public:
                     PlanStage* child);
 
     bool isEOF() final;
-    StageState doWork(WorkingSetID* out) final;
+    StageState work(WorkingSetID* out) final;
 
     StageType stageType() const final {
         return STAGE_PROJECTION;

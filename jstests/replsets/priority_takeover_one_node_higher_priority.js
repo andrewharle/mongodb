@@ -8,14 +8,8 @@
     load('jstests/replsets/rslib.js');
 
     var name = 'priority_takeover_one_node_higher_priority';
-    var replSet = new ReplSetTest({
-        name: name,
-        nodes: [
-            {rsConfig: {priority: 3}},
-            {},
-            {rsConfig: {arbiterOnly: true}},
-        ]
-    });
+    var replSet = new ReplSetTest(
+        {name: name, nodes: [{rsConfig: {priority: 3}}, {}, {rsConfig: {arbiterOnly: true}}, ]});
     replSet.startSet();
     replSet.initiate();
 
@@ -28,11 +22,11 @@
     // Primary should step down long enough for election to occur on secondary.
     var config = assert.commandWorked(primary.adminCommand({replSetGetConfig: 1})).config;
     var stepDownException = assert.throws(function() {
-        var result = primary.adminCommand({replSetStepDown: replSet.kDefaultTimeoutMS / 1000});
-        print('replSetStepDown did not throw exception but returned: ' + tojson(result));
+        primary.adminCommand({replSetStepDown: replSet.kDefaultTimeoutMS / 1000});
     });
-    assert(isNetworkError(stepDownException),
-           'replSetStepDown did not disconnect client; failed with ' + tojson(stepDownException));
+    assert.neq(-1,
+               tojson(stepDownException).indexOf('error doing query'),
+               'replSetStepDown did not disconnect client');
 
     // Step down primary and wait for node 1 to be promoted to primary.
     replSet.waitForState(replSet.nodes[1], ReplSetTest.State.PRIMARY);

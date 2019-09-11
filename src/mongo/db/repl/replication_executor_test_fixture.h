@@ -28,9 +28,9 @@
 
 #pragma once
 
+#include "mongo/stdx/memory.h"
 #include "mongo/db/repl/replication_executor.h"
 #include "mongo/executor/task_executor_test_fixture.h"
-#include "mongo/stdx/memory.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo {
@@ -43,6 +43,7 @@ class TaskExecutor;
 namespace repl {
 
 class ReplicationExecutor;
+class StorageInterfaceMock;
 
 /**
  * Test fixture for tests that require a ReplicationExecutor backed by
@@ -60,6 +61,8 @@ protected:
 private:
     std::unique_ptr<executor::TaskExecutor> makeTaskExecutor(
         std::unique_ptr<executor::NetworkInterfaceMock> net) override;
+
+    StorageInterfaceMock* _storage{nullptr};
 
     std::unique_ptr<ReplicationExecutor> _executor;
     bool _executorStarted{false};

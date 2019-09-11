@@ -26,9 +26,9 @@
  *    it in the license file.
  */
 
-#include <map>
 #include <string>
 #include <vector>
+#include <map>
 
 #include "mongo/db/field_parser.h"
 #include "mongo/db/jsobj.h"
@@ -44,9 +44,9 @@ using mongo::BSONObjBuilder;
 using mongo::Date_t;
 using mongo::FieldParser;
 using mongo::OID;
-using std::map;
 using std::string;
 using std::vector;
+using std::map;
 
 class ExtractionFixture : public mongo::unittest::Test {
 protected:
@@ -78,9 +78,7 @@ protected:
         valLong = 1LL;
 
         doc = BSON(aBool(valBool) << anArray(valArray) << anObj(valObj) << aDate(valDate)
-                                  << aString(valString)
-                                  << anOID(valOID)
-                                  << aLong(valLong));
+                                  << aString(valString) << anOID(valOID) << aLong(valLong));
     }
 
     void tearDown() {}
@@ -112,11 +110,11 @@ TEST_F(ExtractionFixture, GetBSONArray) {
     BSONField<BSONArray> wrongType(aString.name());
     BSONArray val;
     ASSERT_TRUE(FieldParser::extract(doc, anArray, &val));
-    ASSERT_BSONOBJ_EQ(val, valArray);
+    ASSERT_EQUALS(val, valArray);
     ASSERT_TRUE(FieldParser::extract(doc, notThere, &val));
-    ASSERT_BSONOBJ_EQ(val,
-                      BSON_ARRAY("a"
-                                 << "b"));
+    ASSERT_EQUALS(val,
+                  BSON_ARRAY("a"
+                             << "b"));
     ASSERT_FALSE(FieldParser::extract(doc, wrongType, &val));
 }
 
@@ -125,9 +123,9 @@ TEST_F(ExtractionFixture, GetBSONObj) {
     BSONField<BSONObj> wrongType(aString.name());
     BSONObj val;
     ASSERT_TRUE(FieldParser::extract(doc, anObj, &val));
-    ASSERT_BSONOBJ_EQ(val, valObj);
+    ASSERT_EQUALS(val, valObj);
     ASSERT_TRUE(FieldParser::extract(doc, notThere, &val));
-    ASSERT_BSONOBJ_EQ(val, BSON("b" << 1));
+    ASSERT_EQUALS(val, BSON("b" << 1));
     ASSERT_FALSE(FieldParser::extract(doc, wrongType, &val));
 }
 
@@ -237,9 +235,9 @@ TEST(ComplexExtraction, GetObjectVector) {
     vector<BSONObj> parsedVector;
 
     ASSERT(FieldParser::extract(obj, vectorField, &parsedVector));
-    ASSERT_BSONOBJ_EQ(BSON("a" << 1), parsedVector[0]);
-    ASSERT_BSONOBJ_EQ(BSON("b" << 1), parsedVector[1]);
-    ASSERT_BSONOBJ_EQ(BSON("c" << 1), parsedVector[2]);
+    ASSERT_EQUALS(BSON("a" << 1), parsedVector[0]);
+    ASSERT_EQUALS(BSON("b" << 1), parsedVector[1]);
+    ASSERT_EQUALS(BSON("c" << 1), parsedVector[2]);
     ASSERT_EQUALS(parsedVector.size(), static_cast<size_t>(3));
 }
 
@@ -317,27 +315,23 @@ TEST(ComplexExtraction, GetObjectMap) {
 
     BSONObjBuilder bob;
     bob << mapField() << BSON("a" << BSON("a"
-                                          << "a")
-                                  << "b"
-                                  << BSON("b"
-                                          << "b")
-                                  << "c"
-                                  << BSON("c"
-                                          << "c"));
+                                          << "a") << "b" << BSON("b"
+                                                                 << "b") << "c" << BSON("c"
+                                                                                        << "c"));
     BSONObj obj = bob.obj();
 
     map<string, BSONObj> parsedMap;
 
     ASSERT(FieldParser::extract(obj, mapField, &parsedMap));
-    ASSERT_BSONOBJ_EQ(BSON("a"
-                           << "a"),
-                      parsedMap["a"]);
-    ASSERT_BSONOBJ_EQ(BSON("b"
-                           << "b"),
-                      parsedMap["b"]);
-    ASSERT_BSONOBJ_EQ(BSON("c"
-                           << "c"),
-                      parsedMap["c"]);
+    ASSERT_EQUALS(BSON("a"
+                       << "a"),
+                  parsedMap["a"]);
+    ASSERT_EQUALS(BSON("b"
+                       << "b"),
+                  parsedMap["b"]);
+    ASSERT_EQUALS(BSON("c"
+                       << "c"),
+                  parsedMap["c"]);
     ASSERT_EQUALS(parsedMap.size(), static_cast<size_t>(3));
 }
 
@@ -348,9 +342,7 @@ TEST(ComplexExtraction, GetBadMap) {
     BSONObjBuilder bob;
     bob << mapField() << BSON("a"
                               << "a"
-                              << "b"
-                              << 123
-                              << "c"
+                              << "b" << 123 << "c"
                               << "c");
     BSONObj obj = bob.obj();
 
@@ -429,9 +421,7 @@ TEST(ComplexExtraction, GetBadNestedMap) {
 
     BSONObj nestedMapObj = BSON("a"
                                 << "a"
-                                << "b"
-                                << 123
-                                << "c"
+                                << "b" << 123 << "c"
                                 << "c");
 
     BSONObjBuilder bob;

@@ -295,7 +295,7 @@ TEST(ReplSetHeartbeatResponse, DefaultConstructThenSlowlyBuildToFullObj) {
     ASSERT_EQUALS(hbResponseObj.toString(), hbResponseObjRoundTripChecker.toBSON(false).toString());
 
     // set config
-    ReplSetConfig config;
+    ReplicaSetConfig config;
     hbResponse.setConfig(config);
     ++fieldsSet;
     ASSERT_EQUALS(false, hbResponse.hasState());
@@ -606,7 +606,7 @@ TEST(ReplSetHeartbeatResponse, InitializeWrongElectionTimeType) {
     ASSERT_EQUALS(ErrorCodes::TypeMismatch, result);
     ASSERT_EQUALS(
         "Expected \"electionTime\" field in response to replSetHeartbeat command to "
-        "have type Date or Timestamp, but found type string",
+        "have type Date or Timestamp, but found type String",
         result.reason());
 }
 
@@ -618,7 +618,7 @@ TEST(ReplSetHeartbeatResponse, InitializeWrongTimeType) {
     ASSERT_EQUALS(ErrorCodes::TypeMismatch, result);
     ASSERT_EQUALS(
         "Expected \"time\" field in response to replSetHeartbeat command to "
-        "have a numeric type, but found type string",
+        "have a numeric type, but found type String",
         result.reason());
 }
 
@@ -628,13 +628,13 @@ TEST(ReplSetHeartbeatResponse, InitializeWrongDurableOpTimeType) {
                                        << "hello");
     Status result = hbResponse.initialize(initializerObj, 0);
     ASSERT_EQUALS(ErrorCodes::TypeMismatch, result);
-    ASSERT_EQUALS("\"durableOpTime\" had the wrong type. Expected object, found string",
+    ASSERT_EQUALS("\"durableOpTime\" had the wrong type. Expected Object, found String",
                   result.reason());
 
     BSONObj initializerObj2 = BSON("ok" << 1.0 << "durableOpTime" << OpTime().getTimestamp());
     Status result2 = hbResponse.initialize(initializerObj2, 0);
     ASSERT_EQUALS(ErrorCodes::TypeMismatch, result2);
-    ASSERT_EQUALS("\"durableOpTime\" had the wrong type. Expected object, found timestamp",
+    ASSERT_EQUALS("\"durableOpTime\" had the wrong type. Expected Object, found Timestamp",
                   result2.reason());
 }
 
@@ -646,7 +646,7 @@ TEST(ReplSetHeartbeatResponse, InitializeWrongAppliedOpTimeType) {
     ASSERT_EQUALS(ErrorCodes::TypeMismatch, result);
     ASSERT_EQUALS(
         "Expected \"opTime\" field in response to replSetHeartbeat command to "
-        "have type Date or Timestamp, but found type string",
+        "have type Date or Timestamp, but found type String",
         result.reason());
 }
 
@@ -658,7 +658,7 @@ TEST(ReplSetHeartbeatResponse, InitializeMemberStateWrongType) {
     ASSERT_EQUALS(ErrorCodes::TypeMismatch, result);
     ASSERT_EQUALS(
         "Expected \"state\" field in response to replSetHeartbeat command to "
-        "have type NumberInt or NumberLong, but found type string",
+        "have type NumberInt or NumberLong, but found type String",
         result.reason());
 }
 
@@ -692,7 +692,7 @@ TEST(ReplSetHeartbeatResponse, InitializeVersionWrongType) {
     ASSERT_EQUALS(ErrorCodes::TypeMismatch, result);
     ASSERT_EQUALS(
         "Expected \"v\" field in response to replSetHeartbeat to "
-        "have type NumberInt, but found string",
+        "have type NumberInt, but found String",
         result.reason());
 }
 
@@ -705,7 +705,7 @@ TEST(ReplSetHeartbeatResponse, InitializeReplSetNameWrongType) {
     ASSERT_EQUALS(ErrorCodes::TypeMismatch, result);
     ASSERT_EQUALS(
         "Expected \"set\" field in response to replSetHeartbeat to "
-        "have type String, but found int",
+        "have type String, but found NumberInt32",
         result.reason());
 }
 
@@ -713,13 +713,12 @@ TEST(ReplSetHeartbeatResponse, InitializeHeartbeatMeessageWrongType) {
     ReplSetHeartbeatResponse hbResponse;
     BSONObj initializerObj =
         BSON("ok" << 1.0 << "v" << 2 <<  // needs a version to get this far in initialize()
-             "hbmsg"
-                  << 4);
+             "hbmsg" << 4);
     Status result = hbResponse.initialize(initializerObj, 0);
     ASSERT_EQUALS(ErrorCodes::TypeMismatch, result);
     ASSERT_EQUALS(
         "Expected \"hbmsg\" field in response to replSetHeartbeat to "
-        "have type String, but found int",
+        "have type String, but found NumberInt32",
         result.reason());
 }
 
@@ -727,13 +726,12 @@ TEST(ReplSetHeartbeatResponse, InitializeSyncingToWrongType) {
     ReplSetHeartbeatResponse hbResponse;
     BSONObj initializerObj =
         BSON("ok" << 1.0 << "v" << 2 <<  // needs a version to get this far in initialize()
-             "syncingTo"
-                  << 4);
+             "syncingTo" << 4);
     Status result = hbResponse.initialize(initializerObj, 0);
     ASSERT_EQUALS(ErrorCodes::TypeMismatch, result);
     ASSERT_EQUALS(
         "Expected \"syncingTo\" field in response to replSetHeartbeat to "
-        "have type String, but found int",
+        "have type String, but found NumberInt32",
         result.reason());
 }
 
@@ -741,13 +739,12 @@ TEST(ReplSetHeartbeatResponse, InitializeConfigWrongType) {
     ReplSetHeartbeatResponse hbResponse;
     BSONObj initializerObj =
         BSON("ok" << 1.0 << "v" << 2 <<  // needs a version to get this far in initialize()
-             "config"
-                  << 4);
+             "config" << 4);
     Status result = hbResponse.initialize(initializerObj, 0);
     ASSERT_EQUALS(ErrorCodes::TypeMismatch, result);
     ASSERT_EQUALS(
         "Expected \"config\" in response to replSetHeartbeat to "
-        "have type Object, but found int",
+        "have type Object, but found NumberInt32",
         result.reason());
 }
 
@@ -755,8 +752,7 @@ TEST(ReplSetHeartbeatResponse, InitializeBadConfig) {
     ReplSetHeartbeatResponse hbResponse;
     BSONObj initializerObj =
         BSON("ok" << 1.0 << "v" << 2 <<  // needs a version to get this far in initialize()
-             "config"
-                  << BSON("illegalFieldName" << 2));
+             "config" << BSON("illegalFieldName" << 2));
     Status result = hbResponse.initialize(initializerObj, 0);
     ASSERT_EQUALS(ErrorCodes::BadValue, result);
     ASSERT_EQUALS("Unexpected field illegalFieldName in replica set configuration",

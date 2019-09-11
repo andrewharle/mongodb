@@ -111,7 +111,7 @@ void BSONInfo::make(
     auto scope = getScope(cx);
 
     scope->getProto<BSONInfo>().newObject(obj);
-    JS_SetPrivate(obj, scope->trackedNew<BSONHolder>(bson, parent, scope, ro));
+    JS_SetPrivate(obj, new BSONHolder(bson, parent, scope, ro));
 }
 
 void BSONInfo::finalize(JSFreeOp* fop, JSObject* obj) {
@@ -120,13 +120,10 @@ void BSONInfo::finalize(JSFreeOp* fop, JSObject* obj) {
     if (!holder)
         return;
 
-    getScope(fop)->trackedDelete(holder);
+    delete holder;
 }
 
-void BSONInfo::enumerate(JSContext* cx,
-                         JS::HandleObject obj,
-                         JS::AutoIdVector& properties,
-                         bool enumerableOnly) {
+void BSONInfo::enumerate(JSContext* cx, JS::HandleObject obj, JS::AutoIdVector& properties) {
     auto holder = getValidHolder(cx, obj);
 
     if (!holder)
@@ -155,17 +152,13 @@ void BSONInfo::enumerate(JSContext* cx,
     }
 }
 
-void BSONInfo::setProperty(JSContext* cx,
-                           JS::HandleObject obj,
-                           JS::HandleId id,
-                           JS::MutableHandleValue vp,
-                           JS::ObjectOpResult& result) {
+void BSONInfo::setProperty(
+    JSContext* cx, JS::HandleObject obj, JS::HandleId id, bool strict, JS::MutableHandleValue vp) {
     auto holder = getValidHolder(cx, obj);
 
     if (holder) {
         if (holder->_readOnly) {
             uasserted(ErrorCodes::BadValue, "Read only object");
-            return;
         }
 
         auto iter = holder->_removed.find(IdWrapper(cx, id).toString());
@@ -178,19 +171,14 @@ void BSONInfo::setProperty(JSContext* cx,
     }
 
     ObjectWrapper(cx, obj).defineProperty(id, vp, JSPROP_ENUMERATE);
-    result.succeed();
 }
 
-void BSONInfo::delProperty(JSContext* cx,
-                           JS::HandleObject obj,
-                           JS::HandleId id,
-                           JS::ObjectOpResult& result) {
+void BSONInfo::delProperty(JSContext* cx, JS::HandleObject obj, JS::HandleId id, bool* succeeded) {
     auto holder = getValidHolder(cx, obj);
 
     if (holder) {
         if (holder->_readOnly) {
             uasserted(ErrorCodes::BadValue, "Read only object");
-            return;
         }
 
         holder->_altered = true;
@@ -199,7 +187,7 @@ void BSONInfo::delProperty(JSContext* cx,
         holder->_removed[IdWrapper(cx, id).toStringData(&jsstr)] = true;
     }
 
-    result.succeed();
+    *succeeded = true;
 }
 
 void BSONInfo::resolve(JSContext* cx, JS::HandleObject obj, JS::HandleId id, bool* resolvedp) {

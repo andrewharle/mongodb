@@ -30,74 +30,7 @@
 
 #include "mongo/db/storage/bson_collection_catalog_entry.h"
 
-#include <algorithm>
-
-#include "mongo/db/field_ref.h"
-
 namespace mongo {
-
-namespace {
-
-// An index will fail to get created if the size in bytes of its key pattern is greater than 2048.
-// We use that value to represent the largest number of path components we could ever possibly
-// expect to see in an indexed field.
-const size_t kMaxKeyPatternPathLength = 2048;
-char multikeyPathsEncodedAsBytes[kMaxKeyPatternPathLength];
-
-/**
- * Encodes 'multikeyPaths' as binary data and appends it to 'bob'.
- *
- * For example, consider the index {'a.b': 1, 'a.c': 1} where the paths "a" and "a.b" cause it to be
- * multikey. The object {'a.b': HexData('0101'), 'a.c': HexData('0100')} would then be appended to
- * 'bob'.
- */
-void appendMultikeyPathsAsBytes(BSONObj keyPattern,
-                                const MultikeyPaths& multikeyPaths,
-                                BSONObjBuilder* bob) {
-    size_t i = 0;
-    for (const auto keyElem : keyPattern) {
-        StringData keyName = keyElem.fieldNameStringData();
-        size_t numParts = FieldRef{keyName}.numParts();
-        invariant(numParts > 0);
-        invariant(numParts <= kMaxKeyPatternPathLength);
-
-        std::fill_n(multikeyPathsEncodedAsBytes, numParts, 0);
-        for (const auto multikeyComponent : multikeyPaths[i]) {
-            multikeyPathsEncodedAsBytes[multikeyComponent] = 1;
-        }
-        bob->appendBinData(keyName, numParts, BinDataGeneral, &multikeyPathsEncodedAsBytes[0]);
-
-        ++i;
-    }
-}
-
-/**
- * Parses the path-level multikey information encoded as binary data from 'multikeyPathsObj' and
- * sets 'multikeyPaths' as that value.
- *
- * For example, consider the index {'a.b': 1, 'a.c': 1} where the paths "a" and "a.b" cause it to be
- * multikey. The binary data {'a.b': HexData('0101'), 'a.c': HexData('0100')} would then be parsed
- * into std::vector<std::set<size_t>>{{0U, 1U}, {0U}}.
- */
-void parseMultikeyPathsFromBytes(BSONObj multikeyPathsObj, MultikeyPaths* multikeyPaths) {
-    invariant(multikeyPaths);
-    for (auto elem : multikeyPathsObj) {
-        std::set<size_t> multikeyComponents;
-        int len;
-        const char* data = elem.binData(len);
-        invariant(len > 0);
-        invariant(static_cast<size_t>(len) <= kMaxKeyPatternPathLength);
-
-        for (int i = 0; i < len; ++i) {
-            if (data[i]) {
-                multikeyComponents.insert(i);
-            }
-        }
-        multikeyPaths->push_back(multikeyComponents);
-    }
-}
-
-}  // namespace
 
 BSONCollectionCatalogEntry::BSONCollectionCatalogEntry(StringData ns)
     : CollectionCatalogEntry(ns) {}
@@ -143,28 +76,12 @@ void BSONCollectionCatalogEntry::getAllIndexes(OperationContext* txn,
     }
 }
 
-void BSONCollectionCatalogEntry::getReadyIndexes(OperationContext* txn,
-                                                 std::vector<std::string>* names) const {
-    MetaData md = _getMetaData(txn);
-
-    for (unsigned i = 0; i < md.indexes.size(); i++) {
-        if (md.indexes[i].ready)
-            names->push_back(md.indexes[i].spec["name"].String());
-    }
-}
-
 bool BSONCollectionCatalogEntry::isIndexMultikey(OperationContext* txn,
-                                                 StringData indexName,
-                                                 MultikeyPaths* multikeyPaths) const {
+                                                 StringData indexName) const {
     MetaData md = _getMetaData(txn);
 
     int offset = md.findIndexOffset(indexName);
     invariant(offset >= 0);
-
-    if (multikeyPaths && !md.indexes[offset].multikeyPaths.empty()) {
-        *multikeyPaths = md.indexes[offset].multikeyPaths;
-    }
-
     return md.indexes[offset].multikey;
 }
 
@@ -226,14 +143,8 @@ void BSONCollectionCatalogEntry::MetaData::rename(StringData toNS) {
     for (size_t i = 0; i < indexes.size(); i++) {
         BSONObj spec = indexes[i].spec;
         BSONObjBuilder b;
-        // Add the fields in the same order they were in the original specification.
-        for (auto&& elem : spec) {
-            if (elem.fieldNameStringData() == "ns") {
-                b.append("ns", toNS);
-            } else {
-                b.append(elem);
-            }
-        }
+        b.append("ns", toNS);
+        b.appendElementsUnique(spec);
         indexes[i].spec = b.obj();
     }
 }
@@ -249,19 +160,10 @@ BSONObj BSONCollectionCatalogEntry::MetaData::toBSON() const {
             sub.append("spec", indexes[i].spec);
             sub.appendBool("ready", indexes[i].ready);
             sub.appendBool("multikey", indexes[i].multikey);
-
-            if (!indexes[i].multikeyPaths.empty()) {
-                BSONObjBuilder subMultikeyPaths(sub.subobjStart("multikeyPaths"));
-                appendMultikeyPathsAsBytes(indexes[i].spec.getObjectField("key"),
-                                           indexes[i].multikeyPaths,
-                                           &subMultikeyPaths);
-                subMultikeyPaths.doneFast();
-            }
-
             sub.append("head", static_cast<long long>(indexes[i].head.repr()));
-            sub.doneFast();
+            sub.done();
         }
-        arr.doneFast();
+        arr.done();
     }
     return b.obj();
 }
@@ -288,8 +190,8 @@ void BSONCollectionCatalogEntry::MetaData::parse(const BSONObj& obj) {
             }
             imd.multikey = idx["multikey"].trueValue();
 
-            if (auto multikeyPathsElem = idx["multikeyPaths"]) {
-                parseMultikeyPathsFromBytes(multikeyPathsElem.Obj(), &imd.multikeyPaths);
+            if (idx["multikeyPaths"]) {
+                imd.hasMultikeyPaths = true;
             }
 
             indexes.push_back(imd);

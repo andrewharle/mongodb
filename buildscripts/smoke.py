@@ -557,6 +557,7 @@ def skipTest(path):
         authTestsToSkip = [("jstests", "drop2.js"), # SERVER-8589,
                            ("jstests", "killop.js"), # SERVER-10128
                            ("sharding", "sync3.js"), # SERVER-6388 for this and those below
+                           ("sharding", "sync6.js"),
                            ("sharding", "parallel.js"),
                            ("sharding", "copydb_from_mongos.js"), # SERVER-13080
                            ("jstests", "bench_test1.js"),
@@ -661,6 +662,8 @@ def runTest(test, result):
                      'TestData.wiredTigerEngineConfigString = "' + ternary( wiredtiger_engine_config_string, wiredtiger_engine_config_string, "" ) + '";' + \
                      'TestData.wiredTigerCollectionConfigString = "' + ternary( wiredtiger_collection_config_string, wiredtiger_collection_config_string, "" ) + '";' + \
                      'TestData.wiredTigerIndexConfigString = "' + ternary( wiredtiger_index_config_string, wiredtiger_index_config_string, "" ) + '";' + \
+                     'TestData.testPath = "' + path + '";' + \
+                     'TestData.testFile = "' + os.path.basename( path ) + '";' + \
                      'TestData.testName = "' + re.sub( ".js$", "", os.path.basename( path ) ) + '";' + \
                      'TestData.setParameters = "' + ternary( set_parameters, set_parameters, "" )  + '";' + \
                      'TestData.setParametersMongos = "' + ternary( set_parameters_mongos, set_parameters_mongos, "" )  + '";' + \
@@ -1015,7 +1018,7 @@ suiteGlobalConfig = {"js": ("core/*.js", True),
                      "gle": ("gle/*.js", True),
                      "rocksDB": ("rocksDB/*.js", True),
                      "slow1": ("slow1/*.js", True),
-                     "serial_run": ("serial_run/*.js", True),
+                     "slow2": ("slow2/*.js", True),
                      }
 
 def get_module_suites():
@@ -1090,7 +1093,7 @@ def expand_suites(suites,expandUseDB=True):
                                   'auth', 
                                   'sharding', 
                                   'slow1',
-                                  'serial_run',
+                                  'slow2',
                                   'tool'],
                                  expandUseDB=expandUseDB)
         if suite == 'dbtest' or suite == 'test':

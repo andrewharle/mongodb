@@ -76,7 +76,7 @@ class DistinctScan final : public PlanStage {
 public:
     DistinctScan(OperationContext* txn, const DistinctParams& params, WorkingSet* workingSet);
 
-    StageState doWork(WorkingSetID* out) final;
+    StageState work(WorkingSetID* out) final;
     bool isEOF() final;
     void doSaveState() final;
     void doRestoreState() final;

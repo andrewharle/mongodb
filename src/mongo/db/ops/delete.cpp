@@ -63,10 +63,18 @@ long long deleteObjects(OperationContext* txn,
     ParsedDelete parsedDelete(txn, &request);
     uassertStatusOK(parsedDelete.parseRequest());
 
-    std::unique_ptr<PlanExecutor> exec = uassertStatusOK(
-        getExecutorDelete(txn, &CurOp::get(txn)->debug(), collection, &parsedDelete));
+    auto client = txn->getClient();
+    auto lastOpAtOperationStart = repl::ReplClientInfo::forClient(client).getLastOp();
+
+    std::unique_ptr<PlanExecutor> exec =
+        uassertStatusOK(getExecutorDelete(txn, collection, &parsedDelete));
 
     uassertStatusOK(exec->executePlan());
+
+    // No-ops need to reset lastOp in the client, for write concern.
+    if (repl::ReplClientInfo::forClient(client).getLastOp() == lastOpAtOperationStart) {
+        repl::ReplClientInfo::forClient(client).setLastOpToSystemLastOpTime(txn);
+    }
 
     return DeleteStage::getNumDeleted(*exec);
 }

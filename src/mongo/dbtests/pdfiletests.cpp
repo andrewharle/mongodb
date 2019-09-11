@@ -32,10 +32,10 @@
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/catalog/collection.h"
-#include "mongo/db/client.h"
 #include "mongo/db/db.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/json.h"
+#include "mongo/db/operation_context_impl.h"
 #include "mongo/db/ops/insert.h"
 #include "mongo/dbtests/dbtests.h"
 
@@ -62,8 +62,7 @@ protected:
         return _context.db()->getCollection(ns());
     }
 
-    const ServiceContext::UniqueOperationContext _txnPtr = cc().makeOperationContext();
-    OperationContext& _txn = *_txnPtr;
+    OperationContextImpl _txn;
     ScopedTransaction _scopedXact;
     Lock::GlobalWrite _lk;
     OldClientContext _context;
@@ -76,14 +75,13 @@ public:
         BSONObj x = BSON("x" << 1);
         ASSERT(x["_id"].type() == 0);
         Collection* collection = _context.db()->getOrCreateCollection(&_txn, ns());
-        OpDebug* const nullOpDebug = nullptr;
-        ASSERT(!collection->insertDocument(&_txn, x, nullOpDebug, true).isOK());
+        ASSERT(!collection->insertDocument(&_txn, x, true).isOK());
 
         StatusWith<BSONObj> fixed = fixDocumentForInsert(x);
         ASSERT(fixed.isOK());
         x = fixed.getValue();
         ASSERT(x["_id"].type() == jstOID);
-        ASSERT(collection->insertDocument(&_txn, x, nullOpDebug, true).isOK());
+        ASSERT(collection->insertDocument(&_txn, x, true).isOK());
         wunit.commit();
     }
 };

@@ -33,15 +33,12 @@
 #include <map>
 #include <sstream>
 #include <string>
-#include <utility>
 #include <vector>
+#include <utility>
 
 #include "mongo/bson/bsonobj.h"
 #include "mongo/platform/process_id.h"
-#include "mongo/platform/unordered_map.h"
-#include "mongo/platform/unordered_set.h"
 #include "mongo/stdx/mutex.h"
-#include "mongo/stdx/thread.h"
 
 namespace mongo {
 
@@ -57,12 +54,13 @@ struct MongoProgramScope {
 };
 int KillMongoProgramInstances();
 
+void goingAwaySoon();
 void installShellUtilsLauncher(Scope& scope);
 
 /** Record log lines from concurrent programs.  All public members are thread safe. */
 class ProgramOutputMultiplexer {
 public:
-    void appendLine(int port, ProcessId pid, const std::string& name, const std::string& line);
+    void appendLine(int port, ProcessId pid, const char* line);
     /** @return up to 100000 characters of the most recent log output. */
     std::string str() const;
     void clear();
@@ -82,22 +80,20 @@ public:
     ProcessId pidForPort(int port) const;
     /** @return port (-1 if doesn't exist) for a registered pid. */
     int portForPid(ProcessId pid) const;
+    /** @return name for a registered program */
+    std::string programName(ProcessId pid) const;
     /** Register an unregistered program. */
-    void registerProgram(ProcessId pid, int port = -1);
-    /** Registers the reader thread for the PID. Must be called before `joinReaderThread`. */
-    void registerReaderThread(ProcessId pid, stdx::thread reader);
-    /** Closes the registered program's write pipe and waits for all of the written output to be
-     * consumed by the reader thread, then removes the program from the registry */
-    void unregisterProgram(ProcessId pid);
+    void registerProgram(ProcessId pid, int output, int port = 0, std::string name = "sh");
+    void deleteProgram(ProcessId pid);
 
     bool isPidRegistered(ProcessId pid) const;
     void getRegisteredPorts(std::vector<int>& ports);
     void getRegisteredPids(std::vector<ProcessId>& pids);
 
 private:
-    stdx::unordered_set<ProcessId> _registeredPids;
-    stdx::unordered_map<int, ProcessId> _portToPidMap;
-    stdx::unordered_map<ProcessId, stdx::thread> _outputReaderThreads;
+    std::unordered_map<int, ProcessId> _portToPidMap;
+    std::unordered_map<ProcessId, int> _outputs;
+    std::unordered_map<ProcessId, std::string> _programNames;
     mutable stdx::recursive_mutex _mutex;
 
 #ifdef _WIN32
@@ -116,10 +112,8 @@ public:
 /** Helper class for launching a program and logging its output. */
 class ProgramRunner {
 public:
-    /** @param args The program's arguments, including the program name.
-     *  @param env Environment to run the program with, which will override any set by the local
-     *             environment */
-    ProgramRunner(const BSONObj& args, const BSONObj& env);
+    /** @param args The program's arguments, including the program name. */
+    ProgramRunner(const BSONObj& args);
     /** Launch the program. */
     void start();
     /** Continuously read the program's output, generally from a special purpose thread. */
@@ -136,7 +130,6 @@ private:
     void launchProcess(int child_stdout);
 
     std::vector<std::string> _argv;
-    std::map<std::string, std::string> _envp;
     int _port;
     int _pipe;
     ProcessId _pid;

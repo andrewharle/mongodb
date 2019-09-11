@@ -58,6 +58,7 @@ post:
           if [ -d "${scons_cache_path}" ]; then
               ${python|python} buildscripts/scons_cache_prune.py --cache-dir ${scons_cache_path} --cache-size ${scons_cache_size|200} --prune-ratio ${scons_prune_ratio|0.8}
           fi
+    - command: shell.cleanup
 
 functions:
   "compile mongodb":
@@ -67,52 +68,11 @@ functions:
         script: |
           set -o errexit
           set -o verbose
-
-          # We get the raw version string (r1.2.3-45-gabcdef) from git
-          MONGO_VERSION=$(git describe)
-          # If we're going to compile the upstream wtdevelop repository for wiredtiger, add
-          # that githash to version string.
-          if [ "${wtdevelop|}" = "-wtdevelop" ]; then
-            WT_VERSION=$(cd src/third_party/wtdevelop; git describe | cut -c 9-)
-            MONGO_VERSION="$MONGO_VERSION-wtdevelop-$WT_VERSION"
-          fi
-          # If this is a patch build, we add the patch version id to the version string so we know
-          # this build was a patch, and which evergreen task it came from
-          if [ "${is_patch|}" = "true" ]; then
-            MONGO_VERSION="$MONGO_VERSION-patch-${version_id}"
-          fi
-
-          # This script converts the generated version string into a sanitized version string for
-          # use by scons and uploading artifacts as well as information about for the scons cache.
-          echo $MONGO_VERSION | USE_SCONS_CACHE=${use_scons_cache|false} ${python|python} buildscripts/generate_compile_expansions.py | tee compile_expansions.yml
-    # Then we load the generated version data into the agent so we can use it in task definitions
-    - command: expansions.update
-      params:
-        file: src/compile_expansions.yml
-    - command: shell.exec
-      params:
-        working_dir: src
-        script: |
-          set -o errexit
-          set -o verbose
-          ${python|python} ./buildscripts/scons.py ${compile_flags|} ${scons_cache_args|} mongo${extension} mongod${extension} mongos${extension} MONGO_VERSION=${version}
+          ${scons|scons} ${compile_flags|} mongo mongod mongos
           mkdir -p mongodb/bin
-          mkdir -p mongodb/jstests/hooks
-          mv mongo${extension|} mongodb/bin
-          mv mongod${extension|} mongodb/bin
-          mv mongos${extension|} mongodb/bin
-          if [ -d jstests/hooks ]
-          then
-            echo "Fetching JS test DB correctness checks from directory jstests"
-            cp -a jstests/* mongodb/jstests
-            echo "Now adding our own special run_validate_collections.js wrapper"
-            mv mongodb/jstests/hooks/run_validate_collections.js mongodb/jstests/hooks/run_validate_collections.actual.js
-            cat << EOF > mongodb/jstests/hooks/run_validate_collections.js
-            print("NOTE: run_validate_collections.js will skip the oplog!");
-            TestData = { skipValidationNamespaces: ['local.oplog.rs'] };
-            load('jstests/hooks/run_validate_collections.actual.js');
-          EOF
-          fi
+          mv mongo mongodb/bin
+          mv mongod mongodb/bin
+          mv mongos mongodb/bin
           tar czf mongodb${wtdevelop|}.tar.gz mongodb
     - command: s3.put
       params:
@@ -268,7 +228,7 @@ functions:
         script: |
           set -o errexit
           set -o verbose
-          TAG="3.4.17-Baseline"
+          TAG="3.2.21-Baseline"
           OVERRIDEFILE="../src/dsi/dsi/analysis/${branch_name}/system_perf_override.json"
           python -u ../src/dsi/dsi/analysis/post_run_check.py ${script_flags} --reports-analysis reports --perf-file perf.json --rev ${revision} --refTag $TAG --overrideFile $OVERRIDEFILE --project_id sys-perf --variant ${build_variant} --task ${task_name}
 
@@ -279,7 +239,6 @@ functions:
 tasks:
 - name: compile
   commands:
-    - command: manifest.load
     - command: git.get_project
       params:
         directory: src
@@ -368,6 +327,7 @@ tasks:
     - func: "deploy cluster"
     - func: "run test"
     - func: "analyze"
+
 - name: mongos_workloads
   priority: 5
   commands:
@@ -398,35 +358,12 @@ tasks:
     - func: "run test"
     - func: "analyze"
 
-- name: secondary_performance
-  priority: 5
-  commands:
-    - func: "prepare environment"
-      vars:
-        # Unfortunately the dash/underscore style is different for mongodb_setup and test_control
-        test: "secondary_performance"
-        setup: "secondary-performance"
-    - func: "deploy cluster"
-    - func: "run test"
-    - func: "analyze"
-
 - name: initialsync
   priority: 5
   commands:
     - func: "prepare environment"
       vars:
         test: "initialsync"
-    - func: "deploy cluster"
-    - func: "run test"
-    - func: "analyze"
-
-- name: initialsync-logkeeper
-  priority: 5
-  exec_timeout_secs: 216000 # 2.5 days
-  commands:
-    - func: "prepare environment"
-      vars:
-        test: "initialsync-logkeeper"
     - func: "deploy cluster"
     - func: "run test"
     - func: "analyze"
@@ -457,7 +394,7 @@ buildvariants:
 # proper artifacts directly from that project, we should do that and remove these tasks.
 - name: compile-rhel70
   display_name: Compile on rhel70
-  batchtime: 10080 # 7 days
+  batchtime: 1440 # 24 hours
   modules:
     - wtdevelop
   expansions:
@@ -503,7 +440,6 @@ buildvariants:
     - name: smoke_test
     - name: non_sharded_workloads
 
-
 - name: linux-standalone
   display_name: Linux Standalone
   batchtime: 10080 # 7 days
@@ -533,11 +469,10 @@ buildvariants:
   batchtime: 10080 # 7 days
   modules: *modules
   expansions:
-    compile_flags: -j$(grep -c ^processor /proc/cpuinfo) CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
+    compile_flags: -j$(grep -c ^processor /proc/cpuinfo) CC=/opt/mongodbtoolchain/bin/gcc CXX=/opt/mongodbtoolchain/bin/g++ --release
     setup: shard
     cluster: shard
     platform: linux
-    use_scons_cache: true
     project_dir: *project_dir
     storageEngine: wiredTiger
   run_on:
@@ -561,7 +496,7 @@ buildvariants:
   batchtime: 10080 # 7 days
   modules: *modules
   expansions:
-    compile_flags: -j$(grep -c ^processor /proc/cpuinfo) CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
+    compile_flags: -j$(grep -c ^processor /proc/cpuinfo) CC=/opt/mongodbtoolchain/bin/gcc CXX=/opt/mongodbtoolchain/bin/g++ --release
     setup: replica
     cluster: replica
     platform: linux
@@ -580,7 +515,6 @@ buildvariants:
     - name: map_reduce_workloads
     - name: smoke_test
     - name: industry_benchmarks_wmajority
-    - name: secondary_performance
     - name: non_sharded_workloads
 
 - name: linux-3-node-replSet-initialsync
@@ -588,11 +522,10 @@ buildvariants:
   batchtime: 10080 # 7 days
   modules: *modules
   expansions:
-    compile_flags: -j$(grep -c ^processor /proc/cpuinfo) CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
+    compile_flags: -j$(grep -c ^processor /proc/cpuinfo) CC=/opt/mongodbtoolchain/bin/gcc CXX=/opt/mongodbtoolchain/bin/g++ --release
     setup: replica-2node
     cluster: replica
     platform: linux
-    use_scons_cache: true
     project_dir: *project_dir
     storageEngine: wiredTiger
   run_on:
@@ -602,26 +535,6 @@ buildvariants:
         variant: compile-rhel70
   tasks:
     - name: initialsync
-
-- name: linux-replSet-initialsync-logkeeper
-  display_name: Linux ReplSet Initial Sync LogKeeper
-  batchtime: 10080 # 7 days
-  modules: *modules
-  expansions:
-    compile_flags: -j$(grep -c ^processor /proc/cpuinfo) CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy
-    setup: initialsync-logkeeper
-    cluster: initialsync-logkeeper
-    platform: linux
-    use_scons_cache: true
-    storageEngine: wiredTiger
-    project_dir: *project_dir
-  run_on:
-      - "rhel70-perf-initialsync-logkeeper"
-  depends_on:
-      - name: compile
-        variant: compile-rhel70
-  tasks:
-    - name: initialsync-logkeeper
 
 #######################################
 #         MMAP Buildvariants         #
@@ -682,8 +595,8 @@ buildvariants:
     setup: shard
     cluster: shard
     platform: linux
-    project_dir: *project_dir
     storageEngine: "mmapv1"
+    project_dir: *project_dir
   run_on:
       - "rhel70-perf-shard"
   depends_on:
@@ -723,7 +636,6 @@ buildvariants:
     - name: mixed_workloads
     - name: misc_workloads
     - name: map_reduce_workloads
-    - name: secondary_performance
     - name: non_sharded_workloads
 
 - name: mmap-3-node-replSet-initialsync

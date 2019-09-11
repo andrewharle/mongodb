@@ -12,15 +12,8 @@
     var dbName = "wMajorityCheck";
     var collName = "stepdownAndBackUp";
 
-    var rst = new ReplSetTest({
-        name: name,
-        nodes: [
-            {},
-            {},
-            {rsConfig: {priority: 0}},
-        ],
-        useBridge: true
-    });
+    var rst = new ReplSetTest(
+        {name: name, nodes: [{}, {}, {rsConfig: {priority: 0}}, ], useBridge: true});
     var nodes = rst.startSet();
     rst.initiate();
 
@@ -30,9 +23,8 @@
         });
     }
 
-    // SERVER-20844 ReplSetTest starts up a single node replica set then reconfigures to the correct
-    // size for faster startup, so nodes[0] is always the first primary.
     jsTestLog("Make sure node 0 is primary.");
+    rst.stepUp(nodes[0]);
     var primary = rst.getPrimary();
     var secondaries = rst.getSecondaries();
     assert.eq(nodes[0], primary);
@@ -48,9 +40,8 @@
 
     jsTestLog("Do w:majority write that will block waiting for replication.");
     var doMajorityWrite = function() {
-        var res = db.getSiblingDB('wMajorityCheck').stepdownAndBackUp.insert({a: 2}, {
-            writeConcern: {w: 'majority'}
-        });
+        var res = db.getSiblingDB('wMajorityCheck')
+                      .stepdownAndBackUp.insert({a: 2}, {writeConcern: {w: 'majority'}});
         assert.writeErrorWithCode(res, ErrorCodes.PrimarySteppedDown);
     };
 

@@ -55,13 +55,12 @@
 #include "mongo/config.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/storage/encryption_hooks.h"
 #include "mongo/db/storage/storage_options.h"
+#include "mongo/db/storage/wiredtiger/wiredtiger_customization_hooks.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/s/mongos_options.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/bufreader.h"
-#include "mongo/util/destructor_guard.h"
 #include "mongo/util/mongoutils/str.h"
 #include "mongo/util/print.h"
 #include "mongo/util/unowned_ptr.h"
@@ -146,7 +145,8 @@ public:
 
     /// Any number of values
     template <typename Container>
-    InMemIterator(const Container& input) : _data(input.begin(), input.end()) {}
+    InMemIterator(const Container& input)
+        : _data(input.begin(), input.end()) {}
 
     bool more() {
         return !_data.empty();
@@ -166,8 +166,7 @@ template <typename Key, typename Value>
 class FileIterator : public SortIteratorInterface<Key, Value> {
 public:
     typedef std::pair<typename Key::SorterDeserializeSettings,
-                      typename Value::SorterDeserializeSettings>
-        Settings;
+                      typename Value::SorterDeserializeSettings> Settings;
     typedef std::pair<Key, Value> Data;
 
     FileIterator(const std::string& fileName,
@@ -179,8 +178,8 @@ public:
           _fileDeleter(fileDeleter),
           _file(_fileName.c_str(), std::ios::in | std::ios::binary) {
         massert(16814,
-                str::stream() << "error opening file \"" << _fileName << "\": "
-                              << myErrnoWithDescription(),
+                str::stream() << "error opening file \"" << _fileName
+                              << "\": " << myErrnoWithDescription(),
                 _file.good());
 
         massert(16815,
@@ -198,10 +197,11 @@ public:
         verify(!_done);
         fillIfNeeded();
 
+        Data out;
         // Note: key must be read before value so can't pass directly to Data constructor
-        auto first = Key::deserializeForSorter(*_reader, _settings.first);
-        auto second = Value::deserializeForSorter(*_reader, _settings.second);
-        return Data(std::move(first), std::move(second));
+        out.first = Key::deserializeForSorter(*_reader, _settings.first);
+        out.second = Value::deserializeForSorter(*_reader, _settings.second);
+        return out;
     }
 
 private:
@@ -226,16 +226,15 @@ private:
         read(_buffer.get(), blockSize);
         massert(16816, "file too short?", !_done);
 
-        auto encryptionHooks = EncryptionHooks::get(getGlobalServiceContext());
-        if (encryptionHooks->enabled()) {
+        auto hooks = WiredTigerCustomizationHooks::get(getGlobalServiceContext());
+        if (hooks->enabled()) {
             std::unique_ptr<char[]> out(new char[blockSize]);
             size_t outLen;
-            Status status =
-                encryptionHooks->unprotectTmpData(reinterpret_cast<uint8_t*>(_buffer.get()),
-                                                  blockSize,
-                                                  reinterpret_cast<uint8_t*>(out.get()),
-                                                  blockSize,
-                                                  &outLen);
+            Status status = hooks->unprotectTmpData(reinterpret_cast<uint8_t*>(_buffer.get()),
+                                                    blockSize,
+                                                    reinterpret_cast<uint8_t*>(out.get()),
+                                                    blockSize,
+                                                    &outLen);
             massert(28841,
                     str::stream() << "Failed to unprotect data: " << status.toString(),
                     status.isOK());
@@ -275,8 +274,8 @@ private:
             }
 
             msgasserted(16817,
-                        str::stream() << "error reading file \"" << _fileName << "\": "
-                                      << myErrnoWithDescription());
+                        str::stream() << "error reading file \"" << _fileName
+                                      << "\": " << myErrnoWithDescription());
         }
         verify(_file.gcount() == static_cast<std::streamsize>(size));
     }
@@ -420,8 +419,7 @@ public:
     typedef std::pair<Key, Value> Data;
     typedef SortIteratorInterface<Key, Value> Iterator;
     typedef std::pair<typename Key::SorterDeserializeSettings,
-                      typename Value::SorterDeserializeSettings>
-        Settings;
+                      typename Value::SorterDeserializeSettings> Settings;
 
     NoLimitSorter(const SortOptions& opts,
                   const Comparator& comp,
@@ -491,8 +489,7 @@ private:
             // need to be revisited.
             uasserted(16819,
                       str::stream()
-                          << "Sort exceeded memory limit of "
-                          << _opts.maxMemoryUsageBytes
+                          << "Sort exceeded memory limit of " << _opts.maxMemoryUsageBytes
                           << " bytes, but did not opt in to external sorting. Aborting operation."
                           << " Pass allowDiskUse:true to opt in.");
         }
@@ -572,8 +569,7 @@ public:
     typedef std::pair<Key, Value> Data;
     typedef SortIteratorInterface<Key, Value> Iterator;
     typedef std::pair<typename Key::SorterDeserializeSettings,
-                      typename Value::SorterDeserializeSettings>
-        Settings;
+                      typename Value::SorterDeserializeSettings> Settings;
 
     TopKSorter(const SortOptions& opts,
                const Comparator& comp,
@@ -769,14 +765,10 @@ private:
             // need to be revisited.
             uasserted(16820,
                       str::stream()
-                          << "Sort exceeded memory limit of "
-                          << _opts.maxMemoryUsageBytes
+                          << "Sort exceeded memory limit of " << _opts.maxMemoryUsageBytes
                           << " bytes, but did not opt in to external sorting. Aborting operation."
                           << " Pass allowDiskUse:true to opt in.");
         }
-
-        // We should check readOnly before getting here.
-        invariant(!storageGlobalParams.readOnly);
 
         sort();
         updateCutoff();
@@ -845,8 +837,8 @@ SortedFileWriter<Key, Value>::SortedFileWriter(const SortOptions& opts, const Se
 
     _file.open(_fileName.c_str(), std::ios::binary | std::ios::out);
     massert(16818,
-            str::stream() << "error opening file \"" << _fileName << "\": "
-                          << sorter::myErrnoWithDescription(),
+            str::stream() << "error opening file \"" << _fileName
+                          << "\": " << sorter::myErrnoWithDescription(),
             _file.good());
 
     _fileDeleter = std::make_shared<sorter::FileDeleter>(_fileName);
@@ -885,16 +877,16 @@ void SortedFileWriter<Key, Value>::spill() {
     }
 
     std::unique_ptr<char[]> out;
-    auto encryptionHooks = EncryptionHooks::get(getGlobalServiceContext());
-    if (encryptionHooks->enabled()) {
-        size_t protectedSizeMax = size + encryptionHooks->additionalBytesForProtectedBuffer();
+    auto hooks = WiredTigerCustomizationHooks::get(getGlobalServiceContext());
+    if (hooks->enabled()) {
+        size_t protectedSizeMax = size + hooks->additionalBytesForProtectedBuffer();
         out.reset(new char[protectedSizeMax]);
         size_t resultLen;
-        Status status = encryptionHooks->protectTmpData(reinterpret_cast<const uint8_t*>(outBuffer),
-                                                        size,
-                                                        reinterpret_cast<uint8_t*>(out.get()),
-                                                        protectedSizeMax,
-                                                        &resultLen);
+        Status status = hooks->protectTmpData(reinterpret_cast<const uint8_t*>(outBuffer),
+                                              size,
+                                              reinterpret_cast<uint8_t*>(out.get()),
+                                              protectedSizeMax,
+                                              &resultLen);
         massert(28842,
                 str::stream() << "Failed to compress data: " << status.toString(),
                 status.isOK());
@@ -910,8 +902,8 @@ void SortedFileWriter<Key, Value>::spill() {
 
     } catch (const std::exception&) {
         msgasserted(16821,
-                    str::stream() << "error writing to file \"" << _fileName << "\": "
-                                  << sorter::myErrnoWithDescription());
+                    str::stream() << "error writing to file \"" << _fileName
+                                  << "\": " << sorter::myErrnoWithDescription());
     }
 
     _buffer.reset();

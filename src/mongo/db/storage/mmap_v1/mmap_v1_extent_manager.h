@@ -76,12 +76,6 @@ class MmapV1ExtentManager : public ExtentManager {
     MONGO_DISALLOW_COPYING(MmapV1ExtentManager);
 
 public:
-    class Factory : public ExtentManager::Factory {
-        virtual std::unique_ptr<ExtentManager> create(StringData dbname,
-                                                      StringData path,
-                                                      bool directoryPerDB) final;
-    };
-
     /**
      * @param freeListDetails this is a reference into the .ns file
      *        while a bit odd, this is not a layer violation as extents
@@ -111,6 +105,8 @@ public:
      */
     void freeExtent(OperationContext* txn, DiskLoc extent);
 
+    // For debug only: not thread safe
+    void printFreeList() const;
 
     void freeListStats(OperationContext* txn, int* numExtents, int64_t* totalFreeSizeBytes) const;
 
@@ -123,7 +119,7 @@ public:
      */
     MmapV1RecordHeader* recordForV1(const DiskLoc& loc) const;
 
-    std::unique_ptr<RecordFetcher> recordNeedsFetch(const DiskLoc& loc) const;
+    std::unique_ptr<RecordFetcher> recordNeedsFetch(const DiskLoc& loc) const final;
 
     /**
      * @param loc - has to be for a specific MmapV1RecordHeader (not an Extent)
@@ -145,10 +141,10 @@ public:
     /**
      * Not thread safe, requires a database exclusive lock
      */
-    DataFileVersion getFileFormat(OperationContext* txn) const final;
-    void setFileFormat(OperationContext* txn, DataFileVersion newVersion) final;
+    DataFileVersion getFileFormat(OperationContext* txn) const;
+    void setFileFormat(OperationContext* txn, DataFileVersion newVersion);
 
-    const DataFile* getOpenFile(int n) const final {
+    const DataFile* getOpenFile(int n) const {
         return _getOpenFile(n);
     }
 

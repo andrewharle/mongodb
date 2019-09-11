@@ -15,7 +15,9 @@ var $config = (function() {
         documentsToInsert: 100,
         insertedDocuments: 0,
         generateDocumentToInsert: function generateDocumentToInsert() {
-            return {tid: this.tid};
+            return {
+                tid: this.tid
+            };
         },
         shardKey: {tid: 1}
     };
@@ -41,7 +43,10 @@ var $config = (function() {
         }
     };
 
-    var transitions = {insert: {insert: 0.2, query: 0.8}, query: {insert: 0.8, query: 0.2}};
+    var transitions = {
+        insert: {insert: 0.2, query: 0.8},
+        query: {insert: 0.8, query: 0.2}
+    };
 
     var setup = function setup(db, collName, cluster) {
         assertAlways.commandWorked(db[collName].ensureIndex({tid: 1}));

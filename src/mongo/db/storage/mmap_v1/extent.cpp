@@ -30,7 +30,6 @@
 
 #include "mongo/db/storage/mmap_v1/extent.h"
 
-#include "mongo/base/static_assert.h"
 #include "mongo/db/storage/mmap_v1/extent_manager.h"
 #include "mongo/util/hex.h"
 #include "mongo/util/mongoutils/str.h"
@@ -41,18 +40,12 @@ using std::iostream;
 using std::string;
 using std::vector;
 
-MONGO_STATIC_ASSERT(sizeof(Extent) - 4 == 48 + 128);
+static_assert(sizeof(Extent) - 4 == 48 + 128, "sizeof(Extent) - 4 == 48 + 128");
 
 BSONObj Extent::dump() const {
     return BSON("loc" << myLoc.toString() << "xnext" << xnext.toString() << "xprev"
-                      << xprev.toString()
-                      << "nsdiag"
-                      << nsDiagnostic.toString()
-                      << "size"
-                      << length
-                      << "firstRecord"
-                      << firstRecord.toString()
-                      << "lastRecord"
+                      << xprev.toString() << "nsdiag" << nsDiagnostic.toString() << "size" << length
+                      << "firstRecord" << firstRecord.toString() << "lastRecord"
                       << lastRecord.toString());
 }
 

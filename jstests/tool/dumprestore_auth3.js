@@ -4,7 +4,9 @@
 
 // Runs the tool with the given name against the given mongod.
 function runTool(toolName, mongod, options) {
-    var opts = {host: mongod.host};
+    var opts = {
+        host: mongod.host
+    };
     Object.extend(opts, options);
     MongoRunner.runMongoTool(toolName, opts);
 }
@@ -109,10 +111,9 @@ var dumpRestoreAuth3 = function(backup_role, restore_role) {
     assert.eq(0, db.getRoles().length, "Restored roles even though it shouldn't have");
 
     jsTestLog("Restore foo database *with* user data");
-    // SERVER-23290: removed writeConcern: "0" from the mongorestore command line options because,
-    // with it, sometimes the following assert.soon would succeed and then then userCount assert
-    // would fail because it was not yet available
-    runTool("mongorestore", mongod, {dir: dumpDir + "foo/", db: 'foo', restoreDbUsersAndRoles: ""});
+    runTool("mongorestore",
+            mongod,
+            {dir: dumpDir + "foo/", db: 'foo', restoreDbUsersAndRoles: "", writeConcern: "0"});
     db = mongod.getDB('foo');
     admindb = mongod.getDB('admin');
 
@@ -136,13 +137,15 @@ var dumpRestoreAuth3 = function(backup_role, restore_role) {
 
     jsTestLog("Restore foo database (and user data) with --drop so it overrides the changes made");
     // Restore with --drop to override the changes to user data
-    runTool("mongorestore", mongod, {
-        dir: dumpDir + "foo/",
-        db: 'foo',
-        drop: "",
-        restoreDbUsersAndRoles: "",
-        writeConcern: "0"
-    });
+    runTool("mongorestore",
+            mongod,
+            {
+              dir: dumpDir + "foo/",
+              db: 'foo',
+              drop: "",
+              restoreDbUsersAndRoles: "",
+              writeConcern: "0"
+            });
     db = mongod.getDB('foo');
     admindb = mongod.getDB('admin');
 

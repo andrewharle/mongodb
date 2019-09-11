@@ -36,7 +36,6 @@
 
 namespace mongo {
 
-class ClockSource;
 class OperationContext;
 
 namespace dur {
@@ -137,7 +136,7 @@ protected:
     DurableInterface();
 
 private:
-    friend void startup(ClockSource* cs, int64_t serverStartMs);
+    friend void startup();
 
     static DurableInterface* _impl;
 };
@@ -147,7 +146,7 @@ private:
  * Called during startup to startup the durability module.
  * Does nothing if storageGlobalParams.dur is false
  */
-void startup(ClockSource* cs, int64_t serverStartMs);
+void startup();
 
 // Sets a new JournalListener, which is used to alert the rest of the system about
 // journaled write progress.

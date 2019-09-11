@@ -28,13 +28,12 @@
 
 #include "mongo/platform/basic.h"
 
-#include "mongo/db/pipeline/document_source_sample.h"
+#include "mongo/db/pipeline/document_source.h"
 
 #include "mongo/db/client.h"
 #include "mongo/db/pipeline/document.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/pipeline/lite_parsed_document_source.h"
 #include "mongo/db/pipeline/value.h"
 
 namespace mongo {
@@ -43,40 +42,27 @@ using boost::intrusive_ptr;
 DocumentSourceSample::DocumentSourceSample(const intrusive_ptr<ExpressionContext>& pExpCtx)
     : DocumentSource(pExpCtx), _size(0) {}
 
-REGISTER_DOCUMENT_SOURCE(sample,
-                         LiteParsedDocumentSourceDefault::parse,
-                         DocumentSourceSample::createFromBson);
+REGISTER_DOCUMENT_SOURCE(sample, DocumentSourceSample::createFromBson);
 
 const char* DocumentSourceSample::getSourceName() const {
     return "$sample";
 }
 
-DocumentSource::GetNextResult DocumentSourceSample::getNext() {
+boost::optional<Document> DocumentSourceSample::getNext() {
     if (_size == 0)
-        return GetNextResult::makeEOF();
+        return {};
 
     pExpCtx->checkForInterrupt();
 
     if (!_sortStage->isPopulated()) {
         // Exhaust source stage, add random metadata, and push all into sorter.
         PseudoRandom& prng = pExpCtx->opCtx->getClient()->getPrng();
-        auto nextInput = pSource->getNext();
-        for (; nextInput.isAdvanced(); nextInput = pSource->getNext()) {
-            MutableDocument doc(nextInput.releaseDocument());
+        while (boost::optional<Document> next = pSource->getNext()) {
+            MutableDocument doc(std::move(*next));
             doc.setRandMetaField(prng.nextCanonicalDouble());
             _sortStage->loadDocument(doc.freeze());
         }
-        switch (nextInput.getStatus()) {
-            case GetNextResult::ReturnStatus::kAdvanced: {
-                MONGO_UNREACHABLE;  // We consumed all advances above.
-            }
-            case GetNextResult::ReturnStatus::kPauseExecution: {
-                return nextInput;  // Propagate the pause.
-            }
-            case GetNextResult::ReturnStatus::kEOF: {
-                _sortStage->loadingDone();
-            }
-        }
+        _sortStage->loadingDone();
     }
 
     invariant(_sortStage->isPopulated());

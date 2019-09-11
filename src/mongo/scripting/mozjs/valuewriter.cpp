@@ -33,14 +33,12 @@
 #include <js/Conversions.h>
 
 #include "mongo/base/error_codes.h"
-#include "mongo/platform/decimal128.h"
 #include "mongo/scripting/mozjs/exception.h"
 #include "mongo/scripting/mozjs/implscope.h"
 #include "mongo/scripting/mozjs/jsstringwrapper.h"
 #include "mongo/scripting/mozjs/objectwrapper.h"
 #include "mongo/scripting/mozjs/valuereader.h"
 #include "mongo/util/base64.h"
-#include "mongo/util/represent_as.h"
 
 namespace mongo {
 namespace mozjs {
@@ -59,15 +57,8 @@ int ValueWriter::type() {
         return Undefined;
     if (_value.isString())
         return String;
-
-    bool isArray;
-
-    if (!JS_IsArrayObject(_context, _value, &isArray)) {
-        uasserted(ErrorCodes::BadValue, "unable to check if type is an array");
-    }
-    if (isArray)
+    if (JS_IsArrayObject(_context, _value))
         return Array;
-
     if (_value.isBoolean())
         return Bool;
 
@@ -80,14 +71,8 @@ int ValueWriter::type() {
 
     if (_value.isObject()) {
         JS::RootedObject obj(_context, _value.toObjectOrNull());
-        bool isDate;
-
-        if (!JS_ObjectIsDate(_context, obj, &isDate)) {
-            uasserted(ErrorCodes::BadValue, "unable to check if type is a date");
-        }
-        if (isDate)
+        if (JS_ObjectIsDate(_context, obj))
             return Date;
-
         if (JS_ObjectIsFunction(_context, obj))
             return Code;
 
@@ -104,14 +89,7 @@ std::string ValueWriter::typeAsString() {
         return "undefined";
     if (_value.isString())
         return "string";
-
-    bool isArray;
-
-    if (!JS_IsArrayObject(_context, _value, &isArray)) {
-        uasserted(ErrorCodes::BadValue, "unable to check if type is an array");
-    }
-
-    if (isArray)
+    if (JS_IsArrayObject(_context, _value))
         return "array";
     if (_value.isBoolean())
         return "boolean";
@@ -120,21 +98,10 @@ std::string ValueWriter::typeAsString() {
 
     if (_value.isObject()) {
         JS::RootedObject obj(_context, _value.toObjectOrNull());
-
-        if (!JS_IsArrayObject(_context, obj, &isArray)) {
-            uasserted(ErrorCodes::BadValue, "unable to check if type is an array");
-        }
-        if (isArray)
+        if (JS_IsArrayObject(_context, obj))
             return "array";
-
-        bool isDate;
-
-        if (!JS_ObjectIsDate(_context, obj, &isDate)) {
-            uasserted(ErrorCodes::BadValue, "unable to check if type is a date");
-        }
-        if (isDate)
+        if (JS_ObjectIsDate(_context, obj))
             return "date";
-
         if (JS_ObjectIsFunction(_context, obj))
             return "function";
 
@@ -195,37 +162,23 @@ int64_t ValueWriter::toInt64() {
 }
 
 Decimal128 ValueWriter::toDecimal128() {
-    std::uint32_t signalingFlags = 0;
     if (_value.isNumber()) {
-        return Decimal128(toNumber(), Decimal128::kRoundTo15Digits);
+        return Decimal128(toNumber());
     }
+
     if (getScope(_context)->getProto<NumberIntInfo>().instanceOf(_value))
         return Decimal128(NumberIntInfo::ToNumberInt(_context, _value));
 
     if (getScope(_context)->getProto<NumberLongInfo>().instanceOf(_value))
-        return Decimal128(static_cast<int64_t>(NumberLongInfo::ToNumberLong(_context, _value)));
+        return Decimal128(NumberLongInfo::ToNumberLong(_context, _value));
 
     if (getScope(_context)->getProto<NumberDecimalInfo>().instanceOf(_value))
         return NumberDecimalInfo::ToNumberDecimal(_context, _value);
 
     if (_value.isString()) {
-        std::string input = toString();
-        Decimal128 decimal = Decimal128(input, &signalingFlags);
-        uassert(ErrorCodes::BadValue,
-                str::stream() << "Input is not a valid Decimal128 value.",
-                !Decimal128::hasFlag(signalingFlags, Decimal128::SignalingFlag::kInvalid));
-        uassert(ErrorCodes::BadValue,
-                str::stream() << "Input out of range of Decimal128 value (inexact).",
-                !Decimal128::hasFlag(signalingFlags, Decimal128::SignalingFlag::kInexact));
-        uassert(ErrorCodes::BadValue,
-                str::stream() << "Input out of range of Decimal128 value (underflow).",
-                !Decimal128::hasFlag(signalingFlags, Decimal128::SignalingFlag::kUnderflow));
-        uassert(ErrorCodes::BadValue,
-                str::stream() << "Input out of range of Decimal128 value (overflow).",
-                !Decimal128::hasFlag(signalingFlags, Decimal128::SignalingFlag::kOverflow));
-
-        return decimal;
+        return Decimal128(toString());
     }
+
     uasserted(ErrorCodes::BadValue, str::stream() << "Unable to write Decimal128 value.");
 }
 
@@ -250,14 +203,14 @@ void ValueWriter::writeThis(BSONObjBuilder* b,
     } else if (_value.isNumber()) {
         double val = toNumber();
 
-        // if previous type was integer, attempt to represent 'val' as an integer
-        auto intval = representAs<int>(val);
+        // if previous type was integer, keep it
+        int intval = static_cast<int>(val);
 
-        if (intval && _originalParent) {
+        if (val == intval && _originalParent) {
             // This makes copying an object of numbers O(n**2) :(
             BSONElement elmt = _originalParent->getField(sd);
             if (elmt.type() == mongo::NumberInt) {
-                b->append(sd, *intval);
+                b->append(sd, intval);
                 return;
             }
         }
@@ -355,8 +308,6 @@ void ValueWriter::_writeObject(BSONObjBuilder* b,
             if (scope->getProto<BinDataInfo>().getJSClass() == jsclass) {
                 auto str = static_cast<std::string*>(JS_GetPrivate(obj));
 
-                uassert(ErrorCodes::BadValue, "Cannot call getter on BinData prototype", str);
-
                 auto binData = base64::decode(*str);
 
                 b->appendBinData(sd,
@@ -388,7 +339,7 @@ void ValueWriter::_writeObject(BSONObjBuilder* b,
             }
         }
 
-        auto protoKey = JS::IdentifyStandardInstanceOrPrototype(obj);
+        auto protoKey = JS::IdentifyStandardInstance(obj);
 
         switch (protoKey) {
             case JSProto_Function: {
@@ -413,15 +364,10 @@ void ValueWriter::_writeObject(BSONObjBuilder* b,
                 return;
             }
             case JSProto_Date: {
-                Date_t d;
-                if (JS::IdentifyStandardPrototype(obj) == JSProto_Date) {
-                    d = Date_t::fromMillisSinceEpoch(0);
-                } else {
-                    JS::RootedValue dateval(_context);
-                    o.callMethod("getTime", &dateval);
-                    d = Date_t::fromMillisSinceEpoch(ValueWriter(_context, dateval).toInt64());
-                }
+                JS::RootedValue dateval(_context);
+                o.callMethod("getTime", &dateval);
 
+                auto d = Date_t::fromMillisSinceEpoch(ValueWriter(_context, dateval).toNumber());
                 b->appendDate(sd, d);
 
                 return;

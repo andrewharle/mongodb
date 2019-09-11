@@ -38,8 +38,8 @@
 #include "mongo/db/matcher/extensions_callback_real.h"
 #include "mongo/db/query/get_executor.h"
 #include "mongo/db/query/plan_executor.h"
-#include "mongo/db/query/planner_access.h"
 #include "mongo/db/query/planner_analysis.h"
+#include "mongo/db/query/planner_access.h"
 #include "mongo/db/query/query_planner.h"
 #include "mongo/db/query/query_planner_common.h"
 #include "mongo/db/query/stage_builder.h"
@@ -92,33 +92,33 @@ bool isContainedOr(const MatchExpression* expr) {
 }  // namespace
 
 bool SubplanStage::canUseSubplanning(const CanonicalQuery& query) {
-    const QueryRequest& qr = query.getQueryRequest();
+    const LiteParsedQuery& lpq = query.getParsed();
     const MatchExpression* expr = query.root();
 
     // Hint provided
-    if (!qr.getHint().isEmpty()) {
+    if (!lpq.getHint().isEmpty()) {
         return false;
     }
 
     // Min provided
     // Min queries are a special case of hinted queries.
-    if (!qr.getMin().isEmpty()) {
+    if (!lpq.getMin().isEmpty()) {
         return false;
     }
 
     // Max provided
     // Similar to min, max queries are a special case of hinted queries.
-    if (!qr.getMax().isEmpty()) {
+    if (!lpq.getMax().isEmpty()) {
         return false;
     }
 
     // Tailable cursors won't get cached, just turn into collscans.
-    if (query.getQueryRequest().isTailable()) {
+    if (query.getParsed().isTailable()) {
         return false;
     }
 
     // Snapshot is really a hint.
-    if (query.getQueryRequest().isSnapshot()) {
+    if (query.getParsed().isSnapshot()) {
         return false;
     }
 
@@ -164,16 +164,20 @@ std::unique_ptr<MatchExpression> SubplanStage::rewriteToRootedOr(
 }
 
 Status SubplanStage::planSubqueries() {
+    // Adds the amount of time taken by planSubqueries() to executionTimeMillis. There's lots of
+    // work that happens here, so this is needed for the time accounting to make sense.
+    ScopedTimer timer(&_commonStats.executionTimeMillis);
+
     _orExpression = _query->root()->shallowClone();
     if (isContainedOr(_orExpression.get())) {
         _orExpression = rewriteToRootedOr(std::move(_orExpression));
-        invariant(CanonicalQuery::isValid(_orExpression.get(), _query->getQueryRequest()).isOK());
+        invariant(CanonicalQuery::isValid(_orExpression.get(), _query->getParsed()).isOK());
     }
 
     for (size_t i = 0; i < _plannerParams.indices.size(); ++i) {
         const IndexEntry& ie = _plannerParams.indices[i];
-        _indexMap[ie.name] = i;
-        LOG(5) << "Subplanner: index " << i << " is " << ie;
+        _indexMap[ie.keyPattern] = i;
+        LOG(5) << "Subplanner: index " << i << " is " << ie.toString();
     }
 
     const ExtensionsCallbackReal extensionsCallback(getOpCtx(), &_collection->ns());
@@ -186,8 +190,7 @@ Status SubplanStage::planSubqueries() {
         MatchExpression* orChild = _orExpression->getChild(i);
 
         // Turn the i-th child into its own query.
-        auto statusWithCQ =
-            CanonicalQuery::canonicalize(getOpCtx(), *_query, orChild, extensionsCallback);
+        auto statusWithCQ = CanonicalQuery::canonicalize(*_query, orChild, extensionsCallback);
         if (!statusWithCQ.isOK()) {
             mongoutils::str::stream ss;
             ss << "Can't canonicalize subchild " << orChild->toString() << " "
@@ -249,7 +252,7 @@ namespace {
 Status tagOrChildAccordingToCache(PlanCacheIndexTree* compositeCacheData,
                                   SolutionCacheData* branchCacheData,
                                   MatchExpression* orChild,
-                                  const std::map<StringData, size_t>& indexMap) {
+                                  const std::map<BSONObj, size_t>& indexMap) {
     invariant(compositeCacheData);
 
     // We want a well-formed *indexed* solution.
@@ -334,12 +337,8 @@ Status SubplanStage::choosePlanForSubqueries(PlanYieldPolicy* yieldPolicy) {
             // Dump all the solutions into the MPS.
             for (size_t ix = 0; ix < branchResult->solutions.size(); ++ix) {
                 PlanStage* nextPlanRoot;
-                invariant(StageBuilder::build(getOpCtx(),
-                                              _collection,
-                                              *branchResult->canonicalQuery,
-                                              *branchResult->solutions[ix],
-                                              _ws,
-                                              &nextPlanRoot));
+                invariant(StageBuilder::build(
+                    getOpCtx(), _collection, *branchResult->solutions[ix], _ws, &nextPlanRoot));
 
                 // Takes ownership of solution with index 'ix' and 'nextPlanRoot'.
                 multiPlanStage->addPlan(branchResult->solutions.releaseAt(ix), nextPlanRoot, _ws);
@@ -400,7 +399,7 @@ Status SubplanStage::choosePlanForSubqueries(PlanYieldPolicy* yieldPolicy) {
         return Status(ErrorCodes::BadValue, ss);
     }
 
-    LOG(5) << "Subplanner: fully tagged tree is " << redact(solnRoot->toString());
+    LOG(5) << "Subplanner: fully tagged tree is " << solnRoot->toString();
 
     // Takes ownership of 'solnRoot'
     _compositeSolution.reset(
@@ -412,14 +411,13 @@ Status SubplanStage::choosePlanForSubqueries(PlanYieldPolicy* yieldPolicy) {
         return Status(ErrorCodes::BadValue, ss);
     }
 
-    LOG(5) << "Subplanner: Composite solution is " << redact(_compositeSolution->toString());
+    LOG(5) << "Subplanner: Composite solution is " << _compositeSolution->toString();
 
     // Use the index tags from planning each branch to construct the composite solution,
     // and set that solution as our child stage.
     _ws->clear();
     PlanStage* root;
-    invariant(StageBuilder::build(
-        getOpCtx(), _collection, *_query, *_compositeSolution.get(), _ws, &root));
+    invariant(StageBuilder::build(getOpCtx(), _collection, *_compositeSolution.get(), _ws, &root));
     invariant(_children.empty());
     _children.emplace_back(root);
 
@@ -452,7 +450,7 @@ Status SubplanStage::choosePlanWholeQuery(PlanYieldPolicy* yieldPolicy) {
     if (1 == solutions.size()) {
         PlanStage* root;
         // Only one possible plan.  Run it.  Build the stages from the solution.
-        verify(StageBuilder::build(getOpCtx(), _collection, *_query, *solutions[0], _ws, &root));
+        verify(StageBuilder::build(getOpCtx(), _collection, *solutions[0], _ws, &root));
         invariant(_children.empty());
         _children.emplace_back(root);
 
@@ -474,8 +472,8 @@ Status SubplanStage::choosePlanWholeQuery(PlanYieldPolicy* yieldPolicy) {
 
             // version of StageBuild::build when WorkingSet is shared
             PlanStage* nextPlanRoot;
-            verify(StageBuilder::build(
-                getOpCtx(), _collection, *_query, *solutions[ix], _ws, &nextPlanRoot));
+            verify(
+                StageBuilder::build(getOpCtx(), _collection, *solutions[ix], _ws, &nextPlanRoot));
 
             // Takes ownership of 'solutions[ix]' and 'nextPlanRoot'.
             multiPlanStage->addPlan(solutions.releaseAt(ix), nextPlanRoot, _ws);
@@ -494,7 +492,7 @@ Status SubplanStage::choosePlanWholeQuery(PlanYieldPolicy* yieldPolicy) {
 Status SubplanStage::pickBestPlan(PlanYieldPolicy* yieldPolicy) {
     // Adds the amount of time taken by pickBestPlan() to executionTimeMillis. There's lots of
     // work that happens here, so this is needed for the time accounting to make sense.
-    ScopedTimer timer(getClock(), &_commonStats.executionTimeMillis);
+    ScopedTimer timer(&_commonStats.executionTimeMillis);
 
     // Plan each branch of the $or.
     Status subplanningStatus = planSubqueries();
@@ -528,13 +526,28 @@ bool SubplanStage::isEOF() {
     return child()->isEOF();
 }
 
-PlanStage::StageState SubplanStage::doWork(WorkingSetID* out) {
+PlanStage::StageState SubplanStage::work(WorkingSetID* out) {
+    ++_commonStats.works;
+
+    // Adds the amount of time taken by work() to executionTimeMillis.
+    ScopedTimer timer(&_commonStats.executionTimeMillis);
+
     if (isEOF()) {
         return PlanStage::IS_EOF;
     }
 
     invariant(child());
-    return child()->work(out);
+    StageState state = child()->work(out);
+
+    if (PlanStage::NEED_TIME == state) {
+        ++_commonStats.needTime;
+    } else if (PlanStage::NEED_YIELD == state) {
+        ++_commonStats.needYield;
+    } else if (PlanStage::ADVANCED == state) {
+        ++_commonStats.advanced;
+    }
+
+    return state;
 }
 
 unique_ptr<PlanStageStats> SubplanStage::getStats() {

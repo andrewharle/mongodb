@@ -5,13 +5,10 @@ config_variables:
 selector:
   js_test:
     roots:
-    - jstests/core/**/*.js
+    - jstests/core/*.js
 
 executor:
   js_test:
-    archive:
-      hooks:
-        - ValidateCollections
     config:
       shell_options:
         readMode: commands

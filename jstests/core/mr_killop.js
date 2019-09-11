@@ -1,4 +1,6 @@
 // Test killop applied to m/r operations and child ops of m/r operations.
+//
+// @tags: [requires_parallel_shell]
 
 t = db.jstests_mr_killop;
 t.drop();
@@ -51,7 +53,12 @@ function testOne(map, reduce, finalize, scope, childLoop, wait) {
     t.save({a: 1});
     t.save({a: 1});
 
-    spec = {mapreduce: "jstests_mr_killop", out: "jstests_mr_killop_out", map: map, reduce: reduce};
+    spec = {
+        mapreduce: "jstests_mr_killop",
+        out: "jstests_mr_killop_out",
+        map: map,
+        reduce: reduce
+    };
     if (finalize) {
         spec["finalize"] = finalize;
     }

@@ -31,7 +31,6 @@
 #include <sstream>
 #include <string>
 
-#include "mongo/bson/bsontypes.h"
 #include "mongo/logger/labeled_level.h"
 #include "mongo/logger/log_component.h"
 #include "mongo/logger/log_severity.h"
@@ -65,7 +64,7 @@ public:
      * "contextName" is a short name of the thread or other context.
      * "severity" is the logging severity of the message.
      */
-    LogstreamBuilder(MessageLogDomain* domain, StringData contextName, LogSeverity severity);
+    LogstreamBuilder(MessageLogDomain* domain, std::string contextName, LogSeverity severity);
 
     /**
      * Construct a LogstreamBuilder that writes to "domain" on destruction.
@@ -80,7 +79,7 @@ public:
      * for each instance of this class rather than cacheing.
      */
     LogstreamBuilder(MessageLogDomain* domain,
-                     StringData contextName,
+                     std::string contextName,
                      LogSeverity severity,
                      LogComponent component,
                      bool shouldCache = true);
@@ -88,10 +87,24 @@ public:
     /**
      * Deprecated.
      */
-    LogstreamBuilder(MessageLogDomain* domain, StringData contextName, LabeledLevel labeledLevel);
+    LogstreamBuilder(MessageLogDomain* domain,
+                     const std::string& contextName,
+                     LabeledLevel labeledLevel);
 
-    LogstreamBuilder(LogstreamBuilder&& other) = default;
-    LogstreamBuilder& operator=(LogstreamBuilder&& other) = default;
+    /**
+     * Move constructor.
+     *
+     * TODO: Replace with = default implementation when minimum MSVC version is bumped to
+     * MSVC2015.
+     */
+    LogstreamBuilder(LogstreamBuilder&& other);
+
+    /**
+     * Move assignment operator.
+     *
+     * TODO: Replace with =default implementation when minimum MSVC version is bumped to VS2015.
+     */
+    LogstreamBuilder& operator=(LogstreamBuilder&& other);
 
     /**
      * Destroys a LogstreamBuilder().  If anything was written to it via stream() or operator<<,
@@ -188,14 +201,12 @@ public:
         return *this;
     }
 
-    template <typename Period>
-    LogstreamBuilder& operator<<(const Duration<Period>& d) {
-        stream() << d;
-        return *this;
-    }
-
-    LogstreamBuilder& operator<<(BSONType t) {
-        stream() << typeName(t);
+    template <typename Rep, typename Period>
+    LogstreamBuilder& operator<<(stdx::chrono::duration<Rep, Period> d) {
+        // We can't rely on ADL to find our custom stream out class,
+        // since neither the class (ostream) nor the argument are in
+        // our namespace. Just manually invoke
+        mongo::operator<<(stream(), d);
         return *this;
     }
 

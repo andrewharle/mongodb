@@ -28,8 +28,8 @@
 
 #pragma once
 
-#include "mongo/db/curop.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/db/curop.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/query/explain.h"
 #include "mongo/util/mongoutils/str.h"
@@ -91,14 +91,6 @@ public:
 
     inline const BSONObj& getSort() const {
         return _sort;
-    }
-
-    inline void setCollation(const BSONObj& collation) {
-        _collation = collation;
-    }
-
-    inline const BSONObj& getCollation() const {
-        return _collation;
     }
 
     inline void setUpdates(const BSONObj& updates) {
@@ -186,8 +178,7 @@ public:
 
     const std::string toString() const {
         return str::stream() << " query: " << _query << " projection: " << _proj
-                             << " sort: " << _sort << " collation: " << _collation
-                             << " updated: " << _updates << " god: " << _god
+                             << " sort: " << _sort << " updated: " << _updates << " god: " << _god
                              << " upsert: " << _upsert << " multi: " << _multi
                              << " fromMigration: " << _fromMigration
                              << " isExplain: " << _isExplain;
@@ -204,9 +195,6 @@ private:
 
     // Contains the sort order information.
     BSONObj _sort;
-
-    // Contains the collation information.
-    BSONObj _collation;
 
     // Contains the modifiers to apply to matched objects, or a replacement document.
     BSONObj _updates;

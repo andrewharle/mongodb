@@ -43,13 +43,13 @@
 
 #define _CRT_RAND_S
 #include <cstdlib>
-#include <fstream>
 #include <iostream>
+#include <fstream>
 #include <limits>
 
-#include "mongo/stdx/memory.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/log.h"
+#include <mongo/stdx/memory.h>
+#include <mongo/util/log.h>
+#include <mongo/util/assert_util.h>
 
 namespace mongo {
 
@@ -112,8 +112,7 @@ public:
             &_algHandle, BCRYPT_RNG_ALGORITHM, MS_PRIMITIVE_PROVIDER, 0);
         if (ntstatus != STATUS_SUCCESS) {
             error() << "Failed to open crypto algorithm provider while creating secure random "
-                       "object; NTSTATUS: "
-                    << ntstatus;
+                       "object; NTSTATUS: " << ntstatus;
             fassertFailed(28815);
         }
     }
@@ -122,8 +121,7 @@ public:
         auto ntstatus = ::BCryptCloseAlgorithmProvider(_algHandle, 0);
         if (ntstatus != STATUS_SUCCESS) {
             warning() << "Failed to close crypto algorithm provider destroying secure random "
-                         "object; NTSTATUS: "
-                      << ntstatus;
+                         "object; NTSTATUS: " << ntstatus;
         }
     }
 

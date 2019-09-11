@@ -34,7 +34,9 @@
             if (db.getMongo().writeMode() === 'commands') {
                 assert.docEq(first, second);
             } else {
-                var overrideModifiedCount = {modifiedCount: undefined};
+                var overrideModifiedCount = {
+                    modifiedCount: undefined
+                };
                 assert.docEq(Object.merge(first, overrideModifiedCount),
                              Object.merge(second, overrideModifiedCount));
             }

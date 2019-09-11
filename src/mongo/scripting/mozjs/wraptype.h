@@ -101,7 +101,7 @@ bool wrapFunction(JSContext* cx, unsigned argc, JS::Value* vp) {
 
 // Now all the spidermonkey type methods
 template <typename T>
-bool addProperty(JSContext* cx, JS::HandleObject obj, JS::HandleId id, JS::HandleValue v) {
+bool addProperty(JSContext* cx, JS::HandleObject obj, JS::HandleId id, JS::MutableHandleValue v) {
     try {
         T::addProperty(cx, obj, id, v);
         return true;
@@ -134,9 +134,9 @@ bool construct(JSContext* cx, unsigned argc, JS::Value* vp) {
 };
 
 template <typename T>
-bool delProperty(JSContext* cx, JS::HandleObject obj, JS::HandleId id, JS::ObjectOpResult& result) {
+bool convert(JSContext* cx, JS::HandleObject obj, JSType type, JS::MutableHandleValue vp) {
     try {
-        T::delProperty(cx, obj, id, result);
+        T::convert(cx, obj, type, vp);
         return true;
     } catch (...) {
         mongoToJSException(cx);
@@ -145,12 +145,20 @@ bool delProperty(JSContext* cx, JS::HandleObject obj, JS::HandleId id, JS::Objec
 };
 
 template <typename T>
-bool enumerate(JSContext* cx,
-               JS::HandleObject obj,
-               JS::AutoIdVector& properties,
-               bool enumerableOnly) {
+bool delProperty(JSContext* cx, JS::HandleObject obj, JS::HandleId id, bool* succeeded) {
     try {
-        T::enumerate(cx, obj, properties, enumerableOnly);
+        T::delProperty(cx, obj, id, succeeded);
+        return true;
+    } catch (...) {
+        mongoToJSException(cx);
+        return false;
+    }
+};
+
+template <typename T>
+bool enumerate(JSContext* cx, JS::HandleObject obj, JS::AutoIdVector& properties) {
+    try {
+        T::enumerate(cx, obj, properties);
         return true;
     } catch (...) {
         mongoToJSException(cx);
@@ -160,12 +168,6 @@ bool enumerate(JSContext* cx,
 
 template <typename T>
 bool getProperty(JSContext* cx, JS::HandleObject obj, JS::HandleId id, JS::MutableHandleValue vp) {
-    if (JSID_IS_SYMBOL(id)) {
-        // Just default to the SpiderMonkey's standard implementations for Symbol methods
-        vp.setUndefined();
-        return true;
-    }
-
     try {
         T::getProperty(cx, obj, id, vp);
         return true;
@@ -187,13 +189,10 @@ bool hasInstance(JSContext* cx, JS::HandleObject obj, JS::MutableHandleValue vp,
 };
 
 template <typename T>
-bool setProperty(JSContext* cx,
-                 JS::HandleObject obj,
-                 JS::HandleId id,
-                 JS::MutableHandleValue vp,
-                 JS::ObjectOpResult& result) {
+bool setProperty(
+    JSContext* cx, JS::HandleObject obj, JS::HandleId id, bool strict, JS::MutableHandleValue vp) {
     try {
-        T::setProperty(cx, obj, id, vp, result);
+        T::setProperty(cx, obj, id, strict, vp);
         return true;
     } catch (...) {
         mongoToJSException(cx);
@@ -203,12 +202,6 @@ bool setProperty(JSContext* cx,
 
 template <typename T>
 bool resolve(JSContext* cx, JS::HandleObject obj, JS::HandleId id, bool* resolvedp) {
-    if (JSID_IS_SYMBOL(id)) {
-        // Just default to the SpiderMonkey's standard implementations for Symbol methods
-        *resolvedp = false;
-        return true;
-    }
-
     try {
         T::resolve(cx, obj, id, resolvedp);
         return true;
@@ -226,7 +219,6 @@ public:
     WrapType(JSContext* context)
         : _context(context),
           _proto(),
-          _constructor(),
           _jsclass({T::className,
                     T::classFlags,
                     T::addProperty != BaseInfo::addProperty ? smUtils::addProperty<T> : nullptr,
@@ -236,7 +228,7 @@ public:
                     // We don't use the regular enumerate because we want the fancy new one
                     nullptr,
                     T::resolve != BaseInfo::resolve ? smUtils::resolve<T> : nullptr,
-                    T::mayResolve != BaseInfo::mayResolve ? T::mayResolve : nullptr,
+                    T::convert != BaseInfo::convert ? smUtils::convert<T> : nullptr,
                     T::finalize != BaseInfo::finalize ? T::finalize : nullptr,
                     T::call != BaseInfo::call ? smUtils::call<T> : nullptr,
                     T::hasInstance != BaseInfo::hasInstance ? smUtils::hasInstance<T> : nullptr,
@@ -266,7 +258,6 @@ public:
     ~WrapType() {
         // Persistent globals don't RAII, you have to reset() them manually
         _proto.reset();
-        _constructor.reset();
     }
 
     void install(JS::HandleObject global) {
@@ -288,7 +279,15 @@ public:
      * types without a constructor or inside the constructor
      */
     void newObject(JS::MutableHandleObject out) {
-        out.set(_assertPtr(JS_NewObjectWithGivenProto(_context, &_jsclass, _proto)));
+        // The regular form of JS_NewObject, where we pass proto as the
+        // third param, actually does a global object lookup for some
+        // reason.  This way allows object creation with non-public
+        // prototypes and if someone deletes the symbol up the chain.
+        out.set(_assertPtr(JS_NewObject(_context, &_jsclass, JS::NullPtr())));
+
+        if (!JS_SetPrototype(_context, out, _proto))
+            throwCurrentJSException(
+                _context, ErrorCodes::JSInterpreterFailure, "Failed to set prototype");
     }
 
     void newObject(JS::MutableHandleValue out) {
@@ -312,8 +311,7 @@ public:
     void newInstance(const JS::HandleValueArray& args, JS::MutableHandleObject out) {
         dassert(T::installType == InstallType::OverNative || T::construct != BaseInfo::construct);
 
-        out.set(_assertPtr(JS_New(
-            _context, T::installType == InstallType::OverNative ? _constructor : _proto, args)));
+        out.set(_assertPtr(JS_New(_context, _proto, args)));
     }
 
     void newInstance(JS::MutableHandleValue out) {
@@ -327,8 +325,7 @@ public:
     void newInstance(const JS::HandleValueArray& args, JS::MutableHandleValue out) {
         dassert(T::installType == InstallType::OverNative || T::construct != BaseInfo::construct);
 
-        out.setObjectOrNull(_assertPtr(JS_New(
-            _context, T::installType == InstallType::OverNative ? _constructor : _proto, args)));
+        out.setObjectOrNull(_assertPtr(JS_New(_context, _proto, args)));
     }
 
     // instanceOf doesn't go up the prototype tree.  It's a lower level more specific match
@@ -388,7 +385,7 @@ private:
 
         // See newObject() for why we have to do this dance with the explicit
         // SetPrototype
-        _proto.init(_context, _assertPtr(JS_NewObject(_context, &_jsclass)));
+        _proto.init(_context, _assertPtr(JS_NewObject(_context, &_jsclass, JS::NullPtr())));
         if (parent.get() && !JS_SetPrototype(_context, _proto, parent))
             throwCurrentJSException(
                 _context, ErrorCodes::JSInterpreterFailure, "Failed to set prototype");
@@ -407,6 +404,7 @@ private:
         dassert(T::addProperty == BaseInfo::addProperty);
         dassert(T::call == BaseInfo::call);
         dassert(T::construct == BaseInfo::construct);
+        dassert(T::convert == BaseInfo::convert);
         dassert(T::delProperty == BaseInfo::delProperty);
         dassert(T::enumerate == BaseInfo::enumerate);
         dassert(T::finalize == BaseInfo::finalize);
@@ -423,25 +421,7 @@ private:
         if (!value.isObject())
             uasserted(ErrorCodes::BadValue, "className isn't object");
 
-        JS::RootedObject classNameObject(_context);
-        if (!JS_ValueToObject(_context, value, &classNameObject))
-            throwCurrentJSException(_context,
-                                    ErrorCodes::JSInterpreterFailure,
-                                    "Couldn't convert className property into an object.");
-
-        JS::RootedValue protoValue(_context);
-        if (!JS_GetPropertyById(_context,
-                                classNameObject,
-                                InternedStringId(_context, InternedString::prototype),
-                                &protoValue))
-            throwCurrentJSException(
-                _context, ErrorCodes::JSInterpreterFailure, "Couldn't get className prototype");
-
-        if (!protoValue.isObject())
-            uasserted(ErrorCodes::BadValue, "className's prototype isn't object");
-
-        _constructor.init(_context, value.toObjectOrNull());
-        _proto.init(_context, protoValue.toObjectOrNull());
+        _proto.init(_context, value.toObjectOrNull());
 
         _installFunctions(_proto, T::methods);
         _installFunctions(global, T::freeFunctions);
@@ -465,7 +445,7 @@ private:
     // ensure that these two structures are equal.
     //
     // This is a landmine to watch out for during upgrades
-    using enumerateT = bool (*)(JSContext*, JS::HandleObject, JS::AutoIdVector&, bool);
+    using enumerateT = bool (*)(JSContext*, JS::HandleObject, JS::AutoIdVector&);
     void _installEnumerate(enumerateT enumerate) {
         if (!enumerate)
             return;
@@ -506,7 +486,7 @@ private:
         if (!ctor)
             return;
 
-        auto ptr = JS_NewFunction(_context, ctor, 0, JSFUN_CONSTRUCTOR, nullptr);
+        auto ptr = JS_NewFunction(_context, ctor, 0, JSFUN_CONSTRUCTOR, JS::NullPtr(), nullptr);
         if (!ptr) {
             throwCurrentJSException(
                 _context, ErrorCodes::JSInterpreterFailure, "Failed to install constructor");
@@ -530,7 +510,6 @@ private:
 
     JSContext* _context;
     JS::PersistentRootedObject _proto;
-    JS::PersistentRootedObject _constructor;
     JSClass _jsclass;
 };
 

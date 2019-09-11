@@ -106,10 +106,12 @@ function assertHasPrivilege(privilegeArray, privilege) {
     assertHasRole(roleObj.roles, "roleC", db.getName());
 
     // Privileges on the same resource get collapsed
-    db.grantPrivilegesToRole("roleA", [
-        {resource: {db: db.getName(), collection: ""}, actions: ['dropDatabase']},
-        {resource: {db: db.getName(), collection: "foo"}, actions: ['insert']}
-    ]);
+    db.grantPrivilegesToRole(
+        "roleA",
+        [
+          {resource: {db: db.getName(), collection: ""}, actions: ['dropDatabase']},
+          {resource: {db: db.getName(), collection: "foo"}, actions: ['insert']}
+        ]);
     roleObj = db.getRole("roleA", {showPrivileges: true});
     assert.eq(0, roleObj.roles.length);
     assert.eq(2, roleObj.privileges.length);
@@ -120,10 +122,12 @@ function assertHasPrivilege(privilegeArray, privilege) {
                        {resource: {db: db.getName(), collection: ""}, actions: ['dropDatabase']});
 
     // Update role
-    db.updateRole("roleA", {
-        roles: ['roleB'],
-        privileges: [{resource: {db: db.getName(), collection: "foo"}, actions: ['find']}]
-    });
+    db.updateRole(
+        "roleA",
+        {
+          roles: ['roleB'],
+          privileges: [{resource: {db: db.getName(), collection: "foo"}, actions: ['find']}]
+        });
     roleObj = db.getRole("roleA", {showPrivileges: true});
     assert.eq(1, roleObj.roles.length);
     assertHasRole(roleObj.roles, "roleB", db.getName());

@@ -7,7 +7,7 @@ load('jstests/libs/trace_missing_docs.js');
     var testDocMissing = function(useReplicaSet) {
         var options = {
             rs: useReplicaSet,
-            shardOptions: {oplogSize: 10},
+            shardOptions: {master: "", oplogSize: 10},
             rsOptions: {nodes: 1, oplogSize: 10}
         };
 
@@ -16,9 +16,10 @@ load('jstests/libs/trace_missing_docs.js');
         var mongos = st.s0;
         var coll = mongos.getCollection("foo.bar");
         var admin = mongos.getDB("admin");
+        var shards = mongos.getCollection("config.shards").find().toArray();
 
         assert.commandWorked(admin.runCommand({enableSharding: coll.getDB() + ""}));
-        st.ensurePrimaryShard(coll.getDB() + "", st.shard0.shardName);
+        st.ensurePrimaryShard(coll.getDB() + "", shards[0]._id);
 
         coll.ensureIndex({sk: 1});
         assert.commandWorked(admin.runCommand({shardCollection: coll + "", key: {sk: 1}}));
@@ -28,7 +29,7 @@ load('jstests/libs/trace_missing_docs.js');
         assert.writeOK(coll.update({sk: 67890}, {$set: {baz: 'boz'}}));
 
         assert.commandWorked(admin.runCommand(
-            {moveChunk: coll + "", find: {sk: 0}, to: st.shard1.shardName, _waitForDelete: true}));
+            {moveChunk: coll + "", find: {sk: 0}, to: shards[1]._id, _waitForDelete: true}));
 
         st.printShardingStatus();
 
@@ -37,10 +38,12 @@ load('jstests/libs/trace_missing_docs.js');
         assert.eq(ops[0].op, 'i');
         assert.eq(ops.length, 5);
 
-        jsTest.log("DONE! (using rs)");
+        jsTest.log("DONE! " + (useReplicaSet ? "(using rs)" : "(using master/slave)"));
 
         st.stop();
     };
 
     testDocMissing(true);
+    testDocMissing(false);
+
 })();

@@ -29,9 +29,7 @@
 
 #pragma once
 
-#include <iterator>
 #include <memory>
-#include <type_traits>
 
 #include "mongo/base/disallow_copying.h"
 #include "mongo/util/assert_util.h"
@@ -63,96 +61,20 @@ template <typename K_L,  // key lookup
 class UnorderedFastKeyTable {
 public:
     // Typedefs for compatibility with std::map.
-    using value_type = std::pair<const K_S, V>;
+    using value_type = std::pair<K_S, V>;
     using key_type = K_L;
     using mapped_type = V;
 
     using HashedKey = typename Traits::HashedKey;
 
 private:
-    class Entry {
-    public:
-        Entry() = default;
+    struct Entry {
+        Entry() : used(false), everUsed(false) {}
 
-        Entry(const Entry& other)
-            : _used(other._used), _everUsed(other.everUsed), _curHash(other._curHash) {
-            if (other.isUsed()) {
-                new (&_data) value_type(other.getData());
-            }
-        }
-
-        Entry& operator=(const Entry& other) {
-            if (this == &other) {
-                return *this;
-            }
-
-            if (isUsed()) {
-                unUse();
-            }
-
-            _used = other._used;
-            _everUsed = other._everUsed;
-            _curHash = other._curHash;
-
-            if (other.isUsed()) {
-                new (&_data) value_type(other.getData());
-            }
-
-            return *this;
-        }
-
-        ~Entry() {
-            if (isUsed()) {
-                unUse();
-            }
-        }
-
-        template <typename... Args>
-        void emplaceData(const HashedKey& key, Args&&... args) {
-            dassert(!isUsed());
-            _used = true;
-            _everUsed = true;
-            _curHash = key.hash();
-            new (&_data) value_type(std::piecewise_construct,
-                                    std::forward_as_tuple(Traits::toStorage(key.key())),
-                                    std::forward_as_tuple(std::forward<Args>(args)...));
-        }
-
-        bool isUsed() const {
-            return _used;
-        }
-
-        bool wasEverUsed() const {
-            return _everUsed;
-        }
-
-        uint32_t getCurHash() const {
-            dassert(isUsed());
-            return _curHash;
-        }
-
-        void unUse() {
-            dassert(isUsed());
-            _used = false;
-            reinterpret_cast<value_type*>(&_data)->~value_type();
-        }
-
-        value_type& getData() {
-            dassert(isUsed());
-            return *reinterpret_cast<value_type*>(&_data);
-        }
-
-        const value_type& getData() const {
-            dassert(isUsed());
-            return *reinterpret_cast<const value_type*>(&_data);
-        }
-
-    private:
-        bool _used = false;
-        bool _everUsed = false;
-        uint32_t _curHash;
-        typename std::aligned_storage<sizeof(value_type),
-                                      std::alignment_of<value_type>::value>::type _data;
+        bool used;
+        bool everUsed;
+        uint32_t curHash;
+        value_type data;
     };
 
     struct Area {
@@ -248,10 +170,6 @@ public:
         return get(HashedKey(key));
     }
 
-    void clear() {
-        *this = {};
-    }
-
     /**
      * @return number of elements removed
      */
@@ -262,43 +180,34 @@ public:
         return erase(HashedKey(key));
     }
 
-    template <typename AreaPtr,
-              typename reference = decltype(AreaPtr()->begin()->getData()),
-              typename pointer = typename std::add_pointer<reference>::type>
-    class iterator_impl
-        : public std::
-              iterator<std::forward_iterator_tag, value_type, std::ptrdiff_t, pointer, reference> {
+    class const_iterator {
         friend class UnorderedFastKeyTable;
 
     public:
-        iterator_impl() {
+        const_iterator() {
             _position = -1;
         }
-        iterator_impl(AreaPtr area) {
+        const_iterator(const Area* area) {
             _area = area;
             _position = 0;
             _max = _area->capacity() - 1;
             _skip();
         }
-        iterator_impl(AreaPtr area, int pos) {
+        const_iterator(const Area* area, int pos) {
             _area = area;
             _position = pos;
             _max = pos;
         }
 
-        template <typename... Args>
-        iterator_impl(const iterator_impl<Args...>& other)
-            : _area(other._area), _position(other._position), _max(other._max) {}
-
-        pointer operator->() const {
-            return &_area->_entries[_position].getData();
+        const value_type* operator->() const {
+            return &_area->_entries[_position].data;
         }
 
-        reference operator*() const {
-            return _area->_entries[_position].getData();
+        const value_type& operator*() const {
+            return _area->_entries[_position].data;
         }
 
-        iterator_impl& operator++() {
+        const_iterator operator++() {
             if (_position < 0)
                 return *this;
             _position++;
@@ -306,16 +215,10 @@ public:
             return *this;
         }
 
-        iterator_impl operator++(int) {
-            iterator_impl before(*this);
-            operator++();
-            return before;
-        }
-
-        bool operator==(const iterator_impl& other) const {
+        bool operator==(const const_iterator& other) const {
             return _position == other._position;
         }
-        bool operator!=(const iterator_impl& other) const {
+        bool operator!=(const const_iterator& other) const {
             return _position != other._position;
         }
 
@@ -326,19 +229,16 @@ public:
                     _position = -1;
                     break;
                 }
-                if (_area->_entries[_position].isUsed())
+                if (_area->_entries[_position].used)
                     break;
                 ++_position;
             }
         }
 
-        AreaPtr _area;
+        const Area* _area;
         int _position;
         int _max;  // inclusive
     };
-
-    using iterator = iterator_impl<Area*>;
-    using const_iterator = iterator_impl<const Area*>;
 
     void erase(const_iterator it);
 
@@ -357,57 +257,12 @@ public:
         return const_iterator(&_area, _area.find(key, nullptr));
     }
 
-    iterator find(const K_L& key) {
-        if (empty())
-            return end();  // Don't waste time hashing.
-        return find(HashedKey(key));
-    }
-
-    iterator find(const HashedKey& key) {
-        if (empty())
-            return end();
-        return iterator(&_area, _area.find(key, nullptr));
-    }
-
     const_iterator begin() const {
         return const_iterator(&_area);
     }
 
     const_iterator end() const {
         return const_iterator();
-    }
-
-    iterator begin() {
-        return iterator(&_area);
-    }
-
-    iterator end() {
-        return iterator();
-    }
-
-    const_iterator cbegin() const {
-        return const_iterator(&_area);
-    }
-
-    const_iterator cend() const {
-        return const_iterator();
-    }
-
-    template <typename... Args>
-    std::pair<iterator, bool> try_emplace(const HashedKey& key, Args&&... args);
-
-    template <typename... Args>
-    std::pair<iterator, bool> try_emplace(const K_L& key, Args&&... args) {
-        return try_emplace(HashedKey(key), std::forward<Args>(args)...);
-    }
-
-    void swap(UnorderedFastKeyTable& other) {
-        _area.swap(&(other._area));
-        std::swap(_size, other._size);
-    }
-
-    friend void swap(UnorderedFastKeyTable& lhs, UnorderedFastKeyTable& rhs) {
-        return lhs.swap(rhs);
     }
 
 private:

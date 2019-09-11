@@ -1,37 +1,39 @@
 (function() {
-    'use strict';
 
-    var s = new ShardingTest({shards: 2, mongos: 1, other: {chunkSize: 1, enableAutoSplit: true}});
+    var s = new ShardingTest({name: "jumbo1", shards: 2, mongos: 1, other: {chunkSize: 1}});
 
-    assert.commandWorked(s.s0.adminCommand({enablesharding: "test"}));
+    s.adminCommand({enablesharding: "test"});
     s.ensurePrimaryShard('test', 'shard0001');
-    assert.commandWorked(s.s0.adminCommand({shardcollection: "test.foo", key: {x: 1}}));
+    s.adminCommand({shardcollection: "test.foo", key: {x: 1}});
 
-    var db = s.getDB("test");
+    db = s.getDB("test");
 
-    var big = "";
-    while (big.length < 10000) {
+    big = "";
+    while (big.length < 10000)
         big += ".";
-    }
 
-    // Create sufficient documents to create a jumbo chunk, and use the same shard key in all of
-    // them so that the chunk cannot be split.
-    var x = 0;
+    x = 0;
     var bulk = db.foo.initializeUnorderedBulkOp();
-    for (var i = 0; i < 500; i++) {
+    for (; x < 500; x++)
         bulk.insert({x: x, big: big});
-    }
 
-    // Create documents with different shard keys that can be split and moved without issue.
-    for (; x < 1500; x++) {
+    for (i = 0; i < 500; i++)
         bulk.insert({x: x, big: big});
-    }
+
+    for (; x < 2000; x++)
+        bulk.insert({x: x, big: big});
 
     assert.writeOK(bulk.execute());
 
-    s.printShardingStatus(true);
+    sh.status(true);
 
-    s.startBalancer();
+    res = sh.moveChunk("test.foo", {x: 0}, "shard0001");
+    if (!res.ok)
+        res = sh.moveChunk("test.foo", {x: 0}, "shard0000");
+
+    sh.status(true);
+
+    sh.setBalancerState(true);
 
     function diff1() {
         var x = s.chunkCounts("foo");
@@ -42,17 +44,9 @@
     assert.soon(function() {
         var d = diff1();
         print("diff: " + d);
-        s.printShardingStatus(true);
+        sh.status(true);
         return d < 5;
-    }, "balance didn't happen", 1000 * 60 * 10, 5000);
-
-    // Check that the jumbo chunk did not move, which shouldn't be possible.
-    var jumboChunk =
-        s.getDB('config').chunks.findOne({ns: 'test.foo', min: {$lte: {x: 0}}, max: {$gt: {x: 0}}});
-    assert.eq('shard0001', jumboChunk.shard, 'jumbo chunk ' + tojson(jumboChunk) + ' was moved');
-    // TODO: SERVER-26531 Make sure that balancer marked the first chunk as jumbo.
-    // Assumption: balancer favors moving the lowest valued chunk out of a shard.
-    // assert(jumboChunk.jumbo, tojson(jumboChunk));
+    }, "balance didn't happen", 1000 * 60 * 5, 5000);
 
     s.stop();
 

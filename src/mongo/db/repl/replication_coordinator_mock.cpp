@@ -32,11 +32,11 @@
 
 #include "mongo/base/status.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/repl/is_master_response.h"
-#include "mongo/db/repl/read_concern_args.h"
-#include "mongo/db/repl/sync_source_resolver.h"
-#include "mongo/db/storage/snapshot_name.h"
 #include "mongo/db/write_concern_options.h"
+#include "mongo/db/repl/read_concern_args.h"
+#include "mongo/db/repl/read_concern_response.h"
+#include "mongo/db/repl/replica_set_config.h"
+#include "mongo/db/storage/snapshot_name.h"
 #include "mongo/util/assert_util.h"
 
 namespace mongo {
@@ -46,14 +46,13 @@ using std::vector;
 
 ReplicationCoordinatorMock::ReplicationCoordinatorMock(const ReplSettings& settings)
     : _settings(settings) {}
-
 ReplicationCoordinatorMock::~ReplicationCoordinatorMock() {}
 
-void ReplicationCoordinatorMock::startup(OperationContext* txn) {
+void ReplicationCoordinatorMock::startReplication(OperationContext* txn) {
     // TODO
 }
 
-void ReplicationCoordinatorMock::shutdown(OperationContext*) {
+void ReplicationCoordinatorMock::shutdown(OperationContext* txn) {
     // TODO
 }
 
@@ -120,13 +119,8 @@ bool ReplicationCoordinatorMock::isMasterForReportingPurposes() {
 }
 
 bool ReplicationCoordinatorMock::canAcceptWritesForDatabase(StringData dbName) {
-    // Return true if we allow writes explicitly even when not in primary state, as in sharding
-    // unit tests, so that the op observers can fire but the tests don't have to set all the states
-    // as if it's in primary.
-    if (_alwaysAllowWrites) {
-        return true;
-    }
-    return dbName == "local" || _memberState.primary() || _settings.isMaster();
+    // TODO
+    return true;
 }
 
 bool ReplicationCoordinatorMock::canAcceptWritesFor(const NamespaceString& ns) {
@@ -141,8 +135,9 @@ Status ReplicationCoordinatorMock::checkCanServeReadsFor(OperationContext* txn,
     return Status::OK();
 }
 
-bool ReplicationCoordinatorMock::shouldRelaxIndexConstraints(const NamespaceString& ns) {
-    return !canAcceptWritesFor(ns);
+bool ReplicationCoordinatorMock::shouldIgnoreUniqueIndex(const IndexDescriptor* idx) {
+    // TODO
+    return false;
 }
 
 Status ReplicationCoordinatorMock::setLastOptimeForSlave(const OID& rid, const Timestamp& ts) {
@@ -185,9 +180,9 @@ OpTime ReplicationCoordinatorMock::getMyLastDurableOpTime() const {
     return _myLastDurableOpTime;
 }
 
-Status ReplicationCoordinatorMock::waitUntilOpTimeForRead(OperationContext* txn,
-                                                          const ReadConcernArgs& settings) {
-    return Status::OK();
+ReadConcernResponse ReplicationCoordinatorMock::waitUntilOpTime(OperationContext* txn,
+                                                                const ReadConcernArgs& settings) {
+    return ReadConcernResponse();
 }
 
 
@@ -209,11 +204,11 @@ bool ReplicationCoordinatorMock::setFollowerMode(const MemberState& newState) {
     return true;
 }
 
-ReplicationCoordinator::ApplierState ReplicationCoordinatorMock::getApplierState() {
-    return ApplierState::Running;
+bool ReplicationCoordinatorMock::isWaitingForApplierToDrain() {
+    return false;
 }
 
-void ReplicationCoordinatorMock::signalDrainComplete(OperationContext*, long long) {}
+void ReplicationCoordinatorMock::signalDrainComplete(OperationContext*) {}
 
 Status ReplicationCoordinatorMock::waitForDrainFinish(Milliseconds timeout) {
     invariant(false);
@@ -222,47 +217,35 @@ Status ReplicationCoordinatorMock::waitForDrainFinish(Milliseconds timeout) {
 
 void ReplicationCoordinatorMock::signalUpstreamUpdater() {}
 
-Status ReplicationCoordinatorMock::resyncData(OperationContext* txn, bool waitUntilCompleted) {
-    return Status::OK();
+bool ReplicationCoordinatorMock::prepareOldReplSetUpdatePositionCommand(
+    BSONObjBuilder* cmdBuilder) {
+    cmdBuilder->append("replSetUpdatePosition", 1);
+    return true;
 }
 
-StatusWith<BSONObj> ReplicationCoordinatorMock::prepareReplSetUpdatePositionCommand(
-    ReplicationCoordinator::ReplSetUpdatePositionCommandStyle commandStyle) const {
-    BSONObjBuilder cmdBuilder;
-    cmdBuilder.append("replSetUpdatePosition", 1);
-    return cmdBuilder.obj();
+bool ReplicationCoordinatorMock::prepareReplSetUpdatePositionCommand(BSONObjBuilder* cmdBuilder) {
+    cmdBuilder->append("replSetUpdatePosition", 1);
+    return true;
 }
 
-ReplSetConfig ReplicationCoordinatorMock::getConfig() const {
-    return _getConfigReturnValue;
-}
-
-void ReplicationCoordinatorMock::setGetConfigReturnValue(ReplSetConfig returnValue) {
-    _getConfigReturnValue = std::move(returnValue);
+ReplicaSetConfig ReplicationCoordinatorMock::getConfig() const {
+    return ReplicaSetConfig();
 }
 
 void ReplicationCoordinatorMock::processReplSetGetConfig(BSONObjBuilder* result) {
     // TODO
 }
 
-void ReplicationCoordinatorMock::processReplSetMetadata(const rpc::ReplSetMetadata& replMetadata) {}
-
-void ReplicationCoordinatorMock::advanceCommitPoint(const OpTime& committedOptime) {}
+void ReplicationCoordinatorMock::processReplSetMetadata(const rpc::ReplSetMetadata& replMetadata,
+                                                        bool advanceCommitPoint) {}
 
 void ReplicationCoordinatorMock::cancelAndRescheduleElectionTimeout() {}
 
-Status ReplicationCoordinatorMock::processReplSetGetStatus(BSONObjBuilder*,
-                                                           ReplSetGetStatusResponseStyle) {
+Status ReplicationCoordinatorMock::processReplSetGetStatus(BSONObjBuilder* result) {
     return Status::OK();
 }
 
-void ReplicationCoordinatorMock::fillIsMasterForReplSet(IsMasterResponse* result) {
-    result->setReplSetVersion(_getConfigReturnValue.getConfigVersion());
-    result->setIsMaster(true);
-    result->setIsSecondary(false);
-    result->setMe(_getConfigReturnValue.getMemberAt(0).getHostAndPort());
-    result->setElectionId(OID::gen());
-}
+void ReplicationCoordinatorMock::fillIsMasterForReplSet(IsMasterResponse* result) {}
 
 void ReplicationCoordinatorMock::appendSlaveInfoData(BSONObjBuilder* result) {}
 
@@ -277,8 +260,7 @@ bool ReplicationCoordinatorMock::getMaintenanceMode() {
     return false;
 }
 
-Status ReplicationCoordinatorMock::processReplSetSyncFrom(OperationContext* txn,
-                                                          const HostAndPort& target,
+Status ReplicationCoordinatorMock::processReplSetSyncFrom(const HostAndPort& target,
                                                           BSONObjBuilder* resultObj) {
     // TODO
     return Status::OK();
@@ -368,7 +350,7 @@ Status ReplicationCoordinatorMock::checkReplEnabledForCommand(BSONObjBuilder* re
     return Status::OK();
 }
 
-HostAndPort ReplicationCoordinatorMock::chooseNewSyncSource(const OpTime& lastOpTimeFetched) {
+HostAndPort ReplicationCoordinatorMock::chooseNewSyncSource(const Timestamp& lastTimestampFetched) {
     return HostAndPort();
 }
 
@@ -378,10 +360,9 @@ void ReplicationCoordinatorMock::resetLastOpTimesFromOplog(OperationContext* txn
     invariant(false);
 }
 
-bool ReplicationCoordinatorMock::shouldChangeSyncSource(
-    const HostAndPort& currentSource,
-    const rpc::ReplSetMetadata& replMetadata,
-    boost::optional<rpc::OplogQueryMetadata> oqMetadata) {
+bool ReplicationCoordinatorMock::shouldChangeSyncSource(const HostAndPort& currentSource,
+                                                        const OpTime& syncSourceLastOpTime,
+                                                        bool syncSourceHasSyncSource) {
     invariant(false);
 }
 
@@ -396,8 +377,12 @@ Status ReplicationCoordinatorMock::processReplSetRequestVotes(
     return Status::OK();
 }
 
-void ReplicationCoordinatorMock::prepareReplMetadata(const BSONObj& metadataRequestObj,
-                                                     const OpTime& lastOpTimeFromClient,
+Status ReplicationCoordinatorMock::processReplSetDeclareElectionWinner(
+    const ReplSetDeclareElectionWinnerArgs& args, long long* responseTerm) {
+    return Status::OK();
+}
+
+void ReplicationCoordinatorMock::prepareReplMetadata(const OpTime& lastOpTimeFromClient,
                                                      BSONObjBuilder* builder) const {}
 
 Status ReplicationCoordinatorMock::processHeartbeatV1(const ReplSetHeartbeatArgsV1& args,
@@ -405,7 +390,7 @@ Status ReplicationCoordinatorMock::processHeartbeatV1(const ReplSetHeartbeatArgs
     return Status::OK();
 }
 
-bool ReplicationCoordinatorMock::isV1ElectionProtocol() const {
+bool ReplicationCoordinatorMock::isV1ElectionProtocol() {
     return true;
 }
 
@@ -456,25 +441,6 @@ WriteConcernOptions ReplicationCoordinatorMock::populateUnsetWriteConcernOptions
         }
     }
     return wc;
-}
-
-ReplSettings::IndexPrefetchConfig ReplicationCoordinatorMock::getIndexPrefetchConfig() const {
-    return ReplSettings::IndexPrefetchConfig();
-}
-
-void ReplicationCoordinatorMock::setIndexPrefetchConfig(
-    const ReplSettings::IndexPrefetchConfig cfg) {}
-
-Status ReplicationCoordinatorMock::stepUpIfEligible() {
-    return Status::OK();
-}
-
-void ReplicationCoordinatorMock::alwaysAllowWrites(bool allowWrites) {
-    _alwaysAllowWrites = allowWrites;
-}
-
-Status ReplicationCoordinatorMock::abortCatchupIfNeeded() {
-    return Status::OK();
 }
 
 }  // namespace repl

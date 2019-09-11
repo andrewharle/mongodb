@@ -38,7 +38,7 @@
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/db/repl/repl_settings.h"
+#include "mongo/db/repl/bgsync.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/replication_coordinator_global.h"
 #include "mongo/db/server_parameters.h"
@@ -67,15 +67,15 @@ ServerStatusMetricField<TimerStats> displayPrefetchDocPages("repl.preload.docs",
 // page in pages needed for all index lookups on a given object
 void prefetchIndexPages(OperationContext* txn,
                         Collection* collection,
-                        const ReplSettings::IndexPrefetchConfig& prefetchConfig,
+                        const BackgroundSync::IndexPrefetchConfig& prefetchConfig,
                         const BSONObj& obj) {
     // do we want prefetchConfig to be (1) as-is, (2) for update ops only, or (3) configured per op
     // type? One might want PREFETCH_NONE for updates, but it's more rare that it is a bad idea for
     // inserts. #3 (per op), a big issue would be "too many knobs".
     switch (prefetchConfig) {
-        case ReplSettings::IndexPrefetchConfig::PREFETCH_NONE:
+        case BackgroundSync::PREFETCH_NONE:
             return;
-        case ReplSettings::IndexPrefetchConfig::PREFETCH_ID_ONLY: {
+        case BackgroundSync::PREFETCH_ID_ONLY: {
             TimerHolder timer(&prefetchIndexStats);
             // on the update op case, the call to prefetchRecordPages will touch the _id index.
             // thus perhaps this option isn't very useful?
@@ -87,11 +87,11 @@ void prefetchIndexPages(OperationContext* txn,
                 invariant(iam);
                 iam->touch(txn, obj);
             } catch (const DBException& e) {
-                LOG(2) << "ignoring exception in prefetchIndexPages(): " << redact(e);
+                LOG(2) << "ignoring exception in prefetchIndexPages(): " << e.what() << endl;
             }
             break;
         }
-        case ReplSettings::IndexPrefetchConfig::PREFETCH_ALL: {
+        case BackgroundSync::PREFETCH_ALL: {
             // indexCount includes all indexes, including ones
             // in the process of being built
             IndexCatalog::IndexIterator ii =
@@ -105,7 +105,7 @@ void prefetchIndexPages(OperationContext* txn,
                     verify(iam);
                     iam->touch(txn, obj);
                 } catch (const DBException& e) {
-                    LOG(2) << "ignoring exception in prefetchIndexPages(): " << redact(e);
+                    LOG(2) << "ignoring exception in prefetchIndexPages(): " << e.what() << endl;
                 }
             }
             break;
@@ -136,7 +136,7 @@ void prefetchRecordPages(OperationContext* txn, Database* db, const char* ns, co
                 _dummy_char += *(result.objdata() + result.objsize() - 1);
             }
         } catch (const DBException& e) {
-            LOG(2) << "ignoring exception in prefetchRecordPages(): " << redact(e);
+            LOG(2) << "ignoring exception in prefetchRecordPages(): " << e.what() << endl;
         }
     }
 }
@@ -145,8 +145,8 @@ void prefetchRecordPages(OperationContext* txn, Database* db, const char* ns, co
 // prefetch for an oplog operation
 void prefetchPagesForReplicatedOp(OperationContext* txn, Database* db, const BSONObj& op) {
     invariant(db);
-    const ReplSettings::IndexPrefetchConfig prefetchConfig =
-        getGlobalReplicationCoordinator()->getIndexPrefetchConfig();
+    const BackgroundSync::IndexPrefetchConfig prefetchConfig =
+        BackgroundSync::get()->getIndexPrefetchConfig();
     const char* opField;
     const char* opType = op.getStringField("op");
     switch (*opType) {
@@ -175,7 +175,7 @@ void prefetchPagesForReplicatedOp(OperationContext* txn, Database* db, const BSO
         return;
     }
 
-    LOG(4) << "index prefetch for op " << *opType;
+    LOG(4) << "index prefetch for op " << *opType << endl;
 
     // should we prefetch index pages on updates? if the update is in-place and doesn't change
     // indexed values, it is actually slower - a lot slower if there are a dozen indexes or
@@ -219,14 +219,13 @@ public:
             ReplicationCoordinator::modeReplSet) {
             return "uninitialized";
         }
-        ReplSettings::IndexPrefetchConfig ip =
-            getGlobalReplicationCoordinator()->getIndexPrefetchConfig();
+        BackgroundSync::IndexPrefetchConfig ip = BackgroundSync::get()->getIndexPrefetchConfig();
         switch (ip) {
-            case ReplSettings::IndexPrefetchConfig::PREFETCH_NONE:
+            case BackgroundSync::PREFETCH_NONE:
                 return "none";
-            case ReplSettings::IndexPrefetchConfig::PREFETCH_ID_ONLY:
+            case BackgroundSync::PREFETCH_ID_ONLY:
                 return "_id_only";
-            case ReplSettings::IndexPrefetchConfig::PREFETCH_ALL:
+            case BackgroundSync::PREFETCH_ALL:
                 return "all";
             default:
                 return "invalid";
@@ -248,22 +247,22 @@ public:
     }
 
     virtual Status setFromString(const string& prefetch) {
-        log() << "changing replication index prefetch behavior to " << prefetch;
+        log() << "changing replication index prefetch behavior to " << prefetch << endl;
 
-        ReplSettings::IndexPrefetchConfig prefetchConfig;
+        BackgroundSync::IndexPrefetchConfig prefetchConfig;
 
         if (prefetch == "none")
-            prefetchConfig = ReplSettings::IndexPrefetchConfig::PREFETCH_NONE;
+            prefetchConfig = BackgroundSync::PREFETCH_NONE;
         else if (prefetch == "_id_only")
-            prefetchConfig = ReplSettings::IndexPrefetchConfig::PREFETCH_ID_ONLY;
+            prefetchConfig = BackgroundSync::PREFETCH_ID_ONLY;
         else if (prefetch == "all")
-            prefetchConfig = ReplSettings::IndexPrefetchConfig::PREFETCH_ALL;
+            prefetchConfig = BackgroundSync::PREFETCH_ALL;
         else {
             return Status(ErrorCodes::BadValue,
                           str::stream() << "unrecognized indexPrefetch setting: " << prefetch);
         }
 
-        getGlobalReplicationCoordinator()->setIndexPrefetchConfig(prefetchConfig);
+        BackgroundSync::get()->setIndexPrefetchConfig(prefetchConfig);
         return Status::OK();
     }
 

@@ -168,11 +168,6 @@ StatusWith<BSONObj> getBSONDocumentFromMetadataDoc(const BSONObj& obj);
  */
 StatusWith<std::vector<BSONObj>> getMetricsFromMetricDoc(const BSONObj& obj,
                                                          FTDCDecompressor* decompressor);
-
-/**
- * Is this a type that FTDC find's interesting? I.e. is this a numeric or container type?
- */
-bool isFTDCType(BSONType type);
 }  // namespace FTDCBSONUtil
 
 
@@ -194,11 +189,6 @@ boost::filesystem::path getInterimTempFile(const boost::filesystem::path& file);
  * Round the specified time_point to the next multiple of period after the specified time_point
  */
 Date_t roundTime(Date_t now, Milliseconds period);
-
-/**
- * Get the storage path for MongoS from the log file path.
- */
-boost::filesystem::path getMongoSPath(const boost::filesystem::path& logFile);
 
 }  // namespace FTDCUtil
 

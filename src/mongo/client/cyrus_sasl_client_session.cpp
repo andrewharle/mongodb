@@ -111,7 +111,7 @@ MONGO_INITIALIZER(CyrusSaslAllocatorsAndMutexes)(InitializerContext*) {
     return Status::OK();
 }
 
-int saslClientLogSwallow(void* context, int priority, const char* message) throw() {
+int saslClientLogSwallow(void* context, int priority, const char* message) {
     return SASL_OK;  // do nothing
 }
 
@@ -141,8 +141,7 @@ MONGO_INITIALIZER_WITH_PREREQUISITES(CyrusSaslClientContext,
     if (result != SASL_OK) {
         return Status(ErrorCodes::UnknownError,
                       mongoutils::str::stream() << "Could not initialize sasl client components ("
-                                                << sasl_errstring(result, NULL, NULL)
-                                                << ")");
+                                                << sasl_errstring(result, NULL, NULL) << ")");
     }
 
     SaslClientSession::create = createCyrusSaslClientSession;
@@ -157,31 +156,27 @@ MONGO_INITIALIZER_WITH_PREREQUISITES(CyrusSaslClientContext,
  * the same.  These correspond to SASL_CB_AUTHNAME and SASL_CB_USER.
  */
 int saslClientGetSimple(void* context, int id, const char** result, unsigned* resultLen) throw() {
-    try {
-        CyrusSaslClientSession* session = static_cast<CyrusSaslClientSession*>(context);
-        if (!session || !result)
-            return SASL_BADPARAM;
+    CyrusSaslClientSession* session = static_cast<CyrusSaslClientSession*>(context);
+    if (!session || !result)
+        return SASL_BADPARAM;
 
-        CyrusSaslClientSession::Parameter requiredParameterId;
-        switch (id) {
-            case SASL_CB_AUTHNAME:
-            case SASL_CB_USER:
-                requiredParameterId = CyrusSaslClientSession::parameterUser;
-                break;
-            default:
-                return SASL_FAIL;
-        }
-
-        if (!session->hasParameter(requiredParameterId))
+    CyrusSaslClientSession::Parameter requiredParameterId;
+    switch (id) {
+        case SASL_CB_AUTHNAME:
+        case SASL_CB_USER:
+            requiredParameterId = CyrusSaslClientSession::parameterUser;
+            break;
+        default:
             return SASL_FAIL;
-        StringData value = session->getParameter(requiredParameterId);
-        *result = value.rawData();
-        if (resultLen)
-            *resultLen = static_cast<unsigned>(value.size());
-        return SASL_OK;
-    } catch (...) {
-        return SASL_FAIL;
     }
+
+    if (!session->hasParameter(requiredParameterId))
+        return SASL_FAIL;
+    StringData value = session->getParameter(requiredParameterId);
+    *result = value.rawData();
+    if (resultLen)
+        *resultLen = static_cast<unsigned>(value.size());
+    return SASL_OK;
 }
 
 /**
@@ -192,25 +187,18 @@ int saslClientGetPassword(sasl_conn_t* conn,
                           void* context,
                           int id,
                           sasl_secret_t** outSecret) throw() {
-    try {
-        CyrusSaslClientSession* session = static_cast<CyrusSaslClientSession*>(context);
-        if (!session || !outSecret)
-            return SASL_BADPARAM;
+    CyrusSaslClientSession* session = static_cast<CyrusSaslClientSession*>(context);
+    if (!session || !outSecret)
+        return SASL_BADPARAM;
 
-        sasl_secret_t* secret = session->getPasswordAsSecret();
-        if (secret == NULL) {
-            sasl_seterror(conn, 0, "No password data provided");
-            return SASL_FAIL;
-        }
-
-        *outSecret = secret;
-        return SASL_OK;
-    } catch (...) {
-        StringBuilder sb;
-        sb << "Caught unhandled exception in saslClientGetSimple: " << exceptionToStatus().reason();
-        sasl_seterror(conn, 0, sb.str().c_str());
+    sasl_secret_t* secret = session->getPasswordAsSecret();
+    if (secret == NULL) {
+        sasl_seterror(conn, 0, "No password data provided");
         return SASL_FAIL;
     }
+
+    *outSecret = secret;
+    return SASL_OK;
 }
 }  // namespace
 

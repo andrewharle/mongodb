@@ -41,10 +41,10 @@ namespace mongo {
 
 class AuthorizationSession;
 class BSONObj;
-class Client;
+class ClientBasic;
 class Command;
 class NamespaceString;
-class OperationContext;
+class ReplSetConfig;
 class StringData;
 class UserName;
 
@@ -53,7 +53,7 @@ namespace audit {
 /**
  * Logs the result of an authentication attempt.
  */
-void logAuthentication(Client* client,
+void logAuthentication(ClientBasic* client,
                        StringData mechanism,
                        const UserName& user,
                        ErrorCodes::Error result);
@@ -68,7 +68,7 @@ void logAuthentication(Client* client,
 /**
  * Logs the result of a command authorization check.
  */
-void logCommandAuthzCheck(Client* client,
+void logCommandAuthzCheck(ClientBasic* client,
                           const std::string& dbname,
                           const BSONObj& cmdObj,
                           Command* command,
@@ -77,7 +77,7 @@ void logCommandAuthzCheck(Client* client,
 /**
  * Logs the result of an authorization check for an OP_DELETE wire protocol message.
  */
-void logDeleteAuthzCheck(Client* client,
+void logDeleteAuthzCheck(ClientBasic* client,
                          const NamespaceString& ns,
                          const BSONObj& pattern,
                          ErrorCodes::Error result);
@@ -85,7 +85,7 @@ void logDeleteAuthzCheck(Client* client,
 /**
  * Logs the result of an authorization check for an OP_GET_MORE wire protocol message.
  */
-void logGetMoreAuthzCheck(Client* client,
+void logGetMoreAuthzCheck(ClientBasic* client,
                           const NamespaceString& ns,
                           long long cursorId,
                           ErrorCodes::Error result);
@@ -93,7 +93,7 @@ void logGetMoreAuthzCheck(Client* client,
 /**
  * Logs the result of an authorization check for an OP_INSERT wire protocol message.
  */
-void logInsertAuthzCheck(Client* client,
+void logInsertAuthzCheck(ClientBasic* client,
                          const NamespaceString& ns,
                          const BSONObj& insertedObj,
                          ErrorCodes::Error result);
@@ -101,7 +101,7 @@ void logInsertAuthzCheck(Client* client,
 /**
  * Logs the result of an authorization check for an OP_KILL_CURSORS wire protocol message.
  */
-void logKillCursorsAuthzCheck(Client* client,
+void logKillCursorsAuthzCheck(ClientBasic* client,
                               const NamespaceString& ns,
                               long long cursorId,
                               ErrorCodes::Error result);
@@ -109,7 +109,7 @@ void logKillCursorsAuthzCheck(Client* client,
 /**
  * Logs the result of an authorization check for an OP_QUERY wire protocol message.
  */
-void logQueryAuthzCheck(Client* client,
+void logQueryAuthzCheck(ClientBasic* client,
                         const NamespaceString& ns,
                         const BSONObj& query,
                         ErrorCodes::Error result);
@@ -117,7 +117,7 @@ void logQueryAuthzCheck(Client* client,
 /**
  * Logs the result of an authorization check for an OP_UPDATE wire protocol message.
  */
-void logUpdateAuthzCheck(Client* client,
+void logUpdateAuthzCheck(ClientBasic* client,
                          const NamespaceString& ns,
                          const BSONObj& query,
                          const BSONObj& updateObj,
@@ -128,7 +128,7 @@ void logUpdateAuthzCheck(Client* client,
 /**
  * Logs the result of a createUser command.
  */
-void logCreateUser(Client* client,
+void logCreateUser(ClientBasic* client,
                    const UserName& username,
                    bool password,
                    const BSONObj* customData,
@@ -137,17 +137,17 @@ void logCreateUser(Client* client,
 /**
  * Logs the result of a dropUser command.
  */
-void logDropUser(Client* client, const UserName& username);
+void logDropUser(ClientBasic* client, const UserName& username);
 
 /**
  * Logs the result of a dropAllUsersFromDatabase command.
  */
-void logDropAllUsersFromDatabase(Client* client, StringData dbname);
+void logDropAllUsersFromDatabase(ClientBasic* client, StringData dbname);
 
 /**
  * Logs the result of a updateUser command.
  */
-void logUpdateUser(Client* client,
+void logUpdateUser(ClientBasic* client,
                    const UserName& username,
                    bool password,
                    const BSONObj* customData,
@@ -156,21 +156,21 @@ void logUpdateUser(Client* client,
 /**
  * Logs the result of a grantRolesToUser command.
  */
-void logGrantRolesToUser(Client* client,
+void logGrantRolesToUser(ClientBasic* client,
                          const UserName& username,
                          const std::vector<RoleName>& roles);
 
 /**
  * Logs the result of a revokeRolesFromUser command.
  */
-void logRevokeRolesFromUser(Client* client,
+void logRevokeRolesFromUser(ClientBasic* client,
                             const UserName& username,
                             const std::vector<RoleName>& roles);
 
 /**
  * Logs the result of a createRole command.
  */
-void logCreateRole(Client* client,
+void logCreateRole(ClientBasic* client,
                    const RoleName& role,
                    const std::vector<RoleName>& roles,
                    const PrivilegeVector& privileges);
@@ -178,7 +178,7 @@ void logCreateRole(Client* client,
 /**
  * Logs the result of a updateRole command.
  */
-void logUpdateRole(Client* client,
+void logUpdateRole(ClientBasic* client,
                    const RoleName& role,
                    const std::vector<RoleName>* roles,
                    const PrivilegeVector* privileges);
@@ -186,58 +186,60 @@ void logUpdateRole(Client* client,
 /**
  * Logs the result of a dropRole command.
  */
-void logDropRole(Client* client, const RoleName& role);
+void logDropRole(ClientBasic* client, const RoleName& role);
 
 /**
  * Logs the result of a dropAllRolesForDatabase command.
  */
-void logDropAllRolesFromDatabase(Client* client, StringData dbname);
+void logDropAllRolesFromDatabase(ClientBasic* client, StringData dbname);
 
 /**
  * Logs the result of a grantRolesToRole command.
  */
-void logGrantRolesToRole(Client* client, const RoleName& role, const std::vector<RoleName>& roles);
+void logGrantRolesToRole(ClientBasic* client,
+                         const RoleName& role,
+                         const std::vector<RoleName>& roles);
 
 /**
  * Logs the result of a revokeRolesFromRole command.
  */
-void logRevokeRolesFromRole(Client* client,
+void logRevokeRolesFromRole(ClientBasic* client,
                             const RoleName& role,
                             const std::vector<RoleName>& roles);
 
 /**
  * Logs the result of a grantPrivilegesToRole command.
  */
-void logGrantPrivilegesToRole(Client* client,
+void logGrantPrivilegesToRole(ClientBasic* client,
                               const RoleName& role,
                               const PrivilegeVector& privileges);
 
 /**
  * Logs the result of a revokePrivilegesFromRole command.
  */
-void logRevokePrivilegesFromRole(Client* client,
+void logRevokePrivilegesFromRole(ClientBasic* client,
                                  const RoleName& role,
                                  const PrivilegeVector& privileges);
 
 /**
  * Logs the result of a replSet(Re)config command.
  */
-void logReplSetReconfig(Client* client, const BSONObj* oldConfig, const BSONObj* newConfig);
+void logReplSetReconfig(ClientBasic* client, const BSONObj* oldConfig, const BSONObj* newConfig);
 
 /**
  * Logs the result of an ApplicationMessage command.
  */
-void logApplicationMessage(Client* client, StringData msg);
+void logApplicationMessage(ClientBasic* client, StringData msg);
 
 /**
  * Logs the result of a shutdown command.
  */
-void logShutdown(Client* client);
+void logShutdown(ClientBasic* client);
 
 /**
  * Logs the result of a createIndex command.
  */
-void logCreateIndex(Client* client,
+void logCreateIndex(ClientBasic* client,
                     const BSONObj* indexSpec,
                     StringData indexname,
                     StringData nsname);
@@ -245,53 +247,56 @@ void logCreateIndex(Client* client,
 /**
  * Logs the result of a createCollection command.
  */
-void logCreateCollection(Client* client, StringData nsname);
+void logCreateCollection(ClientBasic* client, StringData nsname);
 
 /**
  * Logs the result of a createDatabase command.
  */
-void logCreateDatabase(Client* client, StringData dbname);
+void logCreateDatabase(ClientBasic* client, StringData dbname);
 
 
 /**
  * Logs the result of a dropIndex command.
  */
-void logDropIndex(Client* client, StringData indexname, StringData nsname);
+void logDropIndex(ClientBasic* client, StringData indexname, StringData nsname);
 
 /**
  * Logs the result of a dropCollection command.
  */
-void logDropCollection(Client* client, StringData nsname);
+void logDropCollection(ClientBasic* client, StringData nsname);
 
 /**
  * Logs the result of a dropDatabase command.
  */
-void logDropDatabase(Client* client, StringData dbname);
+void logDropDatabase(ClientBasic* client, StringData dbname);
 
 /**
  * Logs a collection rename event.
  */
-void logRenameCollection(Client* client, StringData source, StringData target);
+void logRenameCollection(ClientBasic* client, StringData source, StringData target);
 
 /**
  * Logs the result of a enableSharding command.
  */
-void logEnableSharding(Client* client, StringData dbname);
+void logEnableSharding(ClientBasic* client, StringData dbname);
 
 /**
  * Logs the result of a addShard command.
  */
-void logAddShard(Client* client, StringData name, const std::string& servers, long long maxSize);
+void logAddShard(ClientBasic* client,
+                 StringData name,
+                 const std::string& servers,
+                 long long maxSize);
 
 /**
  * Logs the result of a removeShard command.
  */
-void logRemoveShard(Client* client, StringData shardname);
+void logRemoveShard(ClientBasic* client, StringData shardname);
 
 /**
  * Logs the result of a shardCollection command.
  */
-void logShardCollection(Client* client, StringData ns, const BSONObj& keyPattern, bool unique);
+void logShardCollection(ClientBasic* client, StringData ns, const BSONObj& keyPattern, bool unique);
 
 
 /*
@@ -299,7 +304,7 @@ void logShardCollection(Client* client, StringData ns, const BSONObj& keyPattern
  * to the provided metadata builder. The users and roles are extracted from the current client.
  * They are to be the impersonated users and roles for a Command run by an internal user.
  */
-void writeImpersonatedUsersToMetadata(OperationContext* txn, BSONObjBuilder* metadataBob);
+void writeImpersonatedUsersToMetadata(BSONObjBuilder* metadataBob);
 
 /*
  * Looks for an 'impersonatedUsers' field.  This field is used by mongos to

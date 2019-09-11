@@ -64,8 +64,7 @@ Status bsonCheckOnlyHasFields(StringData objectName,
         if (occurrences[i] > 1) {
             return Status(ErrorCodes::DuplicateKey,
                           str::stream() << "Field " << *curr << " appears " << occurrences[i]
-                                        << " times in "
-                                        << objectName);
+                                        << " times in " << objectName);
         }
     }
     return Status::OK();
@@ -78,7 +77,7 @@ Status bsonCheckOnlyHasFields(StringData objectName,
 template <typename StringType, int N>
 Status bsonCheckOnlyHasFields(StringData objectName,
                               const BSONObj& o,
-                              const StringType (&legals)[N]) {
+                              const StringType(&legals)[N]) {
     return bsonCheckOnlyHasFields(objectName, o, &legals[0], legals + N);
 }
 
@@ -88,10 +87,7 @@ Status bsonCheckOnlyHasFields(StringData objectName,
 inline void checkBSONType(BSONType expectedType, const BSONElement& elem) {
     uassert(elem.type() == BSONType::EOO ? ErrorCodes::NoSuchKey : ErrorCodes::TypeMismatch,
             str::stream() << "Wrong type for '" << elem.fieldNameStringData() << "'. Expected a "
-                          << typeName(expectedType)
-                          << ", got a "
-                          << typeName(elem.type())
-                          << '.',
+                          << typeName(expectedType) << ", got a " << typeName(elem.type()) << '.',
             elem.type() == expectedType);
 }
 

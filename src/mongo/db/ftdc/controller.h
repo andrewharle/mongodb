@@ -62,12 +62,8 @@ public:
 
     /*
      * Set whether the controller is enabled, and collects data.
-     *
-     * Returns ErrorCodes::FTDCPathNotSet if no log path has been specified for FTDC. This occurs
-     * in MongoS in some situations since MongoS is not required to have a storage directory like
-     * MongoD does.
      */
-    Status setEnabled(bool enabled);
+    void setEnabled(bool enabled);
 
     /**
      * Set the period for data collection.
@@ -97,13 +93,6 @@ public:
      * Smaller numbers will create unnecessary I/O.
      */
     void setMaxSamplesPerInterimMetricChunk(size_t size);
-
-    /*
-     * Set the path to store FTDC files if not already set.
-     *
-     * Returns ErrorCodes::FTDCPathAlreadySet if the path has already been set.
-     */
-    Status setDirectory(const boost::filesystem::path& path);
 
     /**
      * Add a metric collector to collect periodically. i.e., serverStatus
@@ -183,7 +172,7 @@ private:
     State _state{State::kNotStarted};
 
     // Directory to store files
-    boost::filesystem::path _path;
+    const boost::filesystem::path _path;
 
     // Mutex to protect the condvar, configuration changes, and most recent periodic document.
     stdx::mutex _mutex;

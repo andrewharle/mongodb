@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/python
 
 '''Helper script for constructing an archive (zip or tar) from a list of files.
 

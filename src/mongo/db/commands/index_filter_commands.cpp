@@ -30,13 +30,12 @@
 
 #include "mongo/platform/basic.h"
 
-#include <sstream>
 #include <string>
-#include <vector>
+#include <sstream>
 
 #include "mongo/base/init.h"
+#include "mongo/base/owned_pointer_vector.h"
 #include "mongo/base/status.h"
-#include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/database.h"
@@ -47,7 +46,6 @@
 #include "mongo/db/jsobj.h"
 #include "mongo/db/matcher/expression_parser.h"
 #include "mongo/db/matcher/extensions_callback_real.h"
-#include "mongo/stdx/unordered_set.h"
 #include "mongo/util/log.h"
 
 
@@ -56,6 +54,20 @@ namespace {
 using std::string;
 using std::vector;
 using namespace mongo;
+
+/**
+ * Utility function to extract error code and message from status
+ * and append to BSON results.
+ */
+void addStatus(const Status& status, BSONObjBuilder& builder) {
+    builder.append("ok", status.isOK() ? 1.0 : 0.0);
+    if (!status.isOK()) {
+        builder.append("code", status.code());
+    }
+    if (!status.reason().empty()) {
+        builder.append("errmsg", status.reason());
+    }
+}
 
 /**
  * Retrieves a collection's query settings and plan cache from the database.
@@ -93,8 +105,8 @@ static Status getQuerySettingsAndPlanCache(OperationContext* txn,
 // available to the client.
 //
 
-MONGO_INITIALIZER_WITH_PREREQUISITES(SetupIndexFilterCommands, MONGO_NO_PREREQUISITES)
-(InitializerContext* context) {
+MONGO_INITIALIZER_WITH_PREREQUISITES(SetupIndexFilterCommands,
+                                     MONGO_NO_PREREQUISITES)(InitializerContext* context) {
     new ListFilters();
     new ClearFilters();
     new SetFilter();
@@ -121,12 +133,18 @@ bool IndexFilterCommand::run(OperationContext* txn,
                              string& errmsg,
                              BSONObjBuilder& result) {
     string ns = parseNs(dbname, cmdObj);
+
     Status status = runIndexFilterCommand(txn, ns, cmdObj, &result);
-    return appendCommandStatus(result, status);
+
+    if (!status.isOK()) {
+        addStatus(status, result);
+        return false;
+    }
+
+    return true;
 }
 
-
-bool IndexFilterCommand::supportsWriteConcern(const BSONObj& cmd) const {
+bool IndexFilterCommand::isWriteCommandForConfigServer() const {
     return false;
 }
 
@@ -142,7 +160,7 @@ void IndexFilterCommand::help(stringstream& ss) const {
     ss << helpText;
 }
 
-Status IndexFilterCommand::checkAuthForCommand(Client* client,
+Status IndexFilterCommand::checkAuthForCommand(ClientBasic* client,
                                                const std::string& dbname,
                                                const BSONObj& cmdObj) {
     AuthorizationSession* authzSession = AuthorizationSession::get(client);
@@ -195,26 +213,22 @@ Status ListFilters::list(const QuerySettings& querySettings, BSONObjBuilder* bob
     //         }
     //  }
     BSONArrayBuilder hintsBuilder(bob->subarrayStart("filters"));
-    std::vector<AllowedIndexEntry> entries = querySettings.getAllAllowedIndices();
-    for (vector<AllowedIndexEntry>::const_iterator i = entries.begin(); i != entries.end(); ++i) {
-        AllowedIndexEntry entry = *i;
+    OwnedPointerVector<AllowedIndexEntry> entries;
+    entries.mutableVector() = querySettings.getAllAllowedIndices();
+    for (vector<AllowedIndexEntry*>::const_iterator i = entries.begin(); i != entries.end(); ++i) {
+        AllowedIndexEntry* entry = *i;
+        invariant(entry);
 
         BSONObjBuilder hintBob(hintsBuilder.subobjStart());
-        hintBob.append("query", entry.query);
-        hintBob.append("sort", entry.sort);
-        hintBob.append("projection", entry.projection);
-        if (!entry.collation.isEmpty()) {
-            hintBob.append("collation", entry.collation);
-        }
+        hintBob.append("query", entry->query);
+        hintBob.append("sort", entry->sort);
+        hintBob.append("projection", entry->projection);
         BSONArrayBuilder indexesBuilder(hintBob.subarrayStart("indexes"));
-        for (BSONObjSet::const_iterator j = entry.indexKeyPatterns.begin();
-             j != entry.indexKeyPatterns.end();
+        for (vector<BSONObj>::const_iterator j = entry->indexKeyPatterns.begin();
+             j != entry->indexKeyPatterns.end();
              ++j) {
             const BSONObj& index = *j;
             indexesBuilder.append(index);
-        }
-        for (const auto& indexEntry : entry.indexNames) {
-            indexesBuilder.append(indexEntry);
         }
         indexesBuilder.doneFast();
     }
@@ -269,22 +283,22 @@ Status ClearFilters::clear(OperationContext* txn,
         // Remove entry from plan cache
         planCache->remove(*cq);
 
-        LOG(0) << "Removed index filter on " << ns << " " << redact(cq->toStringShort());
+        LOG(0) << "Removed index filter on " << ns << " " << cq->toStringShort();
 
         return Status::OK();
     }
 
-    // If query is not provided, make sure sort, projection, and collation are not in arguments.
+    // If query is not provided, make sure sort and projection are not in arguments.
     // We do not want to clear the entire cache inadvertently when the user
     // forgot to provide a value for "query".
-    if (cmdObj.hasField("sort") || cmdObj.hasField("projection") || cmdObj.hasField("collation")) {
-        return Status(ErrorCodes::BadValue,
-                      "sort, projection, or collation provided without query");
+    if (cmdObj.hasField("sort") || cmdObj.hasField("projection")) {
+        return Status(ErrorCodes::BadValue, "sort or projection provided without query");
     }
 
     // Get entries from query settings. We need to remove corresponding entries from the plan
     // cache shortly.
-    std::vector<AllowedIndexEntry> entries = querySettings->getAllAllowedIndices();
+    OwnedPointerVector<AllowedIndexEntry> entries;
+    entries.mutableVector() = querySettings->getAllAllowedIndices();
 
     // OK to proceed with clearing entire cache.
     querySettings->clearAllowedIndices();
@@ -302,17 +316,14 @@ Status ClearFilters::clear(OperationContext* txn,
     // Only way that PlanCache::remove() can fail is when the query shape has been removed from
     // the cache by some other means (re-index, collection info reset, ...). This is OK since
     // that's the intended effect of calling the remove() function with the key from the hint entry.
-    for (vector<AllowedIndexEntry>::const_iterator i = entries.begin(); i != entries.end(); ++i) {
-        AllowedIndexEntry entry = *i;
+    for (vector<AllowedIndexEntry*>::const_iterator i = entries.begin(); i != entries.end(); ++i) {
+        AllowedIndexEntry* entry = *i;
+        invariant(entry);
 
         // Create canonical query.
-        auto qr = stdx::make_unique<QueryRequest>(nss);
-        qr->setFilter(entry.query);
-        qr->setSort(entry.sort);
-        qr->setProj(entry.projection);
-        qr->setCollation(entry.collation);
-        auto statusWithCQ = CanonicalQuery::canonicalize(txn, std::move(qr), extensionsCallback);
-        invariantOK(statusWithCQ.getStatus());
+        auto statusWithCQ = CanonicalQuery::canonicalize(
+            nss, entry->query, entry->sort, entry->projection, extensionsCallback);
+        invariant(statusWithCQ.isOK());
         std::unique_ptr<CanonicalQuery> cq = std::move(statusWithCQ.getValue());
 
         // Remove plan cache entry.
@@ -365,23 +376,19 @@ Status SetFilter::set(OperationContext* txn,
         return Status(ErrorCodes::BadValue,
                       "required field indexes must contain at least one index");
     }
-    BSONObjSet indexes = SimpleBSONObjComparator::kInstance.makeBSONObjSet();
-    stdx::unordered_set<std::string> indexNames;
+    vector<BSONObj> indexes;
     for (vector<BSONElement>::const_iterator i = indexesEltArray.begin();
          i != indexesEltArray.end();
          ++i) {
         const BSONElement& elt = *i;
-        if (elt.type() == BSONType::Object) {
-            BSONObj obj = elt.Obj();
-            if (obj.isEmpty()) {
-                return Status(ErrorCodes::BadValue, "index specification cannot be empty");
-            }
-            indexes.insert(obj.getOwned());
-        } else if (elt.type() == BSONType::String) {
-            indexNames.insert(elt.String());
-        } else {
-            return Status(ErrorCodes::BadValue, "each item in indexes must be an object or string");
+        if (!elt.isABSONObj()) {
+            return Status(ErrorCodes::BadValue, "each item in indexes must be an object");
         }
+        BSONObj obj = elt.Obj();
+        if (obj.isEmpty()) {
+            return Status(ErrorCodes::BadValue, "index specification cannot be empty");
+        }
+        indexes.push_back(obj.getOwned());
     }
 
     auto statusWithCQ = PlanCacheCommand::canonicalize(txn, ns, cmdObj);
@@ -391,13 +398,12 @@ Status SetFilter::set(OperationContext* txn,
     unique_ptr<CanonicalQuery> cq = std::move(statusWithCQ.getValue());
 
     // Add allowed indices to query settings, overriding any previous entries.
-    querySettings->setAllowedIndices(*cq, planCache->computeKey(*cq), indexes, indexNames);
+    querySettings->setAllowedIndices(*cq, planCache->computeKey(*cq), indexes);
 
     // Remove entry from plan cache.
     planCache->remove(*cq);
 
-    LOG(0) << "Index filter set on " << ns << " " << redact(cq->toStringShort()) << " "
-           << indexesElt;
+    LOG(0) << "Index filter set on " << ns << " " << cq->toStringShort() << " " << indexesElt;
 
     return Status::OK();
 }

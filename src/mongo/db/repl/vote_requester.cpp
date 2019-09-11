@@ -44,7 +44,7 @@ namespace repl {
 
 using executor::RemoteCommandRequest;
 
-VoteRequester::Algorithm::Algorithm(const ReplSetConfig& rsConfig,
+VoteRequester::Algorithm::Algorithm(const ReplicaSetConfig& rsConfig,
                                     long long candidateIndex,
                                     long long term,
                                     bool dryRun,
@@ -82,7 +82,7 @@ std::vector<RemoteCommandRequest> VoteRequester::Algorithm::getRequests() const 
     std::vector<RemoteCommandRequest> requests;
     for (const auto& target : _targets) {
         requests.push_back(RemoteCommandRequest(
-            target, "admin", requestVotesCmd, nullptr, _rsConfig.getElectionTimeoutPeriod()));
+            target, "admin", requestVotesCmd, _rsConfig.getElectionTimeoutPeriod()));
     }
 
     return requests;
@@ -90,37 +90,33 @@ std::vector<RemoteCommandRequest> VoteRequester::Algorithm::getRequests() const 
 
 void VoteRequester::Algorithm::processResponse(const RemoteCommandRequest& request,
                                                const ResponseStatus& response) {
-    auto logLine = log();
-    logLine << "VoteRequester(term " << _term << (_dryRun ? " dry run" : "") << ") ";
     _responsesProcessed++;
     if (!response.isOK()) {  // failed response
-        logLine << "failed to receive response from " << request.target << ": " << response.status;
-        return;
-    }
-    _responders.insert(request.target);
-    ReplSetRequestVotesResponse voteResponse;
-    auto status = getStatusFromCommandResult(response.data);
-    if (status.isOK()) {
-        status = voteResponse.initialize(response.data);
-    }
-    if (!status.isOK()) {
-        logLine << "received an invalid response from " << request.target << ": " << status;
-        logLine << "; response message: " << response.data;
-        return;
-    }
-
-    if (voteResponse.getVoteGranted()) {
-        logLine << "received a yes vote from " << request.target;
-        _votes++;
+        log() << "VoteRequester: Got failed response from " << request.target << ": "
+              << response.getStatus();
     } else {
-        logLine << "received a no vote from " << request.target << " with reason \""
-                << voteResponse.getReason() << '"';
-    }
+        _responders.insert(request.target);
+        ReplSetRequestVotesResponse voteResponse;
+        const auto status = voteResponse.initialize(response.getValue().data);
+        if (!status.isOK()) {
+            log() << "VoteRequester: Got error processing response with status: " << status
+                  << ", resp:" << response.getValue().data;
+        }
 
-    if (voteResponse.getTerm() > _term) {
-        _staleTerm = true;
+        if (voteResponse.getVoteGranted()) {
+            LOG(3) << "VoteRequester: Got yes vote from " << request.target
+                   << ", resp:" << response.getValue().data;
+            _votes++;
+        } else {
+            log() << "VoteRequester: Got no vote from " << request.target
+                  << " because: " << voteResponse.getReason()
+                  << ", resp:" << response.getValue().data;
+        }
+
+        if (voteResponse.getTerm() > _term) {
+            _staleTerm = true;
+        }
     }
-    logLine << "; response message: " << response.data;
 }
 
 bool VoteRequester::Algorithm::hasReceivedSufficientResponses() const {
@@ -145,20 +141,22 @@ unordered_set<HostAndPort> VoteRequester::Algorithm::getResponders() const {
 VoteRequester::VoteRequester() : _isCanceled(false) {}
 VoteRequester::~VoteRequester() {}
 
-StatusWith<ReplicationExecutor::EventHandle> VoteRequester::start(ReplicationExecutor* executor,
-                                                                  const ReplSetConfig& rsConfig,
-                                                                  long long candidateIndex,
-                                                                  long long term,
-                                                                  bool dryRun,
-                                                                  OpTime lastDurableOpTime) {
+StatusWith<ReplicationExecutor::EventHandle> VoteRequester::start(
+    ReplicationExecutor* executor,
+    const ReplicaSetConfig& rsConfig,
+    long long candidateIndex,
+    long long term,
+    bool dryRun,
+    OpTime lastDurableOpTime,
+    const stdx::function<void()>& onCompletion) {
     _algorithm.reset(new Algorithm(rsConfig, candidateIndex, term, dryRun, lastDurableOpTime));
-    _runner.reset(new ScatterGatherRunner(_algorithm.get(), executor));
-    return _runner->start();
+    _runner.reset(new ScatterGatherRunner(_algorithm.get()));
+    return _runner->start(executor, onCompletion);
 }
 
-void VoteRequester::cancel() {
+void VoteRequester::cancel(ReplicationExecutor* executor) {
     _isCanceled = true;
-    _runner->cancel();
+    _runner->cancel(executor);
 }
 
 VoteRequester::Result VoteRequester::getResult() const {

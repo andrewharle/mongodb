@@ -29,22 +29,18 @@
 #include "mongo/db/storage/mmap_v1/record_access_tracker.h"
 
 #include "mongo/db/storage/mmap_v1/record.h"
-#include "mongo/stdx/memory.h"
 #include "mongo/unittest/unittest.h"
-#include "mongo/util/clock_source_mock.h"
 
 using namespace mongo;
 
 namespace {
-
-const std::unique_ptr<ClockSource> clock = stdx::make_unique<ClockSourceMock>();
 
 const void* pointerOf(int data) {
     return reinterpret_cast<const void*>(data);
 }
 
 TEST(RecordAccessTrackerTest, TouchRecordTwice) {
-    RecordAccessTracker tracker(clock.get());
+    RecordAccessTracker tracker;
     tracker.disableSystemBlockInMemCheck();
 
     const void* record = pointerOf(0x10003);
@@ -54,7 +50,7 @@ TEST(RecordAccessTrackerTest, TouchRecordTwice) {
 }
 
 TEST(RecordAccessTrackerTest, TouchPageTwice) {
-    RecordAccessTracker tracker(clock.get());
+    RecordAccessTracker tracker;
     tracker.disableSystemBlockInMemCheck();
 
     const void* firstRecord = pointerOf(0x10003);
@@ -67,7 +63,7 @@ TEST(RecordAccessTrackerTest, TouchPageTwice) {
 }
 
 TEST(RecordAccessTrackerTest, TouchTwoPagesTwice) {
-    RecordAccessTracker tracker(clock.get());
+    RecordAccessTracker tracker;
     tracker.disableSystemBlockInMemCheck();
 
     const void* firstRecordFirstPage = pointerOf(0x11000);
@@ -84,7 +80,7 @@ TEST(RecordAccessTrackerTest, TouchTwoPagesTwice) {
 
 // Tests RecordAccessTracker::reset().
 TEST(RecordAccessTrackerTest, TouchTwoPagesTwiceWithReset) {
-    RecordAccessTracker tracker(clock.get());
+    RecordAccessTracker tracker;
     tracker.disableSystemBlockInMemCheck();
 
     const void* firstRecordFirstPage = pointerOf(0x11000);
@@ -108,7 +104,7 @@ TEST(RecordAccessTrackerTest, TouchTwoPagesTwiceWithReset) {
 
 // Tests RecordAccessTracker::markAccessed().
 TEST(RecordAccessTrackerTest, AccessTest) {
-    RecordAccessTracker tracker(clock.get());
+    RecordAccessTracker tracker;
     tracker.disableSystemBlockInMemCheck();
 
     // Mark the first page in superpage 3 as accessed.
@@ -126,7 +122,7 @@ TEST(RecordAccessTrackerTest, AccessTest) {
 // Touch pages in 128 separate superpages, and make sure that they all are reported as
 // recently accessed.
 TEST(RecordAccessTrackerTest, Access128Superpages) {
-    RecordAccessTracker tracker(clock.get());
+    RecordAccessTracker tracker;
     tracker.disableSystemBlockInMemCheck();
 
     // Touch the pages.

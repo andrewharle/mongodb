@@ -26,10 +26,9 @@ stop_word_languages = [
     'turkish',
 ]
 
-generateStopWordsList = env.Command( [ "stop_words_list.h", "stop_words_list.cpp"],
+env.Command( [ "stop_words_list.h", "stop_words_list.cpp"],
              [ "generate_stop_words.py"] + [ 'stop_words_%s.txt' % x for x in stop_word_languages ],
              "$PYTHON $SOURCES $TARGETS" )
-env.Alias('generated-sources', generateStopWordsList)
 
 baseEnv=env.Clone()
 baseEnv.InjectThirdPartyIncludePaths(libraries=['stemmer'])
@@ -52,9 +51,9 @@ baseEnv.Library('base', [
         'stop_words_list.cpp',
         'tokenizer.cpp',
         ], LIBDEPS=["$BUILD_DIR/mongo/base",
-                    "$BUILD_DIR/mongo/db/bson/dotted_path_support",
                     "$BUILD_DIR/mongo/db/common",
                     "$BUILD_DIR/mongo/db/fts/unicode/unicode",
+                    "$BUILD_DIR/mongo/platform/platform",
                     "$BUILD_DIR/mongo/util/md5",
                     "$BUILD_DIR/third_party/shim_stemmer",
                     ])
@@ -69,12 +68,21 @@ env.Library(
     ],
 )
 
+env.Library( 'server_common', [
+             'fts_enabled.cpp'
+             ],
+             LIBDEPS=[
+                 '$BUILD_DIR/mongo/base',
+                 '$BUILD_DIR/mongo/db/server_parameters',
+             ],
+)
+
 env.Library('ftsmongod', [
-        ], LIBDEPS=["base","$BUILD_DIR/mongo/base"])
+        ], LIBDEPS=["base","server_common"])
 
 
 env.Library('ftsmongos', [
-        ], LIBDEPS=["$BUILD_DIR/mongo/base"])
+        ], LIBDEPS=["server_common"])
 
 
 env.CppUnitTest( "fts_basic_phrase_matcher_test", "fts_basic_phrase_matcher_test.cpp",

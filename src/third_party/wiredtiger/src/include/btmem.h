@@ -714,7 +714,7 @@ struct __wt_page {
  *	Related information for fast-delete, on-disk pages.
  */
 struct __wt_page_deleted {
-	volatile uint64_t txnid;	/* Transaction ID */
+	uint64_t txnid;			/* Transaction ID */
 
 	WT_UPDATE **update_list;	/* List of updates for abort */
 };
@@ -904,7 +904,7 @@ struct __wt_ikey {
  * list.
  */
 WT_PACKED_STRUCT_BEGIN(__wt_update)
-	volatile uint64_t txnid;	/* Transaction ID */
+	uint64_t txnid;			/* update transaction */
 
 	WT_UPDATE *next;		/* forward-linked list */
 

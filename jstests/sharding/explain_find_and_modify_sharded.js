@@ -11,7 +11,9 @@
     var st = new ShardingTest({shards: 2});
 
     var testDB = st.s.getDB('test');
-    var shardKey = {a: 1};
+    var shardKey = {
+        a: 1
+    };
 
     // Create a collection with an index on the intended shard key.
     var shardedColl = testDB.getCollection(collName);

@@ -34,7 +34,7 @@ t.ensureIndex({x: 1}, {expireAfterSeconds: 20000});
 
 // split chunk in half by _id, and move one chunk to the other shard
 s.adminCommand({split: ns, middle: {_id: 12}});
-s.adminCommand({moveChunk: ns, find: {_id: 0}, to: s.getOther(s.getPrimaryShard(dbname)).name});
+s.adminCommand({moveChunk: ns, find: {_id: 0}, to: s.getOther(s.getServer(dbname)).name});
 
 // Check that all expired documents are deleted.
 assert.soon(

@@ -77,7 +77,7 @@ public:
               const MatchExpression* filter);
 
 
-    StageState doWork(WorkingSetID* out) final;
+    StageState work(WorkingSetID* out) final;
     bool isEOF() final;
 
     StageType stageType() const final {

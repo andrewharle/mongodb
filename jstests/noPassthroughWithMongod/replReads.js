@@ -56,7 +56,10 @@ function testReadLoadBalancing(numReplicas) {
         connections.push(conn);
     }
 
-    var profileCriteria = {op: 'query', ns: 'test.foo'};
+    var profileCriteria = {
+        op: 'query',
+        ns: 'test.foo'
+    };
 
     for (var i = 0; i < secondaries.length; i++) {
         var profileCollection = secondaries[i].getDB('test').system.profile;

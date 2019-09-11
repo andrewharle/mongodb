@@ -49,11 +49,12 @@
 #include "mongo/db/curop.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index_builder.h"
 #include "mongo/db/op_observer.h"
+#include "mongo/db/operation_context_impl.h"
 #include "mongo/db/repl/replication_coordinator_global.h"
-#include "mongo/db/service_context.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
@@ -69,7 +70,7 @@ public:
     virtual bool slaveOk() const {
         return false;
     }
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    virtual bool isWriteCommandForConfigServer() const {
         return true;
     }
     virtual void help(stringstream& help) const {
@@ -90,8 +91,8 @@ public:
              int,
              string& errmsg,
              BSONObjBuilder& result) {
-        const NamespaceString nss = parseNsCollectionRequired(dbname, jsobj);
-        return appendCommandStatus(result, dropIndexes(txn, nss, jsobj, &result));
+        const std::string ns = parseNsCollectionRequired(dbname, jsobj);
+        return appendCommandStatus(result, dropIndexes(txn, NamespaceString(ns), jsobj, &result));
     }
 
 } cmdDropIndexes;
@@ -101,7 +102,7 @@ public:
     virtual bool slaveOk() const {
         return true;
     }  // can reindex on a secondary
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    virtual bool isWriteCommandForConfigServer() const {
         return true;
     }
     virtual void help(stringstream& help) const {
@@ -124,62 +125,34 @@ public:
              BSONObjBuilder& result) {
         DBDirectClient db(txn);
 
-        const NamespaceString toReIndexNs = parseNsCollectionRequired(dbname, jsobj);
+        const std::string toDeleteNs = parseNsCollectionRequired(dbname, jsobj);
 
-        LOG(0) << "CMD: reIndex " << toReIndexNs;
+        LOG(0) << "CMD: reIndex " << toDeleteNs << endl;
 
         ScopedTransaction transaction(txn, MODE_IX);
         Lock::DBLock dbXLock(txn->lockState(), dbname, MODE_X);
-        OldClientContext ctx(txn, toReIndexNs.ns());
+        OldClientContext ctx(txn, toDeleteNs);
 
-        Collection* collection = ctx.db()->getCollection(toReIndexNs.ns());
+        Collection* collection = ctx.db()->getCollection(toDeleteNs);
+
         if (!collection) {
-            if (ctx.db()->getViewCatalog()->lookup(txn, toReIndexNs.ns()))
-                return appendCommandStatus(
-                    result, {ErrorCodes::CommandNotSupportedOnView, "can't re-index a view"});
-            else
-                return appendCommandStatus(
-                    result, {ErrorCodes::NamespaceNotFound, "collection does not exist"});
+            errmsg = "ns not found";
+            return false;
         }
 
-        BackgroundOperation::assertNoBgOpInProgForNs(toReIndexNs.ns());
-
-        const auto featureCompatibilityVersion =
-            serverGlobalParams.featureCompatibility.version.load();
-        const auto defaultIndexVersion =
-            IndexDescriptor::getDefaultIndexVersion(featureCompatibilityVersion);
+        BackgroundOperation::assertNoBgOpInProgForNs(toDeleteNs);
 
         vector<BSONObj> all;
         {
             vector<string> indexNames;
             collection->getCatalogEntry()->getAllIndexes(txn, &indexNames);
-            all.reserve(indexNames.size());
-
             for (size_t i = 0; i < indexNames.size(); i++) {
                 const string& name = indexNames[i];
                 BSONObj spec = collection->getCatalogEntry()->getIndexSpec(txn, name);
-
-                {
-                    BSONObjBuilder bob;
-
-                    for (auto&& indexSpecElem : spec) {
-                        auto indexSpecElemFieldName = indexSpecElem.fieldNameStringData();
-                        if (IndexDescriptor::kIndexVersionFieldName == indexSpecElemFieldName) {
-                            // We create a new index specification with the 'v' field set as
-                            // 'defaultIndexVersion'.
-                            bob.append(IndexDescriptor::kIndexVersionFieldName,
-                                       static_cast<int>(defaultIndexVersion));
-                        } else {
-                            bob.append(indexSpecElem);
-                        }
-                    }
-
-                    all.push_back(bob.obj());
-                }
+                all.push_back(spec.removeField("v").getOwned());
 
                 const BSONObj key = spec.getObjectField("key");
-                const Status keyStatus =
-                    index_key_validate::validateKeyPattern(key, defaultIndexVersion);
+                const Status keyStatus = validateKeyPattern(key);
                 if (!keyStatus.isOK()) {
                     errmsg = str::stream()
                         << "Cannot rebuild index " << spec << ": " << keyStatus.reason()
@@ -204,15 +177,13 @@ public:
         MultiIndexBlock indexer(txn, collection);
         // do not want interruption as that will leave us without indexes.
 
-        auto indexInfoObjs = indexer.init(all);
-        if (!indexInfoObjs.isOK()) {
-            return appendCommandStatus(result, indexInfoObjs.getStatus());
-        }
-
-        auto status = indexer.insertAllDocumentsInCollection();
-        if (!status.isOK()) {
+        Status status = indexer.init(all);
+        if (!status.isOK())
             return appendCommandStatus(result, status);
-        }
+
+        status = indexer.insertAllDocumentsInCollection();
+        if (!status.isOK())
+            return appendCommandStatus(result, status);
 
         {
             WriteUnitOfWork wunit(txn);
@@ -229,8 +200,8 @@ public:
         replCoord->forceSnapshotCreation();  // Ensures a newer snapshot gets created even if idle.
         collection->setMinimumVisibleSnapshot(snapshotName);
 
-        result.append("nIndexes", static_cast<int>(indexInfoObjs.getValue().size()));
-        result.append("indexes", indexInfoObjs.getValue());
+        result.append("nIndexes", (int)all.size());
+        result.append("indexes", all);
 
         return true;
     }

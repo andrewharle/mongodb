@@ -33,12 +33,9 @@
 
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/s/query/cluster_query_result.h"
 #include "mongo/util/time_support.h"
 
 namespace mongo {
-
-class OperationContext;
 
 /**
  * This is the lightweight mongoS analogue of the PlanStage abstraction used to execute queries on
@@ -60,13 +57,9 @@ public:
     /**
      * Returns the next query result, or an error.
      *
-     * If there are no more results, returns an EOF ClusterQueryResult.
-     *
-     * All returned BSONObjs are owned. They may own a buffer larger than the object. If you are
-     * holding on to a subset of the returned results and need to minimize memory usage, call copy()
-     * on the BSONObjs.
+     * If there are no more results, returns boost::none.
      */
-    virtual StatusWith<ClusterQueryResult> next() = 0;
+    virtual StatusWith<boost::optional<BSONObj>> next() = 0;
 
     /**
      * Must be called before destruction to abandon a not-yet-exhausted plan. May block waiting for
@@ -87,13 +80,6 @@ public:
      * the cursor is not tailable + awaitData).
      */
     virtual Status setAwaitDataTimeout(Milliseconds awaitDataTimeout) = 0;
-
-    /**
-     * Update the operation context for remote requests.
-     *
-     * Network requests depend on having a valid operation context for user initiated actions.
-     */
-    virtual void setOperationContext(OperationContext* txn) = 0;
 
 protected:
     /**

@@ -13,6 +13,7 @@
     assert.neq(null, conn, 'failed to start mongod');
 
     var test = conn.getDB("test");
+    var pid = test.serverStatus().pid;
 
     var name = 'jstests_slownightly_' + baseName;
     var t = test.getCollection(name);
@@ -44,8 +45,9 @@
 
     abortDuringIndexBuild();
 
-    assert.eq(waitProgram(conn.pid),
-              MongoRunner.EXIT_TEST,
+    var EXIT_TEST = 101;
+    assert.eq(waitProgram(pid),
+              EXIT_TEST,
               "mongod should have crashed due to the 'crashAfterStartingIndexBuild' " +
                   "failpoint being set.");
 

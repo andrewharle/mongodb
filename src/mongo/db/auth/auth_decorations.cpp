@@ -43,13 +43,13 @@ namespace mongo {
 namespace {
 
 const auto getAuthenticationSession =
-    Client::declareDecoration<std::unique_ptr<AuthenticationSession>>();
+    ClientBasic::declareDecoration<std::unique_ptr<AuthenticationSession>>();
 
 const auto getAuthorizationManager =
     ServiceContext::declareDecoration<std::unique_ptr<AuthorizationManager>>();
 
 const auto getAuthorizationSession =
-    Client::declareDecoration<std::unique_ptr<AuthorizationSession>>();
+    ClientBasic::declareDecoration<std::unique_ptr<AuthorizationSession>>();
 
 class AuthzClientObserver final : public ServiceContext::ClientObserver {
 public:
@@ -67,11 +67,13 @@ public:
 
 }  // namespace
 
-void AuthenticationSession::set(Client* client, std::unique_ptr<AuthenticationSession> newSession) {
+void AuthenticationSession::set(ClientBasic* client,
+                                std::unique_ptr<AuthenticationSession> newSession) {
     getAuthenticationSession(client) = std::move(newSession);
 }
 
-void AuthenticationSession::swap(Client* client, std::unique_ptr<AuthenticationSession>& other) {
+void AuthenticationSession::swap(ClientBasic* client,
+                                 std::unique_ptr<AuthenticationSession>& other) {
     using std::swap;
     swap(getAuthenticationSession(client), other);
 }
@@ -93,21 +95,21 @@ void AuthorizationManager::set(ServiceContext* service,
     service->registerClientObserver(stdx::make_unique<AuthzClientObserver>());
 }
 
-AuthorizationSession* AuthorizationSession::get(Client* client) {
+AuthorizationSession* AuthorizationSession::get(ClientBasic* client) {
     return get(*client);
 }
 
-AuthorizationSession* AuthorizationSession::get(Client& client) {
+AuthorizationSession* AuthorizationSession::get(ClientBasic& client) {
     AuthorizationSession* retval = getAuthorizationSession(client).get();
     massert(16481, "No AuthorizationManager has been set up for this connection", retval);
     return retval;
 }
 
-bool AuthorizationSession::exists(Client* client) {
+bool AuthorizationSession::exists(ClientBasic* client) {
     return getAuthorizationSession(client).get();
 }
 
-void AuthorizationSession::set(Client* client,
+void AuthorizationSession::set(ClientBasic* client,
                                std::unique_ptr<AuthorizationSession> authorizationSession) {
     auto& authzSession = getAuthorizationSession(client);
     invariant(authorizationSession);
