@@ -654,9 +654,16 @@ env_vars.Add('MONGO_DISTNAME',
     help='Sets the version string to be used in dist archive naming',
     default='$MONGO_VERSION')
 
+def validate_mongo_version(key, val, env):
+    regex = r'^(\d+)\.(\d+)\.(\d+)-?((?:(rc)(\d+))?.*)?'
+    if not re.match(regex, val):
+        print("Invalid MONGO_VERSION '{}', or could not derive from version.json or git metadata. Please add a conforming MONGO_VERSION=x.y.z[-extra] as an argument to SCons".format(val))
+        Exit(1)
+
 env_vars.Add('MONGO_VERSION',
     help='Sets the version string for MongoDB',
-    default=version_data['version'])
+    default=version_data['version'],
+    validator=validate_mongo_version)
 
 env_vars.Add('MONGO_GIT_HASH',
     help='Sets the githash to store in the MongoDB version information',
@@ -715,6 +722,10 @@ env_vars.Add('VERBOSE',
     help='Control build verbosity (auto, on/off true/false 1/0)',
     default='auto',
 )
+
+env_vars.Add('WINDOWS_OPENSSL_BIN',
+    help='Sets the path to the openssl binaries for packaging',
+    default='c:/openssl/bin')
 
 # don't run configure if user calls --help
 if GetOption('help'):
@@ -830,8 +841,8 @@ envDict = dict(BUILD_ROOT=buildDir,
                UNITTEST_LIST='$BUILD_ROOT/unittests.txt',
                INTEGRATION_TEST_ALIAS='integration_tests',
                INTEGRATION_TEST_LIST='$BUILD_ROOT/integration_tests.txt',
-               CONFIGUREDIR=sconsDataDir.Dir('sconf_temp'),
-               CONFIGURELOG=sconsDataDir.File('config.log'),
+               CONFIGUREDIR='$BUILD_ROOT/scons/$VARIANT_DIR/sconf_temp',
+               CONFIGURELOG='$BUILD_ROOT/scons/config.log',
                INSTALL_DIR=installDir,
                CONFIG_HEADER_DEFINES={},
                LIBDEPS_TAG_EXPANSIONS=[],
@@ -1429,6 +1440,7 @@ elif env.TargetOSIs('windows'):
             'crypt32.lib',
             'kernel32.lib',
             'shell32.lib',
+            'pdh.lib',
             'version.lib',
             'winmm.lib',
             'ws2_32.lib',
@@ -2265,6 +2277,41 @@ def doConfigure(myenv):
 
     myenv = conf.Finish()
 
+    def CheckCXX14EnableIfT(context):
+        test_body = """
+        #include <cstdlib>
+        #include <type_traits>
+
+        template <typename = void>
+        struct scons {
+            bool hasSupport() { return false; }
+        };
+
+        template <>
+        struct scons<typename std::enable_if_t<true>> {
+            bool hasSupport() { return true; }
+        };
+
+        int main(int argc, char **argv) {
+            scons<> SCons;
+            return SCons.hasSupport() ? EXIT_SUCCESS : EXIT_FAILURE;
+        }
+        """
+        context.Message('Checking for C++14 std::enable_if_t support...')
+        ret = context.TryCompile(textwrap.dedent(test_body), '.cpp')
+        context.Result(ret)
+        return ret
+
+    # Check for std::enable_if_t support without using the __cplusplus macro
+    conf = Configure(myenv, help=False, custom_tests = {
+        'CheckCXX14EnableIfT' : CheckCXX14EnableIfT,
+    })
+
+    if conf.CheckCXX14EnableIfT():
+        conf.env.SetConfigHeaderDefine('MONGO_CONFIG_HAVE_STD_ENABLE_IF_T')
+
+    myenv = conf.Finish()
+
     def CheckCXX14MakeUnique(context):
         test_body = """
         #include <memory>
@@ -2333,12 +2380,30 @@ def doConfigure(myenv):
     })
     libdeps.setup_conftests(conf)
 
+    def addOpenSslLibraryToDistArchive(file_name):
+        openssl_bin_path = os.path.normpath(env['WINDOWS_OPENSSL_BIN'].lower())
+        full_file_name = os.path.join(openssl_bin_path, file_name)
+        if os.path.exists(full_file_name):
+            env.Append(ARCHIVE_ADDITIONS=[full_file_name])
+            env.Append(ARCHIVE_ADDITION_DIR_MAP={
+                    openssl_bin_path: "bin"
+                    })
+            return True
+        else:
+            return False
+
     if has_option( "ssl" ):
         sslLibName = "ssl"
         cryptoLibName = "crypto"
         if conf.env.TargetOSIs('windows'):
             sslLibName = "ssleay32"
             cryptoLibName = "libeay32"
+
+            # Add the SSL binaries to the zip file distribution
+            files = ['ssleay32.dll', 'libeay32.dll']
+            for extra_file in files:
+                if not addOpenSslLibraryToDistArchive(extra_file):
+                    print("WARNING: Cannot find SSL library '%s'" % extra_file)
 
         # Used to import system certificate keychains
         if conf.env.TargetOSIs('osx'):
@@ -2565,9 +2630,19 @@ def doConfigure(myenv):
 
 env = doConfigure( env )
 
+# If the flags in the environment are configured for -gsplit-dwarf,
+# inject the necessary emitter.
+split_dwarf = Tool('split_dwarf')
+if split_dwarf.exists(env):
+    split_dwarf(env)
+
 # Load the compilation_db tool. We want to do this after configure so we don't end up with
 # compilation database entries for the configure tests, which is weird.
 env.Tool("compilation_db")
+
+incremental_link = Tool('incremental_link')
+if incremental_link.exists(env):
+    incremental_link(env)
 
 def checkErrorCodes():
     import buildscripts.errorcodes as x
@@ -2584,7 +2659,7 @@ def doLint( env , target , source ):
         raise Exception("ESLint errors")
 
     import buildscripts.clang_format
-    if not buildscripts.clang_format.lint(None, []):
+    if not buildscripts.clang_format.lint_all(None):
         raise Exception("clang-format lint errors")
 
     import buildscripts.lint

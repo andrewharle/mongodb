@@ -33,23 +33,23 @@
 
 #include "mongo/db/repl/sync_tail.h"
 
+#include "third_party/murmurhash3/MurmurHash3.h"
 #include <boost/functional/hash.hpp>
 #include <memory>
-#include "third_party/murmurhash3/MurmurHash3.h"
 
 #include "mongo/base/counter.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/database.h"
+#include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/commands/fsync.h"
 #include "mongo/db/commands/server_status_metric.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
-#include "mongo/db/dbhelpers.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/db_raii.h"
+#include "mongo/db/dbhelpers.h"
 #include "mongo/db/global_timestamp.h"
 #include "mongo/db/operation_context_impl.h"
 #include "mongo/db/prefetch.h"
@@ -255,7 +255,7 @@ bool SyncTail::peek(BSONObj* op) {
 // static
 Status SyncTail::syncApply(OperationContext* txn,
                            const BSONObj& op,
-                           bool convertUpdateToUpsert,
+                           bool inSteadyStateReplication,
                            ApplyOperationInLockFn applyOperationInLock,
                            ApplyCommandInLockFn applyCommandInLock,
                            IncrementOpsAppliedStatsFn incrementOpsAppliedStats) {
@@ -291,7 +291,7 @@ Status SyncTail::syncApply(OperationContext* txn,
             Lock::GlobalWrite globalWriteLock(txn->lockState());
 
             // special case apply for commands to avoid implicit database creation
-            Status status = applyCommandInLock(txn, op);
+            Status status = applyCommandInLock(txn, op, inSteadyStateReplication);
             incrementOpsAppliedStats();
             return status;
         }
@@ -304,7 +304,7 @@ Status SyncTail::syncApply(OperationContext* txn,
         txn->setReplicatedWrites(false);
         DisableDocumentValidation validationDisabler(txn);
 
-        Status status = applyOperationInLock(txn, db, op, convertUpdateToUpsert);
+        Status status = applyOperationInLock(txn, db, op, inSteadyStateReplication);
         if (!status.isOK() && status.code() == ErrorCodes::WriteConflict) {
             throw WriteConflictException();
         }
@@ -333,20 +333,24 @@ Status SyncTail::syncApply(OperationContext* txn,
 
             auto resetLocks = [&](LockMode mode) {
                 collectionLock.reset();
+                // Warning: We must reset the pointer to nullptr first, in order to ensure that we
+                // drop the DB lock before acquiring
+                // the upgraded one.
+                dbLock.reset();
                 dbLock.reset(new Lock::DBLock(txn->lockState(), dbName, mode));
                 collectionLock.reset(new Lock::CollectionLock(txn->lockState(), ns, mode));
             };
 
             resetLocks(MODE_IX);
             if (!dbHolder().get(txn, dbName)) {
-                // need to create database, try again
+                // Need to create database, so reset lock to stronger mode.
                 resetLocks(MODE_X);
                 ctx.reset(new OldClientContext(txn, ns));
             } else {
                 ctx.reset(new OldClientContext(txn, ns));
                 if (!ctx->db()->getCollection(ns)) {
-                    // uh, oh, we need to create collection
-                    // try again
+                    // Need to implicitly create collection.  This occurs for 'u' opTypes,
+                    // but not for 'i' nor 'd'.
                     ctx.reset();
                     resetLocks(MODE_X);
                     ctx.reset(new OldClientContext(txn, ns));
@@ -365,10 +369,12 @@ Status SyncTail::syncApply(OperationContext* txn,
     return Status(ErrorCodes::BadValue, ss);
 }
 
-Status SyncTail::syncApply(OperationContext* txn, const BSONObj& op, bool convertUpdateToUpsert) {
+Status SyncTail::syncApply(OperationContext* txn,
+                           const BSONObj& op,
+                           bool inSteadyStateReplication) {
     return syncApply(txn,
                      op,
-                     convertUpdateToUpsert,
+                     inSteadyStateReplication,
                      applyOperation_inlock,
                      applyCommand_inlock,
                      stdx::bind(&Counter64::increment, &opsAppliedStats, 1ULL));
@@ -621,28 +627,49 @@ public:
     }
 
 private:
+    /**
+     * Calculates batch limit size (in bytes) using the maximum capped collection size of the oplog
+     * size.
+     * Batches are limited to 10% of the oplog.
+     */
+    std::size_t _calculateBatchLimitBytes() {
+        auto opCtx = cc().makeOperationContext();
+        auto oplogMaxSizeResult =
+            _storageInterface->getOplogMaxSize(opCtx.get(), NamespaceString(rsOplogName));
+        auto oplogMaxSize = fassertStatusOK(40301, oplogMaxSizeResult);
+        return std::min(oplogMaxSize / 10, std::size_t(replBatchLimitBytes));
+    }
+
+    /**
+     * If slaveDelay is enabled, this function calculates the most recent timestamp of any oplog
+     * entries that can be be returned in a batch.
+     */
+    boost::optional<Date_t> _calculateSlaveDelayLatestTimestamp() {
+        auto service = cc().getServiceContext();
+        auto replCoord = ReplicationCoordinator::get(service);
+        auto slaveDelay = replCoord->getSlaveDelaySecs();
+        if (slaveDelay <= Seconds(0)) {
+            return {};
+        }
+        return Date_t::now() - slaveDelay;
+    }
+
     void run() {
         Client::initThread("ReplBatcher");
-        OperationContextImpl txn;
-        auto replCoord = ReplicationCoordinator::get(&txn);
 
-        const auto oplogMaxSize = fassertStatusOK(
-            40301, _storageInterface->getOplogMaxSize(&txn, NamespaceString(rsOplogName)));
-
-        // Batches are limited to 10% of the oplog.
         BatchLimits batchLimits;
         batchLimits.ops = replBatchLimitOperations;
-        batchLimits.bytes = std::min(oplogMaxSize / 10, size_t(replBatchLimitBytes));
+        batchLimits.bytes = _calculateBatchLimitBytes();
         while (!_inShutdown.load()) {
-            const auto slaveDelay = replCoord->getSlaveDelaySecs();
-            batchLimits.slaveDelayLatestTimestamp = (slaveDelay > Seconds(0))
-                ? (Date_t::now() - slaveDelay)
-                : boost::optional<Date_t>();
+            batchLimits.slaveDelayLatestTimestamp = _calculateSlaveDelayLatestTimestamp();
 
             OpQueue ops;
             // tryPopAndWaitForMore adds to ops and returns true when we need to end a batch early.
-            while (!_inShutdown.load() &&
-                   !_syncTail->tryPopAndWaitForMore(&txn, &ops, batchLimits)) {
+            {
+                auto opCtx = cc().makeOperationContext();
+                while (!_inShutdown.load() &&
+                       !_syncTail->tryPopAndWaitForMore(opCtx.get(), &ops, batchLimits)) {
+                }
             }
 
             // For pausing replication in tests
@@ -681,8 +708,12 @@ private:
 void SyncTail::oplogApplication(StorageInterface* storageInterface) {
     OpQueueBatcher batcher(this, storageInterface);
 
-    OperationContextImpl txn;
-    auto replCoord = ReplicationCoordinator::get(&txn);
+    ReplicationCoordinator* replCoord;
+    {
+        OperationContextImpl txn;
+        replCoord = ReplicationCoordinator::get(&txn);
+    }
+
     std::unique_ptr<ApplyBatchFinalizer> finalizer{
         getGlobalServiceContext()->getGlobalStorageEngine()->isDurable()
             ? new ApplyBatchFinalizerForJournal(replCoord)
@@ -690,6 +721,7 @@ void SyncTail::oplogApplication(StorageInterface* storageInterface) {
 
     while (!inShutdown()) {
         OpQueue ops;
+        OperationContextImpl txn;
 
         do {
             if (BackgroundSync::get()->getInitialSyncRequestedFlag()) {
@@ -985,11 +1017,12 @@ void multiSyncApply(const std::vector<BSONObj>& ops, SyncTail* st) {
     // allow us to get through the magic barrier
     txn.lockState()->setIsBatchWriter(true);
 
-    bool convertUpdatesToUpserts = true;
+    // This function is only called in steady state replication.
+    bool inSteadyStateReplication = true;
 
     for (std::vector<BSONObj>::const_iterator it = ops.begin(); it != ops.end(); ++it) {
         try {
-            const Status s = SyncTail::syncApply(&txn, *it, convertUpdatesToUpserts);
+            const Status s = SyncTail::syncApply(&txn, *it, inSteadyStateReplication);
             if (!s.isOK()) {
                 severe() << "Error applying operation (" << it->toString() << "): " << s;
                 fassertFailedNoTrace(16359);
@@ -1012,23 +1045,39 @@ void multiInitialSyncApply(const std::vector<BSONObj>& ops, SyncTail* st) {
     initializeWriterThread();
 
     OperationContextImpl txn;
-    txn.setReplicatedWrites(false);
-    DisableDocumentValidation validationDisabler(&txn);
+    Status status = multiInitialSyncApply_noAbort(&txn, ops, st);
+    fassertNoTrace(15915, status);
+}
+
+Status multiInitialSyncApply_noAbort(OperationContext* txn,
+                                     const std::vector<BSONObj>& ops,
+                                     SyncTail* st) {
+    txn->setReplicatedWrites(false);
+    DisableDocumentValidation validationDisabler(txn);
 
     // allow us to get through the magic barrier
-    txn.lockState()->setIsBatchWriter(true);
+    txn->lockState()->setIsBatchWriter(true);
 
-    bool convertUpdatesToUpserts = false;
+    // This function is only called in initial sync, as its name suggests.
+    bool inSteadyStateReplication = false;
 
     for (std::vector<BSONObj>::const_iterator it = ops.begin(); it != ops.end(); ++it) {
         try {
-            const Status s = SyncTail::syncApply(&txn, *it, convertUpdatesToUpserts);
+            const Status s = SyncTail::syncApply(txn, *it, inSteadyStateReplication);
             if (!s.isOK()) {
-                if (st->shouldRetry(&txn, *it)) {
-                    const Status s2 = SyncTail::syncApply(&txn, *it, convertUpdatesToUpserts);
+                // Don't retry on commands.
+                SyncTail::OplogEntry entry(*it);
+                if (entry.opType[0] == 'c') {
+                    error() << "Error applying command (" << it->toString() << "): " << s;
+                    return s;
+                }
+
+                // We might need to fetch the missing docs from the sync source.
+                if (st->shouldRetry(txn, *it)) {
+                    const Status s2 = SyncTail::syncApply(txn, *it, inSteadyStateReplication);
                     if (!s2.isOK()) {
                         severe() << "Error applying operation (" << it->toString() << "): " << s2;
-                        fassertFailedNoTrace(15915);
+                        return s2;
                     }
                 }
 
@@ -1037,16 +1086,24 @@ void multiInitialSyncApply(const std::vector<BSONObj>& ops, SyncTail* st) {
                 // subsequently got deleted and no longer exists on the Sync Target at all
             }
         } catch (const DBException& e) {
+            // SERVER-24927 If we have a NamespaceNotFound exception, then this document will be
+            // dropped before initial sync ends anyways and we should ignore it.
+            SyncTail::OplogEntry entry(*it);
+            if (e.getCode() == ErrorCodes::NamespaceNotFound &&
+                isCrudOpType(entry.opType.rawData())) {
+                continue;
+            }
+
             severe() << "writer worker caught exception: " << causedBy(e)
                      << " on: " << it->toString();
 
             if (inShutdown()) {
-                return;
+                return Status::OK();
             }
-
-            fassertFailedNoTrace(16361);
+            return e.toStatus();
         }
     }
+    return Status::OK();
 }
 
 }  // namespace repl
