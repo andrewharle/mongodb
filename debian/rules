@@ -38,7 +38,7 @@ endif
 
 # Wiredtiger does not build on 32-bit systems
 ifeq (32, $(DEB_HOST_ARCH_BITS))
-COMMON_OPTIONS += --wiredtiger=off
+COMMON_OPTIONS += --wiredtiger=off --mmapv1=on
 endif
 
 override_dh_auto_clean:
@@ -54,7 +54,7 @@ override_dh_auto_build:
 ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
 override_dh_auto_test:
 	scons $(COMMON_OPTIONS) dbtest unittests
-	python ./buildscripts/resmoke.py --dbpathPrefix="$(CURDIR)/debian/tmp-test" --suites=dbtest,unittests
+	python ./buildscripts/resmoke.py --dbpathPrefix="$(CURDIR)/debian/tmp-test" --suites=dbtest,unittests --storageEngine=mmapv1
 .PHONY: override_dh_auto_test
 endif
 
