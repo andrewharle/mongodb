@@ -68,6 +68,10 @@ load("jstests/replsets/rslib.js");       // For startSetIfSupportsReadMajority.
         dropDB: {
             prepare: function(db) {
                 assert.writeOK(db.coll.insert({_id: 1}));
+                // Drop collection explicitly during the preparation phase while we are still able
+                // to write to a majority. Otherwise, dropDatabase() will drop the collection
+                // and wait for the collection drop to be replicated to a majority of the nodes.
+                assert(db.coll.drop());
             },
             performOp: function(db) {
                 assert.commandWorked(db.dropDatabase());
@@ -90,6 +94,10 @@ load("jstests/replsets/rslib.js");       // For startSetIfSupportsReadMajority.
         dropAndRecreateDB: {
             prepare: function(db) {
                 assert.writeOK(db.coll.insert({_id: 1}));
+                // Drop collection explicitly during the preparation phase while we are still able
+                // to write to a majority. Otherwise, dropDatabase() will drop the collection
+                // and wait for the collection drop to be replicated to a majority of the nodes.
+                assert(db.coll.drop());
             },
             performOp: function(db) {
                 assert.commandWorked(db.dropDatabase());
@@ -210,16 +218,16 @@ load("jstests/replsets/rslib.js");       // For startSetIfSupportsReadMajority.
         var res =
             coll.runCommand('find', {"readConcern": {"level": "majority"}, "maxTimeMS": 5000});
         assert.commandFailedWithCode(res,
-                                     ErrorCodes.ExceededTimeLimit,
+                                     ErrorCodes.MaxTimeMSExpired,
                                      "Expected read of " + coll.getFullName() + " to block");
     }
 
     function assertReadsSucceed(coll, timeoutMs = 20000) {
-        var res = coll.runCommand('find',
-                                  {"readConcern": {"level": "majority"}, "maxTimeMS": timeoutMs});
+        var res =
+            coll.runCommand('find', {"readConcern": {"level": "majority"}, "maxTimeMS": timeoutMs});
         assert.commandWorked(res, 'reading from ' + coll.getFullName());
         // Exhaust the cursor to avoid leaking cursors on the server.
-        new DBCommandCursor(coll.getMongo(), res).itcount();
+        new DBCommandCursor(coll.getDB(), res).itcount();
     }
 
     // Set up a set and grab things for later.
@@ -229,6 +237,7 @@ load("jstests/replsets/rslib.js");       // For startSetIfSupportsReadMajority.
 
     if (!startSetIfSupportsReadMajority(replTest)) {
         jsTest.log("skipping test since storage engine doesn't support committed reads");
+        replTest.stopSet();
         return;
     }
 
@@ -241,11 +250,12 @@ load("jstests/replsets/rslib.js");       // For startSetIfSupportsReadMajority.
             {"_id": 2, "host": nodes[2], arbiterOnly: true}
         ]
     };
+
     replTest.initiate(config);
 
     // Get connections.
     var primary = replTest.getPrimary();
-    var secondary = replTest.liveNodes.slaves[0];
+    var secondary = replTest._slaves[0];
 
     // This is the DB that all of the tests will use.
     var mainDB = primary.getDB('mainDB');
@@ -253,8 +263,8 @@ load("jstests/replsets/rslib.js");       // For startSetIfSupportsReadMajority.
     // This DB won't be used by any tests so it should always be unblocked.
     var otherDB = primary.getDB('otherDB');
     var otherDBCollection = otherDB.collection;
-    assert.writeOK(
-        otherDBCollection.insert({}, {writeConcern: {w: "majority", wtimeout: 60 * 1000}}));
+    assert.writeOK(otherDBCollection.insert(
+        {}, {writeConcern: {w: "majority", wtimeout: ReplSetTest.kDefaultTimeoutMS}}));
     assertReadsSucceed(otherDBCollection);
 
     for (var testName in testCases) {
@@ -264,7 +274,7 @@ load("jstests/replsets/rslib.js");       // For startSetIfSupportsReadMajority.
         const setUpInitialState = function setUpInitialState() {
             assert.commandWorked(mainDB.dropDatabase());
             test.prepare(mainDB);
-            mainDB.getLastError('majority', 60 * 1000);
+            replTest.awaitReplication();
             // Do some sanity checks.
             assertReadsSucceed(otherDBCollection);
             test.blockedCollections.forEach((name) => assertReadsSucceed(mainDB[name]));
@@ -326,7 +336,7 @@ load("jstests/replsets/rslib.js");       // For startSetIfSupportsReadMajority.
             // unblocked.
             assert.commandWorked(
                 secondary.adminCommand({configureFailPoint: "rsSyncApplyStop", mode: "off"}));
-            mainDB.getLastError("majority", 60 * 1000);
+            replTest.awaitReplication();
             test.blockedCollections.forEach((name) => assertReadsSucceed(mainDB[name]));
 
             // Wait for the threads to complete and report any errors encountered from running them.
@@ -340,4 +350,6 @@ load("jstests/replsets/rslib.js");       // For startSetIfSupportsReadMajority.
             threads.forEach(thread => thread.join());
         }
     }
+
+    replTest.stopSet();
 }());

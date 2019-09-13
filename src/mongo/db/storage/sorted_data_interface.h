@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -42,6 +44,7 @@ namespace mongo {
 class BSONObjBuilder;
 class BucketDeletionNotification;
 class SortedDataBuilderInterface;
+struct ValidateResults;
 
 /**
  * This interface is a work in progress.  Notes below:
@@ -74,18 +77,19 @@ public:
      * Implementations can assume that 'this' index outlives its bulk
      * builder.
      *
-     * @param txn the transaction under which keys are added to 'this' index
+     * @param opCtx the transaction under which keys are added to 'this' index
      * @param dupsAllowed true if duplicate keys are allowed, and false
      *        otherwise
      *
      * @return caller takes ownership
      */
-    virtual SortedDataBuilderInterface* getBulkBuilder(OperationContext* txn, bool dupsAllowed) = 0;
+    virtual SortedDataBuilderInterface* getBulkBuilder(OperationContext* opCtx,
+                                                       bool dupsAllowed) = 0;
 
     /**
      * Insert an entry into the index with the specified key and RecordId.
      *
-     * @param txn the transaction under which the insert takes place
+     * @param opCtx the transaction under which the insert takes place
      * @param dupsAllowed true if duplicate keys are allowed, and false
      *        otherwise
      *
@@ -94,7 +98,7 @@ public:
      *         ErrorCodes::DuplicateKey if 'key' already exists in 'this' index
      *         at a RecordId other than 'loc' and duplicates were not allowed
      */
-    virtual Status insert(OperationContext* txn,
+    virtual Status insert(OperationContext* opCtx,
                           const BSONObj& key,
                           const RecordId& loc,
                           bool dupsAllowed) = 0;
@@ -102,11 +106,11 @@ public:
     /**
      * Remove the entry from the index with the specified key and RecordId.
      *
-     * @param txn the transaction under which the remove takes place
+     * @param opCtx the transaction under which the remove takes place
      * @param dupsAllowed true if duplicate keys are allowed, and false
      *        otherwise
      */
-    virtual void unindex(OperationContext* txn,
+    virtual void unindex(OperationContext* opCtx,
                          const BSONObj& key,
                          const RecordId& loc,
                          bool dupsAllowed) = 0;
@@ -115,28 +119,34 @@ public:
      * Return ErrorCodes::DuplicateKey if 'key' already exists in 'this'
      * index at a RecordId other than 'loc', and Status::OK() otherwise.
      *
-     * @param txn the transaction under which this operation takes place
+     * @param opCtx the transaction under which this operation takes place
      *
      * TODO: Hide this by exposing an update method?
      */
-    virtual Status dupKeyCheck(OperationContext* txn, const BSONObj& key, const RecordId& loc) = 0;
+    virtual Status dupKeyCheck(OperationContext* opCtx,
+                               const BSONObj& key,
+                               const RecordId& loc) = 0;
+
+    /**
+     * Attempt to reduce the storage space used by this index via compaction. Only called if the
+     * indexed record store supports compaction-in-place.
+     */
+    virtual Status compact(OperationContext* opCtx) {
+        return Status::OK();
+    }
 
     //
     // Information about the tree
     //
 
     /**
-     * 'output' is used to store results of validate when 'full' is true.
-     * If 'full' is false, 'output' may be NULL.
-     *
      * TODO: expose full set of args for testing?
      */
-    virtual void fullValidate(OperationContext* txn,
-                              bool full,
+    virtual void fullValidate(OperationContext* opCtx,
                               long long* numKeysOut,
-                              BSONObjBuilder* output) const = 0;
+                              ValidateResults* fullResults) const = 0;
 
-    virtual bool appendCustomStats(OperationContext* txn,
+    virtual bool appendCustomStats(OperationContext* opCtx,
                                    BSONObjBuilder* output,
                                    double scale) const = 0;
 
@@ -144,16 +154,16 @@ public:
     /**
      * Return the number of bytes consumed by 'this' index.
      *
-     * @param txn the transaction under which this operation takes place
+     * @param opCtx the transaction under which this operation takes place
      *
      * @see IndexAccessMethod::getSpaceUsedBytes
      */
-    virtual long long getSpaceUsedBytes(OperationContext* txn) const = 0;
+    virtual long long getSpaceUsedBytes(OperationContext* opCtx) const = 0;
 
     /**
      * Return true if 'this' index is empty, and false otherwise.
      */
-    virtual bool isEmpty(OperationContext* txn) = 0;
+    virtual bool isEmpty(OperationContext* opCtx) = 0;
 
     /**
      * Attempt to bring the entirety of 'this' index into memory.
@@ -163,7 +173,7 @@ public:
      *
      * @return Status::OK()
      */
-    virtual Status touch(OperationContext* txn) const {
+    virtual Status touch(OperationContext* opCtx) const {
         return Status(ErrorCodes::CommandNotSupported,
                       "this storage engine does not support touch");
     }
@@ -174,9 +184,9 @@ public:
      * The default implementation should be overridden with a more
      * efficient one if at all possible.
      */
-    virtual long long numEntries(OperationContext* txn) const {
+    virtual long long numEntries(OperationContext* opCtx) const {
         long long x = -1;
-        fullValidate(txn, false, &x, NULL);
+        fullValidate(opCtx, &x, NULL);
         return x;
     }
 
@@ -352,7 +362,7 @@ public:
      *
      * Implementations can assume that 'this' index outlives all cursors it produces.
      */
-    virtual std::unique_ptr<Cursor> newCursor(OperationContext* txn,
+    virtual std::unique_ptr<Cursor> newCursor(OperationContext* opCtx,
                                               bool isForward = true) const = 0;
 
     /**
@@ -369,7 +379,7 @@ public:
      * Implementations should avoid obvious biases toward older, newer, larger smaller or other
      * specific classes of entries.
      */
-    virtual std::unique_ptr<Cursor> newRandomCursor(OperationContext* txn) const {
+    virtual std::unique_ptr<Cursor> newRandomCursor(OperationContext* opCtx) const {
         return {};
     }
 
@@ -377,7 +387,7 @@ public:
     // Index creation
     //
 
-    virtual Status initAsEmpty(OperationContext* txn) = 0;
+    virtual Status initAsEmpty(OperationContext* opCtx) = 0;
 };
 
 /**

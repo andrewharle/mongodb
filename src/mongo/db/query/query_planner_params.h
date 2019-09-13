@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -40,7 +42,7 @@ struct QueryPlannerParams {
     QueryPlannerParams()
         : options(DEFAULT),
           indexFiltersApplied(false),
-          maxIndexedSolutions(internalQueryPlannerMaxIndexedSolutions) {}
+          maxIndexedSolutions(internalQueryPlannerMaxIndexedSolutions.load()) {}
 
     enum Options {
         // You probably want to set this.
@@ -74,9 +76,9 @@ struct QueryPlannerParams {
         // of the query in the query results.
         KEEP_MUTATIONS = 1 << 5,
 
-        // Nobody should set this above the getExecutor interface.  Internal flag set as a hint
-        // to the planner that the caller is actually the count command.
-        PRIVATE_IS_COUNT = 1 << 6,
+        // Indicate to the planner that the caller is requesting a count operation, possibly through
+        // a count command, or as part of an aggregation pipeline.
+        IS_COUNT = 1 << 6,
 
         // Set this if you want to handle batchSize properly with sort(). If limits on SORT
         // stages are always actually limits, then this should be left off. If they are
@@ -87,14 +89,18 @@ struct QueryPlannerParams {
         // implicitly via exact index bounds for index intersection solutions.
         CANNOT_TRIM_IXISECT = 1 << 8,
 
-        // Set this if snapshot() should scan the _id index rather than performing a
-        // collection scan. The MMAPv1 storage engine sets this option since it cannot
-        // guarantee that a collection scan won't miss documents or return duplicates.
-        SNAPSHOT_USE_ID = 1 << 9,
-
         // Set this if you don't want any plans with a non-covered projection stage. All projections
         // must be provided/covered by an index.
         NO_UNCOVERED_PROJECTIONS = 1 << 10,
+
+        // Set this to generate covered whole IXSCAN plans.
+        GENERATE_COVERED_IXSCANS = 1 << 11,
+
+        // Set this to track the most recent timestamp seen by this cursor while scanning the oplog.
+        TRACK_LATEST_OPLOG_TS = 1 << 12,
+
+        // Set this so that collection scans on the oplog wait for visibility before reading.
+        OPLOG_SCAN_WAIT_FOR_VISIBLE = 1 << 13,
     };
 
     // See Options enum above.

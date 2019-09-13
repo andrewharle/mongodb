@@ -4,9 +4,7 @@
     "use strict";
 
     function makeDocument(docSize) {
-        var doc = {
-            "fieldName": ""
-        };
+        var doc = {"fieldName": ""};
         var longString = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
         while (Object.bsonsize(doc) < docSize) {
             if (Object.bsonsize(doc) < docSize - longString.length) {
@@ -45,8 +43,11 @@
     t.drop();
     var doc = makeDocument(16 * 1024);
     var docs = [];
-    for (var i = 0; i < 1500; i++)
+    for (var i = 0; i < 1000; i++)
         docs.push(Object.extend({}, doc));
     t.insert(docs);
+    assert.eq(null, t.getDB().getLastError());
     assert.eq(t.count(), docs.length);
+
+    t.drop();
 })();

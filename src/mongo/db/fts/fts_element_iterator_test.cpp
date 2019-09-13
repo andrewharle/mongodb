@@ -1,31 +1,33 @@
 // fts_element_iterator_test.cpp
+
 /**
-*    Copyright (C) 2014 MongoDB Inc.
-*
-*    This program is free software: you can redistribute it and/or  modify
-*    it under the terms of the GNU Affero General Public License, version 3,
-*    as published by the Free Software Foundation.
-*
-*    This program is distributed in the hope that it will be useful,
-*    but WITHOUT ANY WARRANTY; without even the implied warranty of
-*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*    GNU Affero General Public License for more details.
-*
-*    You should have received a copy of the GNU Affero General Public License
-*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*
-*    As a special exception, the copyright holders give permission to link the
-*    code of portions of this program with the OpenSSL library under certain
-*    conditions as described in each individual source file and distribute
-*    linked combinations including the program with the OpenSSL library. You
-*    must comply with the GNU Affero General Public License in all respects for
-*    all of the code used other than as permitted herein. If you modify file(s)
-*    with this exception, you may extend this exception to your version of the
-*    file(s), but you are not obligated to do so. If you do not wish to do so,
-*    delete this exception statement from your version. If you delete this
-*    exception statement from all source files in the program, then also delete
-*    it in the license file.
-*/
+ *    Copyright (C) 2018-present MongoDB, Inc.
+ *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
+ *
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
+ */
 
 #include "mongo/platform/basic.h"
 
@@ -37,6 +39,7 @@ namespace mongo {
 namespace fts {
 
 using std::string;
+using unittest::assertGet;
 
 TEST(FTSElementIterator, Test1) {
     BSONObj obj = fromjson(
@@ -47,7 +50,7 @@ TEST(FTSElementIterator, Test1) {
 
     BSONObj indexSpec = fromjson("{ key : { a : \"text\" }, weights : { b : 10, d : 5 } }");
 
-    FTSSpec spec(FTSSpec::fixSpec(indexSpec));
+    FTSSpec spec(assertGet(FTSSpec::fixSpec(indexSpec)));
     Weights::const_iterator itt = spec.weights().begin();
     ASSERT(itt != spec.weights().end());
     ASSERT_EQUALS("a", itt->first);
@@ -92,7 +95,7 @@ TEST(FTSElementIterator, Test2) {
 
     BSONObj indexSpec = fromjson("{ key : { \"a.b.c\" : \"text\", d : \"text\" } }");
 
-    FTSSpec spec(FTSSpec::fixSpec(indexSpec));
+    FTSSpec spec(assertGet(FTSSpec::fixSpec(indexSpec)));
 
     FTSElementIterator it(spec, obj);
 
@@ -137,7 +140,7 @@ TEST(FTSElementIterator, Test3) {
     BSONObj indexSpec =
         fromjson("{ key : { a : \"text\", \"a.b.c\" : \"text\" }, weights : { \"a.b.c\" : 5 } }");
 
-    FTSSpec spec(FTSSpec::fixSpec(indexSpec));
+    FTSSpec spec(assertGet(FTSSpec::fixSpec(indexSpec)));
     Weights::const_iterator itt = spec.weights().begin();
     ASSERT(itt != spec.weights().end());
     ASSERT_EQUALS("a", itt->first);
@@ -183,7 +186,7 @@ TEST(FTSElementIterator, Test4) {
 
     BSONObj indexSpec = fromjson("{ key : { \"a.b.c\" : \"text\" }, weights : { \"a.b.c\" : 5 } }");
 
-    FTSSpec spec(FTSSpec::fixSpec(indexSpec));
+    FTSSpec spec(assertGet(FTSSpec::fixSpec(indexSpec)));
     FTSElementIterator it(spec, obj);
 
     ASSERT(it.more());
@@ -223,7 +226,7 @@ TEST(FTSElementIterator, Test5) {
     BSONObj indexSpec =
         fromjson("{ key : { a : \"text\" }, weights : { b : 20, c : 10, \"d.e.f\" : 5 } }");
 
-    FTSSpec spec(FTSSpec::fixSpec(indexSpec));
+    FTSSpec spec(assertGet(FTSSpec::fixSpec(indexSpec)));
     FTSElementIterator it(spec, obj);
 
     ASSERT(it.more());
@@ -269,7 +272,7 @@ TEST(FTSElementIterator, Test6) {
     BSONObj indexSpec =
         fromjson("{ key : { a : \"text\" }, weights : { b : 20, c : 10, \"d.e.f\" : 5 } }");
 
-    FTSSpec spec(FTSSpec::fixSpec(indexSpec));
+    FTSSpec spec(assertGet(FTSSpec::fixSpec(indexSpec)));
     FTSElementIterator it(spec, obj);
 
     ASSERT(it.more());
@@ -313,7 +316,7 @@ TEST(FTSElementIterator, LanguageOverrideV2) {
     BSONObj indexSpec =
         fromjson("{ key : { \"a.b.c\" : \"text\", d : \"text\" }, textIndexVersion: 2.0 }");
 
-    FTSSpec spec(FTSSpec::fixSpec(indexSpec));
+    FTSSpec spec(assertGet(FTSSpec::fixSpec(indexSpec)));
 
     FTSElementIterator it(spec, obj);
 
@@ -362,7 +365,7 @@ TEST(FTSElementIterator, LanguageOverrideV3) {
     BSONObj indexSpec =
         fromjson("{ key : { \"a.b.c\" : \"text\", d : \"text\" }, textIndexVersion: 3.0 }");
 
-    FTSSpec spec(FTSSpec::fixSpec(indexSpec));
+    FTSSpec spec(assertGet(FTSSpec::fixSpec(indexSpec)));
 
     FTSElementIterator it(spec, obj);
 

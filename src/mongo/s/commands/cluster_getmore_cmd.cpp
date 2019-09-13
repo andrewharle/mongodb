@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -44,18 +46,22 @@ namespace {
  * corresponding to the cursor id passed from the application. In order to generate these results,
  * may issue getMore commands to remote nodes in one or more shards.
  */
-class ClusterGetMoreCmd final : public Command {
+class ClusterGetMoreCmd final : public BasicCommand {
     MONGO_DISALLOW_COPYING(ClusterGetMoreCmd);
 
 public:
-    ClusterGetMoreCmd() : Command("getMore") {}
+    ClusterGetMoreCmd() : BasicCommand("getMore") {}
 
-    bool isWriteCommandForConfigServer() const final {
+    std::string parseNs(const std::string& dbname, const BSONObj& cmdObj) const final {
+        return GetMoreRequest::parseNs(dbname, cmdObj).ns();
+    }
+
+    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
 
-    bool slaveOk() const final {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const final {
+        return AllowedOnSecondary::kAlways;
     }
 
     bool maintenanceOk() const final {
@@ -73,42 +79,40 @@ public:
         return false;
     }
 
-    void help(std::stringstream& help) const final {
-        help << "retrieve more documents for a cursor id";
+    std::string help() const final {
+        return "retrieve more documents for a cursor id";
     }
 
-    Status checkAuthForCommand(ClientBasic* client,
+    LogicalOp getLogicalOp() const final {
+        return LogicalOp::opGetMore;
+    }
+
+    Status checkAuthForCommand(Client* client,
                                const std::string& dbname,
-                               const BSONObj& cmdObj) final {
+                               const BSONObj& cmdObj) const final {
         StatusWith<GetMoreRequest> parseStatus = GetMoreRequest::parseFromBSON(dbname, cmdObj);
         if (!parseStatus.isOK()) {
             return parseStatus.getStatus();
         }
         const GetMoreRequest& request = parseStatus.getValue();
 
-        return AuthorizationSession::get(client)
-            ->checkAuthForGetMore(request.nss, request.cursorid, request.term.is_initialized());
+        return AuthorizationSession::get(client)->checkAuthForGetMore(
+            request.nss, request.cursorid, request.term.is_initialized());
     }
 
-    bool run(OperationContext* txn,
+    bool run(OperationContext* opCtx,
              const std::string& dbname,
-             BSONObj& cmdObj,
-             int options,
-             std::string& errmsg,
+             const BSONObj& cmdObj,
              BSONObjBuilder& result) final {
         // Counted as a getMore, not as a command.
         globalOpCounters.gotGetMore();
 
         StatusWith<GetMoreRequest> parseStatus = GetMoreRequest::parseFromBSON(dbname, cmdObj);
-        if (!parseStatus.isOK()) {
-            return appendCommandStatus(result, parseStatus.getStatus());
-        }
+        uassertStatusOK(parseStatus.getStatus());
         const GetMoreRequest& request = parseStatus.getValue();
 
-        auto response = ClusterFind::runGetMore(txn, request);
-        if (!response.isOK()) {
-            return appendCommandStatus(result, response.getStatus());
-        }
+        auto response = ClusterFind::runGetMore(opCtx, request);
+        uassertStatusOK(response.getStatus());
 
         response.getValue().addToBSON(CursorResponse::ResponseType::SubsequentResponse, &result);
         return true;

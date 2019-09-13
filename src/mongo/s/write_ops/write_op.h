@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2013 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -30,11 +32,9 @@
 
 #include <vector>
 
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonobj.h"
 #include "mongo/s/ns_targeter.h"
-#include "mongo/s/write_ops/write_error_detail.h"
 #include "mongo/s/write_ops/batched_command_request.h"
+#include "mongo/s/write_ops/write_error_detail.h"
 
 namespace mongo {
 
@@ -42,7 +42,6 @@ struct TargetedWrite;
 struct ChildWriteOp;
 
 enum WriteOpState {
-
     // Item is ready to be targeted
     WriteOpState_Ready,
 
@@ -91,9 +90,7 @@ enum WriteOpState {
  */
 class WriteOp {
 public:
-    WriteOp(const BatchItemRef& itemRef) : _itemRef(itemRef), _state(WriteOpState_Ready) {}
-
-    ~WriteOp();
+    WriteOp(BatchItemRef itemRef) : _itemRef(std::move(itemRef)) {}
 
     /**
      * Returns the write item for this operation
@@ -122,7 +119,7 @@ public:
      * Returns !OK if the targeting process itself fails
      *             (no TargetedWrites will be added, state unchanged)
      */
-    Status targetWrites(OperationContext* txn,
+    Status targetWrites(OperationContext* opCtx,
                         const NSTargeter& targeter,
                         std::vector<TargetedWrite*>* targetedWrites);
 
@@ -167,22 +164,19 @@ private:
     /**
      * Updates the op state after new information is received.
      */
-    void updateOpState();
+    void _updateOpState();
 
     // Owned elsewhere, reference to a batch with a write item
     const BatchItemRef _itemRef;
 
     // What stage of the operation we are at
-    WriteOpState _state;
+    WriteOpState _state{WriteOpState_Ready};
 
     // filled when state == _Pending
-    std::vector<ChildWriteOp*> _childOps;
+    std::vector<ChildWriteOp> _childOps;
 
     // filled when state == _Error
     std::unique_ptr<WriteErrorDetail> _error;
-
-    // Finished child operations, for debugging
-    std::vector<ChildWriteOp*> _history;
 };
 
 /**
@@ -193,15 +187,15 @@ private:
  * (_Error) state.
  */
 struct ChildWriteOp {
-    ChildWriteOp(WriteOp* const parent)
-        : parentOp(parent), state(WriteOpState_Ready), pendingWrite(NULL) {}
+    ChildWriteOp(WriteOp* const parent) : parentOp(parent) {}
 
     const WriteOp* const parentOp;
-    WriteOpState state;
+
+    WriteOpState state{WriteOpState_Ready};
 
     // non-zero when state == _Pending
     // Not owned here but tracked for reporting
-    TargetedWrite* pendingWrite;
+    TargetedWrite* pendingWrite{nullptr};
 
     // filled when state > _Pending
     std::unique_ptr<ShardEndpoint> endpoint;
@@ -232,4 +226,5 @@ struct TargetedWrite {
     // we need to be able to cancel ops.
     WriteOpRef writeOpRef;
 };
-}
+
+}  // namespace mongo

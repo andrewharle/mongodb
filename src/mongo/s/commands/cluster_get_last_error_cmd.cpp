@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -26,48 +28,196 @@
  *    it in the license file.
  */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kSharding
+
 #include "mongo/platform/basic.h"
 
 #include <vector>
 
+#include "mongo/client/remote_command_targeter.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/lasterror.h"
-#include "mongo/s/client/dbclient_multi_command.h"
+#include "mongo/executor/task_executor_pool.h"
+#include "mongo/s/async_requests_sender.h"
+#include "mongo/s/client/shard_registry.h"
 #include "mongo/s/cluster_last_error_info.h"
-#include "mongo/s/dbclient_shard_resolver.h"
+#include "mongo/s/grid.h"
 #include "mongo/s/write_ops/batch_downconvert.h"
+#include "mongo/util/log.h"
 
 namespace mongo {
 namespace {
 
-class GetLastErrorCmd : public Command {
-public:
-    GetLastErrorCmd() : Command("getLastError", false, "getlasterror") {}
+using std::vector;
 
-    virtual bool isWriteCommandForConfigServer() const {
+// Adds a wOpTime and a wElectionId field to a set of gle options
+BSONObj buildGLECmdWithOpTime(const BSONObj& gleOptions,
+                              const repl::OpTime& opTime,
+                              const OID& electionId) {
+    BSONObjBuilder builder;
+    BSONObjIterator it(gleOptions);
+
+    for (int i = 0; it.more(); ++i) {
+        BSONElement el = it.next();
+
+        // Make sure first element is getLastError : 1
+        if (i == 0) {
+            StringData elName(el.fieldName());
+            if (!elName.equalCaseInsensitive("getLastError")) {
+                builder.append("getLastError", 1);
+            }
+        }
+
+        builder.append(el);
+    }
+    opTime.append(&builder, "wOpTime");
+    builder.appendOID("wElectionId", const_cast<OID*>(&electionId));
+    return builder.obj();
+}
+
+/**
+ * Uses GLE and the shard hosts and opTimes last written by write commands to enforce a
+ * write concern across the previously used shards.
+ *
+ * Returns OK with the LegacyWCResponses containing only write concern error information
+ * Returns !OK if there was an error getting a GLE response
+ */
+Status enforceLegacyWriteConcern(OperationContext* opCtx,
+                                 StringData dbName,
+                                 const BSONObj& options,
+                                 const HostOpTimeMap& hostOpTimes,
+                                 std::vector<LegacyWCResponse>* legacyWCResponses) {
+    if (hostOpTimes.empty()) {
+        return Status::OK();
+    }
+
+    // Assemble requests
+    std::vector<AsyncRequestsSender::Request> requests;
+    for (HostOpTimeMap::const_iterator it = hostOpTimes.begin(); it != hostOpTimes.end(); ++it) {
+        const ConnectionString& shardConnStr = it->first;
+        const auto& hot = it->second;
+        const repl::OpTime& opTime = hot.opTime;
+        const OID& electionId = hot.electionId;
+
+        auto swShard = Grid::get(opCtx)->shardRegistry()->getShard(opCtx, shardConnStr.toString());
+        if (!swShard.isOK()) {
+            return swShard.getStatus();
+        }
+
+        LOG(3) << "enforcing write concern " << options << " on " << shardConnStr.toString()
+               << " at opTime " << opTime.getTimestamp().toStringPretty() << " with electionID "
+               << electionId;
+
+        BSONObj gleCmd = buildGLECmdWithOpTime(options, opTime, electionId);
+        requests.emplace_back(swShard.getValue()->getId(), gleCmd);
+    }
+
+    // Send the requests.
+
+    const ReadPreferenceSetting readPref(ReadPreference::PrimaryOnly, TagSet());
+    AsyncRequestsSender ars(opCtx,
+                            Grid::get(opCtx)->getExecutorPool()->getArbitraryExecutor(),
+                            dbName.toString(),
+                            requests,
+                            readPref,
+                            Shard::RetryPolicy::kIdempotent);
+
+    // Receive the responses.
+
+    vector<Status> failedStatuses;
+    while (!ars.done()) {
+        // Block until a response is available.
+        auto response = ars.next();
+
+        // Return immediately if we failed to contact a shard.
+        if (!response.shardHostAndPort) {
+            invariant(!response.swResponse.isOK());
+            return response.swResponse.getStatus();
+        }
+
+        // We successfully contacted the shard, but it returned some error.
+        if (!response.swResponse.isOK()) {
+            failedStatuses.push_back(std::move(response.swResponse.getStatus()));
+            continue;
+        }
+
+        BSONObj gleResponse = stripNonWCInfo(response.swResponse.getValue().data);
+
+        // Use the downconversion tools to determine if this GLE response is ok, a
+        // write concern error, or an unknown error we should immediately abort for.
+        GLEErrors errors;
+        Status extractStatus = extractGLEErrors(gleResponse, &errors);
+        if (!extractStatus.isOK()) {
+            failedStatuses.push_back(extractStatus);
+            continue;
+        }
+
+        LegacyWCResponse wcResponse;
+        invariant(response.shardHostAndPort);
+        wcResponse.shardHost = response.shardHostAndPort->toString();
+        wcResponse.gleResponse = gleResponse;
+        if (errors.wcError.get()) {
+            wcResponse.errToReport = errors.wcError->toString();
+        }
+
+        legacyWCResponses->push_back(wcResponse);
+    }
+
+    if (failedStatuses.empty()) {
+        return Status::OK();
+    }
+
+    StringBuilder builder;
+    builder << "could not enforce write concern";
+
+    for (vector<Status>::const_iterator it = failedStatuses.begin(); it != failedStatuses.end();
+         ++it) {
+        const Status& failedStatus = *it;
+        if (it == failedStatuses.begin()) {
+            builder << causedBy(failedStatus.toString());
+        } else {
+            builder << ":: and ::" << failedStatus.toString();
+        }
+    }
+
+    if (failedStatuses.size() == 1u) {
+        return failedStatuses.front();
+    } else {
+        return Status(ErrorCodes::MultipleErrorsOccurred, builder.str());
+    }
+}
+
+
+class GetLastErrorCmd : public BasicCommand {
+public:
+    GetLastErrorCmd() : BasicCommand("getLastError", "getlasterror") {}
+
+    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
 
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
 
-    virtual void help(std::stringstream& help) const {
-        help << "check for an error on the last command executed";
+    std::string help() const override {
+        return "check for an error on the last command executed";
     }
 
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
+                                       std::vector<Privilege>* out) const {
         // No auth required for getlasterror
     }
 
-    virtual bool run(OperationContext* txn,
+    bool requiresAuth() const override {
+        return false;
+    }
+
+    virtual bool run(OperationContext* opCtx,
                      const std::string& dbname,
-                     BSONObj& cmdObj,
-                     int options,
-                     std::string& errmsg,
+                     const BSONObj& cmdObj,
                      BSONObjBuilder& result) {
         // Mongos GLE - finicky.
         //
@@ -98,33 +248,18 @@ public:
 
         // For compatibility with 2.4 sharded GLE, we always enforce the write concern
         // across all shards.
-        const HostOpTimeMap hostOpTimes(ClusterLastErrorInfo::get(cc()).getPrevHostOpTimes());
-        HostOpTimeMap resolvedHostOpTimes;
+        const HostOpTimeMap hostOpTimes(ClusterLastErrorInfo::get(cc())->getPrevHostOpTimes());
 
-        Status status(Status::OK());
-        for (HostOpTimeMap::const_iterator it = hostOpTimes.begin(); it != hostOpTimes.end();
-             ++it) {
-            const ConnectionString& shardEndpoint = it->first;
-            const HostOpTime& hot = it->second;
-
-            ConnectionString resolvedHost;
-            status = DBClientShardResolver::findMaster(shardEndpoint, &resolvedHost);
-            if (!status.isOK()) {
-                break;
-            }
-
-            resolvedHostOpTimes[resolvedHost] = hot;
-        }
-
-        DBClientMultiCommand dispatcher;
         std::vector<LegacyWCResponse> wcResponses;
-        if (status.isOK()) {
-            status = enforceLegacyWriteConcern(
-                &dispatcher, dbname, cmdObj, resolvedHostOpTimes, &wcResponses);
-        }
+        auto status =
+            enforceLegacyWriteConcern(opCtx,
+                                      dbname,
+                                      CommandHelpers::filterCommandRequestForPassthrough(cmdObj),
+                                      hostOpTimes,
+                                      &wcResponses);
 
         // Don't forget about our last hosts, reset the client info
-        ClusterLastErrorInfo::get(cc()).disableForCommand();
+        ClusterLastErrorInfo::get(cc())->disableForCommand();
 
         // We're now done contacting all remote servers, just report results
 
@@ -181,7 +316,7 @@ public:
         if (numWCErrors == 1) {
             // Return the single write concern error we found, err should be set or not
             // from gle response
-            result.appendElements(lastErrResponse->gleResponse);
+            CommandHelpers::filterCommandReplyForPassthrough(lastErrResponse->gleResponse, &result);
             return lastErrResponse->gleResponse["ok"].trueValue();
         } else {
             // Return a generic combined WC error message
@@ -191,7 +326,7 @@ public:
             // Need to always return err
             result.appendNull("err");
 
-            return appendCommandStatus(
+            return CommandHelpers::appendCommandStatusNoThrow(
                 result,
                 Status(ErrorCodes::WriteConcernFailed, "multiple write concern errors occurred"));
         }

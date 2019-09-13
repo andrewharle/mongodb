@@ -21,13 +21,16 @@ assert.eq(0, res.cursor.id);
 assert.eq([], res.cursor.firstBatch);
 
 // Ensure find command keeps cursor open if tailing a capped collection.
-coll.drop();
-assert.commandWorked(coll.getDB().createCollection(collname, {capped: true, size: 2048}));
-assert.writeOK(coll.insert({_id: 1}));
-res = coll.runCommand("find", {tailable: true});
-assert.commandWorked(res);
-assert.neq(0, res.cursor.id);
-assert.eq([{_id: 1}], res.cursor.firstBatch);
+// Skip the test with mobile storage engine as it doesn't support capped collections.
+if (jsTest.options().storageEngine !== "mobile") {
+    coll.drop();
+    assert.commandWorked(coll.getDB().createCollection(collname, {capped: true, size: 2048}));
+    assert.writeOK(coll.insert({_id: 1}));
+    res = coll.runCommand("find", {tailable: true});
+    assert.commandWorked(res);
+    assert.neq(0, res.cursor.id);
+    assert.eq([{_id: 1}], res.cursor.firstBatch);
+}
 
 // Multiple batches.
 coll.drop();
@@ -39,7 +42,7 @@ assert.commandWorked(res);
 assert.neq(0, res.cursor.id);
 assert.eq(101, res.cursor.firstBatch.length);
 
-cursor = new DBCommandCursor(coll.getDB().getMongo(), res);
+cursor = new DBCommandCursor(coll.getDB(), res);
 assert.eq(cursor.itcount(), 140);
 
 // Command doesn't parse.

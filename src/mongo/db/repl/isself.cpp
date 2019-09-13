@@ -1,30 +1,32 @@
+
 /**
-*    Copyright (C) 2014 MongoDB Inc.
-*
-*    This program is free software: you can redistribute it and/or  modify
-*    it under the terms of the GNU Affero General Public License, version 3,
-*    as published by the Free Software Foundation.
-*
-*    This program is distributed in the hope that it will be useful,
-*    but WITHOUT ANY WARRANTY; without even the implied warranty of
-*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*    GNU Affero General Public License for more details.
-*
-*    You should have received a copy of the GNU Affero General Public License
-*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*
-*    As a special exception, the copyright holders give permission to link the
-*    code of portions of this program with the OpenSSL library under certain
-*    conditions as described in each individual source file and distribute
-*    linked combinations including the program with the OpenSSL library. You
-*    must comply with the GNU Affero General Public License in all respects for
-*    all of the code used other than as permitted herein. If you modify file(s)
-*    with this exception, you may extend this exception to your version of the
-*    file(s), but you are not obligated to do so. If you do not wish to do so,
-*    delete this exception statement from your version. If you delete this
-*    exception statement from all source files in the program, then also delete
-*    it in the license file.
-*/
+ *    Copyright (C) 2018-present MongoDB, Inc.
+ *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
+ *
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
+ */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kNetwork
 
@@ -37,15 +39,17 @@
 #include "mongo/base/init.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/client/dbclientinterface.h"
-#include "mongo/db/commands.h"
 #include "mongo/db/auth/action_set.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authorization_manager_global.h"
 #include "mongo/db/auth/internal_user_auth.h"
 #include "mongo/db/auth/privilege.h"
-#include "mongo/util/scopeguard.h"
+#include "mongo/db/commands.h"
+#include "mongo/db/service_context.h"
 #include "mongo/util/log.h"
+#include "mongo/util/net/socket_utils.h"
+#include "mongo/util/scopeguard.h"
 
 #if defined(__linux__) || defined(__APPLE__) || defined(__FreeBSD__) || defined(__sun) || \
     defined(__OpenBSD__)
@@ -66,11 +70,11 @@
 #endif
 
 #elif defined(_WIN32)
+#include <Ws2tcpip.h>
 #include <boost/asio/detail/socket_ops.hpp>
 #include <boost/system/error_code.hpp>
 #include <iphlpapi.h>
 #include <winsock2.h>
-#include <Ws2tcpip.h>
 #endif  // defined(_WIN32)
 
 namespace mongo {
@@ -154,17 +158,20 @@ std::vector<std::string> getAddrsForHost(const std::string& iporhost,
 
 }  // namespace
 
-bool isSelf(const HostAndPort& hostAndPort) {
+bool isSelf(const HostAndPort& hostAndPort, ServiceContext* const ctx) {
     // Fastpath: check if the host&port in question is bound to one
     // of the interfaces on this machine.
     // No need for ip match if the ports do not match
     if (hostAndPort.port() == serverGlobalParams.port) {
-        std::vector<std::string> myAddrs = serverGlobalParams.bind_ip.empty()
-            ? getBoundAddrs(IPv6Enabled())
-            : std::vector<std::string>();
+        std::vector<std::string> myAddrs = serverGlobalParams.bind_ips;
 
-        if (!serverGlobalParams.bind_ip.empty()) {
-            boost::split(myAddrs, serverGlobalParams.bind_ip, boost::is_any_of(", "));
+        // If any of the bound addresses is the default route (0.0.0.0 on IPv4) it means we are
+        // listening on all network interfaces and need to check against any of them.
+        if (myAddrs.empty() ||
+            std::any_of(myAddrs.cbegin(), myAddrs.cend(), [](std::string const& addrStr) {
+                return HostAndPort(addrStr, serverGlobalParams.port).isDefaultRoute();
+            })) {
+            myAddrs = getBoundAddrs(IPv6Enabled());
         }
 
         const std::vector<std::string> hostAddrs =
@@ -182,12 +189,7 @@ bool isSelf(const HostAndPort& hostAndPort) {
         }
     }
 
-    // Ensure that the server is up and ready to accept incoming network requests.
-    const Listener* listener = Listener::getTimeTracker();
-    if (!listener) {
-        return false;
-    }
-    listener->waitUntilListening();
+    ctx->waitForStartupComplete();
 
     try {
         DBClientConnection conn;
@@ -202,10 +204,8 @@ bool isSelf(const HostAndPort& hostAndPort) {
             return false;
         }
 
-        if (getGlobalAuthorizationManager()->isAuthEnabled() && isInternalAuthSet()) {
-            if (!conn.authenticateInternalUser()) {
-                return false;
-            }
+        if (isInternalAuthSet() && !conn.authenticateInternalUser()) {
+            return false;
         }
         BSONObj out;
         bool ok = conn.simpleCommand("admin", &out, "_isSelf");

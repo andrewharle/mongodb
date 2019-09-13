@@ -1,8 +1,20 @@
-// @tags: [assumes_write_concern_unchanged]
-
+// Cannot implicitly shard accessed collections because of not being able to create unique index
+// using hashed shard key pattern.
+//
+// @tags: [
+//   assumes_write_concern_unchanged,
+//   cannot_create_unique_index_when_using_hashed_shard_key,
+//   requires_fastcount,
+//
+//   # Uses index building in background
+//   requires_background_index,
+// ]
+//
 //
 // Ensures that mongod respects the batch write protocol for inserts
 //
+
+load("jstests/libs/get_index_helpers.js");
 
 var coll = db.getCollection("batch_write_insert");
 coll.drop();
@@ -13,7 +25,7 @@ var request;
 var result;
 var batch;
 
-var maxWriteBatchSize = 1000;
+var maxWriteBatchSize = db.isMaster().maxWriteBatchSize;
 
 function resultOK(result) {
     return result.ok && !('code' in result) && !('errmsg' in result) && !('errInfo' in result) &&
@@ -59,9 +71,8 @@ result = coll.runCommand(request);
 assert(resultOK(result), tojson(result));
 assert.eq(coll.count(), 1);
 
-for (var field in result) {
-    assert.eq('ok', field, 'unexpected field found in result: ' + field);
-}
+var fields = ['ok'];
+assert.hasFields(result, fields, 'fields in result do not match: ' + tojson(fields));
 
 //
 // Single document insert, w:1 write concern specified, ordered:true
@@ -263,7 +274,24 @@ request = {
 result = coll.runCommand(request);
 assert(result.ok, tojson(result));
 assert.eq(1, result.n);
-assert.eq(coll.getIndexes().length, 2);
+var allIndexes = coll.getIndexes();
+var spec = GetIndexHelpers.findByName(allIndexes, "x_1");
+assert.neq(null, spec, "Index with name 'x_1' not found: " + tojson(allIndexes));
+assert.lte(2, spec.v, tojson(spec));
+
+// Test that a v=1 index can be created by inserting into the system.indexes collection.
+coll.drop();
+request = {
+    insert: "system.indexes",
+    documents: [{ns: coll.toString(), key: {x: 1}, name: "x_1", v: 1}]
+};
+result = coll.runCommand(request);
+assert(result.ok, tojson(result));
+assert.eq(1, result.n);
+allIndexes = coll.getIndexes();
+spec = GetIndexHelpers.findByName(allIndexes, "x_1");
+assert.neq(null, spec, "Index with name 'x_1' not found: " + tojson(allIndexes));
+assert.eq(1, spec.v, tojson(spec));
 
 //
 // Duplicate index insertion gives n = 0
@@ -287,7 +315,7 @@ request = {
     documents: [{ns: "invalid." + coll.getName(), key: {x: 1}, name: "x_1", unique: true}]
 };
 result = coll.runCommand(request);
-assert(!result.ok, tojson(result));
+assert(!result.ok || (result.n == 0 && result.writeErrors.length == 1), tojson(result));
 assert.eq(coll.getIndexes().length, 0);
 
 //
@@ -298,7 +326,7 @@ request = {
     documents: [{}]
 };
 result = coll.runCommand(request);
-assert(!result.ok, tojson(result));
+assert(!result.ok || (result.n == 0 && result.writeErrors.length == 1), tojson(result));
 assert.eq(coll.getIndexes().length, 0);
 
 //
@@ -312,7 +340,7 @@ result = coll.runCommand(request);
 assert(result.ok, tojson(result));
 assert.eq(0, result.n);
 assert.eq(0, result.writeErrors[0].index);
-assert.eq(coll.getIndexes().length, 1);
+assert.eq(coll.getIndexes().length, 0);
 
 //
 // Invalid index desc
@@ -322,10 +350,11 @@ request = {
     documents: [{ns: coll.toString(), key: {x: 1}}]
 };
 result = coll.runCommand(request);
+print(tojson(result));
 assert(result.ok, tojson(result));
 assert.eq(0, result.n);
 assert.eq(0, result.writeErrors[0].index);
-assert.eq(coll.getIndexes().length, 1);
+assert.eq(coll.getIndexes().length, 0);
 
 //
 // Invalid index desc
@@ -338,7 +367,7 @@ result = coll.runCommand(request);
 assert(result.ok, tojson(result));
 assert.eq(0, result.n);
 assert.eq(0, result.writeErrors[0].index);
-assert.eq(coll.getIndexes().length, 1);
+assert.eq(coll.getIndexes().length, 0);
 
 //
 // Cannot insert more than one index at a time through the batch writes
@@ -383,4 +412,7 @@ request = {
 result = coll.runCommand(request);
 assert(result.ok, tojson(result));
 assert.eq(1, result.n);
-assert.eq(coll.getIndexes().length, 2);
+allIndexes = coll.getIndexes();
+spec = GetIndexHelpers.findByName(allIndexes, "x_1");
+assert.neq(null, spec, "Index with name 'x_1' not found: " + tojson(allIndexes));
+assert.lte(2, spec.v, tojson(spec));

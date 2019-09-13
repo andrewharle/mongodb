@@ -92,26 +92,39 @@ var Explainable = (function() {
         // Explainable operations.
         //
 
-        /**
-         * Adds "explain: true" to "extraOpts", and then passes through to the regular collection's
-         * aggregate helper.
-         */
         this.aggregate = function(pipeline, extraOpts) {
             if (!(pipeline instanceof Array)) {
-                // support legacy varargs form. (Also handles db.foo.aggregate())
-                pipeline = argumentsToArray(arguments);
+                // Support legacy varargs form. (Also handles db.foo.aggregate())
+                pipeline = Array.from(arguments);
                 extraOpts = {};
             }
 
             // Add the explain option.
-            extraOpts = extraOpts || {};
-            extraOpts.explain = true;
+            let extraOptsCopy = Object.extend({}, (extraOpts || {}));
 
-            return this._collection.aggregate(pipeline, extraOpts);
+            // For compatibility with 3.4 and older versions, when the verbosity is "queryPlanner",
+            // we use the explain option to the aggregate command. Otherwise we issue an explain
+            // command wrapping the agg command, which is supported by newer versions of the server.
+            if (this._verbosity === "queryPlanner") {
+                extraOptsCopy.explain = true;
+                return this._collection.aggregate(pipeline, extraOptsCopy);
+            } else {
+                // The aggregate command requires a cursor field.
+                if (!extraOptsCopy.hasOwnProperty("cursor")) {
+                    extraOptsCopy = Object.extend(extraOptsCopy, {cursor: {}});
+                }
+
+                let aggCmd = Object.extend(
+                    {"aggregate": this._collection.getName(), "pipeline": pipeline}, extraOptsCopy);
+                let explainCmd = {"explain": aggCmd, "verbosity": this._verbosity};
+                let explainResult = this._collection.runReadCommand(explainCmd);
+                return throwOrReturn(explainResult);
+            }
         };
 
-        this.count = function(query) {
-            return this.find(query).count();
+        this.count = function(query, options) {
+            query = this.find(query);
+            return QueryHelpers._applyCountOptions(query, options).count();
         };
 
         /**
@@ -126,37 +139,31 @@ var Explainable = (function() {
 
         this.findAndModify = function(params) {
             var famCmd = Object.extend({"findAndModify": this._collection.getName()}, params);
-            var explainCmd = {
-                "explain": famCmd,
-                "verbosity": this._verbosity
-            };
+            var explainCmd = {"explain": famCmd, "verbosity": this._verbosity};
             var explainResult = this._collection.runReadCommand(explainCmd);
             return throwOrReturn(explainResult);
         };
 
         this.group = function(params) {
             params.ns = this._collection.getName();
-            var grpCmd = {
-                "group": this._collection.getDB()._groupFixParms(params)
-            };
-            var explainCmd = {
-                "explain": grpCmd,
-                "verbosity": this._verbosity
-            };
+            var grpCmd = {"group": this._collection.getDB()._groupFixParms(params)};
+            var explainCmd = {"explain": grpCmd, "verbosity": this._verbosity};
             var explainResult = this._collection.runReadCommand(explainCmd);
             return throwOrReturn(explainResult);
         };
 
-        this.distinct = function(keyString, query) {
+        this.distinct = function(keyString, query, options) {
             var distinctCmd = {
                 distinct: this._collection.getName(),
                 key: keyString,
                 query: query || {}
             };
-            var explainCmd = {
-                explain: distinctCmd,
-                verbosity: this._verbosity
-            };
+
+            if (options && options.hasOwnProperty("collation")) {
+                distinctCmd.collation = options.collation;
+            }
+
+            var explainCmd = {explain: distinctCmd, verbosity: this._verbosity};
             var explainResult = this._collection.runReadCommand(explainCmd);
             return throwOrReturn(explainResult);
         };
@@ -165,9 +172,15 @@ var Explainable = (function() {
             var parsed = this._collection._parseRemove.apply(this._collection, arguments);
             var query = parsed.query;
             var justOne = parsed.justOne;
+            var collation = parsed.collation;
 
             var bulk = this._collection.initializeOrderedBulkOp();
             var removeOp = bulk.find(query);
+
+            if (collation) {
+                removeOp.collation(collation);
+            }
+
             if (justOne) {
                 removeOp.removeOne();
             } else {
@@ -185,12 +198,22 @@ var Explainable = (function() {
             var obj = parsed.obj;
             var upsert = parsed.upsert;
             var multi = parsed.multi;
+            var collation = parsed.collation;
+            var arrayFilters = parsed.arrayFilters;
 
             var bulk = this._collection.initializeOrderedBulkOp();
             var updateOp = bulk.find(query);
 
             if (upsert) {
                 updateOp = updateOp.upsert();
+            }
+
+            if (collation) {
+                updateOp.collation(collation);
+            }
+
+            if (arrayFilters) {
+                updateOp.arrayFilters(arrayFilters);
             }
 
             if (multi) {

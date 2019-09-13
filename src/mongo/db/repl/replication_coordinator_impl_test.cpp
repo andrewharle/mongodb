@@ -1,23 +1,24 @@
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -30,44 +31,47 @@
 
 #include "mongo/platform/basic.h"
 
+#include <boost/optional/optional_io.hpp>
 #include <iostream>
 #include <memory>
 #include <set>
 #include <vector>
 
 #include "mongo/bson/util/bson_extract.h"
+#include "mongo/db/concurrency/lock_state.h"
 #include "mongo/db/operation_context_noop.h"
-#include "mongo/db/repl/handshake_args.h"
+#include "mongo/db/repl/bson_extract_optime.h"
 #include "mongo/db/repl/is_master_response.h"
-#include "mongo/db/repl/old_update_position_args.h"
-#include "mongo/db/repl/operation_context_repl_mock.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/read_concern_args.h"
-#include "mongo/db/repl/read_concern_response.h"
 #include "mongo/db/repl/repl_client_info.h"
+#include "mongo/db/repl/repl_set_config.h"
 #include "mongo/db/repl/repl_set_heartbeat_args.h"
 #include "mongo/db/repl/repl_set_heartbeat_args_v1.h"
 #include "mongo/db/repl/repl_set_request_votes_args.h"
 #include "mongo/db/repl/repl_settings.h"
-#include "mongo/db/repl/replica_set_config.h"
-#include "mongo/db/repl/replication_coordinator.h"  // ReplSetReconfigArgs
+#include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/replication_coordinator_external_state_mock.h"
 #include "mongo/db/repl/replication_coordinator_impl.h"
 #include "mongo/db/repl/replication_coordinator_test_fixture.h"
-#include "mongo/db/repl/topology_coordinator_impl.h"
+#include "mongo/db/repl/storage_interface_mock.h"
+#include "mongo/db/repl/topology_coordinator.h"
 #include "mongo/db/repl/update_position_args.h"
 #include "mongo/db/server_options.h"
-#include "mongo/db/service_context_noop.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/executor/network_interface_mock.h"
+#include "mongo/rpc/metadata/oplog_query_metadata.h"
 #include "mongo/rpc/metadata/repl_set_metadata.h"
 #include "mongo/stdx/functional.h"
 #include "mongo/stdx/future.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/unittest/barrier.h"
+#include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/log.h"
+#include "mongo/util/scopeguard.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/timer.h"
 
@@ -78,10 +82,9 @@ namespace {
 using executor::NetworkInterfaceMock;
 using executor::RemoteCommandRequest;
 using executor::RemoteCommandResponse;
+using unittest::assertGet;
 
 typedef ReplicationCoordinator::ReplSetReconfigArgs ReplSetReconfigArgs;
-Status kInterruptedStatus(ErrorCodes::Interrupted, "operation was interrupted");
-
 // Helper class to wrap Timestamp as an OpTime with term 1.
 struct OpTimeWithTermOne {
     OpTimeWithTermOne(unsigned int sec, unsigned int i) : timestamp(sec, i) {}
@@ -100,23 +103,62 @@ struct OpTimeWithTermOne {
     Timestamp timestamp;
 };
 
-void runSingleNodeElection(ReplicationCoordinatorImpl* replCoord) {
-    replCoord->setMyLastAppliedOpTime(OpTime(Timestamp(1, 0), 0));
-    replCoord->setMyLastDurableOpTime(OpTime(Timestamp(1, 0), 0));
-    ASSERT(replCoord->setFollowerMode(MemberState::RS_SECONDARY));
-    replCoord->waitForElectionFinish_forTest();
+/**
+ * Helper that kills an operation, taking the necessary locks.
+ */
+void killOperation(OperationContext* opCtx) {
+    stdx::lock_guard<Client> lkClient(*opCtx->getClient());
+    opCtx->getServiceContext()->killOperation(opCtx);
+}
 
-    ASSERT(replCoord->isWaitingForApplierToDrain());
-    ASSERT(replCoord->getMemberState().primary()) << replCoord->getMemberState().toString();
+TEST_F(ReplCoordTest, IsMasterIsFalseDuringStepdown) {
+    BSONObj configObj = BSON("_id"
+                             << "mySet"
+                             << "version"
+                             << 1
+                             << "members"
+                             << BSON_ARRAY(BSON("_id" << 1 << "host"
+                                                      << "node1:12345")
+                                           << BSON("_id" << 2 << "host"
+                                                         << "node2:12345"))
+                             << "protocolVersion"
+                             << 1);
+    assertStartSuccess(configObj, HostAndPort("node1", 12345));
+    ReplSetConfig config = assertMakeRSConfig(configObj);
+    auto replCoord = getReplCoord();
+    ASSERT_OK(replCoord->setFollowerMode(MemberState::RS_SECONDARY));
+    replCoord->setMyLastAppliedOpTime(OpTimeWithTermOne(100, 1));
+    replCoord->setMyLastDurableOpTime(OpTimeWithTermOne(100, 1));
+    simulateSuccessfulV1Election();
+    ASSERT(replCoord->getMemberState().primary());
 
-    OperationContextReplMock txn;
-    replCoord->signalDrainComplete(&txn);
+    // Primary begins stepping down due to new term, but cannot finish.
+    getGlobalFailPointRegistry()
+        ->getFailPoint("blockHeartbeatStepdown")
+        ->setMode(FailPoint::alwaysOn);
+
+    TopologyCoordinator::UpdateTermResult updateTermResult;
+    replCoord->updateTerm_forTest(replCoord->getTerm() + 1, &updateTermResult);
+    ASSERT(TopologyCoordinator::UpdateTermResult::kTriggerStepDown == updateTermResult);
+
+    // Test that "ismaster" is immediately false, although "secondary" is not yet true.
+    IsMasterResponse response;
+    replCoord->fillIsMasterForReplSet(&response, {});
+    ASSERT_TRUE(response.isConfigSet());
+    BSONObj responseObj = response.toBSON();
+    ASSERT_FALSE(responseObj["ismaster"].Bool());
+    ASSERT_FALSE(responseObj["secondary"].Bool());
+    ASSERT_FALSE(responseObj.hasField("isreplicaset"));
+
+    getGlobalFailPointRegistry()->getFailPoint("blockHeartbeatStepdown")->setMode(FailPoint::off);
 }
 
 TEST_F(ReplCoordTest, NodeEntersStartup2StateWhenStartingUpWithValidLocalConfig) {
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 2 << "members"
+                            << "version"
+                            << 2
+                            << "members"
                             << BSON_ARRAY(BSON("_id" << 1 << "host"
                                                      << "node1:12345"))),
                        HostAndPort("node1", 12345));
@@ -127,10 +169,13 @@ TEST_F(ReplCoordTest, NodeEntersStartup2StateWhenStartingUpWithValidLocalConfig)
 TEST_F(ReplCoordTest, NodeEntersArbiterStateWhenStartingUpWithValidLocalConfigWhereItIsAnArbiter) {
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 2 << "members"
+                            << "version"
+                            << 2
+                            << "members"
                             << BSON_ARRAY(BSON("_id" << 1 << "host"
                                                      << "node1:12345"
-                                                     << "arbiterOnly" << true)
+                                                     << "arbiterOnly"
+                                                     << true)
                                           << BSON("_id" << 2 << "host"
                                                         << "node2:12345"))),
                        HostAndPort("node1", 12345));
@@ -142,7 +187,9 @@ TEST_F(ReplCoordTest, NodeEntersRemovedStateWhenStartingUpWithALocalConfigWhichL
     startCapturingLogMessages();
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 2 << "members"
+                            << "version"
+                            << 2
+                            << "members"
                             << BSON_ARRAY(BSON("_id" << 1 << "host"
                                                      << "node1:12345")
                                           << BSON("_id" << 2 << "host"
@@ -159,7 +206,9 @@ TEST_F(ReplCoordTest,
     startCapturingLogMessages();
     assertStartSuccess(BSON("_id"
                             << "notMySet"
-                            << "version" << 2 << "members"
+                            << "version"
+                            << 2
+                            << "members"
                             << BSON_ARRAY(BSON("_id" << 1 << "host"
                                                      << "node1:12345"))),
                        HostAndPort("node1", 12345));
@@ -172,34 +221,37 @@ TEST_F(ReplCoordTest, NodeEntersStartupStateWhenStartingUpWithNoLocalConfig) {
     startCapturingLogMessages();
     start();
     stopCapturingLogMessages();
-    ASSERT_EQUALS(2, countLogLinesContaining("Did not find local "));
+    ASSERT_EQUALS(3, countLogLinesContaining("Did not find local "));
     ASSERT_EQUALS(MemberState::RS_STARTUP, getReplCoord()->getMemberState().s);
 }
 
 TEST_F(ReplCoordTest, NodeReturnsInvalidReplicaSetConfigWhenInitiatedWithAnEmptyConfig) {
-    OperationContextNoop txn;
     init("mySet");
     start(HostAndPort("node1", 12345));
+    auto opCtx = makeOperationContext();
     BSONObjBuilder result;
     ASSERT_EQUALS(ErrorCodes::InvalidReplicaSetConfig,
-                  getReplCoord()->processReplSetInitiate(&txn, BSONObj(), &result));
+                  getReplCoord()->processReplSetInitiate(opCtx.get(), BSONObj(), &result));
     ASSERT_EQUALS(MemberState::RS_STARTUP, getReplCoord()->getMemberState().s);
 }
 
 TEST_F(ReplCoordTest,
        NodeReturnsAlreadyInitiatedWhenReceivingAnInitiateCommandAfterHavingAValidConfig) {
-    OperationContextNoop txn;
     init("mySet");
     start(HostAndPort("node1", 12345));
     ASSERT_EQUALS(MemberState::RS_STARTUP, getReplCoord()->getMemberState().s);
 
+    auto opCtx = makeOperationContext();
+
     // Starting uninitialized, show that we can perform the initiate behavior.
     BSONObjBuilder result1;
     ASSERT_OK(
-        getReplCoord()->processReplSetInitiate(&txn,
+        getReplCoord()->processReplSetInitiate(opCtx.get(),
                                                BSON("_id"
                                                     << "mySet"
-                                                    << "version" << 1 << "members"
+                                                    << "version"
+                                                    << 1
+                                                    << "members"
                                                     << BSON_ARRAY(BSON("_id" << 0 << "host"
                                                                              << "node1:12345"))),
                                                &result1));
@@ -210,10 +262,12 @@ TEST_F(ReplCoordTest,
     BSONObjBuilder result2;
     ASSERT_EQUALS(
         ErrorCodes::AlreadyInitialized,
-        getReplCoord()->processReplSetInitiate(&txn,
+        getReplCoord()->processReplSetInitiate(opCtx.get(),
                                                BSON("_id"
                                                     << "mySet"
-                                                    << "version" << 1 << "members"
+                                                    << "version"
+                                                    << 1
+                                                    << "members"
                                                     << BSON_ARRAY(BSON("_id" << 0 << "host"
                                                                              << "node1:12345"))),
                                                &result2));
@@ -224,23 +278,28 @@ TEST_F(ReplCoordTest,
 
 TEST_F(ReplCoordTest,
        NodeReturnsInvalidReplicaSetConfigWhenInitiatingViaANodeThatCannotBecomePrimary) {
-    OperationContextNoop txn;
     init("mySet");
     start(HostAndPort("node1", 12345));
+    auto opCtx = makeOperationContext();
+
     ASSERT_EQUALS(MemberState::RS_STARTUP, getReplCoord()->getMemberState().s);
 
     // Starting uninitialized, show that we can perform the initiate behavior.
     BSONObjBuilder result1;
-    auto status = getReplCoord()->processReplSetInitiate(
-        &txn,
-        BSON("_id"
-             << "mySet"
-             << "version" << 1 << "members" << BSON_ARRAY(BSON("_id" << 0 << "host"
-                                                                     << "node1:12345"
-                                                                     << "arbiterOnly" << true)
-                                                          << BSON("_id" << 1 << "host"
-                                                                        << "node2:12345"))),
-        &result1);
+    auto status =
+        getReplCoord()->processReplSetInitiate(opCtx.get(),
+                                               BSON("_id"
+                                                    << "mySet"
+                                                    << "version"
+                                                    << 1
+                                                    << "members"
+                                                    << BSON_ARRAY(BSON("_id" << 0 << "host"
+                                                                             << "node1:12345"
+                                                                             << "arbiterOnly"
+                                                                             << true)
+                                                                  << BSON("_id" << 1 << "host"
+                                                                                << "node2:12345"))),
+                                               &result1);
     ASSERT_EQUALS(ErrorCodes::InvalidReplicaSetConfig, status);
     ASSERT_STRING_CONTAINS(status.reason(), "is not electable under the new configuration version");
     ASSERT_FALSE(getExternalState()->threadsStarted());
@@ -248,21 +307,23 @@ TEST_F(ReplCoordTest,
 
 TEST_F(ReplCoordTest,
        InitiateShouldSucceedWithAValidConfigEvenIfItHasFailedWithAnInvalidConfigPreviously) {
-    OperationContextNoop txn;
     init("mySet");
     start(HostAndPort("node1", 12345));
+    auto opCtx = makeOperationContext();
     BSONObjBuilder result;
     ASSERT_EQUALS(ErrorCodes::InvalidReplicaSetConfig,
-                  getReplCoord()->processReplSetInitiate(&txn, BSONObj(), &result));
+                  getReplCoord()->processReplSetInitiate(opCtx.get(), BSONObj(), &result));
     ASSERT_EQUALS(MemberState::RS_STARTUP, getReplCoord()->getMemberState().s);
 
     // Having failed to initiate once, show that we can now initiate.
     BSONObjBuilder result1;
     ASSERT_OK(
-        getReplCoord()->processReplSetInitiate(&txn,
+        getReplCoord()->processReplSetInitiate(opCtx.get(),
                                                BSON("_id"
                                                     << "mySet"
-                                                    << "version" << 1 << "members"
+                                                    << "version"
+                                                    << 1
+                                                    << "members"
                                                     << BSON_ARRAY(BSON("_id" << 0 << "host"
                                                                              << "node1:12345"))),
                                                &result1));
@@ -271,29 +332,34 @@ TEST_F(ReplCoordTest,
 
 TEST_F(ReplCoordTest,
        NodeReturnsInvalidReplicaSetConfigWhenInitiatingWithAConfigTheNodeIsAbsentFrom) {
-    OperationContextNoop txn;
     BSONObjBuilder result;
     init("mySet");
     start(HostAndPort("node1", 12345));
+    auto opCtx = makeOperationContext();
     ASSERT_EQUALS(
         ErrorCodes::InvalidReplicaSetConfig,
-        getReplCoord()->processReplSetInitiate(&txn,
+        getReplCoord()->processReplSetInitiate(opCtx.get(),
                                                BSON("_id"
                                                     << "mySet"
-                                                    << "version" << 1 << "members"
+                                                    << "version"
+                                                    << 1
+                                                    << "members"
                                                     << BSON_ARRAY(BSON("_id" << 0 << "host"
                                                                              << "node4"))),
                                                &result));
 }
 
 void doReplSetInitiate(ReplicationCoordinatorImpl* replCoord, Status* status) {
-    OperationContextNoop txn;
     BSONObjBuilder garbage;
+    auto client = getGlobalServiceContext()->makeClient("rsi");
+    auto opCtx = client->makeOperationContext();
     *status =
-        replCoord->processReplSetInitiate(&txn,
+        replCoord->processReplSetInitiate(opCtx.get(),
                                           BSON("_id"
                                                << "mySet"
-                                               << "version" << 1 << "members"
+                                               << "version"
+                                               << 1
+                                               << "members"
                                                << BSON_ARRAY(BSON("_id" << 0 << "host"
                                                                         << "node1:12345")
                                                              << BSON("_id" << 1 << "host"
@@ -306,24 +372,26 @@ TEST_F(ReplCoordTest, NodeReturnsNodeNotFoundWhenQuorumCheckFailsWhileInitiating
     start(HostAndPort("node1", 12345));
     ASSERT_EQUALS(MemberState::RS_STARTUP, getReplCoord()->getMemberState().s);
 
-    ReplSetHeartbeatArgs hbArgs;
+    ReplSetHeartbeatArgsV1 hbArgs;
     hbArgs.setSetName("mySet");
-    hbArgs.setProtocolVersion(1);
     hbArgs.setConfigVersion(1);
-    hbArgs.setCheckEmpty(true);
+    hbArgs.setCheckEmpty();
     hbArgs.setSenderHost(HostAndPort("node1", 12345));
     hbArgs.setSenderId(0);
+    hbArgs.setTerm(0);
+    hbArgs.setHeartbeatVersion(1);
 
     Status status(ErrorCodes::InternalError, "Not set");
-    stdx::thread prsiThread(stdx::bind(doReplSetInitiate, getReplCoord(), &status));
+    stdx::thread prsiThread([&] { doReplSetInitiate(getReplCoord(), &status); });
     const Date_t startDate = getNet()->now();
     getNet()->enterNetwork();
     const NetworkInterfaceMock::NetworkOperationIterator noi = getNet()->getNextReadyRequest();
     ASSERT_EQUALS(HostAndPort("node2", 54321), noi->getRequest().target);
     ASSERT_EQUALS("admin", noi->getRequest().dbname);
-    ASSERT_EQUALS(hbArgs.toBSON(), noi->getRequest().cmdObj);
-    getNet()->scheduleResponse(
-        noi, startDate + Milliseconds(10), ResponseStatus(ErrorCodes::NoSuchKey, "No response"));
+    ASSERT_BSONOBJ_EQ(hbArgs.toBSON(), noi->getRequest().cmdObj);
+    getNet()->scheduleResponse(noi,
+                               startDate + Milliseconds(10),
+                               RemoteCommandResponse(ErrorCodes::NoSuchKey, "No response"));
     getNet()->runUntil(startDate + Milliseconds(10));
     getNet()->exitNetwork();
     ASSERT_EQUALS(startDate + Milliseconds(10), getNet()->now());
@@ -337,50 +405,58 @@ TEST_F(ReplCoordTest, InitiateSucceedsWhenQuorumCheckPasses) {
     start(HostAndPort("node1", 12345));
     ASSERT_EQUALS(MemberState::RS_STARTUP, getReplCoord()->getMemberState().s);
 
-    ReplSetHeartbeatArgs hbArgs;
+    ReplSetHeartbeatArgsV1 hbArgs;
     hbArgs.setSetName("mySet");
-    hbArgs.setProtocolVersion(1);
     hbArgs.setConfigVersion(1);
-    hbArgs.setCheckEmpty(true);
+    hbArgs.setCheckEmpty();
     hbArgs.setSenderHost(HostAndPort("node1", 12345));
     hbArgs.setSenderId(0);
+    hbArgs.setTerm(0);
+    hbArgs.setHeartbeatVersion(1);
+
+    auto appliedTS = Timestamp(3, 3);
+    getReplCoord()->setMyLastAppliedOpTime(OpTime(appliedTS, 1));
 
     Status status(ErrorCodes::InternalError, "Not set");
-    stdx::thread prsiThread(stdx::bind(doReplSetInitiate, getReplCoord(), &status));
+    stdx::thread prsiThread([&] { doReplSetInitiate(getReplCoord(), &status); });
     const Date_t startDate = getNet()->now();
     getNet()->enterNetwork();
     const NetworkInterfaceMock::NetworkOperationIterator noi = getNet()->getNextReadyRequest();
     ASSERT_EQUALS(HostAndPort("node2", 54321), noi->getRequest().target);
     ASSERT_EQUALS("admin", noi->getRequest().dbname);
-    ASSERT_EQUALS(hbArgs.toBSON(), noi->getRequest().cmdObj);
+    ASSERT_BSONOBJ_EQ(hbArgs.toBSON(), noi->getRequest().cmdObj);
     ReplSetHeartbeatResponse hbResp;
     hbResp.setConfigVersion(0);
     getNet()->scheduleResponse(
         noi,
         startDate + Milliseconds(10),
-        ResponseStatus(RemoteCommandResponse(hbResp.toBSON(false), BSONObj(), Milliseconds(8))));
+        RemoteCommandResponse(hbResp.toBSON(false), BSONObj(), Milliseconds(8)));
     getNet()->runUntil(startDate + Milliseconds(10));
     getNet()->exitNetwork();
     ASSERT_EQUALS(startDate + Milliseconds(10), getNet()->now());
     prsiThread.join();
     ASSERT_OK(status);
     ASSERT_EQUALS(ReplicationCoordinator::modeReplSet, getReplCoord()->getReplicationMode());
+
+    ASSERT_EQUALS(getStorageInterface()->getInitialDataTimestamp(), appliedTS);
 }
 
 TEST_F(ReplCoordTest,
        NodeReturnsInvalidReplicaSetConfigWhenInitiatingWithAConfigWithAMismatchedSetName) {
-    OperationContextNoop txn;
     init("mySet");
     start(HostAndPort("node1", 12345));
+    auto opCtx = makeOperationContext();
     ASSERT_EQUALS(MemberState::RS_STARTUP, getReplCoord()->getMemberState().s);
 
     BSONObjBuilder result1;
     ASSERT_EQUALS(
         ErrorCodes::InvalidReplicaSetConfig,
-        getReplCoord()->processReplSetInitiate(&txn,
+        getReplCoord()->processReplSetInitiate(opCtx.get(),
                                                BSON("_id"
                                                     << "wrongSet"
-                                                    << "version" << 1 << "members"
+                                                    << "version"
+                                                    << 1
+                                                    << "members"
                                                     << BSON_ARRAY(BSON("_id" << 0 << "host"
                                                                              << "node1:12345"))),
                                                &result1));
@@ -388,27 +464,27 @@ TEST_F(ReplCoordTest,
 }
 
 TEST_F(ReplCoordTest, NodeReturnsInvalidReplicaSetConfigWhenInitiatingWithAnEmptyConfig) {
-    OperationContextNoop txn;
-    init("");
+    init("mySet");
     start(HostAndPort("node1", 12345));
+    auto opCtx = makeOperationContext();
     ASSERT_EQUALS(MemberState::RS_STARTUP, getReplCoord()->getMemberState().s);
 
     BSONObjBuilder result1;
-    auto status = getReplCoord()->processReplSetInitiate(&txn, BSONObj(), &result1);
+    auto status = getReplCoord()->processReplSetInitiate(opCtx.get(), BSONObj(), &result1);
     ASSERT_EQUALS(ErrorCodes::InvalidReplicaSetConfig, status);
     ASSERT_STRING_CONTAINS(status.reason(), "Missing expected field \"_id\"");
     ASSERT_EQUALS(MemberState::RS_STARTUP, getReplCoord()->getMemberState().s);
 }
 
 TEST_F(ReplCoordTest, NodeReturnsInvalidReplicaSetConfigWhenInitiatingWithoutAn_idField) {
-    OperationContextNoop txn;
-    init("");
+    init("mySet");
     start(HostAndPort("node1", 12345));
+    auto opCtx = makeOperationContext();
     ASSERT_EQUALS(MemberState::RS_STARTUP, getReplCoord()->getMemberState().s);
 
     BSONObjBuilder result1;
     auto status = getReplCoord()->processReplSetInitiate(
-        &txn,
+        opCtx.get(),
         BSON("version" << 1 << "members" << BSON_ARRAY(BSON("_id" << 0 << "host"
                                                                   << "node1:12345"))),
         &result1);
@@ -419,17 +495,19 @@ TEST_F(ReplCoordTest, NodeReturnsInvalidReplicaSetConfigWhenInitiatingWithoutAn_
 
 TEST_F(ReplCoordTest,
        NodeReturnsInvalidReplicaSetConfigWhenInitiatingWithAConfigVersionNotEqualToOne) {
-    OperationContextNoop txn;
-    init("");
+    init("mySet");
     start(HostAndPort("node1", 12345));
+    auto opCtx = makeOperationContext();
     ASSERT_EQUALS(MemberState::RS_STARTUP, getReplCoord()->getMemberState().s);
 
     BSONObjBuilder result1;
     auto status =
-        getReplCoord()->processReplSetInitiate(&txn,
+        getReplCoord()->processReplSetInitiate(opCtx.get(),
                                                BSON("_id"
                                                     << "mySet"
-                                                    << "version" << 2 << "members"
+                                                    << "version"
+                                                    << 2
+                                                    << "members"
                                                     << BSON_ARRAY(BSON("_id" << 0 << "host"
                                                                              << "node1:12345"))),
                                                &result1);
@@ -438,153 +516,31 @@ TEST_F(ReplCoordTest,
     ASSERT_EQUALS(MemberState::RS_STARTUP, getReplCoord()->getMemberState().s);
 }
 
-TEST_F(ReplCoordTest, InitiateFailsWithoutReplSetFlagWithMoreThanOneMember) {
-    OperationContextNoop txn;
+TEST_F(ReplCoordTest, InitiateFailsWithoutReplSetFlag) {
     init("");
     start(HostAndPort("node1", 12345));
+    auto opCtx = makeOperationContext();
     ASSERT_EQUALS(MemberState::RS_STARTUP, getReplCoord()->getMemberState().s);
 
     BSONObjBuilder result1;
-    auto status =
-        getReplCoord()->processReplSetInitiate(&txn,
+    ASSERT_EQUALS(
+        ErrorCodes::NoReplicationEnabled,
+        getReplCoord()->processReplSetInitiate(opCtx.get(),
                                                BSON("_id"
                                                     << "mySet"
-                                                    << "version" << 1 << "members"
-                                                    << BSON_ARRAY(BSON("_id" << 0 << "host"
-                                                                             << "node1:12345")
-                                                                  << BSON("_id" << 1 << "host"
-                                                                                << "node2:12345"))),
-                                               &result1);
-    ASSERT_EQUALS(ErrorCodes::InvalidReplicaSetConfig, status);
-    ASSERT_STRING_CONTAINS(status.reason(), "you can only specify one member in the config");
-    ASSERT_EQUALS(MemberState::RS_STARTUP, getReplCoord()->getMemberState().s);
-}
-
-TEST_F(ReplCoordTest, InitiateFailsWithoutReplSetFlagWithSelfMissing) {
-    OperationContextNoop txn;
-    init("");
-    start(HostAndPort("node1", 12345));
-    ASSERT_EQUALS(MemberState::RS_STARTUP, getReplCoord()->getMemberState().s);
-
-    BSONObjBuilder result1;
-    auto status =
-        getReplCoord()->processReplSetInitiate(&txn,
-                                               BSON("_id"
-                                                    << "mySet"
-                                                    << "version" << 1 << "members"
-                                                    << BSON_ARRAY(BSON("_id" << 0 << "host"
-                                                                             << "node5:12345"))),
-                                               &result1);
-    ASSERT_EQUALS(ErrorCodes::InvalidReplicaSetConfig, status);
-    ASSERT_STRING_CONTAINS(status.reason(), "No host described in new configuration");
-    ASSERT_STRING_CONTAINS(status.reason(), "maps to this node");
-    ASSERT_EQUALS(MemberState::RS_STARTUP, getReplCoord()->getMemberState().s);
-}
-
-TEST_F(ReplCoordTest, InitiateFailsWithoutReplSetFlagWithArbiterMember) {
-    OperationContextNoop txn;
-    init("");
-    start(HostAndPort("node1", 12345));
-    ASSERT_EQUALS(MemberState::RS_STARTUP, getReplCoord()->getMemberState().s);
-
-    BSONObjBuilder result1;
-    auto status = getReplCoord()->processReplSetInitiate(
-        &txn,
-        BSON("_id"
-             << "mySet"
-             << "version" << 1 << "members" << BSON_ARRAY(BSON("_id" << 0 << "host"
-                                                                     << "node1:12345"
-                                                                     << "arbiterOnly" << true))),
-        &result1);
-    ASSERT_EQUALS(ErrorCodes::InvalidReplicaSetConfig, status);
-    ASSERT_STRING_CONTAINS(status.reason(), "must contain at least one non-arbiter member");
-    ASSERT_EQUALS(MemberState::RS_STARTUP, getReplCoord()->getMemberState().s);
-}
-
-TEST_F(ReplCoordTest, InitiateFailsWithoutReplSetFlagWithPriorityZero) {
-    OperationContextNoop txn;
-    init("");
-    start(HostAndPort("node1", 12345));
-    ASSERT_EQUALS(MemberState::RS_STARTUP, getReplCoord()->getMemberState().s);
-
-    BSONObjBuilder result1;
-    auto status =
-        getReplCoord()->processReplSetInitiate(&txn,
-                                               BSON("_id"
-                                                    << "mySet"
-                                                    << "version" << 1 << "members"
-                                                    << BSON_ARRAY(BSON("_id" << 0 << "host"
-                                                                             << "node1:12345"
-                                                                             << "priority" << 0))),
-                                               &result1);
-    ASSERT_EQUALS(ErrorCodes::InvalidReplicaSetConfig, status);
-    ASSERT_STRING_CONTAINS(status.reason(), "must contain at least one non-arbiter member");
-    ASSERT_EQUALS(MemberState::RS_STARTUP, getReplCoord()->getMemberState().s);
-}
-
-TEST_F(ReplCoordTest, InitiateFailsWithoutReplSetFlagWithNoVotes) {
-    OperationContextNoop txn;
-    init("");
-    start(HostAndPort("node1", 12345));
-    ASSERT_EQUALS(MemberState::RS_STARTUP, getReplCoord()->getMemberState().s);
-
-    BSONObjBuilder result1;
-    auto status =
-        getReplCoord()->processReplSetInitiate(&txn,
-                                               BSON("_id"
-                                                    << "mySet"
-                                                    << "version" << 1 << "members"
-                                                    << BSON_ARRAY(BSON("_id" << 0 << "host"
-                                                                             << "node1:12345"
-                                                                             << "votes" << 0))),
-                                               &result1);
-    ASSERT_EQUALS(ErrorCodes::InvalidReplicaSetConfig, status);
-    ASSERT_STRING_CONTAINS(status.reason(), "priority must be 0 when non-voting (votes:0)");
-    ASSERT_EQUALS(MemberState::RS_STARTUP, getReplCoord()->getMemberState().s);
-}
-
-TEST_F(ReplCoordTest, InitiateFailsWithoutReplSetFlagWithHiddenMember) {
-    OperationContextNoop txn;
-    init("");
-    start(HostAndPort("node1", 12345));
-    ASSERT_EQUALS(MemberState::RS_STARTUP, getReplCoord()->getMemberState().s);
-
-    BSONObjBuilder result1;
-    auto status =
-        getReplCoord()->processReplSetInitiate(&txn,
-                                               BSON("_id"
-                                                    << "mySet"
-                                                    << "version" << 1 << "members"
-                                                    << BSON_ARRAY(BSON("_id" << 0 << "host"
-                                                                             << "node1:12345"
-                                                                             << "hidden" << true))),
-                                               &result1);
-    ASSERT_EQUALS(ErrorCodes::InvalidReplicaSetConfig, status);
-    ASSERT_STRING_CONTAINS(status.reason(), "priority must be 0 when hidden=true");
-    ASSERT_EQUALS(MemberState::RS_STARTUP, getReplCoord()->getMemberState().s);
-}
-
-TEST_F(ReplCoordTest, InitiatePassesWithoutReplSetFlagWithValidConfiguration) {
-    OperationContextNoop txn;
-    init("");
-    start(HostAndPort("node1", 12345));
-    ASSERT_EQUALS(MemberState::RS_STARTUP, getReplCoord()->getMemberState().s);
-
-    BSONObjBuilder result1;
-    ASSERT_OK(
-        getReplCoord()->processReplSetInitiate(&txn,
-                                               BSON("_id"
-                                                    << "mySet"
-                                                    << "version" << 1 << "members"
+                                                    << "version"
+                                                    << 1
+                                                    << "members"
                                                     << BSON_ARRAY(BSON("_id" << 0 << "host"
                                                                              << "node1:12345"))),
                                                &result1));
+    ASSERT_EQUALS(MemberState::RS_STARTUP, getReplCoord()->getMemberState().s);
 }
 
 TEST_F(ReplCoordTest, NodeReturnsOutOfDiskSpaceWhenInitiateCannotWriteConfigToDisk) {
-    OperationContextNoop txn;
     init("mySet");
     start(HostAndPort("node1", 12345));
+    auto opCtx = makeOperationContext();
     ASSERT_EQUALS(MemberState::RS_STARTUP, getReplCoord()->getMemberState().s);
 
     BSONObjBuilder result1;
@@ -592,10 +548,12 @@ TEST_F(ReplCoordTest, NodeReturnsOutOfDiskSpaceWhenInitiateCannotWriteConfigToDi
         Status(ErrorCodes::OutOfDiskSpace, "The test set this"));
     ASSERT_EQUALS(
         ErrorCodes::OutOfDiskSpace,
-        getReplCoord()->processReplSetInitiate(&txn,
+        getReplCoord()->processReplSetInitiate(opCtx.get(),
                                                BSON("_id"
                                                     << "mySet"
-                                                    << "version" << 1 << "members"
+                                                    << "version"
+                                                    << 1
+                                                    << "members"
                                                     << BSON_ARRAY(BSON("_id" << 0 << "host"
                                                                              << "node1:12345"))),
                                                &result1));
@@ -620,7 +578,7 @@ TEST_F(
     ReplCoordTest,
     NodeReturnsNoReplicationEnabledAndInfoConfigsvrWhenCheckReplEnabledForCommandWhileConfigsvr) {
     ReplSettings settings;
-    serverGlobalParams.configsvr = true;
+    serverGlobalParams.clusterRole = ClusterRole::ConfigServer;
     init(settings);
     start();
 
@@ -629,7 +587,7 @@ TEST_F(
     Status status = getReplCoord()->checkReplEnabledForCommand(&result);
     ASSERT_EQUALS(status, ErrorCodes::NoReplicationEnabled);
     ASSERT_EQUALS(result.obj()["info"].String(), "configsvr");
-    serverGlobalParams.configsvr = false;
+    serverGlobalParams.clusterRole = ClusterRole::None;
 }
 
 TEST_F(
@@ -647,9 +605,13 @@ TEST_F(
 TEST_F(ReplCoordTest, NodeReturnsOkWhenCheckReplEnabledForCommandAfterReceivingAConfig) {
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 2 << "members" << BSON_ARRAY(BSON("host"
-                                                                              << "node1:12345"
-                                                                              << "_id" << 0))),
+                            << "version"
+                            << 2
+                            << "members"
+                            << BSON_ARRAY(BSON("host"
+                                               << "node1:12345"
+                                               << "_id"
+                                               << 0))),
                        HostAndPort("node1", 12345));
 
     // check status OK and result is empty
@@ -659,22 +621,10 @@ TEST_F(ReplCoordTest, NodeReturnsOkWhenCheckReplEnabledForCommandAfterReceivingA
     ASSERT_TRUE(result.obj().isEmpty());
 }
 
-TEST_F(ReplCoordTest, RollBackIDShouldIncreaseByOneWhenIncrementRollbackIDIsCalled) {
-    start();
-    BSONObjBuilder result;
-    getReplCoord()->processReplSetGetRBID(&result);
-    long long initialValue = result.obj()["rbid"].Int();
-    getReplCoord()->incrementRollbackID();
-
-    BSONObjBuilder result2;
-    getReplCoord()->processReplSetGetRBID(&result2);
-    long long incrementedValue = result2.obj()["rbid"].Int();
-    ASSERT_EQUALS(incrementedValue, initialValue + 1);
-}
-
 TEST_F(ReplCoordTest, NodeReturnsImmediatelyWhenAwaitReplicationIsRanAgainstAStandaloneNode) {
     init("");
-    OperationContextNoop txn;
+    auto opCtx = makeOperationContext();
+
     OpTimeWithTermOne time(100, 1);
 
     WriteConcernOptions writeConcern;
@@ -684,42 +634,32 @@ TEST_F(ReplCoordTest, NodeReturnsImmediatelyWhenAwaitReplicationIsRanAgainstASta
     // Because we didn't set ReplSettings.replSet, it will think we're a standalone so
     // awaitReplication will always work.
     ReplicationCoordinator::StatusAndDuration statusAndDur =
-        getReplCoord()->awaitReplication(&txn, time, writeConcern);
-    ASSERT_OK(statusAndDur.status);
-}
-
-TEST_F(ReplCoordTest, NodeReturnsImmediatelyWhenAwaitReplicationIsRanAgainstAMasterSlaveNode) {
-    ReplSettings settings;
-    settings.setMaster(true);
-    init(settings);
-    OperationContextNoop txn;
-    OpTimeWithTermOne time(100, 1);
-
-    WriteConcernOptions writeConcern;
-    writeConcern.wTimeout = WriteConcernOptions::kNoWaiting;
-    writeConcern.wNumNodes = 0;
-    writeConcern.wMode = WriteConcernOptions::kMajority;
-    // w:majority always works on master/slave
-    ReplicationCoordinator::StatusAndDuration statusAndDur =
-        getReplCoord()->awaitReplication(&txn, time, writeConcern);
+        getReplCoord()->awaitReplication(opCtx.get(), time, writeConcern);
     ASSERT_OK(statusAndDur.status);
 }
 
 TEST_F(ReplCoordTest, NodeReturnsNotMasterWhenRunningAwaitReplicationAgainstASecondaryNode) {
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 2 << "members"
+                            << "version"
+                            << 2
+                            << "members"
                             << BSON_ARRAY(BSON("host"
                                                << "node1:12345"
-                                               << "_id" << 0)
+                                               << "_id"
+                                               << 0)
                                           << BSON("host"
                                                   << "node2:12345"
-                                                  << "_id" << 1) << BSON("host"
-                                                                         << "node3:12345"
-                                                                         << "_id" << 2))),
+                                                  << "_id"
+                                                  << 1)
+                                          << BSON("host"
+                                                  << "node3:12345"
+                                                  << "_id"
+                                                  << 2))),
                        HostAndPort("node1", 12345));
 
-    OperationContextNoop txn;
+    auto opCtx = makeOperationContext();
+
     OpTimeWithTermOne time(100, 1);
 
     WriteConcernOptions writeConcern;
@@ -729,25 +669,30 @@ TEST_F(ReplCoordTest, NodeReturnsNotMasterWhenRunningAwaitReplicationAgainstASec
 
     // Node should fail to awaitReplication when not primary.
     ReplicationCoordinator::StatusAndDuration statusAndDur =
-        getReplCoord()->awaitReplication(&txn, time, writeConcern);
-    ASSERT_EQUALS(ErrorCodes::NotMaster, statusAndDur.status);
+        getReplCoord()->awaitReplication(opCtx.get(), time, writeConcern);
+    ASSERT_EQUALS(ErrorCodes::PrimarySteppedDown, statusAndDur.status);
 }
 
 TEST_F(ReplCoordTest, NodeReturnsOkWhenRunningAwaitReplicationAgainstPrimaryWithWTermOne) {
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 2 << "members"
+                            << "version"
+                            << 2
+                            << "members"
                             << BSON_ARRAY(BSON("host"
                                                << "node1:12345"
-                                               << "_id" << 0)
+                                               << "_id"
+                                               << 0)
                                           << BSON("host"
                                                   << "node2:12345"
-                                                  << "_id" << 1) << BSON("host"
-                                                                         << "node3:12345"
-                                                                         << "_id" << 2))),
+                                                  << "_id"
+                                                  << 1)
+                                          << BSON("host"
+                                                  << "node3:12345"
+                                                  << "_id"
+                                                  << 2))),
                        HostAndPort("node1", 12345));
 
-    OperationContextNoop txn;
     OpTimeWithTermOne time(100, 1);
 
     WriteConcernOptions writeConcern;
@@ -756,181 +701,197 @@ TEST_F(ReplCoordTest, NodeReturnsOkWhenRunningAwaitReplicationAgainstPrimaryWith
     writeConcern.wMode = "";
 
     // Become primary.
-    ASSERT(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
-    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(100, 0));
-    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(100, 0));
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(100, 1));
+    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(100, 1));
     simulateSuccessfulV1Election();
     ASSERT(getReplCoord()->getMemberState().primary());
 
-    ReplicationCoordinator::StatusAndDuration statusAndDur =
-        getReplCoord()->awaitReplication(&txn, time, writeConcern);
-    ASSERT_OK(statusAndDur.status);
+    auto opCtx = makeOperationContext();
 
-    ASSERT_TRUE(getExternalState()->isApplierSignaledToCancelFetcher());
+    ReplicationCoordinator::StatusAndDuration statusAndDur =
+        getReplCoord()->awaitReplication(opCtx.get(), time, writeConcern);
+    ASSERT_OK(statusAndDur.status);
 }
 
 TEST_F(ReplCoordTest,
        NodeReturnsWriteConcernFailedUntilASufficientNumberOfNodesHaveTheWriteDurable) {
-    OperationContextNoop txn;
-    assertStartSuccess(
-        BSON("_id"
-             << "mySet"
-             << "version" << 2 << "members"
-             << BSON_ARRAY(BSON("host"
-                                << "node1:12345"
-                                << "_id" << 0)
-                           << BSON("host"
-                                   << "node2:12345"
-                                   << "_id" << 1) << BSON("host"
-                                                          << "node3:12345"
-                                                          << "_id" << 2) << BSON("host"
-                                                                                 << "node4:12345"
-                                                                                 << "_id" << 3))),
-        HostAndPort("node1", 12345));
-    ASSERT(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
-    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(100, 0));
-    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(100, 0));
+    assertStartSuccess(BSON("_id"
+                            << "mySet"
+                            << "version"
+                            << 2
+                            << "members"
+                            << BSON_ARRAY(BSON("host"
+                                               << "node1:12345"
+                                               << "_id"
+                                               << 0)
+                                          << BSON("host"
+                                                  << "node2:12345"
+                                                  << "_id"
+                                                  << 1)
+                                          << BSON("host"
+                                                  << "node3:12345"
+                                                  << "_id"
+                                                  << 2)
+                                          << BSON("host"
+                                                  << "node4:12345"
+                                                  << "_id"
+                                                  << 3))),
+                       HostAndPort("node1", 12345));
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(100, 1));
+    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(100, 1));
     simulateSuccessfulV1Election();
 
-    OpTimeWithTermOne time1(100, 1);
-    OpTimeWithTermOne time2(100, 2);
+    OpTimeWithTermOne time1(100, 2);
+    OpTimeWithTermOne time2(100, 3);
 
     WriteConcernOptions writeConcern;
     writeConcern.wTimeout = WriteConcernOptions::kNoWaiting;
     writeConcern.wNumNodes = 1;
     writeConcern.syncMode = WriteConcernOptions::SyncMode::JOURNAL;
 
+    auto opCtx = makeOperationContext();
     // 1 node waiting for time 1
     ReplicationCoordinator::StatusAndDuration statusAndDur =
-        getReplCoord()->awaitReplication(&txn, time1, writeConcern);
+        getReplCoord()->awaitReplication(opCtx.get(), time1, writeConcern);
     ASSERT_EQUALS(ErrorCodes::WriteConcernFailed, statusAndDur.status);
     getReplCoord()->setMyLastAppliedOpTime(time1);
     getReplCoord()->setMyLastDurableOpTime(time1);
-    statusAndDur = getReplCoord()->awaitReplication(&txn, time1, writeConcern);
+    statusAndDur = getReplCoord()->awaitReplication(opCtx.get(), time1, writeConcern);
     ASSERT_OK(statusAndDur.status);
 
     // 2 nodes waiting for time1
     writeConcern.wNumNodes = 2;
-    statusAndDur = getReplCoord()->awaitReplication(&txn, time1, writeConcern);
+    statusAndDur = getReplCoord()->awaitReplication(opCtx.get(), time1, writeConcern);
     ASSERT_EQUALS(ErrorCodes::WriteConcernFailed, statusAndDur.status);
     // Applied is not durable and will not satisfy WriteConcern with SyncMode JOURNAL.
     ASSERT_OK(getReplCoord()->setLastAppliedOptime_forTest(2, 1, time1));
-    statusAndDur = getReplCoord()->awaitReplication(&txn, time1, writeConcern);
+    statusAndDur = getReplCoord()->awaitReplication(opCtx.get(), time1, writeConcern);
     ASSERT_EQUALS(ErrorCodes::WriteConcernFailed, statusAndDur.status);
     ASSERT_OK(getReplCoord()->setLastDurableOptime_forTest(2, 1, time1));
-    statusAndDur = getReplCoord()->awaitReplication(&txn, time1, writeConcern);
+    statusAndDur = getReplCoord()->awaitReplication(opCtx.get(), time1, writeConcern);
     ASSERT_OK(statusAndDur.status);
 
     // 2 nodes waiting for time2
-    statusAndDur = getReplCoord()->awaitReplication(&txn, time2, writeConcern);
+    statusAndDur = getReplCoord()->awaitReplication(opCtx.get(), time2, writeConcern);
     ASSERT_EQUALS(ErrorCodes::WriteConcernFailed, statusAndDur.status);
     getReplCoord()->setMyLastAppliedOpTime(time2);
     getReplCoord()->setMyLastDurableOpTime(time2);
-    statusAndDur = getReplCoord()->awaitReplication(&txn, time2, writeConcern);
+    statusAndDur = getReplCoord()->awaitReplication(opCtx.get(), time2, writeConcern);
     ASSERT_EQUALS(ErrorCodes::WriteConcernFailed, statusAndDur.status);
     ASSERT_OK(getReplCoord()->setLastAppliedOptime_forTest(2, 2, time2));
     ASSERT_OK(getReplCoord()->setLastDurableOptime_forTest(2, 2, time2));
-    statusAndDur = getReplCoord()->awaitReplication(&txn, time2, writeConcern);
+    statusAndDur = getReplCoord()->awaitReplication(opCtx.get(), time2, writeConcern);
     ASSERT_OK(statusAndDur.status);
 
     // 3 nodes waiting for time2
     writeConcern.wNumNodes = 3;
-    statusAndDur = getReplCoord()->awaitReplication(&txn, time2, writeConcern);
+    statusAndDur = getReplCoord()->awaitReplication(opCtx.get(), time2, writeConcern);
     ASSERT_EQUALS(ErrorCodes::WriteConcernFailed, statusAndDur.status);
     ASSERT_OK(getReplCoord()->setLastAppliedOptime_forTest(2, 3, time2));
     ASSERT_OK(getReplCoord()->setLastDurableOptime_forTest(2, 3, time2));
-    statusAndDur = getReplCoord()->awaitReplication(&txn, time2, writeConcern);
+    statusAndDur = getReplCoord()->awaitReplication(opCtx.get(), time2, writeConcern);
     ASSERT_OK(statusAndDur.status);
 }
 
 TEST_F(ReplCoordTest, NodeReturnsWriteConcernFailedUntilASufficientNumberOfNodesHaveTheWrite) {
-    OperationContextNoop txn;
-    assertStartSuccess(
-        BSON("_id"
-             << "mySet"
-             << "version" << 2 << "members"
-             << BSON_ARRAY(BSON("host"
-                                << "node1:12345"
-                                << "_id" << 0)
-                           << BSON("host"
-                                   << "node2:12345"
-                                   << "_id" << 1) << BSON("host"
-                                                          << "node3:12345"
-                                                          << "_id" << 2) << BSON("host"
-                                                                                 << "node4:12345"
-                                                                                 << "_id" << 3))),
-        HostAndPort("node1", 12345));
-    ASSERT(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
-    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(100, 0));
-    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(100, 0));
+    assertStartSuccess(BSON("_id"
+                            << "mySet"
+                            << "version"
+                            << 2
+                            << "members"
+                            << BSON_ARRAY(BSON("host"
+                                               << "node1:12345"
+                                               << "_id"
+                                               << 0)
+                                          << BSON("host"
+                                                  << "node2:12345"
+                                                  << "_id"
+                                                  << 1)
+                                          << BSON("host"
+                                                  << "node3:12345"
+                                                  << "_id"
+                                                  << 2)
+                                          << BSON("host"
+                                                  << "node4:12345"
+                                                  << "_id"
+                                                  << 3))),
+                       HostAndPort("node1", 12345));
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(100, 1));
+    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(100, 1));
     simulateSuccessfulV1Election();
 
-    OpTimeWithTermOne time1(100, 1);
-    OpTimeWithTermOne time2(100, 2);
+    OpTimeWithTermOne time1(100, 2);
+    OpTimeWithTermOne time2(100, 3);
 
     WriteConcernOptions writeConcern;
     writeConcern.wTimeout = WriteConcernOptions::kNoWaiting;
     writeConcern.wNumNodes = 1;
 
+    auto opCtx = makeOperationContext();
+
+
     // 1 node waiting for time 1
     ReplicationCoordinator::StatusAndDuration statusAndDur =
-        getReplCoord()->awaitReplication(&txn, time1, writeConcern);
+        getReplCoord()->awaitReplication(opCtx.get(), time1, writeConcern);
     ASSERT_EQUALS(ErrorCodes::WriteConcernFailed, statusAndDur.status);
     getReplCoord()->setMyLastAppliedOpTime(time1);
     getReplCoord()->setMyLastDurableOpTime(time1);
-    statusAndDur = getReplCoord()->awaitReplication(&txn, time1, writeConcern);
+    statusAndDur = getReplCoord()->awaitReplication(opCtx.get(), time1, writeConcern);
     ASSERT_OK(statusAndDur.status);
 
     // 2 nodes waiting for time1
     writeConcern.wNumNodes = 2;
-    statusAndDur = getReplCoord()->awaitReplication(&txn, time1, writeConcern);
+    statusAndDur = getReplCoord()->awaitReplication(opCtx.get(), time1, writeConcern);
     ASSERT_EQUALS(ErrorCodes::WriteConcernFailed, statusAndDur.status);
     ASSERT_OK(getReplCoord()->setLastAppliedOptime_forTest(2, 1, time1));
-    statusAndDur = getReplCoord()->awaitReplication(&txn, time1, writeConcern);
+    statusAndDur = getReplCoord()->awaitReplication(opCtx.get(), time1, writeConcern);
     ASSERT_OK(statusAndDur.status);
 
     // 2 nodes waiting for time2
-    statusAndDur = getReplCoord()->awaitReplication(&txn, time2, writeConcern);
+    statusAndDur = getReplCoord()->awaitReplication(opCtx.get(), time2, writeConcern);
     ASSERT_EQUALS(ErrorCodes::WriteConcernFailed, statusAndDur.status);
     getReplCoord()->setMyLastAppliedOpTime(time2);
     getReplCoord()->setMyLastDurableOpTime(time2);
-    statusAndDur = getReplCoord()->awaitReplication(&txn, time2, writeConcern);
+    statusAndDur = getReplCoord()->awaitReplication(opCtx.get(), time2, writeConcern);
     ASSERT_EQUALS(ErrorCodes::WriteConcernFailed, statusAndDur.status);
     ASSERT_OK(getReplCoord()->setLastAppliedOptime_forTest(2, 2, time2));
     ASSERT_OK(getReplCoord()->setLastDurableOptime_forTest(2, 2, time2));
-    statusAndDur = getReplCoord()->awaitReplication(&txn, time2, writeConcern);
+    statusAndDur = getReplCoord()->awaitReplication(opCtx.get(), time2, writeConcern);
     ASSERT_OK(statusAndDur.status);
 
     // 3 nodes waiting for time2
     writeConcern.wNumNodes = 3;
-    statusAndDur = getReplCoord()->awaitReplication(&txn, time2, writeConcern);
+    statusAndDur = getReplCoord()->awaitReplication(opCtx.get(), time2, writeConcern);
     ASSERT_EQUALS(ErrorCodes::WriteConcernFailed, statusAndDur.status);
     ASSERT_OK(getReplCoord()->setLastAppliedOptime_forTest(2, 3, time2));
-    statusAndDur = getReplCoord()->awaitReplication(&txn, time2, writeConcern);
+    statusAndDur = getReplCoord()->awaitReplication(opCtx.get(), time2, writeConcern);
     ASSERT_OK(statusAndDur.status);
 }
 
 TEST_F(ReplCoordTest,
        NodeReturnsUnknownReplWriteConcernWhenAwaitReplicationReceivesAnInvalidWriteConcernMode) {
-    auto service = stdx::make_unique<ServiceContextNoop>();
-    auto client = service->makeClient("test");
-    OperationContextNoop txn(client.get(), 100);
-
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 2 << "members"
+                            << "version"
+                            << 2
+                            << "members"
                             << BSON_ARRAY(BSON("_id" << 0 << "host"
                                                      << "node0")
                                           << BSON("_id" << 1 << "host"
-                                                        << "node1") << BSON("_id" << 2 << "host"
-                                                                                  << "node2")
+                                                        << "node1")
+                                          << BSON("_id" << 2 << "host"
+                                                        << "node2")
                                           << BSON("_id" << 3 << "host"
-                                                        << "node3") << BSON("_id" << 4 << "host"
-                                                                                  << "node4"))),
+                                                        << "node3")
+                                          << BSON("_id" << 4 << "host"
+                                                        << "node4"))),
                        HostAndPort("node0"));
-    ASSERT(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
-    getReplCoord()->setMyLastAppliedOpTime(OpTime(Timestamp(100, 0), 0));
-    getReplCoord()->setMyLastDurableOpTime(OpTime(Timestamp(100, 0), 0));
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+    getReplCoord()->setMyLastAppliedOpTime(OpTime(Timestamp(100, 1), 0));
+    getReplCoord()->setMyLastDurableOpTime(OpTime(Timestamp(100, 1), 0));
     simulateSuccessfulV1Election();
 
     OpTime time1(Timestamp(100, 1), 1);
@@ -941,63 +902,67 @@ TEST_F(ReplCoordTest,
     invalidWriteConcern.wTimeout = WriteConcernOptions::kNoWaiting;
     invalidWriteConcern.wMode = "fakemode";
 
+    auto opCtx = makeOperationContext();
     ReplicationCoordinator::StatusAndDuration statusAndDur =
-        getReplCoord()->awaitReplication(&txn, time1, invalidWriteConcern);
+        getReplCoord()->awaitReplication(opCtx.get(), time1, invalidWriteConcern);
     ASSERT_EQUALS(ErrorCodes::UnknownReplWriteConcern, statusAndDur.status);
 }
 
 TEST_F(
     ReplCoordTest,
     NodeReturnsWriteConcernFailedUntilASufficientSetOfNodesHaveTheWriteAndTheWriteIsInACommittedSnapshot) {
-    auto service = stdx::make_unique<ServiceContextNoop>();
-    auto client = service->makeClient("test");
-    OperationContextNoop txn(client.get(), 100);
-
     assertStartSuccess(
         BSON("_id"
              << "mySet"
-             << "version" << 2 << "members"
+             << "version"
+             << 2
+             << "members"
              << BSON_ARRAY(BSON("_id" << 0 << "host"
                                       << "node0"
-                                      << "tags" << BSON("dc"
-                                                        << "NA"
-                                                        << "rack"
-                                                        << "rackNA1"))
+                                      << "tags"
+                                      << BSON("dc"
+                                              << "NA"
+                                              << "rack"
+                                              << "rackNA1"))
                            << BSON("_id" << 1 << "host"
                                          << "node1"
-                                         << "tags" << BSON("dc"
-                                                           << "NA"
-                                                           << "rack"
-                                                           << "rackNA2"))
+                                         << "tags"
+                                         << BSON("dc"
+                                                 << "NA"
+                                                 << "rack"
+                                                 << "rackNA2"))
                            << BSON("_id" << 2 << "host"
                                          << "node2"
-                                         << "tags" << BSON("dc"
-                                                           << "NA"
-                                                           << "rack"
-                                                           << "rackNA3"))
+                                         << "tags"
+                                         << BSON("dc"
+                                                 << "NA"
+                                                 << "rack"
+                                                 << "rackNA3"))
                            << BSON("_id" << 3 << "host"
                                          << "node3"
-                                         << "tags" << BSON("dc"
-                                                           << "EU"
-                                                           << "rack"
-                                                           << "rackEU1"))
+                                         << "tags"
+                                         << BSON("dc"
+                                                 << "EU"
+                                                 << "rack"
+                                                 << "rackEU1"))
                            << BSON("_id" << 4 << "host"
                                          << "node4"
-                                         << "tags" << BSON("dc"
-                                                           << "EU"
-                                                           << "rack"
-                                                           << "rackEU2"))) << "settings"
+                                         << "tags"
+                                         << BSON("dc"
+                                                 << "EU"
+                                                 << "rack"
+                                                 << "rackEU2")))
+             << "settings"
              << BSON("getLastErrorModes" << BSON("multiDC" << BSON("dc" << 2) << "multiDCAndRack"
                                                            << BSON("dc" << 2 << "rack" << 3)))),
         HostAndPort("node0"));
-    ASSERT(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
-    getReplCoord()->setMyLastAppliedOpTime(OpTime(Timestamp(100, 0), 0));
-    getReplCoord()->setMyLastDurableOpTime(OpTime(Timestamp(100, 0), 0));
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+    getReplCoord()->setMyLastAppliedOpTime(OpTime(Timestamp(100, 1), 0));
+    getReplCoord()->setMyLastDurableOpTime(OpTime(Timestamp(100, 1), 0));
     simulateSuccessfulV1Election();
 
-    OpTime time1(Timestamp(100, 1), 1);
-    OpTime time2(Timestamp(100, 2), 1);
-
+    OpTime time1(Timestamp(100, 2), 1);
+    OpTime time2(Timestamp(100, 3), 1);
 
     // Set up valid write concerns for the rest of the test
     WriteConcernOptions majorityWriteConcern;
@@ -1013,80 +978,53 @@ TEST_F(
     multiRackWriteConcern.wTimeout = WriteConcernOptions::kNoWaiting;
     multiRackWriteConcern.wMode = "multiDCAndRack";
 
-
+    auto opCtx = makeOperationContext();
     // Nothing satisfied
     getReplCoord()->setMyLastAppliedOpTime(time1);
     getReplCoord()->setMyLastDurableOpTime(time1);
     ReplicationCoordinator::StatusAndDuration statusAndDur =
-        getReplCoord()->awaitReplication(&txn, time1, majorityWriteConcern);
+        getReplCoord()->awaitReplication(opCtx.get(), time1, majorityWriteConcern);
     ASSERT_EQUALS(ErrorCodes::WriteConcernFailed, statusAndDur.status);
-    statusAndDur = getReplCoord()->awaitReplication(&txn, time1, multiDCWriteConcern);
+    statusAndDur = getReplCoord()->awaitReplication(opCtx.get(), time1, multiDCWriteConcern);
     ASSERT_EQUALS(ErrorCodes::WriteConcernFailed, statusAndDur.status);
-    statusAndDur = getReplCoord()->awaitReplication(&txn, time1, multiRackWriteConcern);
+    statusAndDur = getReplCoord()->awaitReplication(opCtx.get(), time1, multiRackWriteConcern);
     ASSERT_EQUALS(ErrorCodes::WriteConcernFailed, statusAndDur.status);
 
     // Majority satisfied but not either custom mode
-    getReplCoord()->setLastAppliedOptime_forTest(2, 1, time1);
-    getReplCoord()->setLastDurableOptime_forTest(2, 1, time1);
-    getReplCoord()->setLastAppliedOptime_forTest(2, 2, time1);
-    getReplCoord()->setLastDurableOptime_forTest(2, 2, time1);
-    getReplCoord()->createSnapshot(&txn, time1, SnapshotName(1));
+    getReplCoord()->setLastAppliedOptime_forTest(2, 1, time1).transitional_ignore();
+    getReplCoord()->setLastDurableOptime_forTest(2, 1, time1).transitional_ignore();
+    getReplCoord()->setLastAppliedOptime_forTest(2, 2, time1).transitional_ignore();
+    getReplCoord()->setLastDurableOptime_forTest(2, 2, time1).transitional_ignore();
 
-    statusAndDur = getReplCoord()->awaitReplication(&txn, time1, majorityWriteConcern);
+    statusAndDur = getReplCoord()->awaitReplication(opCtx.get(), time1, majorityWriteConcern);
     ASSERT_OK(statusAndDur.status);
-    statusAndDur = getReplCoord()->awaitReplication(&txn, time1, multiDCWriteConcern);
+    statusAndDur = getReplCoord()->awaitReplication(opCtx.get(), time1, multiDCWriteConcern);
     ASSERT_EQUALS(ErrorCodes::WriteConcernFailed, statusAndDur.status);
-    statusAndDur = getReplCoord()->awaitReplication(&txn, time1, multiRackWriteConcern);
+    statusAndDur = getReplCoord()->awaitReplication(opCtx.get(), time1, multiRackWriteConcern);
     ASSERT_EQUALS(ErrorCodes::WriteConcernFailed, statusAndDur.status);
 
     // All modes satisfied
-    getReplCoord()->setLastAppliedOptime_forTest(2, 3, time1);
-    getReplCoord()->setLastDurableOptime_forTest(2, 3, time1);
+    getReplCoord()->setLastAppliedOptime_forTest(2, 3, time1).transitional_ignore();
+    getReplCoord()->setLastDurableOptime_forTest(2, 3, time1).transitional_ignore();
 
-    statusAndDur = getReplCoord()->awaitReplication(&txn, time1, majorityWriteConcern);
+    statusAndDur = getReplCoord()->awaitReplication(opCtx.get(), time1, majorityWriteConcern);
     ASSERT_OK(statusAndDur.status);
-    statusAndDur = getReplCoord()->awaitReplication(&txn, time1, multiDCWriteConcern);
+    statusAndDur = getReplCoord()->awaitReplication(opCtx.get(), time1, multiDCWriteConcern);
     ASSERT_OK(statusAndDur.status);
-    statusAndDur = getReplCoord()->awaitReplication(&txn, time1, multiRackWriteConcern);
-    ASSERT_OK(statusAndDur.status);
-
-    // Majority also waits for the committed snapshot to be newer than all snapshots reserved by
-    // this operation. Custom modes not affected by this.
-    while (getReplCoord()->reserveSnapshotName(&txn) <= SnapshotName(1)) {
-        // These unittests "cheat" and use SnapshotName(1) without advancing the counter. Reserve
-        // another name if we didn't get a high enough one.
-    }
-
-    auto zeroOpTimeInCurrentTerm = OpTime(Timestamp(0, 0), 1);
-    ReplClientInfo::forClient(txn.getClient()).setLastOp(zeroOpTimeInCurrentTerm);
-    statusAndDur = getReplCoord()->awaitReplicationOfLastOpForClient(&txn, majorityWriteConcern);
-    ASSERT_EQUALS(ErrorCodes::WriteConcernFailed, statusAndDur.status);
-    statusAndDur = getReplCoord()->awaitReplicationOfLastOpForClient(&txn, multiDCWriteConcern);
-    ASSERT_OK(statusAndDur.status);
-    statusAndDur = getReplCoord()->awaitReplicationOfLastOpForClient(&txn, multiRackWriteConcern);
-    ASSERT_OK(statusAndDur.status);
-
-    // All modes satisfied
-    getReplCoord()->createSnapshot(&txn, time1, getReplCoord()->reserveSnapshotName(nullptr));
-
-    statusAndDur = getReplCoord()->awaitReplicationOfLastOpForClient(&txn, majorityWriteConcern);
-    ASSERT_OK(statusAndDur.status);
-    statusAndDur = getReplCoord()->awaitReplicationOfLastOpForClient(&txn, multiDCWriteConcern);
-    ASSERT_OK(statusAndDur.status);
-    statusAndDur = getReplCoord()->awaitReplicationOfLastOpForClient(&txn, multiRackWriteConcern);
+    statusAndDur = getReplCoord()->awaitReplication(opCtx.get(), time1, multiRackWriteConcern);
     ASSERT_OK(statusAndDur.status);
 
     // multiDC satisfied but not majority or multiRack
     getReplCoord()->setMyLastAppliedOpTime(time2);
     getReplCoord()->setMyLastDurableOpTime(time2);
-    getReplCoord()->setLastAppliedOptime_forTest(2, 3, time2);
-    getReplCoord()->setLastDurableOptime_forTest(2, 3, time2);
+    getReplCoord()->setLastAppliedOptime_forTest(2, 3, time2).transitional_ignore();
+    getReplCoord()->setLastDurableOptime_forTest(2, 3, time2).transitional_ignore();
 
-    statusAndDur = getReplCoord()->awaitReplication(&txn, time2, majorityWriteConcern);
+    statusAndDur = getReplCoord()->awaitReplication(opCtx.get(), time2, majorityWriteConcern);
     ASSERT_EQUALS(ErrorCodes::WriteConcernFailed, statusAndDur.status);
-    statusAndDur = getReplCoord()->awaitReplication(&txn, time2, multiDCWriteConcern);
+    statusAndDur = getReplCoord()->awaitReplication(opCtx.get(), time2, multiDCWriteConcern);
     ASSERT_OK(statusAndDur.status);
-    statusAndDur = getReplCoord()->awaitReplication(&txn, time2, multiRackWriteConcern);
+    statusAndDur = getReplCoord()->awaitReplication(opCtx.get(), time2, multiRackWriteConcern);
     ASSERT_EQUALS(ErrorCodes::WriteConcernFailed, statusAndDur.status);
 }
 
@@ -1100,10 +1038,17 @@ TEST_F(
  */
 class ReplicationAwaiter {
 public:
-    ReplicationAwaiter(ReplicationCoordinatorImpl* replCoord, OperationContext* txn)
+    ReplicationAwaiter(ReplicationCoordinatorImpl* replCoord, ServiceContext* service)
         : _replCoord(replCoord),
+          _service(service),
+          _client(service->makeClient("replAwaiter")),
+          _opCtx(_client->makeOperationContext()),
           _finished(false),
           _result(ReplicationCoordinator::StatusAndDuration(Status::OK(), Milliseconds(0))) {}
+
+    OperationContext* getOperationContext() {
+        return _opCtx.get();
+    }
 
     void setOpTime(const OpTime& ot) {
         _optime = ot;
@@ -1115,15 +1060,14 @@ public:
 
     // may block
     ReplicationCoordinator::StatusAndDuration getResult() {
-        _thread->join();
+        _thread.join();
         ASSERT(_finished);
         return _result;
     }
 
-    void start(OperationContext* txn) {
+    void start() {
         ASSERT(!_finished);
-        _thread.reset(
-            new stdx::thread(stdx::bind(&ReplicationAwaiter::_awaitReplication, this, txn)));
+        _thread = stdx::thread([this] { _awaitReplication(); });
     }
 
     void reset() {
@@ -1133,39 +1077,47 @@ public:
     }
 
 private:
-    void _awaitReplication(OperationContext* txn) {
-        _result = _replCoord->awaitReplication(txn, _optime, _writeConcern);
+    void _awaitReplication() {
+        _result = _replCoord->awaitReplication(_opCtx.get(), _optime, _writeConcern);
         _finished = true;
     }
 
     ReplicationCoordinatorImpl* _replCoord;
+    ServiceContext* _service;
+    ServiceContext::UniqueClient _client;
+    ServiceContext::UniqueOperationContext _opCtx;
     bool _finished;
     OpTime _optime;
     WriteConcernOptions _writeConcern;
     ReplicationCoordinator::StatusAndDuration _result;
-    std::unique_ptr<stdx::thread> _thread;
+    stdx::thread _thread;
 };
 
 TEST_F(ReplCoordTest, NodeReturnsOkWhenAWriteConcernWithNoTimeoutHasBeenSatisfied) {
-    OperationContextNoop txn;
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 2 << "members"
+                            << "version"
+                            << 2
+                            << "members"
                             << BSON_ARRAY(BSON("host"
                                                << "node1:12345"
-                                               << "_id" << 0)
+                                               << "_id"
+                                               << 0)
                                           << BSON("host"
                                                   << "node2:12345"
-                                                  << "_id" << 1) << BSON("host"
-                                                                         << "node3:12345"
-                                                                         << "_id" << 2))),
+                                                  << "_id"
+                                                  << 1)
+                                          << BSON("host"
+                                                  << "node3:12345"
+                                                  << "_id"
+                                                  << 2))),
                        HostAndPort("node1", 12345));
-    ASSERT(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
-    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(100, 0));
-    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(100, 0));
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(100, 1));
+    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(100, 1));
     simulateSuccessfulV1Election();
 
-    ReplicationAwaiter awaiter(getReplCoord(), &txn);
+    ReplicationAwaiter awaiter(getReplCoord(), getServiceContext());
 
     OpTimeWithTermOne time1(100, 1);
     OpTimeWithTermOne time2(100, 2);
@@ -1177,7 +1129,7 @@ TEST_F(ReplCoordTest, NodeReturnsOkWhenAWriteConcernWithNoTimeoutHasBeenSatisfie
     // 2 nodes waiting for time1
     awaiter.setOpTime(time1);
     awaiter.setWriteConcern(writeConcern);
-    awaiter.start(&txn);
+    awaiter.start();
     getReplCoord()->setMyLastAppliedOpTime(time1);
     getReplCoord()->setMyLastDurableOpTime(time1);
     ASSERT_OK(getReplCoord()->setLastAppliedOptime_forTest(2, 1, time1));
@@ -1187,7 +1139,7 @@ TEST_F(ReplCoordTest, NodeReturnsOkWhenAWriteConcernWithNoTimeoutHasBeenSatisfie
 
     // 2 nodes waiting for time2
     awaiter.setOpTime(time2);
-    awaiter.start(&txn);
+    awaiter.start();
     getReplCoord()->setMyLastAppliedOpTime(time2);
     getReplCoord()->setMyLastDurableOpTime(time2);
     ASSERT_OK(getReplCoord()->setLastAppliedOptime_forTest(2, 1, time2));
@@ -1198,7 +1150,7 @@ TEST_F(ReplCoordTest, NodeReturnsOkWhenAWriteConcernWithNoTimeoutHasBeenSatisfie
     // 3 nodes waiting for time2
     writeConcern.wNumNodes = 3;
     awaiter.setWriteConcern(writeConcern);
-    awaiter.start(&txn);
+    awaiter.start();
     ASSERT_OK(getReplCoord()->setLastAppliedOptime_forTest(2, 2, time2));
     statusAndDur = awaiter.getResult();
     ASSERT_OK(statusAndDur.status);
@@ -1206,40 +1158,50 @@ TEST_F(ReplCoordTest, NodeReturnsOkWhenAWriteConcernWithNoTimeoutHasBeenSatisfie
 }
 
 TEST_F(ReplCoordTest, NodeReturnsWriteConcernFailedWhenAWriteConcernTimesOutBeforeBeingSatisified) {
-    OperationContextNoop txn;
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 2 << "members"
+                            << "version"
+                            << 2
+                            << "members"
                             << BSON_ARRAY(BSON("host"
                                                << "node1:12345"
-                                               << "_id" << 0)
+                                               << "_id"
+                                               << 0)
                                           << BSON("host"
                                                   << "node2:12345"
-                                                  << "_id" << 1) << BSON("host"
-                                                                         << "node3:12345"
-                                                                         << "_id" << 2))),
+                                                  << "_id"
+                                                  << 1)
+                                          << BSON("host"
+                                                  << "node3:12345"
+                                                  << "_id"
+                                                  << 2))),
                        HostAndPort("node1", 12345));
-    ASSERT(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
-    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(100, 0));
-    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(100, 0));
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(100, 1));
+    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(100, 1));
     simulateSuccessfulV1Election();
 
-    ReplicationAwaiter awaiter(getReplCoord(), &txn);
+    ReplicationAwaiter awaiter(getReplCoord(), getServiceContext());
 
     OpTimeWithTermOne time1(100, 1);
     OpTimeWithTermOne time2(100, 2);
 
     WriteConcernOptions writeConcern;
-    writeConcern.wTimeout = 50;
+    writeConcern.wDeadline = getNet()->now() + Milliseconds(50);
     writeConcern.wNumNodes = 2;
 
     // 2 nodes waiting for time2
     awaiter.setOpTime(time2);
     awaiter.setWriteConcern(writeConcern);
-    awaiter.start(&txn);
+    awaiter.start();
     getReplCoord()->setMyLastAppliedOpTime(time2);
     getReplCoord()->setMyLastDurableOpTime(time2);
     ASSERT_OK(getReplCoord()->setLastAppliedOptime_forTest(2, 1, time1));
+    {
+        NetworkInterfaceMock::InNetworkGuard inNet(getNet());
+        getNet()->runUntil(writeConcern.wDeadline);
+        ASSERT_EQUALS(writeConcern.wDeadline, getNet()->now());
+    }
     ReplicationCoordinator::StatusAndDuration statusAndDur = awaiter.getResult();
     ASSERT_EQUALS(ErrorCodes::WriteConcernFailed, statusAndDur.status);
     awaiter.reset();
@@ -1247,25 +1209,30 @@ TEST_F(ReplCoordTest, NodeReturnsWriteConcernFailedWhenAWriteConcernTimesOutBefo
 
 TEST_F(ReplCoordTest,
        NodeReturnsShutDownInProgressWhenANodeShutsDownPriorToSatisfyingAWriteConcern) {
-    OperationContextNoop txn;
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 2 << "members"
+                            << "version"
+                            << 2
+                            << "members"
                             << BSON_ARRAY(BSON("host"
                                                << "node1:12345"
-                                               << "_id" << 0)
+                                               << "_id"
+                                               << 0)
                                           << BSON("host"
                                                   << "node2:12345"
-                                                  << "_id" << 1) << BSON("host"
-                                                                         << "node3:12345"
-                                                                         << "_id" << 2))),
+                                                  << "_id"
+                                                  << 1)
+                                          << BSON("host"
+                                                  << "node3:12345"
+                                                  << "_id"
+                                                  << 2))),
                        HostAndPort("node1", 12345));
-    ASSERT(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
-    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(100, 0));
-    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(100, 0));
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(100, 1));
+    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(100, 1));
     simulateSuccessfulV1Election();
 
-    ReplicationAwaiter awaiter(getReplCoord(), &txn);
+    ReplicationAwaiter awaiter(getReplCoord(), getServiceContext());
 
     OpTimeWithTermOne time1(100, 1);
     OpTimeWithTermOne time2(100, 2);
@@ -1277,10 +1244,13 @@ TEST_F(ReplCoordTest,
     // 2 nodes waiting for time2
     awaiter.setOpTime(time2);
     awaiter.setWriteConcern(writeConcern);
-    awaiter.start(&txn);
+    awaiter.start();
     ASSERT_OK(getReplCoord()->setLastAppliedOptime_forTest(2, 1, time1));
     ASSERT_OK(getReplCoord()->setLastAppliedOptime_forTest(2, 2, time1));
-    shutdown();
+    {
+        auto opCtx = makeOperationContext();
+        shutdown(opCtx.get());
+    }
     ReplicationCoordinator::StatusAndDuration statusAndDur = awaiter.getResult();
     ASSERT_EQUALS(ErrorCodes::ShutdownInProgress, statusAndDur.status);
     awaiter.reset();
@@ -1289,25 +1259,31 @@ TEST_F(ReplCoordTest,
 TEST_F(ReplCoordTest, NodeReturnsNotMasterWhenSteppingDownBeforeSatisfyingAWriteConcern) {
     // Test that a thread blocked in awaitReplication will be woken up and return NotMaster
     // if the node steps down while it is waiting.
-    OperationContextReplMock txn;
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 2 << "members"
+                            << "version"
+                            << 2
+                            << "members"
                             << BSON_ARRAY(BSON("host"
                                                << "node1:12345"
-                                               << "_id" << 0)
+                                               << "_id"
+                                               << 0)
                                           << BSON("host"
                                                   << "node2:12345"
-                                                  << "_id" << 1) << BSON("host"
-                                                                         << "node3:12345"
-                                                                         << "_id" << 2))),
+                                                  << "_id"
+                                                  << 1)
+                                          << BSON("host"
+                                                  << "node3:12345"
+                                                  << "_id"
+                                                  << 2))),
                        HostAndPort("node1", 12345));
-    ASSERT(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
-    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(100, 0));
-    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(100, 0));
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(100, 1));
+    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(100, 1));
     simulateSuccessfulV1Election();
 
-    ReplicationAwaiter awaiter(getReplCoord(), &txn);
+    const auto opCtx = makeOperationContext();
+    ReplicationAwaiter awaiter(getReplCoord(), getServiceContext());
 
     OpTimeWithTermOne time1(100, 1);
     OpTimeWithTermOne time2(100, 2);
@@ -1319,35 +1295,36 @@ TEST_F(ReplCoordTest, NodeReturnsNotMasterWhenSteppingDownBeforeSatisfyingAWrite
     // 2 nodes waiting for time2
     awaiter.setOpTime(time2);
     awaiter.setWriteConcern(writeConcern);
-    awaiter.start(&txn);
+    awaiter.start();
     ASSERT_OK(getReplCoord()->setLastAppliedOptime_forTest(2, 1, time1));
     ASSERT_OK(getReplCoord()->setLastAppliedOptime_forTest(2, 2, time1));
-    getReplCoord()->stepDown(&txn, true, Milliseconds(0), Milliseconds(1000));
+    ASSERT_OK(getReplCoord()->stepDown(opCtx.get(), true, Milliseconds(0), Milliseconds(1000)));
     ReplicationCoordinator::StatusAndDuration statusAndDur = awaiter.getResult();
-    ASSERT_EQUALS(ErrorCodes::NotMaster, statusAndDur.status);
+    ASSERT_EQUALS(ErrorCodes::PrimarySteppedDown, statusAndDur.status);
     awaiter.reset();
 }
 
 TEST_F(ReplCoordTest,
        NodeReturnsInterruptedWhenAnOpWaitingForWriteConcernToBeSatisfiedIsInterrupted) {
     // Tests that a thread blocked in awaitReplication can be killed by a killOp operation
-    const unsigned int opID = 100;
-    OperationContextReplMock txn{opID};
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 2 << "members"
+                            << "version"
+                            << 2
+                            << "members"
                             << BSON_ARRAY(BSON("_id" << 0 << "host"
                                                      << "node1")
                                           << BSON("_id" << 1 << "host"
-                                                        << "node2") << BSON("_id" << 2 << "host"
-                                                                                  << "node3"))),
+                                                        << "node2")
+                                          << BSON("_id" << 2 << "host"
+                                                        << "node3"))),
                        HostAndPort("node1"));
-    ASSERT(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
-    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(100, 0));
-    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(100, 0));
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(100, 1));
+    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(100, 1));
     simulateSuccessfulV1Election();
 
-    ReplicationAwaiter awaiter(getReplCoord(), &txn);
+    ReplicationAwaiter awaiter(getReplCoord(), getServiceContext());
 
     OpTimeWithTermOne time1(100, 1);
     OpTimeWithTermOne time2(100, 2);
@@ -1360,12 +1337,11 @@ TEST_F(ReplCoordTest,
     // 2 nodes waiting for time2
     awaiter.setOpTime(time2);
     awaiter.setWriteConcern(writeConcern);
-    awaiter.start(&txn);
+    awaiter.start();
     ASSERT_OK(getReplCoord()->setLastAppliedOptime_forTest(2, 1, time1));
     ASSERT_OK(getReplCoord()->setLastAppliedOptime_forTest(2, 2, time1));
 
-    txn.setCheckForInterruptStatus(kInterruptedStatus);
-    getReplCoord()->interrupt(opID);
+    killOperation(awaiter.getOperationContext());
     ReplicationCoordinator::StatusAndDuration statusAndDur = awaiter.getResult();
     ASSERT_EQUALS(ErrorCodes::Interrupted, statusAndDur.status);
     awaiter.reset();
@@ -1373,7 +1349,69 @@ TEST_F(ReplCoordTest,
 
 class StepDownTest : public ReplCoordTest {
 protected:
-    OID myRid;
+    struct SharedClientAndOperation {
+        static SharedClientAndOperation make(ServiceContext* serviceContext) {
+            SharedClientAndOperation result;
+            result.client = serviceContext->makeClient("StepDownThread");
+            result.opCtx = result.client->makeOperationContext();
+            return result;
+        }
+        std::shared_ptr<Client> client;
+        std::shared_ptr<OperationContext> opCtx;
+    };
+
+    std::pair<SharedClientAndOperation, stdx::future<boost::optional<Status>>> stepDown_nonBlocking(
+        bool force, Milliseconds waitTime, Milliseconds stepDownTime) {
+        using PromisedClientAndOperation = stdx::promise<SharedClientAndOperation>;
+        auto task = stdx::packaged_task<boost::optional<Status>(PromisedClientAndOperation)>(
+            [=](PromisedClientAndOperation operationPromise) -> boost::optional<Status> {
+                auto result = SharedClientAndOperation::make(getServiceContext());
+                operationPromise.set_value(result);
+                return getReplCoord()->stepDown(result.opCtx.get(), force, waitTime, stepDownTime);
+            });
+        auto result = task.get_future();
+        PromisedClientAndOperation operationPromise;
+        auto operationFuture = operationPromise.get_future();
+        stdx::thread(std::move(task), std::move(operationPromise)).detach();
+
+        getReplCoord()->waitForStepDownAttempt_forTest();
+
+        return std::make_pair(operationFuture.get(), std::move(result));
+    }
+
+    // Makes it so enough secondaries are caught up that a stepdown command can succeed.
+    void catchUpSecondaries(const OpTime& desiredOpTime) {
+        auto config = getReplCoord()->getConfig();
+        auto heartbeatInterval = config.getHeartbeatInterval();
+
+        enterNetwork();
+        getNet()->runUntil(getNet()->now() + heartbeatInterval);
+        NetworkInterfaceMock::NetworkOperationIterator noi = getNet()->getNextReadyRequest();
+        RemoteCommandRequest request = noi->getRequest();
+        log() << request.target.toString() << " processing " << request.cmdObj;
+        ReplSetHeartbeatArgsV1 hbArgs;
+        if (hbArgs.initialize(request.cmdObj).isOK()) {
+            ReplSetHeartbeatResponse hbResp;
+            hbResp.setSetName(hbArgs.getSetName());
+            hbResp.setState(MemberState::RS_SECONDARY);
+            hbResp.setConfigVersion(hbArgs.getConfigVersion());
+            hbResp.setAppliedOpTime(desiredOpTime);
+            hbResp.setDurableOpTime(desiredOpTime);
+            BSONObjBuilder respObj;
+            respObj << "ok" << 1;
+            hbResp.addToBSON(&respObj, false);
+            getNet()->scheduleResponse(noi, getNet()->now(), makeResponseStatus(respObj.obj()));
+        }
+        while (getNet()->hasReadyRequests()) {
+            auto noi = getNet()->getNextReadyRequest();
+            log() << "Blackholing network request " << noi->getRequest().cmdObj;
+            getNet()->blackHole(noi);
+        }
+
+        getNet()->runReadyNetworkOperations();
+        exitNetwork();
+    }
+
     OID rid2;
     OID rid3;
 
@@ -1383,7 +1421,9 @@ private:
         init("mySet/test1:1234,test2:1234,test3:1234");
         assertStartSuccess(BSON("_id"
                                 << "mySet"
-                                << "version" << 1 << "members"
+                                << "version"
+                                << 1
+                                << "members"
                                 << BSON_ARRAY(BSON("_id" << 0 << "host"
                                                          << "test1:1234")
                                               << BSON("_id" << 1 << "host"
@@ -1391,8 +1431,7 @@ private:
                                               << BSON("_id" << 2 << "host"
                                                             << "test3:1234"))),
                            HostAndPort("test1", 1234));
-        ASSERT(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
-        myRid = getReplCoord()->getMyRID();
+        ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
     }
 };
 
@@ -1400,74 +1439,142 @@ private:
 TEST_F(ReplCoordTest, NodeReturnsBadValueWhenUpdateTermIsRunAgainstANonReplNode) {
     init(ReplSettings());
     ASSERT_TRUE(ReplicationCoordinator::modeNone == getReplCoord()->getReplicationMode());
-    OperationContextNoop txn;
-    ASSERT_EQUALS(ErrorCodes::BadValue, getReplCoord()->updateTerm(&txn, 0).code());
+    auto opCtx = makeOperationContext();
+
+    ASSERT_EQUALS(ErrorCodes::BadValue, getReplCoord()->updateTerm(opCtx.get(), 0).code());
+}
+
+TEST_F(ReplCoordTest, ElectionIdTracksTermInPV1) {
+    init("mySet/test1:1234,test2:1234,test3:1234");
+
+    assertStartSuccess(BSON("_id"
+                            << "mySet"
+                            << "version"
+                            << 1
+                            << "members"
+                            << BSON_ARRAY(BSON("_id" << 0 << "host"
+                                                     << "test1:1234")
+                                          << BSON("_id" << 1 << "host"
+                                                        << "test2:1234")
+                                          << BSON("_id" << 2 << "host"
+                                                        << "test3:1234"))
+                            << "protocolVersion"
+                            << 1),
+                       HostAndPort("test1", 1234));
+    getReplCoord()->setMyLastAppliedOpTime(OpTime(Timestamp(100, 1), 0));
+    getReplCoord()->setMyLastDurableOpTime(OpTime(Timestamp(100, 1), 0));
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+    ASSERT_TRUE(getReplCoord()->getMemberState().secondary());
+
+    // No election has taken place yet.
+    {
+        auto term = getTopoCoord().getTerm();
+        auto electionId = getTopoCoord().getElectionId();
+
+        ASSERT_EQUALS(0, term);
+        ASSERT_FALSE(electionId.isSet());
+    }
+
+    simulateSuccessfulV1Election();
+
+    ASSERT_TRUE(getReplCoord()->getMemberState().primary());
+
+    // Check that the electionId is set properly after the election.
+    {
+        auto term = getTopoCoord().getTerm();
+        auto electionId = getTopoCoord().getElectionId();
+
+        ASSERT_EQUALS(1, term);
+        ASSERT_EQUALS(OID::fromTerm(term), electionId);
+    }
+
+    const auto opCtx = makeOperationContext();
+    auto status = getReplCoord()->stepDown(opCtx.get(), true, Milliseconds(0), Milliseconds(1000));
+
+    ASSERT_OK(status);
+    ASSERT_TRUE(getReplCoord()->getMemberState().secondary());
+
+    simulateSuccessfulV1ElectionWithoutExitingDrainMode(
+        getReplCoord()->getElectionTimeout_forTest());
+
+    ASSERT_TRUE(getReplCoord()->getMemberState().primary());
+
+    // Check that the electionId is again properly set after the new election.
+    {
+        auto term = getTopoCoord().getTerm();
+        auto electionId = getTopoCoord().getElectionId();
+
+        ASSERT_EQUALS(2, term);
+        ASSERT_EQUALS(OID::fromTerm(term), electionId);
+    }
 }
 
 TEST_F(ReplCoordTest, NodeChangesTermAndStepsDownWhenAndOnlyWhenUpdateTermSuppliesAHigherTerm) {
     init("mySet/test1:1234,test2:1234,test3:1234");
 
-    assertStartSuccess(
-        BSON("_id"
-             << "mySet"
-             << "version" << 1 << "members"
-             << BSON_ARRAY(BSON("_id" << 0 << "host"
-                                      << "test1:1234")
-                           << BSON("_id" << 1 << "host"
-                                         << "test2:1234") << BSON("_id" << 2 << "host"
-                                                                        << "test3:1234"))
-             << "protocolVersion" << 1),
-        HostAndPort("test1", 1234));
+    assertStartSuccess(BSON("_id"
+                            << "mySet"
+                            << "version"
+                            << 1
+                            << "members"
+                            << BSON_ARRAY(BSON("_id" << 0 << "host"
+                                                     << "test1:1234")
+                                          << BSON("_id" << 1 << "host"
+                                                        << "test2:1234")
+                                          << BSON("_id" << 2 << "host"
+                                                        << "test3:1234"))
+                            << "protocolVersion"
+                            << 1),
+                       HostAndPort("test1", 1234));
     getReplCoord()->setMyLastAppliedOpTime(OpTime(Timestamp(100, 1), 0));
     getReplCoord()->setMyLastDurableOpTime(OpTime(Timestamp(100, 1), 0));
-    ASSERT(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
     ASSERT_TRUE(getReplCoord()->getMemberState().secondary());
 
     simulateSuccessfulV1Election();
-    OperationContextNoop txn;
+    auto opCtx = makeOperationContext();
+
 
     ASSERT_EQUALS(1, getReplCoord()->getTerm());
     ASSERT_TRUE(getReplCoord()->getMemberState().primary());
 
     // lower term, no change
-    ASSERT_OK(getReplCoord()->updateTerm(&txn, 0));
+    ASSERT_OK(getReplCoord()->updateTerm(opCtx.get(), 0));
     ASSERT_EQUALS(1, getReplCoord()->getTerm());
     ASSERT_TRUE(getReplCoord()->getMemberState().primary());
 
     // same term, no change
-    ASSERT_OK(getReplCoord()->updateTerm(&txn, 1));
+    ASSERT_OK(getReplCoord()->updateTerm(opCtx.get(), 1));
     ASSERT_EQUALS(1, getReplCoord()->getTerm());
     ASSERT_TRUE(getReplCoord()->getMemberState().primary());
 
     // higher term, step down and change term
-    Handle cbHandle;
-    ASSERT_EQUALS(ErrorCodes::StaleTerm, getReplCoord()->updateTerm(&txn, 2).code());
-    // Term hasn't been incremented yet, as we need another try to update it after stepdown.
-    ASSERT_EQUALS(1, getReplCoord()->getTerm());
-    ASSERT_TRUE(getReplCoord()->getMemberState().secondary());
-
-    // Now update term should actually update the term, as stepdown is complete.
-    ASSERT_EQUALS(ErrorCodes::StaleTerm, getReplCoord()->updateTerm(&txn, 2).code());
+    executor::TaskExecutor::CallbackHandle cbHandle;
+    ASSERT_EQUALS(ErrorCodes::StaleTerm, getReplCoord()->updateTerm(opCtx.get(), 2).code());
     ASSERT_EQUALS(2, getReplCoord()->getTerm());
+    ASSERT_TRUE(getReplCoord()->getMemberState().secondary());
 }
 
 TEST_F(ReplCoordTest, ConcurrentStepDownShouldNotSignalTheSameFinishEventMoreThanOnce) {
     init("mySet/test1:1234,test2:1234,test3:1234");
 
-    assertStartSuccess(
-        BSON("_id"
-             << "mySet"
-             << "version" << 1 << "members"
-             << BSON_ARRAY(BSON("_id" << 0 << "host"
-                                      << "test1:1234")
-                           << BSON("_id" << 1 << "host"
-                                         << "test2:1234") << BSON("_id" << 2 << "host"
-                                                                        << "test3:1234"))
-             << "protocolVersion" << 1),
-        HostAndPort("test1", 1234));
+    assertStartSuccess(BSON("_id"
+                            << "mySet"
+                            << "version"
+                            << 1
+                            << "members"
+                            << BSON_ARRAY(BSON("_id" << 0 << "host"
+                                                     << "test1:1234")
+                                          << BSON("_id" << 1 << "host"
+                                                        << "test2:1234")
+                                          << BSON("_id" << 2 << "host"
+                                                        << "test3:1234"))
+                            << "protocolVersion"
+                            << 1),
+                       HostAndPort("test1", 1234));
     getReplCoord()->setMyLastAppliedOpTime(OpTime(Timestamp(100, 1), 0));
     getReplCoord()->setMyLastDurableOpTime(OpTime(Timestamp(100, 1), 0));
-    ASSERT(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
     ASSERT_TRUE(getReplCoord()->getMemberState().secondary());
 
     simulateSuccessfulV1Election();
@@ -1479,53 +1586,309 @@ TEST_F(ReplCoordTest, ConcurrentStepDownShouldNotSignalTheSameFinishEventMoreTha
 
     // Prevent _stepDownFinish() from running and becoming secondary by blocking in this
     // exclusive task.
-    unittest::Barrier barrier(2U);
-    auto stepDownFinishBlocker = [&barrier](const executor::TaskExecutor::CallbackArgs& args) {
-        barrier.countDownAndWait();
-    };
-    replExec->scheduleWorkWithGlobalExclusiveLock(stepDownFinishBlocker);
+    const auto opCtx = makeOperationContext();
+    boost::optional<Lock::GlobalWrite> globalExclusiveLock(opCtx.get());
 
     TopologyCoordinator::UpdateTermResult termUpdated2;
     auto updateTermEvh2 = getReplCoord()->updateTerm_forTest(2, &termUpdated2);
+    ASSERT(termUpdated2 == TopologyCoordinator::UpdateTermResult::kTriggerStepDown);
     ASSERT(updateTermEvh2.isValid());
 
     TopologyCoordinator::UpdateTermResult termUpdated3;
     auto updateTermEvh3 = getReplCoord()->updateTerm_forTest(3, &termUpdated3);
-    ASSERT(updateTermEvh3.isValid());
+    ASSERT(termUpdated3 == TopologyCoordinator::UpdateTermResult::kTriggerStepDown);
+    // Although term 3 can trigger stepdown, a stepdown has already been scheduled,
+    // so no other stepdown can be scheduled again. Term 3 will be remembered and
+    // installed once stepdown finishes.
+    ASSERT(!updateTermEvh3.isValid());
 
-    // Unblock 'stepDownFinishBlocker'. Tasks for updateTerm and _stepDownFinish should proceed.
-    barrier.countDownAndWait();
+    // Unblock the tasks for updateTerm and _stepDownFinish.
+    globalExclusiveLock.reset();
 
-    // Both _updateTerm_incallback tasks should be scheduled.
+    // Wait stepdown to finish and term 3 to be installed.
     replExec->waitForEvent(updateTermEvh2);
-    ASSERT(termUpdated2 == TopologyCoordinator::UpdateTermResult::kTriggerStepDown);
+    ASSERT_TRUE(getReplCoord()->getMemberState().secondary());
+    ASSERT_EQUALS(3, getReplCoord()->getTerm());
+}
 
-    replExec->waitForEvent(updateTermEvh3);
-    if (termUpdated3 == TopologyCoordinator::UpdateTermResult::kTriggerStepDown) {
-        // Term hasn't updated yet.
-        ASSERT_EQUALS(1, getReplCoord()->getTerm());
+TEST_F(ReplCoordTest, DrainCompletionMidStepDown) {
+    init("mySet/test1:1234,test2:1234,test3:1234");
 
-        // Update term event handles will wait for potential stepdown.
-        ASSERT_TRUE(getReplCoord()->getMemberState().secondary());
+    assertStartSuccess(BSON("_id"
+                            << "mySet"
+                            << "version"
+                            << 1
+                            << "members"
+                            << BSON_ARRAY(BSON("_id" << 0 << "host"
+                                                     << "test1:1234")
+                                          << BSON("_id" << 1 << "host"
+                                                        << "test2:1234")
+                                          << BSON("_id" << 2 << "host"
+                                                        << "test3:1234"))
+                            << "protocolVersion"
+                            << 1),
+                       HostAndPort("test1", 1234));
+    getReplCoord()->setMyLastAppliedOpTime(OpTime(Timestamp(100, 1), 0));
+    getReplCoord()->setMyLastDurableOpTime(OpTime(Timestamp(100, 1), 0));
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+    ASSERT_TRUE(getReplCoord()->getMemberState().secondary());
 
-        TopologyCoordinator::UpdateTermResult termUpdated4;
-        auto updateTermEvh4 = getReplCoord()->updateTerm_forTest(3, &termUpdated4);
-        ASSERT(updateTermEvh4.isValid());
-        replExec->waitForEvent(updateTermEvh4);
-        ASSERT(termUpdated4 == TopologyCoordinator::UpdateTermResult::kUpdatedTerm);
-        ASSERT_EQUALS(3, getReplCoord()->getTerm());
-    } else {
-        // Term already updated.
-        ASSERT(termUpdated3 == TopologyCoordinator::UpdateTermResult::kUpdatedTerm);
-        ASSERT_EQUALS(3, getReplCoord()->getTerm());
+    simulateSuccessfulV1ElectionWithoutExitingDrainMode(
+        getReplCoord()->getElectionTimeout_forTest());
 
-        // Update term event handles will wait for potential stepdown.
-        ASSERT_TRUE(getReplCoord()->getMemberState().secondary());
+    ASSERT_EQUALS(1, getReplCoord()->getTerm());
+    ASSERT_TRUE(getReplCoord()->getMemberState().primary());
+
+    // Now update term to trigger a stepdown.
+    TopologyCoordinator::UpdateTermResult termUpdated;
+    auto updateTermEvh = getReplCoord()->updateTerm_forTest(2, &termUpdated);
+    ASSERT(updateTermEvh.isValid());
+    ASSERT(termUpdated == TopologyCoordinator::UpdateTermResult::kTriggerStepDown);
+
+    // Now signal that replication applier is finished draining its buffer.
+    const auto opCtx = makeOperationContext();
+    getReplCoord()->signalDrainComplete(opCtx.get(), getReplCoord()->getTerm());
+
+    // Now wait for stepdown to complete
+    getReplExec()->waitForEvent(updateTermEvh);
+
+    // By now drain mode should be cancelled.
+    ASSERT_OK(getReplCoord()->waitForDrainFinish(Milliseconds(0)));
+
+    ASSERT_TRUE(getReplCoord()->getMemberState().secondary());
+    // ASSERT_EQUALS(2, getReplCoord()->getTerm()); // SERVER-28290
+}
+
+TEST_F(StepDownTest, StepDownCanCompleteBasedOnReplSetUpdatePositionAlone) {
+    const auto repl = getReplCoord();
+
+    OpTimeWithTermOne opTime1(100, 1);
+    OpTimeWithTermOne opTime2(200, 1);
+
+    repl->setMyLastAppliedOpTime(opTime2);
+    repl->setMyLastDurableOpTime(opTime2);
+
+    // Secondaries not caught up yet.
+    ASSERT_OK(repl->setLastAppliedOptime_forTest(1, 1, opTime1));
+    ASSERT_OK(repl->setLastAppliedOptime_forTest(1, 2, opTime1));
+
+    simulateSuccessfulV1Election();
+    ASSERT_TRUE(repl->getMemberState().primary());
+
+    // Step down where the secondary actually has to catch up before the stepDown can succeed.
+    auto result = stepDown_nonBlocking(false, Seconds(10), Seconds(60));
+
+    // The node has not been able to step down yet.
+    ASSERT_TRUE(repl->getMemberState().primary());
+
+    // Catch up one of the secondaries using only replSetUpdatePosition.
+    long long configVersion = repl->getConfig().getConfigVersion();
+    UpdatePositionArgs updatePositionArgs;
+
+    ASSERT_OK(updatePositionArgs.initialize(
+        BSON(UpdatePositionArgs::kCommandFieldName
+             << 1
+             << UpdatePositionArgs::kUpdateArrayFieldName
+             << BSON_ARRAY(BSON(UpdatePositionArgs::kConfigVersionFieldName
+                                << configVersion
+                                << UpdatePositionArgs::kMemberIdFieldName
+                                << 1
+                                << UpdatePositionArgs::kAppliedOpTimeFieldName
+                                << opTime2.asOpTime().toBSON()
+                                << UpdatePositionArgs::kDurableOpTimeFieldName
+                                << opTime2.asOpTime().toBSON())
+                           << BSON(UpdatePositionArgs::kConfigVersionFieldName
+                                   << configVersion
+                                   << UpdatePositionArgs::kMemberIdFieldName
+                                   << 2
+                                   << UpdatePositionArgs::kAppliedOpTimeFieldName
+                                   << opTime1.asOpTime().toBSON()
+                                   << UpdatePositionArgs::kDurableOpTimeFieldName
+                                   << opTime1.asOpTime().toBSON())))));
+
+    ASSERT_OK(repl->processReplSetUpdatePosition(updatePositionArgs, &configVersion));
+
+    // Verify that stepDown completes successfully.
+    ASSERT_OK(*result.second.get());
+    ASSERT_TRUE(repl->getMemberState().secondary());
+}
+
+TEST_F(StepDownTest, StepDownFailureRestoresDrainState) {
+    const auto repl = getReplCoord();
+
+    OpTimeWithTermOne opTime1(100, 1);
+    OpTimeWithTermOne opTime2(200, 1);
+
+    repl->setMyLastAppliedOpTime(opTime2);
+    repl->setMyLastDurableOpTime(opTime2);
+
+    // Secondaries not caught up yet.
+    ASSERT_OK(repl->setLastAppliedOptime_forTest(1, 1, opTime1));
+    ASSERT_OK(repl->setLastAppliedOptime_forTest(1, 2, opTime1));
+
+    auto electionTimeoutWhen = getReplCoord()->getElectionTimeout_forTest();
+    simulateSuccessfulV1ElectionWithoutExitingDrainMode(electionTimeoutWhen);
+    ASSERT_TRUE(repl->getMemberState().primary());
+    ASSERT(repl->getApplierState() == ReplicationCoordinator::ApplierState::Draining);
+
+    {
+        // We can't take writes yet since we're still in drain mode.
+        const auto opCtx = makeOperationContext();
+        Lock::GlobalLock lock(opCtx.get(), MODE_IX);
+        ASSERT_FALSE(getReplCoord()->canAcceptWritesForDatabase(opCtx.get(), "admin"));
     }
+
+    // Step down where the secondary actually has to catch up before the stepDown can succeed.
+    auto result = stepDown_nonBlocking(false, Seconds(10), Seconds(60));
+
+    // Interrupt the ongoing stepdown command so that the stepdown attempt will fail.
+    {
+        stdx::lock_guard<Client> lk(*result.first.client.get());
+        result.first.opCtx->markKilled(ErrorCodes::Interrupted);
+    }
+
+    // Ensure that the stepdown command failed.
+    auto stepDownStatus = *result.second.get();
+    ASSERT_NOT_OK(stepDownStatus);
+    // Which code is returned is racy.
+    ASSERT(stepDownStatus == ErrorCodes::PrimarySteppedDown ||
+           stepDownStatus == ErrorCodes::Interrupted);
+    ASSERT_TRUE(getReplCoord()->getMemberState().primary());
+    ASSERT(repl->getApplierState() == ReplicationCoordinator::ApplierState::Draining);
+
+    // Ensure that the failed stepdown attempt didn't make us able to take writes since we're still
+    // in drain mode.
+    {
+        const auto opCtx = makeOperationContext();
+        Lock::GlobalLock lock(opCtx.get(), MODE_IX);
+        ASSERT_FALSE(getReplCoord()->canAcceptWritesForDatabase(opCtx.get(), "admin"));
+    }
+
+    // Now complete drain mode and ensure that we become capable of taking writes.
+    auto opCtx = makeOperationContext();
+    signalDrainComplete(opCtx.get());
+    ASSERT(repl->getApplierState() == ReplicationCoordinator::ApplierState::Stopped);
+
+    ASSERT_TRUE(getReplCoord()->getMemberState().primary());
+    Lock::GlobalLock lock(opCtx.get(), MODE_IX);
+    ASSERT_TRUE(getReplCoord()->canAcceptWritesForDatabase(opCtx.get(), "admin"));
+}
+
+class StepDownTestWithUnelectableNode : public StepDownTest {
+private:
+    void setUp() override {
+        ReplCoordTest::setUp();
+        init("mySet/test1:1234,test2:1234,test3:1234");
+        assertStartSuccess(BSON("_id"
+                                << "mySet"
+                                << "version"
+                                << 1
+                                << "protocolVersion"
+                                << 1
+                                << "members"
+                                << BSON_ARRAY(BSON("_id" << 0 << "host"
+                                                         << "test1:1234")
+                                              << BSON("_id" << 1 << "host"
+                                                            << "test2:1234"
+                                                            << "priority"
+                                                            << 0)
+                                              << BSON("_id" << 2 << "host"
+                                                            << "test3:1234"))),
+                           HostAndPort("test1", 1234));
+        ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+    }
+};
+
+TEST_F(StepDownTestWithUnelectableNode,
+       UpdatePositionDuringStepDownWakesUpStepDownWaiterMoreThanOnce) {
+    const auto repl = getReplCoord();
+
+    OpTimeWithTermOne opTime1(100, 1);
+    OpTimeWithTermOne opTime2(200, 1);
+
+    repl->setMyLastAppliedOpTime(opTime2);
+    repl->setMyLastDurableOpTime(opTime2);
+
+    // No secondaries are caught up yet.
+    ASSERT_OK(repl->setLastAppliedOptime_forTest(1, 1, opTime1));
+    ASSERT_OK(repl->setLastAppliedOptime_forTest(1, 2, opTime1));
+
+    simulateSuccessfulV1Election();
+    ASSERT_TRUE(repl->getMemberState().primary());
+
+    // Step down where the secondary actually has to catch up before the stepDown can succeed.
+    auto result = stepDown_nonBlocking(false, Seconds(10), Seconds(60));
+
+    // The node has not been able to step down yet.
+    ASSERT_TRUE(repl->getMemberState().primary());
+
+    // Use replSetUpdatePosition to catch up the first secondary, which is not electable.
+    // This will yield a majority at the primary's opTime, so the waiter will be woken up,
+    // but stepDown will not be able to complete.
+    long long configVersion = repl->getConfig().getConfigVersion();
+    UpdatePositionArgs catchupFirstSecondary;
+
+    ASSERT_OK(catchupFirstSecondary.initialize(
+        BSON(UpdatePositionArgs::kCommandFieldName
+             << 1
+             << UpdatePositionArgs::kUpdateArrayFieldName
+             << BSON_ARRAY(BSON(UpdatePositionArgs::kConfigVersionFieldName
+                                << configVersion
+                                << UpdatePositionArgs::kMemberIdFieldName
+                                << 1
+                                << UpdatePositionArgs::kAppliedOpTimeFieldName
+                                << opTime2.asOpTime().toBSON()
+                                << UpdatePositionArgs::kDurableOpTimeFieldName
+                                << opTime2.asOpTime().toBSON())
+                           << BSON(UpdatePositionArgs::kConfigVersionFieldName
+                                   << configVersion
+                                   << UpdatePositionArgs::kMemberIdFieldName
+                                   << 2
+                                   << UpdatePositionArgs::kAppliedOpTimeFieldName
+                                   << opTime1.asOpTime().toBSON()
+                                   << UpdatePositionArgs::kDurableOpTimeFieldName
+                                   << opTime1.asOpTime().toBSON())))));
+
+    ASSERT_OK(repl->processReplSetUpdatePosition(catchupFirstSecondary, &configVersion));
+
+    // The primary has still not been able to finish stepping down.
+    ASSERT_TRUE(repl->getMemberState().primary());
+
+    // Now catch up the other secondary. This will wake up the waiter again, but this time
+    // there is an electable node, so stepDown will complete.
+    UpdatePositionArgs catchupOtherSecondary;
+
+    ASSERT_OK(catchupOtherSecondary.initialize(
+        BSON(UpdatePositionArgs::kCommandFieldName
+             << 1
+             << UpdatePositionArgs::kUpdateArrayFieldName
+             << BSON_ARRAY(BSON(UpdatePositionArgs::kConfigVersionFieldName
+                                << configVersion
+                                << UpdatePositionArgs::kMemberIdFieldName
+                                << 1
+                                << UpdatePositionArgs::kAppliedOpTimeFieldName
+                                << opTime2.asOpTime().toBSON()
+                                << UpdatePositionArgs::kDurableOpTimeFieldName
+                                << opTime2.asOpTime().toBSON())
+                           << BSON(UpdatePositionArgs::kConfigVersionFieldName
+                                   << configVersion
+                                   << UpdatePositionArgs::kMemberIdFieldName
+                                   << 2
+                                   << UpdatePositionArgs::kAppliedOpTimeFieldName
+                                   << opTime2.asOpTime().toBSON()
+                                   << UpdatePositionArgs::kDurableOpTimeFieldName
+                                   << opTime2.asOpTime().toBSON())))));
+
+    ASSERT_OK(repl->processReplSetUpdatePosition(catchupOtherSecondary, &configVersion));
+
+    // Verify that stepDown completes successfully.
+    ASSERT_OK(*result.second.get());
+    ASSERT_TRUE(repl->getMemberState().secondary());
 }
 
 TEST_F(StepDownTest, NodeReturnsNotMasterWhenAskedToStepDownAsANonPrimaryNode) {
-    OperationContextReplMock txn;
+    const auto opCtx = makeOperationContext();
+
     OpTimeWithTermOne optime1(100, 1);
     // All nodes are caught up
     getReplCoord()->setMyLastAppliedOpTime(optime1);
@@ -1533,29 +1896,40 @@ TEST_F(StepDownTest, NodeReturnsNotMasterWhenAskedToStepDownAsANonPrimaryNode) {
     ASSERT_OK(getReplCoord()->setLastAppliedOptime_forTest(1, 1, optime1));
     ASSERT_OK(getReplCoord()->setLastAppliedOptime_forTest(1, 2, optime1));
 
-    Status status = getReplCoord()->stepDown(&txn, false, Milliseconds(0), Milliseconds(0));
+    Status status = getReplCoord()->stepDown(opCtx.get(), false, Milliseconds(0), Milliseconds(0));
     ASSERT_EQUALS(ErrorCodes::NotMaster, status);
     ASSERT_TRUE(getReplCoord()->getMemberState().secondary());
 }
 
 TEST_F(StepDownTest,
        NodeReturnsExceededTimeLimitWhenStepDownFailsToObtainTheGlobalLockWithinTheAllottedTime) {
-    OperationContextReplMock txn;
     OpTimeWithTermOne optime1(100, 1);
-    // All nodes are caught up
+
+    // Set up this test so that all nodes are caught up. This is necessary to exclude the false
+    // positive case where stepDown returns "ExceededTimeLimit", but not because it could not
+    // acquire the lock, but because it could not satisfy all stepdown conditions on time.
     getReplCoord()->setMyLastAppliedOpTime(optime1);
     getReplCoord()->setMyLastDurableOpTime(optime1);
     ASSERT_OK(getReplCoord()->setLastAppliedOptime_forTest(1, 1, optime1));
     ASSERT_OK(getReplCoord()->setLastAppliedOptime_forTest(1, 2, optime1));
 
     simulateSuccessfulV1Election();
+    ASSERT_TRUE(getReplCoord()->getMemberState().primary());
 
-    // Make sure stepDown cannot grab the global shared lock
-    Lock::GlobalWrite lk(txn.lockState());
+    const auto opCtx = makeOperationContext();
 
-    Status status = getReplCoord()->stepDown(&txn, false, Milliseconds(0), Milliseconds(1000));
+    // Make sure stepDown cannot grab the global exclusive lock. We need to use a different
+    // locker to test this, or otherwise stepDown will be granted the lock automatically.
+    Lock::GlobalWrite lk(opCtx.get());
+    ASSERT_TRUE(opCtx->lockState()->isW());
+    auto locker = opCtx.get()->swapLockState(stdx::make_unique<DefaultLockerImpl>());
+
+    Status status =
+        getReplCoord()->stepDown(opCtx.get(), false, Milliseconds(0), Milliseconds(1000));
     ASSERT_EQUALS(ErrorCodes::ExceededTimeLimit, status);
     ASSERT_TRUE(getReplCoord()->getMemberState().primary());
+
+    opCtx.get()->swapLockState(std::move(locker));
 }
 
 /* Step Down Test for a 5-node replica set */
@@ -1611,7 +1985,9 @@ private:
 
         assertStartSuccess(BSON("_id"
                                 << "mySet"
-                                << "version" << 1 << "members"
+                                << "version"
+                                << 1
+                                << "members"
                                 << BSON_ARRAY(BSON("_id" << 0 << "host"
                                                          << "test1:1234")
                                               << BSON("_id" << 1 << "host"
@@ -1623,15 +1999,13 @@ private:
                                               << BSON("_id" << 4 << "host"
                                                             << "test5:1234"))),
                            HostAndPort("test1", 1234));
-        ASSERT(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
-        myRid = getReplCoord()->getMyRID();
+        ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
     }
 };
 
 TEST_F(
     StepDownTestFiveNode,
     NodeReturnsExceededTimeLimitWhenStepDownIsRunAndCaughtUpMajorityExistsButWithoutElectableNode) {
-    OperationContextReplMock txn;
     OpTime optimeLagged(Timestamp(100, 1), 1);
     OpTime optimePrimary(Timestamp(100, 2), 1);
 
@@ -1656,15 +2030,16 @@ TEST_F(
     getNet()->runReadyNetworkOperations();
     exitNetwork();
 
+    const auto opCtx = makeOperationContext();
+
     ASSERT_TRUE(getReplCoord()->getMemberState().primary());
-    auto status = getReplCoord()->stepDown(&txn, false, Milliseconds(0), Milliseconds(1000));
+    auto status = getReplCoord()->stepDown(opCtx.get(), false, Milliseconds(0), Milliseconds(1000));
     ASSERT_EQUALS(ErrorCodes::ExceededTimeLimit, status);
     ASSERT_TRUE(getReplCoord()->getMemberState().primary());
 }
 
 TEST_F(StepDownTestFiveNode,
        NodeReturnsExceededTimeLimitWhenStepDownIsRunAndNoCaughtUpMajorityExists) {
-    OperationContextReplMock txn;
     OpTime optimeLagged(Timestamp(100, 1), 1);
     OpTime optimePrimary(Timestamp(100, 2), 1);
 
@@ -1689,8 +2064,10 @@ TEST_F(StepDownTestFiveNode,
     getNet()->runReadyNetworkOperations();
     exitNetwork();
 
+    const auto opCtx = makeOperationContext();
+
     ASSERT_TRUE(getReplCoord()->getMemberState().primary());
-    auto status = getReplCoord()->stepDown(&txn, false, Milliseconds(0), Milliseconds(1000));
+    auto status = getReplCoord()->stepDown(opCtx.get(), false, Milliseconds(0), Milliseconds(1000));
     ASSERT_EQUALS(ErrorCodes::ExceededTimeLimit, status);
     ASSERT_TRUE(getReplCoord()->getMemberState().primary());
 }
@@ -1698,7 +2075,6 @@ TEST_F(StepDownTestFiveNode,
 TEST_F(
     StepDownTestFiveNode,
     NodeTransitionsToSecondaryImmediatelyWhenStepDownIsRunAndAnUpToDateMajorityWithElectableNodeExists) {
-    OperationContextReplMock txn;
     OpTime optimeLagged(Timestamp(100, 1), 1);
     OpTime optimePrimary(Timestamp(100, 2), 1);
 
@@ -1723,8 +2099,10 @@ TEST_F(
     getNet()->runReadyNetworkOperations();
     exitNetwork();
 
+    const auto opCtx = makeOperationContext();
+
     ASSERT_TRUE(getReplCoord()->getMemberState().primary());
-    ASSERT_OK(getReplCoord()->stepDown(&txn, false, Milliseconds(0), Milliseconds(1000)));
+    ASSERT_OK(getReplCoord()->stepDown(opCtx.get(), false, Milliseconds(0), Milliseconds(1000)));
     enterNetwork();  // So we can safely inspect the topology coordinator
     ASSERT_EQUALS(getNet()->now() + Seconds(1), getTopoCoord().getStepDownTime());
     ASSERT_TRUE(getTopoCoord().getMemberState().secondary());
@@ -1732,18 +2110,108 @@ TEST_F(
     ASSERT_TRUE(getReplCoord()->getMemberState().secondary());
 }
 
+// This test checks if a primary is chosen even if there are two simultaneous elections
+// happening because of election timeout and step-down timeout in a single node replica set.
+TEST_F(ReplCoordTest, SingleNodeReplSetStepDownTimeoutAndElectionTimeoutExpiresAtTheSameTime) {
+    init();
+
+    assertStartSuccess(BSON("_id"
+                            << "mySet"
+                            << "version"
+                            << 1
+                            << "members"
+                            << BSON_ARRAY(BSON("_id" << 0 << "host"
+                                                     << "test1:1234"))
+                            << "protocolVersion"
+                            << 1
+                            << "settings"
+                            << BSON("electionTimeoutMillis" << 1000)),
+                       HostAndPort("test1", 1234));
+    auto opCtx = makeOperationContext();
+    getExternalState()->setElectionTimeoutOffsetLimitFraction(0);
+    runSingleNodeElection(opCtx.get());
+
+    // Stepdown command with "force=true" resets the election timer to election timeout (10 seconds
+    // later) and allows the node to resume primary after stepdown timeout (also 10 seconds).
+    ASSERT_OK(getReplCoord()->stepDown(opCtx.get(), true, Milliseconds(0), Milliseconds(1000)));
+    getNet()->enterNetwork();
+    ASSERT_TRUE(getTopoCoord().getMemberState().secondary());
+    ASSERT_TRUE(getReplCoord()->getMemberState().secondary());
+
+    // Now run time forward and make sure that the node becomes primary again when stepdown timeout
+    // and election timeout occurs at the same time.
+    Date_t stepdownUntil = getNet()->now() + Seconds(1);
+    getNet()->runUntil(stepdownUntil);
+    ASSERT_EQUALS(stepdownUntil, getNet()->now());
+    ASSERT_TRUE(getTopoCoord().getMemberState().primary());
+    getNet()->exitNetwork();
+    ASSERT_TRUE(getReplCoord()->getMemberState().primary());
+}
+
+TEST_F(ReplCoordTest, SingleNodeReplSetUnfreeze) {
+    init();
+
+    assertStartSuccess(BSON("_id"
+                            << "mySet"
+                            << "version"
+                            << 1
+                            << "members"
+                            << BSON_ARRAY(BSON("_id" << 0 << "host"
+                                                     << "test1:1234"))
+                            << "protocolVersion"
+                            << 1
+                            << "settings"
+                            << BSON("electionTimeoutMillis" << 10000)),
+                       HostAndPort("test1", 1234));
+    auto opCtx = makeOperationContext();
+    getExternalState()->setElectionTimeoutOffsetLimitFraction(0);
+
+    // Become Secondary.
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(100, 1));
+    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(100, 1));
+    ASSERT_TRUE(getTopoCoord().getMemberState().secondary());
+    ASSERT_TRUE(getReplCoord()->getMemberState().secondary());
+
+    // Freeze the node for 20 seconds.
+    BSONObjBuilder resultObj;
+    Date_t freezeUntil = getNet()->now() + Seconds(15);
+    ASSERT_OK(getReplCoord()->processReplSetFreeze(20, &resultObj));
+    getNet()->enterNetwork();
+
+    // Now run time forward and unfreeze the node after 15 seconds.
+    getNet()->runUntil(freezeUntil);
+    ASSERT_EQUALS(freezeUntil, getNet()->now());
+    ASSERT_TRUE(getTopoCoord().getMemberState().secondary());
+    getNet()->exitNetwork();
+    ASSERT_TRUE(getReplCoord()->getMemberState().secondary());
+    ASSERT_OK(getReplCoord()->processReplSetFreeze(0, &resultObj));
+    getNet()->enterNetwork();
+
+    // Wait for single node election to happen.
+    Date_t waitUntil = freezeUntil + Seconds(1);
+    getNet()->runUntil(waitUntil);
+    ASSERT_EQUALS(waitUntil, getNet()->now());
+    ASSERT_TRUE(getTopoCoord().getMemberState().primary());
+    getNet()->exitNetwork();
+    ASSERT_TRUE(getReplCoord()->getMemberState().primary());
+}
+
 TEST_F(ReplCoordTest, NodeBecomesPrimaryAgainWhenStepDownTimeoutExpiresInASingleNodeSet) {
     init("mySet");
 
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 1 << "members"
+                            << "version"
+                            << 1
+                            << "members"
                             << BSON_ARRAY(BSON("_id" << 0 << "host"
                                                      << "test1:1234"))),
                        HostAndPort("test1", 1234));
-    OperationContextReplMock txn;
-    runSingleNodeElection(getReplCoord());
-    ASSERT_OK(getReplCoord()->stepDown(&txn, true, Milliseconds(0), Milliseconds(1000)));
+    auto opCtx = makeOperationContext();
+    runSingleNodeElection(opCtx.get());
+
+    ASSERT_OK(getReplCoord()->stepDown(opCtx.get(), true, Milliseconds(0), Milliseconds(1000)));
     getNet()->enterNetwork();  // Must do this before inspecting the topocoord
     Date_t stepdownUntil = getNet()->now() + Seconds(1);
     ASSERT_EQUALS(stepdownUntil, getTopoCoord().getStepDownTime());
@@ -1759,9 +2227,47 @@ TEST_F(ReplCoordTest, NodeBecomesPrimaryAgainWhenStepDownTimeoutExpiresInASingle
     ASSERT_TRUE(getReplCoord()->getMemberState().primary());
 }
 
+TEST_F(
+    ReplCoordTest,
+    NodeGoesIntoRecoveryAgainWhenStepDownTimeoutExpiresInASingleNodeSetAndWeAreInMaintenanceMode) {
+    init("mySet");
+
+    assertStartSuccess(BSON("_id"
+                            << "mySet"
+                            << "version"
+                            << 1
+                            << "members"
+                            << BSON_ARRAY(BSON("_id" << 0 << "host"
+                                                     << "test1:1234"))),
+                       HostAndPort("test1", 1234));
+    const auto opCtx = makeOperationContext();
+    runSingleNodeElection(opCtx.get());
+
+    ASSERT_OK(getReplCoord()->stepDown(opCtx.get(), true, Milliseconds(0), Milliseconds(1000)));
+    getNet()->enterNetwork();  // Must do this before inspecting the topocoord
+    Date_t stepdownUntil = getNet()->now() + Seconds(1);
+    ASSERT_EQUALS(stepdownUntil, getTopoCoord().getStepDownTime());
+    ASSERT_TRUE(getTopoCoord().getMemberState().secondary());
+    ASSERT_TRUE(getReplCoord()->getMemberState().secondary());
+
+    // Go into maintenance mode.
+    ASSERT_EQUALS(0, getTopoCoord().getMaintenanceCount());
+    ASSERT_FALSE(getReplCoord()->getMaintenanceMode());
+    ASSERT_OK(getReplCoord()->setMaintenanceMode(true));
+    ASSERT_EQUALS(1, getTopoCoord().getMaintenanceCount());
+    ASSERT_TRUE(getReplCoord()->getMaintenanceMode());
+
+    // Now run time forward and make sure that the node goes into RECOVERING again when the stepdown
+    // period ends.
+    getNet()->runUntil(stepdownUntil);
+    ASSERT_EQUALS(stepdownUntil, getNet()->now());
+    ASSERT_EQUALS(MemberState(MemberState::RS_RECOVERING), getTopoCoord().getMemberState());
+    getNet()->exitNetwork();
+    ASSERT_EQUALS(MemberState(MemberState::RS_RECOVERING), getReplCoord()->getMemberState());
+}
+
 TEST_F(StepDownTest,
        NodeReturnsExceededTimeLimitWhenNoSecondaryIsCaughtUpWithinStepDownsSecondaryCatchUpPeriod) {
-    OperationContextReplMock txn;
     OpTimeWithTermOne optime1(100, 1);
     OpTimeWithTermOne optime2(100, 2);
     // No secondary is caught up
@@ -1773,8 +2279,10 @@ TEST_F(StepDownTest,
 
     simulateSuccessfulV1Election();
 
+    const auto opCtx = makeOperationContext();
+
     // Try to stepDown but time out because no secondaries are caught up.
-    auto status = repl->stepDown(&txn, false, Milliseconds(0), Milliseconds(1000));
+    auto status = repl->stepDown(opCtx.get(), false, Milliseconds(0), Milliseconds(1000));
     ASSERT_EQUALS(ErrorCodes::ExceededTimeLimit, status);
     ASSERT_TRUE(repl->getMemberState().primary());
 
@@ -1789,14 +2297,13 @@ TEST_F(StepDownTest,
     }
     getNet()->exitNetwork();
     ASSERT_TRUE(repl->getMemberState().primary());
-    status = repl->stepDown(&txn, true, Milliseconds(0), Milliseconds(1000));
+    status = repl->stepDown(opCtx.get(), true, Milliseconds(0), Milliseconds(1000));
     ASSERT_OK(status);
     ASSERT_TRUE(repl->getMemberState().secondary());
 }
 
 TEST_F(StepDownTest,
        NodeTransitionsToSecondaryWhenASecondaryCatchesUpAfterTheFirstRoundOfHeartbeats) {
-    OperationContextReplMock txn;
     OpTime optime1(Timestamp(100, 1), 1);
     OpTime optime2(Timestamp(100, 2), 1);
 
@@ -1812,53 +2319,16 @@ TEST_F(StepDownTest,
     ASSERT_TRUE(getReplCoord()->getMemberState().primary());
 
     // Step down where the secondary actually has to catch up before the stepDown can succeed.
-    // On entering the network, _stepDownContinue should cancel the heartbeats scheduled for
-    // T + 2 seconds and send out a new round of heartbeats immediately.
-    // This makes it unnecessary to advance the clock after entering the network to process
-    // the heartbeat requests.
-    Status result(ErrorCodes::InternalError, "not mutated");
-    auto globalReadLockAndEventHandle =
-        repl->stepDown_nonBlocking(&txn, false, Milliseconds(10000), Milliseconds(60000), &result);
-    const auto& eventHandle = globalReadLockAndEventHandle.second;
-    ASSERT_TRUE(eventHandle);
-    ASSERT_TRUE(txn.lockState()->isReadLocked());
+    auto result = stepDown_nonBlocking(false, Seconds(10), Seconds(60));
 
-    // Make a secondary actually catch up
-    enterNetwork();
-    ASSERT(getNet()->hasReadyRequests());
-    NetworkInterfaceMock::NetworkOperationIterator noi = getNet()->getNextReadyRequest();
-    RemoteCommandRequest request = noi->getRequest();
-    log() << request.target.toString() << " processing " << request.cmdObj;
-    ReplSetHeartbeatArgsV1 hbArgs;
-    if (hbArgs.initialize(request.cmdObj).isOK()) {
-        ReplSetHeartbeatResponse hbResp;
-        hbResp.setSetName(hbArgs.getSetName());
-        hbResp.setState(MemberState::RS_SECONDARY);
-        hbResp.setConfigVersion(hbArgs.getConfigVersion());
-        hbResp.setAppliedOpTime(optime2);
-        hbResp.setDurableOpTime(optime2);
-        BSONObjBuilder respObj;
-        respObj << "ok" << 1;
-        hbResp.addToBSON(&respObj, false);
-        getNet()->scheduleResponse(noi, getNet()->now(), makeResponseStatus(respObj.obj()));
-    }
-    while (getNet()->hasReadyRequests()) {
-        auto noi = getNet()->getNextReadyRequest();
-        log() << "Blackholing network request " << noi->getRequest().cmdObj;
-        getNet()->blackHole(noi);
-    }
+    catchUpSecondaries(optime2);
 
-    getNet()->runReadyNetworkOperations();
-    exitNetwork();
-
-    getReplExec()->waitForEvent(eventHandle);
-    ASSERT_OK(result);
+    ASSERT_OK(*result.second.get());
     ASSERT_TRUE(repl->getMemberState().secondary());
 }
 
 TEST_F(StepDownTest,
        NodeTransitionsToSecondaryWhenASecondaryCatchesUpDuringStepDownsSecondaryCatchupPeriod) {
-    OperationContextReplMock txn;
     OpTime optime1(Timestamp(100, 1), 1);
     OpTime optime2(Timestamp(100, 2), 1);
 
@@ -1872,20 +2342,12 @@ TEST_F(StepDownTest,
     simulateSuccessfulV1Election();
 
     // Step down where the secondary actually has to catch up before the stepDown can succeed.
-    // On entering the network, _stepDownContinue should cancel the heartbeats scheduled for
-    // T + 2 seconds and send out a new round of heartbeats immediately.
-    // This makes it unnecessary to advance the clock after entering the network to process
-    // the heartbeat requests.
-    Status result(ErrorCodes::InternalError, "not mutated");
-    auto globalReadLockAndEventHandle =
-        repl->stepDown_nonBlocking(&txn, false, Milliseconds(10000), Milliseconds(60000), &result);
-    const auto& eventHandle = globalReadLockAndEventHandle.second;
-    ASSERT_TRUE(eventHandle);
-    ASSERT_TRUE(txn.lockState()->isReadLocked());
+    auto result = stepDown_nonBlocking(false, Seconds(10), Seconds(60));
 
-    // Secondary has not caught up on first round of heartbeats.
+    // Advance the clock by two seconds to allow for a round of heartbeats to be sent. The
+    // secondary will not appear to be caught up.
     enterNetwork();
-    ASSERT(getNet()->hasReadyRequests());
+    getNet()->runUntil(getNet()->now() + Milliseconds(2000));
     NetworkInterfaceMock::NetworkOperationIterator noi = getNet()->getNextReadyRequest();
     RemoteCommandRequest request = noi->getRequest();
     log() << "HB1: " << request.target.toString() << " processing " << request.cmdObj;
@@ -1906,44 +2368,13 @@ TEST_F(StepDownTest,
     getNet()->runReadyNetworkOperations();
     exitNetwork();
 
-    auto config = getReplCoord()->getConfig();
-    auto heartbeatInterval = config.getHeartbeatInterval();
+    catchUpSecondaries(optime2);
 
-    // Make a secondary actually catch up
-    enterNetwork();
-    auto until = getNet()->now() + heartbeatInterval;
-    getNet()->runUntil(until);
-    ASSERT_EQUALS(until, getNet()->now());
-    ASSERT(getNet()->hasReadyRequests());
-    noi = getNet()->getNextReadyRequest();
-    request = noi->getRequest();
-    log() << "HB2: " << request.target.toString() << " processing " << request.cmdObj;
-    if (hbArgs.initialize(request.cmdObj).isOK()) {
-        ReplSetHeartbeatResponse hbResp;
-        hbResp.setSetName(hbArgs.getSetName());
-        hbResp.setState(MemberState::RS_SECONDARY);
-        hbResp.setConfigVersion(hbArgs.getConfigVersion());
-        hbResp.setAppliedOpTime(optime2);
-        hbResp.setDurableOpTime(optime2);
-        BSONObjBuilder respObj;
-        respObj << "ok" << 1;
-        hbResp.addToBSON(&respObj, false);
-        getNet()->scheduleResponse(noi, getNet()->now(), makeResponseStatus(respObj.obj()));
-    }
-    while (getNet()->hasReadyRequests()) {
-        getNet()->blackHole(getNet()->getNextReadyRequest());
-    }
-    getNet()->runReadyNetworkOperations();
-    exitNetwork();
-
-    getReplExec()->waitForEvent(eventHandle);
-    ASSERT_OK(result);
+    ASSERT_OK(*result.second.get());
     ASSERT_TRUE(repl->getMemberState().secondary());
 }
 
 TEST_F(StepDownTest, NodeReturnsInterruptedWhenInterruptedDuringStepDown) {
-    const unsigned int opID = 100;
-    OperationContextReplMock txn{opID};
     OpTimeWithTermOne optime1(100, 1);
     OpTimeWithTermOne optime2(100, 2);
     // No secondary is caught up
@@ -1954,45 +2385,177 @@ TEST_F(StepDownTest, NodeReturnsInterruptedWhenInterruptedDuringStepDown) {
     ASSERT_OK(repl->setLastAppliedOptime_forTest(1, 2, optime1));
 
     simulateSuccessfulV1Election();
+
     ASSERT_TRUE(repl->getMemberState().primary());
 
     // stepDown where the secondary actually has to catch up before the stepDown can succeed.
-    Status result(ErrorCodes::InternalError, "not mutated");
-    auto globalReadLockAndEventHandle =
-        repl->stepDown_nonBlocking(&txn, false, Milliseconds(10000), Milliseconds(60000), &result);
-    const auto& eventHandle = globalReadLockAndEventHandle.second;
-    ASSERT_TRUE(eventHandle);
-    ASSERT_TRUE(txn.lockState()->isReadLocked());
-
-    txn.setCheckForInterruptStatus(kInterruptedStatus);
-    getReplCoord()->interrupt(opID);
-
-    getReplExec()->waitForEvent(eventHandle);
-    ASSERT_EQUALS(ErrorCodes::Interrupted, result);
+    auto result = stepDown_nonBlocking(false, Seconds(10), Seconds(60));
+    killOperation(result.first.opCtx.get());
+    ASSERT_EQUALS(ErrorCodes::Interrupted, *result.second.get());
     ASSERT_TRUE(repl->getMemberState().primary());
+}
+
+TEST_F(StepDownTest, OnlyOneStepDownCmdIsAllowedAtATime) {
+    OpTime optime1(Timestamp(100, 1), 1);
+    OpTime optime2(Timestamp(100, 2), 1);
+
+    // No secondary is caught up
+    auto repl = getReplCoord();
+    repl->setMyLastAppliedOpTime(optime2);
+    repl->setMyLastDurableOpTime(optime2);
+    ASSERT_OK(repl->setLastAppliedOptime_forTest(1, 1, optime1));
+    ASSERT_OK(repl->setLastAppliedOptime_forTest(1, 2, optime1));
+
+    simulateSuccessfulV1Election();
+
+    ASSERT_TRUE(getReplCoord()->getMemberState().primary());
+
+    // Step down where the secondary actually has to catch up before the stepDown can succeed.
+    auto result = stepDown_nonBlocking(false, Seconds(10), Seconds(60));
+
+    // We should still be primary at this point
+    ASSERT_TRUE(getReplCoord()->getMemberState().primary());
+
+    // Now while the first stepdown request is waiting for secondaries to catch up, attempt
+    // another stepdown request and ensure it fails.
+    const auto opCtx = makeOperationContext();
+    auto status = getReplCoord()->stepDown(opCtx.get(), false, Seconds(10), Seconds(60));
+    ASSERT_EQUALS(ErrorCodes::ConflictingOperationInProgress, status);
+
+    // Now ensure that the original stepdown command can still succeed.
+    catchUpSecondaries(optime2);
+
+    ASSERT_OK(*result.second.get());
+    ASSERT_TRUE(repl->getMemberState().secondary());
+}
+
+// Test that if a stepdown command is blocked waiting for secondaries to catch up when an
+// unconditional stepdown happens, the stepdown command fails.
+TEST_F(StepDownTest, UnconditionalStepDownFailsStepDownCommand) {
+    OpTime optime1(Timestamp(100, 1), 1);
+    OpTime optime2(Timestamp(100, 2), 1);
+
+    // No secondary is caught up
+    auto repl = getReplCoord();
+    repl->setMyLastAppliedOpTime(optime2);
+    repl->setMyLastDurableOpTime(optime2);
+    ASSERT_OK(repl->setLastAppliedOptime_forTest(1, 1, optime1));
+    ASSERT_OK(repl->setLastAppliedOptime_forTest(1, 2, optime1));
+
+    simulateSuccessfulV1Election();
+
+    ASSERT_TRUE(getReplCoord()->getMemberState().primary());
+
+    // Start a stepdown command that needs to wait for secondaries to catch up.
+    auto result = stepDown_nonBlocking(false, Seconds(10), Seconds(60));
+
+    // We should still be primary at this point
+    ASSERT_TRUE(getReplCoord()->getMemberState().primary());
+
+    // Now while the first stepdown request is waiting for secondaries to catch up, force an
+    // unconditional stepdown.
+    const auto opCtx = makeOperationContext();
+    ASSERT_EQUALS(ErrorCodes::StaleTerm, getReplCoord()->updateTerm(opCtx.get(), 2));
+    ASSERT_TRUE(getReplCoord()->getMemberState().secondary());
+
+    // Ensure that the stepdown command failed.
+    ASSERT_EQUALS(ErrorCodes::PrimarySteppedDown, *result.second.get());
+}
+
+// Test that if a stepdown command is blocked waiting for secondaries to catch up when an
+// unconditional stepdown happens, and then is interrupted, we stay stepped down, even though
+// normally if we were just interrupted we would step back up.
+TEST_F(StepDownTest, InterruptingStepDownCommandRestoresWriteAvailability) {
+    OpTime optime1(Timestamp(100, 1), 1);
+    OpTime optime2(Timestamp(100, 2), 1);
+
+    // No secondary is caught up
+    auto repl = getReplCoord();
+    repl->setMyLastAppliedOpTime(optime2);
+    repl->setMyLastDurableOpTime(optime2);
+    ASSERT_OK(repl->setLastAppliedOptime_forTest(1, 1, optime1));
+    ASSERT_OK(repl->setLastAppliedOptime_forTest(1, 2, optime1));
+
+    simulateSuccessfulV1Election();
+
+    ASSERT_TRUE(getReplCoord()->getMemberState().primary());
+
+    // Start a stepdown command that needs to wait for secondaries to catch up.
+    auto result = stepDown_nonBlocking(false, Seconds(10), Seconds(60));
+
+    // We should still be primary at this point
+    ASSERT_TRUE(getReplCoord()->getMemberState().primary());
+
+    // Interrupt the ongoing stepdown command.
+    {
+        stdx::lock_guard<Client> lk(*result.first.client.get());
+        result.first.opCtx->markKilled(ErrorCodes::Interrupted);
+    }
+
+    // Ensure that the stepdown command failed.
+    ASSERT_EQUALS(*result.second.get(), ErrorCodes::Interrupted);
+    ASSERT_TRUE(getReplCoord()->getMemberState().primary());
+
+    // This is the important check, that we didn't accidentally step back up when aborting the
+    // stepdown command attempt.
+    const auto opCtx = makeOperationContext();
+    Lock::GlobalLock lock(opCtx.get(), MODE_IX);
+    ASSERT_TRUE(getReplCoord()->canAcceptWritesForDatabase(opCtx.get(), "admin"));
+}
+
+// Test that if a stepdown command is blocked waiting for secondaries to catch up when an
+// unconditional stepdown happens, and then is interrupted, we stay stepped down, even though
+// normally if we were just interrupted we would step back up.
+TEST_F(StepDownTest, InterruptingAfterUnconditionalStepdownDoesNotRestoreWriteAvailability) {
+    OpTime optime1(Timestamp(100, 1), 1);
+    OpTime optime2(Timestamp(100, 2), 1);
+
+    // No secondary is caught up
+    auto repl = getReplCoord();
+    repl->setMyLastAppliedOpTime(optime2);
+    repl->setMyLastDurableOpTime(optime2);
+    ASSERT_OK(repl->setLastAppliedOptime_forTest(1, 1, optime1));
+    ASSERT_OK(repl->setLastAppliedOptime_forTest(1, 2, optime1));
+
+    simulateSuccessfulV1Election();
+
+    ASSERT_TRUE(getReplCoord()->getMemberState().primary());
+
+    // Start a stepdown command that needs to wait for secondaries to catch up.
+    auto result = stepDown_nonBlocking(false, Seconds(10), Seconds(60));
+
+    // We should still be primary at this point
+    ASSERT_TRUE(getReplCoord()->getMemberState().primary());
+
+    // Interrupt the ongoing stepdown command.
+    {
+        stdx::lock_guard<Client> lk(*result.first.client.get());
+        result.first.opCtx->markKilled(ErrorCodes::Interrupted);
+    }
+
+    // Now while the first stepdown request is waiting for secondaries to catch up, force an
+    // unconditional stepdown.
+    const auto opCtx = makeOperationContext();
+    ASSERT_EQUALS(ErrorCodes::StaleTerm, getReplCoord()->updateTerm(opCtx.get(), 2));
+    ASSERT_TRUE(getReplCoord()->getMemberState().secondary());
+
+    // Ensure that the stepdown command failed.
+    auto stepDownStatus = *result.second.get();
+    ASSERT_NOT_OK(stepDownStatus);
+    // Which code is returned is racy.
+    ASSERT(stepDownStatus == ErrorCodes::PrimarySteppedDown ||
+           stepDownStatus == ErrorCodes::Interrupted);
+    ASSERT_TRUE(getReplCoord()->getMemberState().secondary());
+
+    // This is the important check, that we didn't accidentally step back up when aborting the
+    // stepdown command attempt.
+    Lock::GlobalLock lock(opCtx.get(), MODE_IX);
+    ASSERT_FALSE(getReplCoord()->canAcceptWritesForDatabase(opCtx.get(), "admin"));
 }
 
 TEST_F(ReplCoordTest, GetReplicationModeNone) {
     init();
     ASSERT_EQUALS(MemberState::RS_STARTUP, getReplCoord()->getMemberState().s);
-}
-
-TEST_F(ReplCoordTest,
-       NodeReturnsModeMasterSlaveInResponseToGetReplicationModeWhenRunningWithTheMasterFlag) {
-    // modeMasterSlave if master set
-    ReplSettings settings;
-    settings.setMaster(true);
-    init(settings);
-    ASSERT_EQUALS(ReplicationCoordinator::modeMasterSlave, getReplCoord()->getReplicationMode());
-}
-
-TEST_F(ReplCoordTest,
-       NodeReturnsModeMasterSlaveInResponseToGetReplicationModeWhenRunningWithTheSlaveFlag) {
-    // modeMasterSlave if the slave flag was set
-    ReplSettings settings;
-    settings.setSlave(true);
-    init(settings);
-    ASSERT_EQUALS(ReplicationCoordinator::modeMasterSlave, getReplCoord()->getReplicationMode());
 }
 
 TEST_F(ReplCoordTest,
@@ -2005,27 +2568,32 @@ TEST_F(ReplCoordTest,
     ASSERT_EQUALS(MemberState::RS_STARTUP, getReplCoord()->getMemberState().s);
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 2 << "members" << BSON_ARRAY(BSON("host"
-                                                                              << "node1:12345"
-                                                                              << "_id" << 0))),
+                            << "version"
+                            << 2
+                            << "members"
+                            << BSON_ARRAY(BSON("host"
+                                               << "node1:12345"
+                                               << "_id"
+                                               << 0))),
                        HostAndPort("node1", 12345));
 }
 
 TEST_F(ReplCoordTest, NodeIncludesOtherMembersProgressInUpdatePositionCommand) {
-    OperationContextNoop txn;
     init("mySet/test1:1234,test2:1234,test3:1234");
-    assertStartSuccess(
-        BSON("_id"
-             << "mySet"
-             << "version" << 1 << "members"
-             << BSON_ARRAY(BSON("_id" << 0 << "host"
-                                      << "test1:1234")
-                           << BSON("_id" << 1 << "host"
-                                         << "test2:1234") << BSON("_id" << 2 << "host"
-                                                                        << "test3:1234")
-                           << BSON("_id" << 3 << "host"
-                                         << "test4:1234"))),
-        HostAndPort("test1", 1234));
+    assertStartSuccess(BSON("_id"
+                            << "mySet"
+                            << "version"
+                            << 1
+                            << "members"
+                            << BSON_ARRAY(BSON("_id" << 0 << "host"
+                                                     << "test1:1234")
+                                          << BSON("_id" << 1 << "host"
+                                                        << "test2:1234")
+                                          << BSON("_id" << 2 << "host"
+                                                        << "test3:1234")
+                                          << BSON("_id" << 3 << "host"
+                                                        << "test4:1234"))),
+                       HostAndPort("test1", 1234));
     OpTime optime1({2, 1}, 1);
     OpTime optime2({100, 1}, 1);
     OpTime optime3({100, 2}, 1);
@@ -2038,43 +2606,49 @@ TEST_F(ReplCoordTest, NodeIncludesOtherMembersProgressInUpdatePositionCommand) {
     ASSERT_OK(getReplCoord()->setLastDurableOptime_forTest(1, 3, optime1));
 
     // Check that the proper BSON is generated for the replSetUpdatePositionCommand
-    BSONObjBuilder cmdBuilder;
-    getReplCoord()->prepareReplSetUpdatePositionCommand(&cmdBuilder);
-    BSONObj cmd = cmdBuilder.done();
+    BSONObj cmd = unittest::assertGet(getReplCoord()->prepareReplSetUpdatePositionCommand());
 
     ASSERT_EQUALS(3, cmd.nFields());
-    ASSERT_EQUALS("replSetUpdatePosition", cmd.firstElement().fieldNameStringData());
+    ASSERT_EQUALS(UpdatePositionArgs::kCommandFieldName, cmd.firstElement().fieldNameStringData());
 
     std::set<long long> memberIds;
-    BSONForEach(entryElement, cmd["optimes"].Obj()) {
+    BSONForEach(entryElement, cmd[UpdatePositionArgs::kUpdateArrayFieldName].Obj()) {
         OpTime durableOpTime;
         OpTime appliedOpTime;
         BSONObj entry = entryElement.Obj();
-        long long memberId = entry["memberId"].Number();
+        long long memberId = entry[UpdatePositionArgs::kMemberIdFieldName].Number();
         memberIds.insert(memberId);
         if (memberId == 0) {
             log() << 0;
-            ASSERT_OK(bsonExtractOpTimeField(entry, "appliedOpTime", &appliedOpTime));
-            ASSERT_OK(bsonExtractOpTimeField(entry, "durableOpTime", &durableOpTime));
+            ASSERT_OK(bsonExtractOpTimeField(
+                entry, UpdatePositionArgs::kAppliedOpTimeFieldName, &appliedOpTime));
+            ASSERT_OK(bsonExtractOpTimeField(
+                entry, UpdatePositionArgs::kDurableOpTimeFieldName, &durableOpTime));
             ASSERT_EQUALS(optime1, appliedOpTime);
             ASSERT_EQUALS(optime1, durableOpTime);
         } else if (memberId == 1) {
             log() << 1;
-            ASSERT_OK(bsonExtractOpTimeField(entry, "appliedOpTime", &appliedOpTime));
-            ASSERT_OK(bsonExtractOpTimeField(entry, "durableOpTime", &durableOpTime));
+            ASSERT_OK(bsonExtractOpTimeField(
+                entry, UpdatePositionArgs::kAppliedOpTimeFieldName, &appliedOpTime));
+            ASSERT_OK(bsonExtractOpTimeField(
+                entry, UpdatePositionArgs::kDurableOpTimeFieldName, &durableOpTime));
             ASSERT_EQUALS(optime2, appliedOpTime);
             ASSERT_EQUALS(OpTime(), durableOpTime);
         } else if (memberId == 2) {
             log() << 2;
-            ASSERT_OK(bsonExtractOpTimeField(entry, "appliedOpTime", &appliedOpTime));
-            ASSERT_OK(bsonExtractOpTimeField(entry, "durableOpTime", &durableOpTime));
+            ASSERT_OK(bsonExtractOpTimeField(
+                entry, UpdatePositionArgs::kAppliedOpTimeFieldName, &appliedOpTime));
+            ASSERT_OK(bsonExtractOpTimeField(
+                entry, UpdatePositionArgs::kDurableOpTimeFieldName, &durableOpTime));
             ASSERT_EQUALS(optime3, appliedOpTime);
             ASSERT_EQUALS(optime3, durableOpTime);
         } else {
             log() << 3;
             ASSERT_EQUALS(3, memberId);
-            ASSERT_OK(bsonExtractOpTimeField(entry, "appliedOpTime", &appliedOpTime));
-            ASSERT_OK(bsonExtractOpTimeField(entry, "durableOpTime", &durableOpTime));
+            ASSERT_OK(bsonExtractOpTimeField(
+                entry, UpdatePositionArgs::kAppliedOpTimeFieldName, &appliedOpTime));
+            ASSERT_OK(bsonExtractOpTimeField(
+                entry, UpdatePositionArgs::kDurableOpTimeFieldName, &durableOpTime));
             ASSERT_EQUALS(optime3, appliedOpTime);
             ASSERT_EQUALS(optime1, durableOpTime);
         }
@@ -2082,73 +2656,26 @@ TEST_F(ReplCoordTest, NodeIncludesOtherMembersProgressInUpdatePositionCommand) {
     ASSERT_EQUALS(4U, memberIds.size());  // Make sure we saw all 4 nodes
 }
 
-TEST_F(ReplCoordTest, NodeIncludesOtherMembersProgressInOldUpdatePositionCommand) {
-    OperationContextNoop txn;
-    init("mySet/test1:1234,test2:1234,test3:1234");
-    assertStartSuccess(
-        BSON("_id"
-             << "mySet"
-             << "version" << 1 << "members"
-             << BSON_ARRAY(BSON("_id" << 0 << "host"
-                                      << "test1:1234")
-                           << BSON("_id" << 1 << "host"
-                                         << "test2:1234") << BSON("_id" << 2 << "host"
-                                                                        << "test3:1234"))),
-        HostAndPort("test1", 1234));
-    OpTimeWithTermOne optime1(100, 1);
-    OpTimeWithTermOne optime2(100, 2);
-    OpTimeWithTermOne optime3(2, 1);
-    getReplCoord()->setMyLastAppliedOpTime(optime1);
-    getReplCoord()->setMyLastDurableOpTime(optime1);
-    ASSERT_OK(getReplCoord()->setLastAppliedOptime_forTest(1, 1, optime2));
-    ASSERT_OK(getReplCoord()->setLastDurableOptime_forTest(1, 1, optime2));
-    ASSERT_OK(getReplCoord()->setLastAppliedOptime_forTest(1, 2, optime3));
-    ASSERT_OK(getReplCoord()->setLastDurableOptime_forTest(1, 2, optime3));
-
-    // Check that the proper BSON is generated for the replSetUpdatePositionCommand
-    BSONObjBuilder cmdBuilder;
-    getReplCoord()->prepareOldReplSetUpdatePositionCommand(&cmdBuilder);
-    BSONObj cmd = cmdBuilder.done();
-
-    ASSERT_EQUALS(2, cmd.nFields());
-    ASSERT_EQUALS("replSetUpdatePosition", cmd.firstElement().fieldNameStringData());
-
-    std::set<long long> memberIds;
-    BSONForEach(entryElement, cmd["optimes"].Obj()) {
-        BSONObj entry = entryElement.Obj();
-        long long memberId = entry["memberId"].Number();
-        memberIds.insert(memberId);
-        if (memberId == 0) {
-            // TODO(siyuan) Update when we change replSetUpdatePosition format
-            ASSERT_EQUALS(optime1.timestamp, entry["optime"]["ts"].timestamp());
-        } else if (memberId == 1) {
-            ASSERT_EQUALS(optime2.timestamp, entry["optime"]["ts"].timestamp());
-        } else {
-            ASSERT_EQUALS(2, memberId);
-            ASSERT_EQUALS(optime3.timestamp, entry["optime"]["ts"].timestamp());
-        }
-        ASSERT_EQUALS(1, entry["optime"]["t"].Number());
-    }
-    ASSERT_EQUALS(3U, memberIds.size());  // Make sure we saw all 3 nodes
-}
-
 TEST_F(ReplCoordTest,
        NodeReturnsOperationFailedWhenSettingMaintenanceModeFalseWhenItHasNotBeenSetTrue) {
     init("mySet/test1:1234,test2:1234,test3:1234");
-    assertStartSuccess(
-        BSON("_id"
-             << "mySet"
-             << "protocolVersion" << 1 << "version" << 1 << "members"
-             << BSON_ARRAY(BSON("_id" << 0 << "host"
-                                      << "test1:1234")
-                           << BSON("_id" << 1 << "host"
-                                         << "test2:1234") << BSON("_id" << 2 << "host"
-                                                                        << "test3:1234"))),
-        HostAndPort("test2", 1234));
-    OperationContextNoop txn;
-    getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY);
-    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(100, 0));
-    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(100, 0));
+    assertStartSuccess(BSON("_id"
+                            << "mySet"
+                            << "protocolVersion"
+                            << 1
+                            << "version"
+                            << 1
+                            << "members"
+                            << BSON_ARRAY(BSON("_id" << 0 << "host"
+                                                     << "test1:1234")
+                                          << BSON("_id" << 1 << "host"
+                                                        << "test2:1234")
+                                          << BSON("_id" << 2 << "host"
+                                                        << "test3:1234"))),
+                       HostAndPort("test2", 1234));
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(100, 1));
+    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(100, 1));
 
     // Can't unset maintenance mode if it was never set to begin with.
     Status status = getReplCoord()->setMaintenanceMode(false);
@@ -2159,49 +2686,55 @@ TEST_F(ReplCoordTest,
 TEST_F(ReplCoordTest,
        ReportRollbackWhileInBothRollbackAndMaintenanceModeAndRecoveryAfterFinishingRollback) {
     init("mySet/test1:1234,test2:1234,test3:1234");
-    assertStartSuccess(
-        BSON("_id"
-             << "mySet"
-             << "protocolVersion" << 1 << "version" << 1 << "members"
-             << BSON_ARRAY(BSON("_id" << 0 << "host"
-                                      << "test1:1234")
-                           << BSON("_id" << 1 << "host"
-                                         << "test2:1234") << BSON("_id" << 2 << "host"
-                                                                        << "test3:1234"))),
-        HostAndPort("test2", 1234));
-    OperationContextNoop txn;
-    getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY);
-    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(100, 0));
-    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(100, 0));
+    assertStartSuccess(BSON("_id"
+                            << "mySet"
+                            << "protocolVersion"
+                            << 1
+                            << "version"
+                            << 1
+                            << "members"
+                            << BSON_ARRAY(BSON("_id" << 0 << "host"
+                                                     << "test1:1234")
+                                          << BSON("_id" << 1 << "host"
+                                                        << "test2:1234")
+                                          << BSON("_id" << 2 << "host"
+                                                        << "test3:1234"))),
+                       HostAndPort("test2", 1234));
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(100, 1));
+    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(100, 1));
     // valid set
     ASSERT_OK(getReplCoord()->setMaintenanceMode(true));
     ASSERT_TRUE(getReplCoord()->getMemberState().recovering());
 
     // If we go into rollback while in maintenance mode, our state changes to RS_ROLLBACK.
-    getReplCoord()->setFollowerMode(MemberState::RS_ROLLBACK);
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_ROLLBACK));
     ASSERT_TRUE(getReplCoord()->getMemberState().rollback());
 
     // When we go back to SECONDARY, we still observe RECOVERING because of maintenance mode.
-    getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY);
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
     ASSERT_TRUE(getReplCoord()->getMemberState().recovering());
 }
 
 TEST_F(ReplCoordTest, AllowAsManyUnsetMaintenanceModesAsThereHaveBeenSetMaintenanceModes) {
     init("mySet/test1:1234,test2:1234,test3:1234");
-    assertStartSuccess(
-        BSON("_id"
-             << "mySet"
-             << "protocolVersion" << 1 << "version" << 1 << "members"
-             << BSON_ARRAY(BSON("_id" << 0 << "host"
-                                      << "test1:1234")
-                           << BSON("_id" << 1 << "host"
-                                         << "test2:1234") << BSON("_id" << 2 << "host"
-                                                                        << "test3:1234"))),
-        HostAndPort("test2", 1234));
-    OperationContextNoop txn;
-    getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY);
-    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(100, 0));
-    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(100, 0));
+    assertStartSuccess(BSON("_id"
+                            << "mySet"
+                            << "protocolVersion"
+                            << 1
+                            << "version"
+                            << 1
+                            << "members"
+                            << BSON_ARRAY(BSON("_id" << 0 << "host"
+                                                     << "test1:1234")
+                                          << BSON("_id" << 1 << "host"
+                                                        << "test2:1234")
+                                          << BSON("_id" << 2 << "host"
+                                                        << "test3:1234"))),
+                       HostAndPort("test2", 1234));
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(100, 1));
+    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(100, 1));
     // Can set multiple times
     ASSERT_OK(getReplCoord()->setMaintenanceMode(true));
     ASSERT_OK(getReplCoord()->setMaintenanceMode(true));
@@ -2219,24 +2752,27 @@ TEST_F(ReplCoordTest, AllowAsManyUnsetMaintenanceModesAsThereHaveBeenSetMaintena
 
 TEST_F(ReplCoordTest, SettingAndUnsettingMaintenanceModeShouldNotAffectRollbackState) {
     init("mySet/test1:1234,test2:1234,test3:1234");
-    assertStartSuccess(
-        BSON("_id"
-             << "mySet"
-             << "protocolVersion" << 1 << "version" << 1 << "members"
-             << BSON_ARRAY(BSON("_id" << 0 << "host"
-                                      << "test1:1234")
-                           << BSON("_id" << 1 << "host"
-                                         << "test2:1234") << BSON("_id" << 2 << "host"
-                                                                        << "test3:1234"))),
-        HostAndPort("test2", 1234));
-    OperationContextNoop txn;
-    getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY);
-    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(100, 0));
-    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(100, 0));
+    assertStartSuccess(BSON("_id"
+                            << "mySet"
+                            << "protocolVersion"
+                            << 1
+                            << "version"
+                            << 1
+                            << "members"
+                            << BSON_ARRAY(BSON("_id" << 0 << "host"
+                                                     << "test1:1234")
+                                          << BSON("_id" << 1 << "host"
+                                                        << "test2:1234")
+                                          << BSON("_id" << 2 << "host"
+                                                        << "test3:1234"))),
+                       HostAndPort("test2", 1234));
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(100, 1));
+    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(100, 1));
 
     // From rollback, entering and exiting maintenance mode doesn't change perceived
     // state.
-    getReplCoord()->setFollowerMode(MemberState::RS_ROLLBACK);
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_ROLLBACK));
     ASSERT_TRUE(getReplCoord()->getMemberState().rollback());
     ASSERT_OK(getReplCoord()->setMaintenanceMode(true));
     ASSERT_TRUE(getReplCoord()->getMemberState().rollback());
@@ -2244,34 +2780,37 @@ TEST_F(ReplCoordTest, SettingAndUnsettingMaintenanceModeShouldNotAffectRollbackS
     ASSERT_TRUE(getReplCoord()->getMemberState().rollback());
 
     // Rollback is sticky even if entered while in maintenance mode.
-    getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY);
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
     ASSERT_TRUE(getReplCoord()->getMemberState().secondary());
     ASSERT_OK(getReplCoord()->setMaintenanceMode(true));
     ASSERT_TRUE(getReplCoord()->getMemberState().recovering());
-    getReplCoord()->setFollowerMode(MemberState::RS_ROLLBACK);
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_ROLLBACK));
     ASSERT_TRUE(getReplCoord()->getMemberState().rollback());
     ASSERT_OK(getReplCoord()->setMaintenanceMode(false));
     ASSERT_TRUE(getReplCoord()->getMemberState().rollback());
-    getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY);
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
     ASSERT_TRUE(getReplCoord()->getMemberState().secondary());
 }
 
 TEST_F(ReplCoordTest, DoNotAllowMaintenanceModeWhilePrimary) {
     init("mySet/test1:1234,test2:1234,test3:1234");
-    assertStartSuccess(
-        BSON("_id"
-             << "mySet"
-             << "protocolVersion" << 1 << "version" << 1 << "members"
-             << BSON_ARRAY(BSON("_id" << 0 << "host"
-                                      << "test1:1234")
-                           << BSON("_id" << 1 << "host"
-                                         << "test2:1234") << BSON("_id" << 2 << "host"
-                                                                        << "test3:1234"))),
-        HostAndPort("test2", 1234));
-    OperationContextNoop txn;
-    getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY);
-    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(100, 0));
-    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(100, 0));
+    assertStartSuccess(BSON("_id"
+                            << "mySet"
+                            << "protocolVersion"
+                            << 1
+                            << "version"
+                            << 1
+                            << "members"
+                            << BSON_ARRAY(BSON("_id" << 0 << "host"
+                                                     << "test1:1234")
+                                          << BSON("_id" << 1 << "host"
+                                                        << "test2:1234")
+                                          << BSON("_id" << 2 << "host"
+                                                        << "test3:1234"))),
+                       HostAndPort("test2", 1234));
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(100, 1));
+    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(100, 1));
     // Can't modify maintenance mode when PRIMARY
     simulateSuccessfulV1Election();
 
@@ -2279,8 +2818,11 @@ TEST_F(ReplCoordTest, DoNotAllowMaintenanceModeWhilePrimary) {
     ASSERT_EQUALS(ErrorCodes::NotSecondary, status);
     ASSERT_TRUE(getReplCoord()->getMemberState().primary());
 
+    auto opCtx = makeOperationContext();
+
+
     // Step down from primary.
-    getReplCoord()->updateTerm(&txn, getReplCoord()->getTerm() + 1);
+    getReplCoord()->updateTerm(opCtx.get(), getReplCoord()->getTerm() + 1).transitional_ignore();
     ASSERT_OK(getReplCoord()->waitForMemberState(MemberState::RS_SECONDARY, Seconds(1)));
 
     status = getReplCoord()->setMaintenanceMode(false);
@@ -2291,29 +2833,38 @@ TEST_F(ReplCoordTest, DoNotAllowMaintenanceModeWhilePrimary) {
 
 TEST_F(ReplCoordTest, DoNotAllowSettingMaintenanceModeWhileConductingAnElection) {
     init("mySet/test1:1234,test2:1234,test3:1234");
-    assertStartSuccess(
-        BSON("_id"
-             << "mySet"
-             << "protocolVersion" << 1 << "version" << 1 << "members"
-             << BSON_ARRAY(BSON("_id" << 0 << "host"
-                                      << "test1:1234")
-                           << BSON("_id" << 1 << "host"
-                                         << "test2:1234") << BSON("_id" << 2 << "host"
-                                                                        << "test3:1234"))),
-        HostAndPort("test2", 1234));
-    OperationContextNoop txn;
-    getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY);
-    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(100, 0));
-    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(100, 0));
+    assertStartSuccess(BSON("_id"
+                            << "mySet"
+                            << "protocolVersion"
+                            << 1
+                            << "version"
+                            << 1
+                            << "members"
+                            << BSON_ARRAY(BSON("_id" << 0 << "host"
+                                                     << "test1:1234")
+                                          << BSON("_id" << 1 << "host"
+                                                        << "test2:1234")
+                                          << BSON("_id" << 2 << "host"
+                                                        << "test3:1234"))),
+                       HostAndPort("test2", 1234));
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(100, 1));
+    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(100, 1));
 
     // TODO this election shouldn't have to happen.
     simulateSuccessfulV1Election();
+
+    auto opCtx = makeOperationContext();
+
+
     // Step down from primary.
-    getReplCoord()->updateTerm(&txn, getReplCoord()->getTerm() + 1);
-    getReplCoord()->waitForMemberState(MemberState::RS_SECONDARY, Milliseconds(10 * 1000));
+    getReplCoord()->updateTerm(opCtx.get(), getReplCoord()->getTerm() + 1).transitional_ignore();
+    getReplCoord()
+        ->waitForMemberState(MemberState::RS_SECONDARY, Milliseconds(10 * 1000))
+        .transitional_ignore();
 
     // Can't modify maintenance mode when running for election (before and after dry run).
-    ASSERT_EQUALS(TopologyCoordinator::Role::follower, getTopoCoord().getRole());
+    ASSERT_EQUALS(TopologyCoordinator::Role::kFollower, getTopoCoord().getRole());
     auto net = this->getNet();
     net->enterNetwork();
     auto when = getReplCoord()->getElectionTimeout_forTest();
@@ -2326,27 +2877,24 @@ TEST_F(ReplCoordTest, DoNotAllowSettingMaintenanceModeWhileConductingAnElection)
     }
     ASSERT_EQUALS(when, net->now());
     net->exitNetwork();
-    ASSERT_EQUALS(TopologyCoordinator::Role::candidate, getTopoCoord().getRole());
+    ASSERT_EQUALS(TopologyCoordinator::Role::kCandidate, getTopoCoord().getRole());
     Status status = getReplCoord()->setMaintenanceMode(false);
     ASSERT_EQUALS(ErrorCodes::NotSecondary, status);
     status = getReplCoord()->setMaintenanceMode(true);
     ASSERT_EQUALS(ErrorCodes::NotSecondary, status);
 
     simulateSuccessfulDryRun();
-    ASSERT_EQUALS(TopologyCoordinator::Role::candidate, getTopoCoord().getRole());
+    ASSERT_EQUALS(TopologyCoordinator::Role::kCandidate, getTopoCoord().getRole());
     status = getReplCoord()->setMaintenanceMode(false);
     ASSERT_EQUALS(ErrorCodes::NotSecondary, status);
     status = getReplCoord()->setMaintenanceMode(true);
     ASSERT_EQUALS(ErrorCodes::NotSecondary, status);
 
     // This cancels the actual election.
-    bool success = false;
-    auto event = getReplCoord()->setFollowerMode_nonBlocking(MemberState::RS_ROLLBACK, &success);
     // We do not need to respond to any pending network operations because setFollowerMode() will
     // cancel the vote requester.
-    getReplCoord()->waitForElectionFinish_forTest();
-    getReplExec()->waitForEvent(event);
-    ASSERT_TRUE(success);
+    ASSERT_EQUALS(ErrorCodes::ElectionInProgress,
+                  getReplCoord()->setFollowerMode(MemberState::RS_ROLLBACK));
 }
 
 TEST_F(ReplCoordTest,
@@ -2356,12 +2904,13 @@ TEST_F(ReplCoordTest,
     HostAndPort client2Host("node3:12345");
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 2 << "members"
+                            << "version"
+                            << 2
+                            << "members"
                             << BSON_ARRAY(BSON("_id" << 0 << "host" << myHost.toString())
                                           << BSON("_id" << 1 << "host" << client1Host.toString())
                                           << BSON("_id" << 2 << "host" << client2Host.toString()))),
                        HostAndPort("node1", 12345));
-    OperationContextNoop txn;
 
     OpTimeWithTermOne time1(100, 1);
     OpTimeWithTermOne time2(100, 2);
@@ -2400,12 +2949,13 @@ TEST_F(ReplCoordTest,
     HostAndPort client2Host("node3:12345");
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 2 << "members"
+                            << "version"
+                            << 2
+                            << "members"
                             << BSON_ARRAY(BSON("_id" << 0 << "host" << myHost.toString())
                                           << BSON("_id" << 1 << "host" << client1Host.toString())
                                           << BSON("_id" << 2 << "host" << client2Host.toString()))),
                        HostAndPort("node1", 12345));
-    OperationContextNoop txn;
 
     OpTimeWithTermOne time1(100, 1);
     OpTimeWithTermOne time2(100, 2);
@@ -2429,35 +2979,6 @@ TEST_F(ReplCoordTest,
     }
 }
 
-TEST_F(ReplCoordTest, NodeDoesNotIncludeItselfWhenRunningGetHostsWrittenToInMasterSlave) {
-    ReplSettings settings;
-    settings.setMaster(true);
-    init(settings);
-    HostAndPort clientHost("node2:12345");
-    OperationContextNoop txn;
-
-    OID client = OID::gen();
-    OpTimeWithTermOne time1(100, 1);
-    OpTimeWithTermOne time2(100, 2);
-
-    getExternalState()->setClientHostAndPort(clientHost);
-    HandshakeArgs handshake;
-    ASSERT_OK(handshake.initialize(BSON("handshake" << client)));
-    ASSERT_OK(getReplCoord()->processHandshake(&txn, handshake));
-
-    getReplCoord()->setMyLastAppliedOpTime(time2);
-    getReplCoord()->setMyLastDurableOpTime(time2);
-    ASSERT_OK(getReplCoord()->setLastOptimeForSlave(client, time1.timestamp));
-
-    std::vector<HostAndPort> caughtUpHosts = getReplCoord()->getHostsWrittenTo(time2, false);
-    ASSERT_EQUALS(0U, caughtUpHosts.size());  // self doesn't get included in master-slave
-
-    ASSERT_OK(getReplCoord()->setLastOptimeForSlave(client, time2.timestamp));
-    caughtUpHosts = getReplCoord()->getHostsWrittenTo(time2, false);
-    ASSERT_EQUALS(1U, caughtUpHosts.size());
-    ASSERT_EQUALS(clientHost, caughtUpHosts[0]);
-}
-
 TEST_F(ReplCoordTest, NodeReturnsNoNodesWhenGetOtherNodesInReplSetIsRunBeforeHavingAConfig) {
     start();
     ASSERT_EQUALS(0U, getReplCoord()->getOtherNodesInReplSet().size());
@@ -2466,14 +2987,19 @@ TEST_F(ReplCoordTest, NodeReturnsNoNodesWhenGetOtherNodesInReplSetIsRunBeforeHav
 TEST_F(ReplCoordTest, NodeReturnsListOfNodesOtherThanItselfInResponseToGetOtherNodesInReplSet) {
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 2 << "members"
+                            << "version"
+                            << 2
+                            << "members"
                             << BSON_ARRAY(BSON("_id" << 0 << "host"
                                                      << "h1")
                                           << BSON("_id" << 1 << "host"
                                                         << "h2")
                                           << BSON("_id" << 2 << "host"
                                                         << "h3"
-                                                        << "priority" << 0 << "hidden" << true))),
+                                                        << "priority"
+                                                        << 0
+                                                        << "hidden"
+                                                        << true))),
                        HostAndPort("h1"));
 
     std::vector<HostAndPort> otherNodes = getReplCoord()->getOtherNodesInReplSet();
@@ -2490,7 +3016,7 @@ TEST_F(ReplCoordTest, IsMasterResponseMentionsLackOfReplicaSetConfig) {
     start();
     IsMasterResponse response;
 
-    getReplCoord()->fillIsMasterForReplSet(&response);
+    getReplCoord()->fillIsMasterForReplSet(&response, {});
     ASSERT_FALSE(response.isConfigSet());
     BSONObj responseObj = response.toBSON();
     ASSERT_FALSE(responseObj["ismaster"].Bool());
@@ -2508,23 +3034,30 @@ TEST_F(ReplCoordTest, IsMaster) {
     HostAndPort h3("h3");
     HostAndPort h4("h4");
     assertStartSuccess(
-        BSON("_id"
-             << "mySet"
-             << "version" << 2 << "members"
-             << BSON_ARRAY(BSON("_id" << 0 << "host" << h1.toString())
-                           << BSON("_id" << 1 << "host" << h2.toString())
-                           << BSON("_id" << 2 << "host" << h3.toString() << "arbiterOnly" << true)
-                           << BSON("_id" << 3 << "host" << h4.toString() << "priority" << 0
-                                         << "tags" << BSON("key1"
-                                                           << "value1"
-                                                           << "key2"
-                                                           << "value2")))),
+        BSON(
+            "_id"
+            << "mySet"
+            << "version"
+            << 2
+            << "members"
+            << BSON_ARRAY(BSON("_id" << 0 << "host" << h1.toString())
+                          << BSON("_id" << 1 << "host" << h2.toString())
+                          << BSON("_id" << 2 << "host" << h3.toString() << "arbiterOnly" << true)
+                          << BSON("_id" << 3 << "host" << h4.toString() << "priority" << 0 << "tags"
+                                        << BSON("key1"
+                                                << "value1"
+                                                << "key2"
+                                                << "value2")))),
         h4);
-    getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY);
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
     ASSERT_TRUE(getReplCoord()->getMemberState().secondary());
 
+    time_t lastWriteDate = 100;
+    OpTime opTime = OpTime(Timestamp(lastWriteDate, 2), 1);
+    getReplCoord()->setMyLastAppliedOpTime(opTime);
+
     IsMasterResponse response;
-    getReplCoord()->fillIsMasterForReplSet(&response);
+    getReplCoord()->fillIsMasterForReplSet(&response, {});
 
     ASSERT_EQUALS("mySet", response.getReplSetName());
     ASSERT_EQUALS(2, response.getReplSetVersion());
@@ -2553,42 +3086,111 @@ TEST_F(ReplCoordTest, IsMaster) {
     ASSERT_EQUALS(1U, arbiters.size());
     ASSERT_EQUALS(h3, arbiters[0]);
 
-    unordered_map<std::string, std::string> tags = response.getTags();
+    stdx::unordered_map<std::string, std::string> tags = response.getTags();
     ASSERT_EQUALS(2U, tags.size());
     ASSERT_EQUALS("value1", tags["key1"]);
     ASSERT_EQUALS("value2", tags["key2"]);
+    ASSERT_EQUALS(opTime, response.getLastWriteOpTime());
+    ASSERT_EQUALS(lastWriteDate, response.getLastWriteDate());
 
     IsMasterResponse roundTripped;
     ASSERT_OK(roundTripped.initialize(response.toBSON()));
 }
 
+TEST_F(ReplCoordTest, IsMasterWithCommittedSnapshot) {
+    init("mySet");
+
+    assertStartSuccess(BSON("_id"
+                            << "mySet"
+                            << "version"
+                            << 1
+                            << "members"
+                            << BSON_ARRAY(BSON("_id" << 0 << "host"
+                                                     << "test1:1234"))),
+                       HostAndPort("test1", 1234));
+    auto opCtx = makeOperationContext();
+    runSingleNodeElection(opCtx.get());
+
+    time_t lastWriteDate = 101;
+    OpTime opTime = OpTime(Timestamp(lastWriteDate, 2), 1);
+    time_t majorityWriteDate = lastWriteDate;
+    OpTime majorityOpTime = opTime;
+
+    getReplCoord()->setMyLastAppliedOpTime(opTime);
+    getReplCoord()->setMyLastDurableOpTime(opTime);
+    ASSERT_EQUALS(majorityOpTime, getReplCoord()->getCurrentCommittedSnapshotOpTime());
+
+    IsMasterResponse response;
+    getReplCoord()->fillIsMasterForReplSet(&response, {});
+
+    ASSERT_EQUALS(opTime, response.getLastWriteOpTime());
+    ASSERT_EQUALS(lastWriteDate, response.getLastWriteDate());
+    ASSERT_EQUALS(majorityOpTime, response.getLastMajorityWriteOpTime());
+    ASSERT_EQUALS(majorityWriteDate, response.getLastMajorityWriteDate());
+}
+
+TEST_F(ReplCoordTest, IsMasterInShutdown) {
+    init("mySet");
+
+    assertStartSuccess(BSON("_id"
+                            << "mySet"
+                            << "version"
+                            << 1
+                            << "members"
+                            << BSON_ARRAY(BSON("_id" << 0 << "host"
+                                                     << "test1:1234"))),
+                       HostAndPort("test1", 1234));
+    auto opCtx = makeOperationContext();
+    runSingleNodeElection(opCtx.get());
+
+    IsMasterResponse responseBeforeShutdown;
+    getReplCoord()->fillIsMasterForReplSet(&responseBeforeShutdown, {});
+    ASSERT_TRUE(responseBeforeShutdown.isMaster());
+    ASSERT_FALSE(responseBeforeShutdown.isSecondary());
+
+    shutdown(opCtx.get());
+
+    // Must not report ourselves as master while we're in shutdown.
+    IsMasterResponse responseAfterShutdown;
+    getReplCoord()->fillIsMasterForReplSet(&responseAfterShutdown, {});
+    ASSERT_FALSE(responseAfterShutdown.isMaster());
+    ASSERT_FALSE(responseBeforeShutdown.isSecondary());
+}
+
+
 TEST_F(ReplCoordTest, LogAMessageWhenShutDownBeforeReplicationStartUpFinished) {
-    OperationContextNoop txn;
     init();
     startCapturingLogMessages();
-    getReplCoord()->shutdown(&txn);
+    {
+        auto opCtx = makeOperationContext();
+        getReplCoord()->shutdown(opCtx.get());
+    }
     stopCapturingLogMessages();
-    ASSERT_EQUALS(1,
-                  countLogLinesContaining("shutdown() called before startReplication() finished"));
+    ASSERT_EQUALS(1, countLogLinesContaining("shutdown() called before startup() finished"));
 }
 
 TEST_F(ReplCoordTest, DoNotProcessSelfWhenUpdatePositionContainsInfoAboutSelf) {
-    OperationContextNoop txn;
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 2 << "members"
+                            << "version"
+                            << 2
+                            << "members"
                             << BSON_ARRAY(BSON("host"
                                                << "node1:12345"
-                                               << "_id" << 0)
+                                               << "_id"
+                                               << 0)
                                           << BSON("host"
                                                   << "node2:12345"
-                                                  << "_id" << 1) << BSON("host"
-                                                                         << "node3:12345"
-                                                                         << "_id" << 2))),
+                                                  << "_id"
+                                                  << 1)
+                                          << BSON("host"
+                                                  << "node3:12345"
+                                                  << "_id"
+                                                  << 2))),
                        HostAndPort("node1", 12345));
-    ASSERT(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
-    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(100, 0));
-    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(100, 0));
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(100, 1));
+    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(100, 1));
     simulateSuccessfulV1Election();
 
     OpTime time1({100, 1}, 1);
@@ -2600,85 +3202,53 @@ TEST_F(ReplCoordTest, DoNotProcessSelfWhenUpdatePositionContainsInfoAboutSelf) {
     writeConcern.wTimeout = WriteConcernOptions::kNoWaiting;
     writeConcern.wNumNodes = 1;
 
+    auto opCtx = makeOperationContext();
+
+
     ASSERT_EQUALS(ErrorCodes::WriteConcernFailed,
-                  getReplCoord()->awaitReplication(&txn, time2, writeConcern).status);
+                  getReplCoord()->awaitReplication(opCtx.get(), time2, writeConcern).status);
 
     // receive updatePosition containing ourself, should not process the update for self
     UpdatePositionArgs args;
-    ASSERT_OK(args.initialize(
-        BSON("replSetUpdatePosition"
-             << 1 << "optimes"
-             << BSON_ARRAY(BSON("cfgver" << 2 << "memberId" << 0 << "durableOpTime"
-                                         << BSON("ts" << time2.getTimestamp() << "t" << 2)
-                                         << "appliedOpTime"
-                                         << BSON("ts" << time2.getTimestamp() << "t" << 2))))));
+    ASSERT_OK(args.initialize(BSON(UpdatePositionArgs::kCommandFieldName
+                                   << 1
+                                   << UpdatePositionArgs::kUpdateArrayFieldName
+                                   << BSON_ARRAY(BSON(UpdatePositionArgs::kConfigVersionFieldName
+                                                      << 2
+                                                      << UpdatePositionArgs::kMemberIdFieldName
+                                                      << 0
+                                                      << UpdatePositionArgs::kDurableOpTimeFieldName
+                                                      << time2.toBSON()
+                                                      << UpdatePositionArgs::kAppliedOpTimeFieldName
+                                                      << time2.toBSON())))));
 
     ASSERT_OK(getReplCoord()->processReplSetUpdatePosition(args, 0));
     ASSERT_EQUALS(ErrorCodes::WriteConcernFailed,
-                  getReplCoord()->awaitReplication(&txn, time2, writeConcern).status);
-}
-
-TEST_F(ReplCoordTest, DoNotProcessSelfWhenOldUpdatePositionContainsInfoAboutSelf) {
-    OperationContextNoop txn;
-    assertStartSuccess(BSON("_id"
-                            << "mySet"
-                            << "version" << 2 << "members"
-                            << BSON_ARRAY(BSON("host"
-                                               << "node1:12345"
-                                               << "_id" << 0)
-                                          << BSON("host"
-                                                  << "node2:12345"
-                                                  << "_id" << 1) << BSON("host"
-                                                                         << "node3:12345"
-                                                                         << "_id" << 2))),
-                       HostAndPort("node1", 12345));
-    ASSERT(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
-    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(100, 0));
-    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(100, 0));
-    simulateSuccessfulV1Election();
-
-    OpTimeWithTermOne time1(100, 1);
-    OpTimeWithTermOne time2(100, 2);
-    OpTimeWithTermOne staleTime(10, 0);
-    getReplCoord()->setMyLastAppliedOpTime(time1);
-    getReplCoord()->setMyLastDurableOpTime(time1);
-
-    WriteConcernOptions writeConcern;
-    writeConcern.wTimeout = WriteConcernOptions::kNoWaiting;
-    writeConcern.wNumNodes = 1;
-
-    ASSERT_EQUALS(ErrorCodes::WriteConcernFailed,
-                  getReplCoord()->awaitReplication(&txn, time2, writeConcern).status);
-
-    // receive updatePosition containing ourself, should not process the update for self
-    OldUpdatePositionArgs args;
-    ASSERT_OK(args.initialize(BSON("replSetUpdatePosition"
-                                   << 1 << "optimes"
-                                   << BSON_ARRAY(BSON("cfgver" << 2 << "memberId" << 0 << "optime"
-                                                               << time2.timestamp)))));
-
-    ASSERT_OK(getReplCoord()->processReplSetUpdatePosition(args, 0));
-    ASSERT_EQUALS(ErrorCodes::WriteConcernFailed,
-                  getReplCoord()->awaitReplication(&txn, time2, writeConcern).status);
+                  getReplCoord()->awaitReplication(opCtx.get(), time2, writeConcern).status);
 }
 
 TEST_F(ReplCoordTest, DoNotProcessUpdatePositionWhenItsConfigVersionIsIncorrect) {
-    OperationContextNoop txn;
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 2 << "members"
+                            << "version"
+                            << 2
+                            << "members"
                             << BSON_ARRAY(BSON("host"
                                                << "node1:12345"
-                                               << "_id" << 0)
+                                               << "_id"
+                                               << 0)
                                           << BSON("host"
                                                   << "node2:12345"
-                                                  << "_id" << 1) << BSON("host"
-                                                                         << "node3:12345"
-                                                                         << "_id" << 2))),
+                                                  << "_id"
+                                                  << 1)
+                                          << BSON("host"
+                                                  << "node3:12345"
+                                                  << "_id"
+                                                  << 2))),
                        HostAndPort("node1", 12345));
-    ASSERT(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
-    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(100, 0));
-    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(100, 0));
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(100, 1));
+    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(100, 1));
     simulateSuccessfulV1Election();
 
     OpTime time1({100, 1}, 1);
@@ -2692,81 +3262,50 @@ TEST_F(ReplCoordTest, DoNotProcessUpdatePositionWhenItsConfigVersionIsIncorrect)
 
     // receive updatePosition with incorrect config version
     UpdatePositionArgs args;
-    ASSERT_OK(args.initialize(
-        BSON("replSetUpdatePosition"
-             << 1 << "optimes"
-             << BSON_ARRAY(BSON("cfgver" << 3 << "memberId" << 1 << "durableOpTime"
-                                         << BSON("ts" << time2.getTimestamp() << "t" << 3)
-                                         << "appliedOpTime"
-                                         << BSON("ts" << time2.getTimestamp() << "t" << 3))))));
+    ASSERT_OK(args.initialize(BSON(UpdatePositionArgs::kCommandFieldName
+                                   << 1
+                                   << UpdatePositionArgs::kUpdateArrayFieldName
+                                   << BSON_ARRAY(BSON(UpdatePositionArgs::kConfigVersionFieldName
+                                                      << 3
+                                                      << UpdatePositionArgs::kMemberIdFieldName
+                                                      << 1
+                                                      << UpdatePositionArgs::kDurableOpTimeFieldName
+                                                      << time2.toBSON()
+                                                      << UpdatePositionArgs::kAppliedOpTimeFieldName
+                                                      << time2.toBSON())))));
+
+    auto opCtx = makeOperationContext();
+
 
     long long cfgver;
     ASSERT_EQUALS(ErrorCodes::InvalidReplicaSetConfig,
                   getReplCoord()->processReplSetUpdatePosition(args, &cfgver));
     ASSERT_EQUALS(ErrorCodes::WriteConcernFailed,
-                  getReplCoord()->awaitReplication(&txn, time2, writeConcern).status);
-}
-
-TEST_F(ReplCoordTest, DoNotProcessOldUpdatePositionWhenItsConfigVersionIsIncorrect) {
-    OperationContextNoop txn;
-    assertStartSuccess(BSON("_id"
-                            << "mySet"
-                            << "version" << 2 << "members"
-                            << BSON_ARRAY(BSON("host"
-                                               << "node1:12345"
-                                               << "_id" << 0)
-                                          << BSON("host"
-                                                  << "node2:12345"
-                                                  << "_id" << 1) << BSON("host"
-                                                                         << "node3:12345"
-                                                                         << "_id" << 2))),
-                       HostAndPort("node1", 12345));
-    ASSERT(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
-    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(100, 0));
-    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(100, 0));
-    simulateSuccessfulV1Election();
-
-    OpTimeWithTermOne time1(100, 1);
-    OpTimeWithTermOne time2(100, 2);
-    OpTimeWithTermOne staleTime(10, 0);
-    getReplCoord()->setMyLastAppliedOpTime(time1);
-    getReplCoord()->setMyLastDurableOpTime(time1);
-
-    WriteConcernOptions writeConcern;
-    writeConcern.wTimeout = WriteConcernOptions::kNoWaiting;
-    writeConcern.wNumNodes = 1;
-
-    // receive updatePosition with incorrect config version
-    OldUpdatePositionArgs args;
-    ASSERT_OK(args.initialize(BSON("replSetUpdatePosition"
-                                   << 1 << "optimes"
-                                   << BSON_ARRAY(BSON("cfgver" << 3 << "memberId" << 1 << "optime"
-                                                               << time2.timestamp)))));
-
-    long long cfgver;
-    ASSERT_EQUALS(ErrorCodes::InvalidReplicaSetConfig,
-                  getReplCoord()->processReplSetUpdatePosition(args, &cfgver));
-    ASSERT_EQUALS(ErrorCodes::WriteConcernFailed,
-                  getReplCoord()->awaitReplication(&txn, time2, writeConcern).status);
+                  getReplCoord()->awaitReplication(opCtx.get(), time2, writeConcern).status);
 }
 
 TEST_F(ReplCoordTest, DoNotProcessUpdatePositionOfMembersWhoseIdsAreNotInTheConfig) {
-    OperationContextNoop txn;
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 2 << "members"
+                            << "version"
+                            << 2
+                            << "members"
                             << BSON_ARRAY(BSON("host"
                                                << "node1:12345"
-                                               << "_id" << 0)
+                                               << "_id"
+                                               << 0)
                                           << BSON("host"
                                                   << "node2:12345"
-                                                  << "_id" << 1) << BSON("host"
-                                                                         << "node3:12345"
-                                                                         << "_id" << 2))),
+                                                  << "_id"
+                                                  << 1)
+                                          << BSON("host"
+                                                  << "node3:12345"
+                                                  << "_id"
+                                                  << 2))),
                        HostAndPort("node1", 12345));
-    ASSERT(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
-    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(100, 0));
-    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(100, 0));
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(100, 1));
+    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(100, 1));
     simulateSuccessfulV1Election();
 
     OpTime time1({100, 1}, 1);
@@ -2780,78 +3319,49 @@ TEST_F(ReplCoordTest, DoNotProcessUpdatePositionOfMembersWhoseIdsAreNotInTheConf
 
     // receive updatePosition with nonexistent member id
     UpdatePositionArgs args;
-    ASSERT_OK(args.initialize(
-        BSON("replSetUpdatePosition"
-             << 1 << "optimes"
-             << BSON_ARRAY(BSON("cfgver" << 2 << "memberId" << 9 << "durableOpTime"
-                                         << BSON("ts" << time2.getTimestamp() << "t" << 2)
-                                         << "appliedOpTime"
-                                         << BSON("ts" << time2.getTimestamp() << "t" << 2))))));
+    ASSERT_OK(args.initialize(BSON(UpdatePositionArgs::kCommandFieldName
+                                   << 1
+                                   << UpdatePositionArgs::kUpdateArrayFieldName
+                                   << BSON_ARRAY(BSON(UpdatePositionArgs::kConfigVersionFieldName
+                                                      << 2
+                                                      << UpdatePositionArgs::kMemberIdFieldName
+                                                      << 9
+                                                      << UpdatePositionArgs::kDurableOpTimeFieldName
+                                                      << time2.toBSON()
+                                                      << UpdatePositionArgs::kAppliedOpTimeFieldName
+                                                      << time2.toBSON())))));
+
+    auto opCtx = makeOperationContext();
+
 
     ASSERT_EQUALS(ErrorCodes::NodeNotFound, getReplCoord()->processReplSetUpdatePosition(args, 0));
     ASSERT_EQUALS(ErrorCodes::WriteConcernFailed,
-                  getReplCoord()->awaitReplication(&txn, time2, writeConcern).status);
-}
-
-TEST_F(ReplCoordTest, DoNotProcessOldUpdatePositionOfMembersWhoseIdsAreNotInTheConfig) {
-    OperationContextNoop txn;
-    assertStartSuccess(BSON("_id"
-                            << "mySet"
-                            << "version" << 2 << "members"
-                            << BSON_ARRAY(BSON("host"
-                                               << "node1:12345"
-                                               << "_id" << 0)
-                                          << BSON("host"
-                                                  << "node2:12345"
-                                                  << "_id" << 1) << BSON("host"
-                                                                         << "node3:12345"
-                                                                         << "_id" << 2))),
-                       HostAndPort("node1", 12345));
-    ASSERT(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
-    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(100, 0));
-    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(100, 0));
-    simulateSuccessfulV1Election();
-
-    OpTimeWithTermOne time1(100, 1);
-    OpTimeWithTermOne time2(100, 2);
-    OpTimeWithTermOne staleTime(10, 0);
-    getReplCoord()->setMyLastAppliedOpTime(time1);
-    getReplCoord()->setMyLastDurableOpTime(time1);
-
-    WriteConcernOptions writeConcern;
-    writeConcern.wTimeout = WriteConcernOptions::kNoWaiting;
-    writeConcern.wNumNodes = 1;
-
-    // receive updatePosition with nonexistent member id
-    OldUpdatePositionArgs args;
-    ASSERT_OK(args.initialize(BSON("replSetUpdatePosition"
-                                   << 1 << "optimes"
-                                   << BSON_ARRAY(BSON("cfgver" << 2 << "memberId" << 9 << "optime"
-                                                               << time2.timestamp)))));
-
-    ASSERT_EQUALS(ErrorCodes::NodeNotFound, getReplCoord()->processReplSetUpdatePosition(args, 0));
-    ASSERT_EQUALS(ErrorCodes::WriteConcernFailed,
-                  getReplCoord()->awaitReplication(&txn, time2, writeConcern).status);
+                  getReplCoord()->awaitReplication(opCtx.get(), time2, writeConcern).status);
 }
 
 TEST_F(ReplCoordTest,
        ProcessUpdateWhenUpdatePositionContainsOnlyConfigVersionAndMemberIdsWithoutRIDs) {
-    OperationContextNoop txn;
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 2 << "members"
+                            << "version"
+                            << 2
+                            << "members"
                             << BSON_ARRAY(BSON("host"
                                                << "node1:12345"
-                                               << "_id" << 0)
+                                               << "_id"
+                                               << 0)
                                           << BSON("host"
                                                   << "node2:12345"
-                                                  << "_id" << 1) << BSON("host"
-                                                                         << "node3:12345"
-                                                                         << "_id" << 2))),
+                                                  << "_id"
+                                                  << 1)
+                                          << BSON("host"
+                                                  << "node3:12345"
+                                                  << "_id"
+                                                  << 2))),
                        HostAndPort("node1", 12345));
-    ASSERT(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
-    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(100, 0));
-    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(100, 0));
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(100, 1));
+    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(100, 1));
     simulateSuccessfulV1Election();
 
     OpTimeWithTermOne time1(100, 1);
@@ -2867,54 +3377,88 @@ TEST_F(ReplCoordTest,
     // receive a good update position
     getReplCoord()->setMyLastAppliedOpTime(time2);
     getReplCoord()->setMyLastDurableOpTime(time2);
-    OldUpdatePositionArgs args;
-    ASSERT_OK(args.initialize(
-        BSON("replSetUpdatePosition"
-             << 1 << "optimes"
-             << BSON_ARRAY(
-                    BSON("cfgver" << 2 << "memberId" << 1 << "optime" << time2.timestamp)
-                    << BSON("cfgver" << 2 << "memberId" << 2 << "optime" << time2.timestamp)))));
+    UpdatePositionArgs args;
+    ASSERT_OK(
+        args.initialize(BSON(UpdatePositionArgs::kCommandFieldName
+                             << 1
+                             << UpdatePositionArgs::kUpdateArrayFieldName
+                             << BSON_ARRAY(BSON(UpdatePositionArgs::kConfigVersionFieldName
+                                                << 2
+                                                << UpdatePositionArgs::kMemberIdFieldName
+                                                << 1
+                                                << UpdatePositionArgs::kAppliedOpTimeFieldName
+                                                << time2.asOpTime().toBSON()
+                                                << UpdatePositionArgs::kDurableOpTimeFieldName
+                                                << time2.asOpTime().toBSON())
+                                           << BSON(UpdatePositionArgs::kConfigVersionFieldName
+                                                   << 2
+                                                   << UpdatePositionArgs::kMemberIdFieldName
+                                                   << 2
+                                                   << UpdatePositionArgs::kAppliedOpTimeFieldName
+                                                   << time2.asOpTime().toBSON()
+                                                   << UpdatePositionArgs::kDurableOpTimeFieldName
+                                                   << time2.asOpTime().toBSON())))));
+
+    auto opCtx = makeOperationContext();
+
 
     ASSERT_OK(getReplCoord()->processReplSetUpdatePosition(args, 0));
-    ASSERT_OK(getReplCoord()->awaitReplication(&txn, time2, writeConcern).status);
+    ASSERT_OK(getReplCoord()->awaitReplication(opCtx.get(), time2, writeConcern).status);
 
     writeConcern.wNumNodes = 3;
-    ASSERT_OK(getReplCoord()->awaitReplication(&txn, time2, writeConcern).status);
+    ASSERT_OK(getReplCoord()->awaitReplication(opCtx.get(), time2, writeConcern).status);
 }
 
 void doReplSetReconfig(ReplicationCoordinatorImpl* replCoord, Status* status) {
-    OperationContextNoop txn;
+    auto client = getGlobalServiceContext()->makeClient("rsr");
+    auto opCtx = client->makeOperationContext();
+
     BSONObjBuilder garbage;
     ReplSetReconfigArgs args;
     args.force = false;
     args.newConfigObj = BSON("_id"
                              << "mySet"
-                             << "version" << 3 << "members"
+                             << "version"
+                             << 3
+                             << "protocolVersion"
+                             << 1
+                             << "members"
                              << BSON_ARRAY(BSON("_id" << 0 << "host"
                                                       << "node1:12345"
-                                                      << "priority" << 3)
+                                                      << "priority"
+                                                      << 3)
                                            << BSON("_id" << 1 << "host"
                                                          << "node2:12345")
                                            << BSON("_id" << 2 << "host"
                                                          << "node3:12345")));
-    *status = replCoord->processReplSetReconfig(&txn, args, &garbage);
+    *status = replCoord->processReplSetReconfig(opCtx.get(), args, &garbage);
 }
 
 TEST_F(ReplCoordTest, AwaitReplicationShouldResolveAsNormalDuringAReconfig) {
-    OperationContextNoop txn;
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 2 << "members"
+                            << "version"
+                            << 2
+                            << "members"
                             << BSON_ARRAY(BSON("host"
                                                << "node1:12345"
-                                               << "_id" << 0)
+                                               << "_id"
+                                               << 0)
                                           << BSON("host"
                                                   << "node2:12345"
-                                                  << "_id" << 1) << BSON("host"
-                                                                         << "node3:12345"
-                                                                         << "_id" << 2))),
+                                                  << "_id"
+                                                  << 1)
+                                          << BSON("host"
+                                                  << "node3:12345"
+                                                  << "_id"
+                                                  << 2))),
                        HostAndPort("node1", 12345));
-    ASSERT(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+
+    // Turn off readconcern majority support, and snapshots.
+    disableReadConcernMajoritySupport();
+    disableSnapshots();
+
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
     getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(100, 2));
     getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(100, 2));
     simulateSuccessfulV1Election();
@@ -2927,22 +3471,22 @@ TEST_F(ReplCoordTest, AwaitReplicationShouldResolveAsNormalDuringAReconfig) {
     writeConcern.wNumNodes = 3;
     writeConcern.syncMode = WriteConcernOptions::SyncMode::NONE;
 
-    ReplicationAwaiter awaiter(getReplCoord(), &txn);
+    ReplicationAwaiter awaiter(getReplCoord(), getServiceContext());
     awaiter.setOpTime(time);
     awaiter.setWriteConcern(writeConcern);
-    awaiter.start(&txn);
+    awaiter.start();
 
-    ReplicationAwaiter awaiterJournaled(getReplCoord(), &txn);
+    ReplicationAwaiter awaiterJournaled(getReplCoord(), getServiceContext());
     writeConcern.wMode = WriteConcernOptions::kMajority;
     awaiterJournaled.setOpTime(time);
     awaiterJournaled.setWriteConcern(writeConcern);
-    awaiterJournaled.start(&txn);
+    awaiterJournaled.start();
 
     // reconfig
     Status status(ErrorCodes::InternalError, "Not Set");
-    stdx::thread reconfigThread(stdx::bind(doReplSetReconfig, getReplCoord(), &status));
+    stdx::thread reconfigThread([&] { doReplSetReconfig(getReplCoord(), &status); });
 
-    replyToReceivedHeartbeat();
+    replyToReceivedHeartbeatV1();
     reconfigThread.join();
     ASSERT_OK(status);
 
@@ -2966,37 +3510,48 @@ TEST_F(ReplCoordTest, AwaitReplicationShouldResolveAsNormalDuringAReconfig) {
 }
 
 void doReplSetReconfigToFewer(ReplicationCoordinatorImpl* replCoord, Status* status) {
-    OperationContextNoop txn;
+    auto client = getGlobalServiceContext()->makeClient("rsr");
+    auto opCtx = client->makeOperationContext();
+
     BSONObjBuilder garbage;
     ReplSetReconfigArgs args;
     args.force = false;
     args.newConfigObj = BSON("_id"
                              << "mySet"
-                             << "version" << 3 << "members"
+                             << "version"
+                             << 3
+                             << "protocolVersion"
+                             << 1
+                             << "members"
                              << BSON_ARRAY(BSON("_id" << 0 << "host"
                                                       << "node1:12345")
                                            << BSON("_id" << 2 << "host"
                                                          << "node3:12345")));
-    *status = replCoord->processReplSetReconfig(&txn, args, &garbage);
+    *status = replCoord->processReplSetReconfig(opCtx.get(), args, &garbage);
 }
 
 TEST_F(
     ReplCoordTest,
     NodeReturnsCannotSatisfyWriteConcernWhenReconfiggingToAClusterThatCannotSatisfyTheWriteConcern) {
-    OperationContextNoop txn;
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 2 << "members"
+                            << "version"
+                            << 2
+                            << "members"
                             << BSON_ARRAY(BSON("host"
                                                << "node1:12345"
-                                               << "_id" << 0)
+                                               << "_id"
+                                               << 0)
                                           << BSON("host"
                                                   << "node2:12345"
-                                                  << "_id" << 1) << BSON("host"
-                                                                         << "node3:12345"
-                                                                         << "_id" << 2))),
+                                                  << "_id"
+                                                  << 1)
+                                          << BSON("host"
+                                                  << "node3:12345"
+                                                  << "_id"
+                                                  << 2))),
                        HostAndPort("node1", 12345));
-    ASSERT(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
     getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(100, 2));
     getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(100, 2));
     simulateSuccessfulV1Election();
@@ -3008,22 +3563,22 @@ TEST_F(
     writeConcern.wTimeout = WriteConcernOptions::kNoTimeout;
     writeConcern.wNumNodes = 3;
 
-    ReplicationAwaiter awaiter(getReplCoord(), &txn);
+    ReplicationAwaiter awaiter(getReplCoord(), getServiceContext());
     awaiter.setOpTime(time);
     awaiter.setWriteConcern(writeConcern);
-    awaiter.start(&txn);
+    awaiter.start();
 
-    ReplicationAwaiter awaiterJournaled(getReplCoord(), &txn);
+    ReplicationAwaiter awaiterJournaled(getReplCoord(), getServiceContext());
     writeConcern.wMode = WriteConcernOptions::kMajority;
     awaiterJournaled.setOpTime(time);
     awaiterJournaled.setWriteConcern(writeConcern);
-    awaiterJournaled.start(&txn);
+    awaiterJournaled.start();
 
     // reconfig to fewer nodes
     Status status(ErrorCodes::InternalError, "Not Set");
-    stdx::thread reconfigThread(stdx::bind(doReplSetReconfigToFewer, getReplCoord(), &status));
+    stdx::thread reconfigThread([&] { doReplSetReconfigToFewer(getReplCoord(), &status); });
 
-    replyToReceivedHeartbeat();
+    replyToReceivedHeartbeatV1();
 
     reconfigThread.join();
     ASSERT_OK(status);
@@ -3039,34 +3594,47 @@ TEST_F(
 
 TEST_F(ReplCoordTest,
        NodeReturnsOKFromAwaitReplicationWhenReconfiggingToASetWhereMajorityIsSmallerAndSatisfied) {
-    OperationContextNoop txn;
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 2 << "members"
+                            << "version"
+                            << 2
+                            << "members"
                             << BSON_ARRAY(BSON("host"
                                                << "node1:12345"
-                                               << "_id" << 0)
+                                               << "_id"
+                                               << 0)
                                           << BSON("host"
                                                   << "node2:12345"
-                                                  << "_id" << 1) << BSON("host"
-                                                                         << "node3:12345"
-                                                                         << "_id" << 2)
+                                                  << "_id"
+                                                  << 1)
+                                          << BSON("host"
+                                                  << "node3:12345"
+                                                  << "_id"
+                                                  << 2)
                                           << BSON("host"
                                                   << "node4:12345"
-                                                  << "_id" << 3) << BSON("host"
-                                                                         << "node5:12345"
-                                                                         << "_id" << 4))),
+                                                  << "_id"
+                                                  << 3)
+                                          << BSON("host"
+                                                  << "node5:12345"
+                                                  << "_id"
+                                                  << 4))),
                        HostAndPort("node1", 12345));
-    ASSERT(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+
+    // Turn off readconcern majority support, and snapshots.
+    disableReadConcernMajoritySupport();
+    disableSnapshots();
+
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
     getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(100, 1));
     getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(100, 1));
     simulateSuccessfulV1Election();
 
     OpTime time(Timestamp(100, 2), 1);
+    auto opCtx = makeOperationContext();
 
     getReplCoord()->setMyLastAppliedOpTime(time);
     getReplCoord()->setMyLastDurableOpTime(time);
-    getReplCoord()->createSnapshot(&txn, time, SnapshotName(1));
     ASSERT_OK(getReplCoord()->setLastAppliedOptime_forTest(2, 1, time));
 
 
@@ -3076,10 +3644,11 @@ TEST_F(ReplCoordTest,
     writeConcern.wMode = WriteConcernOptions::kMajority;
     writeConcern.syncMode = WriteConcernOptions::SyncMode::NONE;
 
-    ReplicationAwaiter awaiter(getReplCoord(), &txn);
+
+    ReplicationAwaiter awaiter(getReplCoord(), getServiceContext());
     awaiter.setOpTime(time);
     awaiter.setWriteConcern(writeConcern);
-    awaiter.start(&txn);
+    awaiter.start();
 
     // demonstrate that majority cannot currently be satisfied
     WriteConcernOptions writeConcern2;
@@ -3088,13 +3657,13 @@ TEST_F(ReplCoordTest,
     writeConcern.syncMode = WriteConcernOptions::SyncMode::NONE;
 
     ASSERT_EQUALS(ErrorCodes::WriteConcernFailed,
-                  getReplCoord()->awaitReplication(&txn, time, writeConcern2).status);
+                  getReplCoord()->awaitReplication(opCtx.get(), time, writeConcern2).status);
 
     // reconfig to three nodes
     Status status(ErrorCodes::InternalError, "Not Set");
-    stdx::thread reconfigThread(stdx::bind(doReplSetReconfig, getReplCoord(), &status));
+    stdx::thread reconfigThread([&] { doReplSetReconfig(getReplCoord(), &status); });
 
-    replyToReceivedHeartbeat();
+    replyToReceivedHeartbeatV1();
     reconfigThread.join();
     ASSERT_OK(status);
 
@@ -3108,27 +3677,40 @@ TEST_F(ReplCoordTest,
        NodeReturnsFromMajorityWriteConcernOnlyOnceTheWriteAppearsInACommittedSnapShot) {
     // Test that we can satisfy majority write concern can only be
     // satisfied by voting data-bearing members.
-    OperationContextNoop txn;
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 2 << "members"
+                            << "version"
+                            << 2
+                            << "members"
                             << BSON_ARRAY(BSON("host"
                                                << "node1:12345"
-                                               << "_id" << 0)
+                                               << "_id"
+                                               << 0)
                                           << BSON("host"
                                                   << "node2:12345"
-                                                  << "_id" << 1) << BSON("host"
-                                                                         << "node3:12345"
-                                                                         << "_id" << 2)
+                                                  << "_id"
+                                                  << 1)
+                                          << BSON("host"
+                                                  << "node3:12345"
+                                                  << "_id"
+                                                  << 2)
                                           << BSON("host"
                                                   << "node4:12345"
-                                                  << "_id" << 3 << "votes" << 0 << "priority" << 0)
+                                                  << "_id"
+                                                  << 3
+                                                  << "votes"
+                                                  << 0
+                                                  << "priority"
+                                                  << 0)
                                           << BSON("host"
                                                   << "node5:12345"
-                                                  << "_id" << 4 << "arbiterOnly" << true))),
+                                                  << "_id"
+                                                  << 4
+                                                  << "arbiterOnly"
+                                                  << true))),
                        HostAndPort("node1", 12345));
-    ASSERT(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
-    OpTime time(Timestamp(100, 0), 1);
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+    OpTime time(Timestamp(100, 1), 1);
     getReplCoord()->setMyLastAppliedOpTime(time);
     getReplCoord()->setMyLastDurableOpTime(time);
     simulateSuccessfulV1Election();
@@ -3138,54 +3720,66 @@ TEST_F(ReplCoordTest,
     majorityWriteConcern.wMode = WriteConcernOptions::kMajority;
     majorityWriteConcern.syncMode = WriteConcernOptions::SyncMode::JOURNAL;
 
+    auto opCtx = makeOperationContext();
+
+
     ASSERT_EQUALS(ErrorCodes::WriteConcernFailed,
-                  getReplCoord()->awaitReplication(&txn, time, majorityWriteConcern).status);
+                  getReplCoord()->awaitReplication(opCtx.get(), time, majorityWriteConcern).status);
 
     ASSERT_OK(getReplCoord()->setLastAppliedOptime_forTest(2, 1, time));
     ASSERT_OK(getReplCoord()->setLastDurableOptime_forTest(2, 1, time));
     ASSERT_EQUALS(ErrorCodes::WriteConcernFailed,
-                  getReplCoord()->awaitReplication(&txn, time, majorityWriteConcern).status);
+                  getReplCoord()->awaitReplication(opCtx.get(), time, majorityWriteConcern).status);
 
     // this member does not vote and as a result should not count towards write concern
     ASSERT_OK(getReplCoord()->setLastAppliedOptime_forTest(2, 3, time));
     ASSERT_OK(getReplCoord()->setLastDurableOptime_forTest(2, 3, time));
     ASSERT_EQUALS(ErrorCodes::WriteConcernFailed,
-                  getReplCoord()->awaitReplication(&txn, time, majorityWriteConcern).status);
+                  getReplCoord()->awaitReplication(opCtx.get(), time, majorityWriteConcern).status);
 
     ASSERT_OK(getReplCoord()->setLastAppliedOptime_forTest(2, 2, time));
     ASSERT_OK(getReplCoord()->setLastDurableOptime_forTest(2, 2, time));
-    ASSERT_EQUALS(ErrorCodes::WriteConcernFailed,
-                  getReplCoord()->awaitReplication(&txn, time, majorityWriteConcern).status);
-
-    getReplCoord()->createSnapshot(&txn, time, SnapshotName(1));
-    ASSERT_OK(getReplCoord()->awaitReplication(&txn, time, majorityWriteConcern).status);
+    ASSERT_OK(getReplCoord()->awaitReplication(opCtx.get(), time, majorityWriteConcern).status);
 }
 
 TEST_F(ReplCoordTest,
        UpdateLastCommittedOpTimeWhenAndOnlyWhenAMajorityOfVotingNodesHaveReceivedTheOp) {
     // Test that the commit level advances properly.
-    OperationContextNoop txn;
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 2 << "members"
+                            << "version"
+                            << 2
+                            << "members"
                             << BSON_ARRAY(BSON("host"
                                                << "node1:12345"
-                                               << "_id" << 0)
+                                               << "_id"
+                                               << 0)
                                           << BSON("host"
                                                   << "node2:12345"
-                                                  << "_id" << 1) << BSON("host"
-                                                                         << "node3:12345"
-                                                                         << "_id" << 2)
+                                                  << "_id"
+                                                  << 1)
+                                          << BSON("host"
+                                                  << "node3:12345"
+                                                  << "_id"
+                                                  << 2)
                                           << BSON("host"
                                                   << "node4:12345"
-                                                  << "_id" << 3 << "votes" << 0 << "priority" << 0)
+                                                  << "_id"
+                                                  << 3
+                                                  << "votes"
+                                                  << 0
+                                                  << "priority"
+                                                  << 0)
                                           << BSON("host"
                                                   << "node5:12345"
-                                                  << "_id" << 4 << "arbiterOnly" << true))),
+                                                  << "_id"
+                                                  << 4
+                                                  << "arbiterOnly"
+                                                  << true))),
                        HostAndPort("node1", 12345));
-    ASSERT(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
     OpTime zero(Timestamp(0, 0), 0);
-    OpTime time(Timestamp(100, 0), 1);
+    OpTime time(Timestamp(100, 1), 1);
     getReplCoord()->setMyLastAppliedOpTime(time);
     getReplCoord()->setMyLastDurableOpTime(time);
     simulateSuccessfulV1Election();
@@ -3221,405 +3815,843 @@ TEST_F(ReplCoordTest,
     ASSERT_EQUALS(newTime, getReplCoord()->getLastCommittedOpTime());
 }
 
-TEST_F(ReplCoordTest, NodeReturnsShutdownInProgressWhenWaitingUntilAnOpTimeDuringShutdown) {
-    OperationContextNoop txn;
+/**
+ * Tests to ensure that ReplicationCoordinator correctly calculates and updates the stable
+ * optime.
+ */
+class StableOpTimeTest : public ReplCoordTest {
+protected:
+    /**
+     * Return a string representation of the given set 's'.
+     */
+    std::string opTimeSetString(std::set<OpTime> s) {
+        std::stringstream ss;
+        ss << "{ ";
+        for (auto const& el : s) {
+            ss << el << " ";
+        }
+        ss << "}";
+        return ss.str();
+    }
+
+    void initReplSetMode() {
+        auto settings = ReplSettings();
+        settings.setReplSetString("replset");
+        init(settings);
+    }
+};
+
+// An equality assertion for two std::set<OpTime> values. Prints the elements of each set when
+// the assertion fails. Only to be used in a 'StableOpTimeTest' unit test function.
+#define ASSERT_OPTIME_SET_EQ(a, b) \
+    ASSERT(a == b) << (opTimeSetString(a) + " != " + opTimeSetString(b));
+
+TEST_F(StableOpTimeTest, CalculateStableOpTime) {
+
+    /**
+     * Tests the 'ReplicationCoordinatorImpl::_calculateStableOpTime' method.
+     */
+
+    initReplSetMode();
+    auto repl = getReplCoord();
+    OpTime commitPoint;
+    boost::optional<OpTime> expectedStableOpTime, stableOpTime;
+    std::set<OpTime> stableOpTimeCandidates;
+    long long term = 0;
+
+    // There is a valid stable optime less than the commit point.
+    commitPoint = OpTime({0, 3}, term);
+    stableOpTimeCandidates = {
+        OpTime({0, 0}, term), OpTime({0, 1}, term), OpTime({0, 2}, term), OpTime({0, 4}, term)};
+    expectedStableOpTime = OpTime({0, 2}, term);
+    stableOpTime = repl->calculateStableOpTime_forTest(stableOpTimeCandidates, commitPoint);
+    ASSERT_EQ(expectedStableOpTime, stableOpTime);
+
+    // There is a valid stable optime equal to the commit point.
+    commitPoint = OpTime({0, 2}, term);
+    stableOpTimeCandidates = {
+        OpTime({0, 0}, term), OpTime({0, 1}, term), OpTime({0, 2}, term), OpTime({0, 3}, term)};
+    expectedStableOpTime = OpTime({0, 2}, term);
+    stableOpTime = repl->calculateStableOpTime_forTest(stableOpTimeCandidates, commitPoint);
+    ASSERT_EQ(expectedStableOpTime, stableOpTime);
+
+    // There is a valid stable optime, all candidates are smaller than the commit point.
+    commitPoint = OpTime({0, 4}, term);
+    stableOpTimeCandidates = {OpTime({0, 1}, term), OpTime({0, 2}, term), OpTime({0, 3}, term)};
+    expectedStableOpTime = OpTime({0, 3}, term);
+    stableOpTime = repl->calculateStableOpTime_forTest(stableOpTimeCandidates, commitPoint);
+    ASSERT_EQ(expectedStableOpTime, stableOpTime);
+
+    // There is no valid stable optime, all candidates are greater than the commit point.
+    commitPoint = OpTime({0, 0}, term);
+    stableOpTimeCandidates = {OpTime({0, 1}, term), OpTime({0, 2}, term), OpTime({0, 3}, term)};
+    expectedStableOpTime = boost::none;
+    stableOpTime = repl->calculateStableOpTime_forTest(stableOpTimeCandidates, commitPoint);
+    ASSERT_EQ(expectedStableOpTime, stableOpTime);
+
+    // There are no timestamp candidates.
+    commitPoint = OpTime({0, 0}, term);
+    stableOpTimeCandidates = {};
+    expectedStableOpTime = boost::none;
+    stableOpTime = repl->calculateStableOpTime_forTest(stableOpTimeCandidates, commitPoint);
+    ASSERT_EQ(expectedStableOpTime, stableOpTime);
+
+    // There is a single timestamp candidate which is equal to the commit point.
+    commitPoint = OpTime({0, 1}, term);
+    stableOpTimeCandidates = {OpTime({0, 1}, term)};
+    expectedStableOpTime = OpTime({0, 1}, term);
+    stableOpTime = repl->calculateStableOpTime_forTest(stableOpTimeCandidates, commitPoint);
+    ASSERT_EQ(expectedStableOpTime, stableOpTime);
+
+    // There is a single timestamp candidate which is greater than the commit point.
+    commitPoint = OpTime({0, 0}, term);
+    stableOpTimeCandidates = {OpTime({0, 1}, term)};
+    expectedStableOpTime = boost::none;
+    stableOpTime = repl->calculateStableOpTime_forTest(stableOpTimeCandidates, commitPoint);
+    ASSERT_EQ(expectedStableOpTime, stableOpTime);
+
+    // There is a single timestamp candidate which is less than the commit point.
+    commitPoint = OpTime({0, 2}, term);
+    stableOpTimeCandidates = {OpTime({0, 1}, term)};
+    expectedStableOpTime = OpTime({0, 1}, term);
+    stableOpTime = repl->calculateStableOpTime_forTest(stableOpTimeCandidates, commitPoint);
+    ASSERT_EQ(expectedStableOpTime, stableOpTime);
+}
+
+TEST_F(StableOpTimeTest, CleanupStableOpTimeCandidates) {
+
+    /**
+     * Tests the 'ReplicationCoordinatorImpl::_cleanupStableOpTimeCandidates' method.
+     */
+
+    initReplSetMode();
+    auto repl = getReplCoord();
+    OpTime stableOpTime;
+    std::set<OpTime> opTimeCandidates, expectedOpTimeCandidates;
+    long long term = 0;
+
+    // Cleanup should remove all timestamp candidates < the stable optime.
+    stableOpTime = OpTime({0, 3}, term);
+    opTimeCandidates = {
+        OpTime({0, 1}, term), OpTime({0, 2}, term), OpTime({0, 3}, term), OpTime({0, 4}, term)};
+    expectedOpTimeCandidates = {OpTime({0, 3}, term), OpTime({0, 4}, term)};
+    repl->cleanupStableOpTimeCandidates_forTest(&opTimeCandidates, stableOpTime);
+    ASSERT_OPTIME_SET_EQ(expectedOpTimeCandidates, opTimeCandidates);
+
+    // Cleanup should remove all timestamp candidates if they are all < the stable optime.
+    stableOpTime = OpTime({0, 5}, term);
+    opTimeCandidates = {
+        OpTime({0, 1}, term), OpTime({0, 2}, term), OpTime({0, 3}, term), OpTime({0, 4}, term)};
+    expectedOpTimeCandidates = {};
+    repl->cleanupStableOpTimeCandidates_forTest(&opTimeCandidates, stableOpTime);
+    ASSERT_OPTIME_SET_EQ(expectedOpTimeCandidates, opTimeCandidates);
+
+    // Cleanup should have no effect when stable optime is less than all candidates.
+    stableOpTime = OpTime({0, 0}, term);
+    opTimeCandidates = {
+        OpTime({0, 1}, term), OpTime({0, 2}, term), OpTime({0, 3}, term), OpTime({0, 4}, term)};
+    expectedOpTimeCandidates = {
+        OpTime({0, 1}, term), OpTime({0, 2}, term), OpTime({0, 3}, term), OpTime({0, 4}, term)};
+    repl->cleanupStableOpTimeCandidates_forTest(&opTimeCandidates, stableOpTime);
+    ASSERT_OPTIME_SET_EQ(expectedOpTimeCandidates, opTimeCandidates);
+
+    // Cleanup should have no effect for a single candidate that is equal to stable optime.
+    stableOpTime = OpTime({0, 1}, term);
+    opTimeCandidates = {OpTime({0, 1}, term)};
+    expectedOpTimeCandidates = {OpTime({0, 1}, term)};
+    repl->cleanupStableOpTimeCandidates_forTest(&opTimeCandidates, stableOpTime);
+    ASSERT_OPTIME_SET_EQ(expectedOpTimeCandidates, opTimeCandidates);
+
+    // Cleanup should leave an empty candidate list unchanged.
+    stableOpTime = OpTime({0, 0}, term);
+    opTimeCandidates = {};
+    expectedOpTimeCandidates = {};
+    repl->cleanupStableOpTimeCandidates_forTest(&opTimeCandidates, stableOpTime);
+    ASSERT_OPTIME_SET_EQ(expectedOpTimeCandidates, opTimeCandidates);
+}
+
+
+TEST_F(StableOpTimeTest, SetMyLastAppliedSetsStableOpTimeForStorage) {
+
+    /**
+     * Test that 'setMyLastAppliedOpTime' sets the stable timestamp properly for the storage engine
+     * and that timestamp cleanup occurs. This test is not meant to fully exercise the stable
+     * optime calculation logic.
+     */
+    init("mySet/test1:1234,test2:1234,test3:1234");
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 2 << "members" << BSON_ARRAY(BSON("host"
-                                                                              << "node1:12345"
-                                                                              << "_id" << 0))),
+                            << "protocolVersion"
+                            << 1
+                            << "version"
+                            << 1
+                            << "members"
+                            << BSON_ARRAY(BSON("_id" << 0 << "host"
+                                                     << "test1:1234")
+                                          << BSON("_id" << 1 << "host"
+                                                        << "test2:1234")
+                                          << BSON("_id" << 2 << "host"
+                                                        << "test3:1234"))),
+                       HostAndPort("test2", 1234));
+
+    auto repl = getReplCoord();
+    Timestamp stableTimestamp;
+
+    getStorageInterface()->supportsDocLockingBool = true;
+    ASSERT_EQUALS(Timestamp::min(), getStorageInterface()->getStableTimestamp());
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+
+    getStorageInterface()->allCommittedTimestamp = Timestamp(1, 1);
+    repl->setMyLastAppliedOpTime(OpTimeWithTermOne(1, 1));
+    repl->setMyLastDurableOpTime(OpTimeWithTermOne(1, 1));
+    simulateSuccessfulV1Election();
+
+    // Advance the commit point so it's higher than all the others.
+    repl->advanceCommitPoint(OpTimeWithTermOne(10, 1));
+    ASSERT_EQUALS(Timestamp(1, 1), getStorageInterface()->getStableTimestamp());
+
+    // Check that the stable timestamp is not updated if the all-committed timestamp is behind.
+    repl->setMyLastAppliedOpTime(OpTimeWithTermOne(1, 2));
+    stableTimestamp = getStorageInterface()->getStableTimestamp();
+    ASSERT_EQUALS(Timestamp(1, 1), getStorageInterface()->getStableTimestamp());
+
+    getStorageInterface()->allCommittedTimestamp = Timestamp(3, 1);
+
+    // Check that the stable timestamp is updated for the storage engine when we set the applied
+    // optime.
+    repl->setMyLastAppliedOpTime(OpTimeWithTermOne(2, 1));
+    stableTimestamp = getStorageInterface()->getStableTimestamp();
+    ASSERT_EQUALS(Timestamp(2, 1), stableTimestamp);
+
+    // Check that timestamp cleanup occurs.
+    repl->setMyLastAppliedOpTime(OpTimeWithTermOne(2, 2));
+    stableTimestamp = getStorageInterface()->getStableTimestamp();
+    ASSERT_EQUALS(Timestamp(2, 2), stableTimestamp);
+
+    auto opTimeCandidates = repl->getStableOpTimeCandidates_forTest();
+    std::set<OpTime> expectedOpTimeCandidates = {OpTimeWithTermOne(2, 2)};
+    ASSERT_OPTIME_SET_EQ(expectedOpTimeCandidates, opTimeCandidates);
+}
+
+TEST_F(StableOpTimeTest, AdvanceCommitPointSetsStableOpTimeForStorage) {
+
+    /**
+     * Test that 'advanceCommitPoint' sets the stable optime for the storage engine and that
+     * timestamp cleanup occurs. This test is not meant to fully exercise the stable optime
+     * calculation logic.
+     */
+
+    init("mySet/test1:1234,test2:1234,test3:1234");
+    assertStartSuccess(BSON("_id"
+                            << "mySet"
+                            << "protocolVersion"
+                            << 1
+                            << "version"
+                            << 1
+                            << "members"
+                            << BSON_ARRAY(BSON("_id" << 0 << "host"
+                                                     << "test1:1234")
+                                          << BSON("_id" << 1 << "host"
+                                                        << "test2:1234")
+                                          << BSON("_id" << 2 << "host"
+                                                        << "test3:1234"))),
+                       HostAndPort("test2", 1234));
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(1, 1));
+    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(1, 1));
+    simulateSuccessfulV1Election();
+
+    auto repl = getReplCoord();
+    Timestamp stableTimestamp;
+    long long term = 2;
+
+    getStorageInterface()->supportsDocLockingBool = true;
+    getStorageInterface()->allCommittedTimestamp = Timestamp(2, 1);
+
+    // Add three stable optime candidates.
+    repl->setMyLastAppliedOpTime(OpTime({2, 1}, term));
+    repl->setMyLastAppliedOpTime(OpTime({2, 2}, term));
+    repl->setMyLastAppliedOpTime(OpTime({3, 2}, term));
+
+    // Set a commit point and check the stable optime.
+    repl->advanceCommitPoint(OpTime({2, 1}, term));
+    stableTimestamp = getStorageInterface()->getStableTimestamp();
+    ASSERT_EQUALS(Timestamp(2, 1), stableTimestamp);
+
+    // Check that the stable timestamp is not updated if the all-committed timestamp is behind.
+    repl->advanceCommitPoint(OpTime({2, 2}, term));
+    stableTimestamp = getStorageInterface()->getStableTimestamp();
+    ASSERT_EQUALS(Timestamp(2, 1), stableTimestamp);
+
+    getStorageInterface()->allCommittedTimestamp = Timestamp(4, 4);
+
+    // Check that the stable timestamp is updated when we advance the commit point.
+    repl->advanceCommitPoint(OpTime({3, 2}, term));
+    stableTimestamp = getStorageInterface()->getStableTimestamp();
+    ASSERT_EQUALS(Timestamp(3, 2), stableTimestamp);
+
+    // Check that timestamp candidate cleanup occurs.
+    auto opTimeCandidates = getReplCoord()->getStableOpTimeCandidates_forTest();
+    std::set<OpTime> expectedOpTimeCandidates = {OpTime({3, 2}, term)};
+    ASSERT_OPTIME_SET_EQ(expectedOpTimeCandidates, opTimeCandidates);
+}
+
+TEST_F(StableOpTimeTest, ClearOpTimeCandidatesPastCommonPointAfterRollback) {
+
+    assertStartSuccess(BSON("_id"
+                            << "mySet"
+                            << "version"
+                            << 1
+                            << "members"
+                            << BSON_ARRAY(BSON("host"
+                                               << "node1:12345"
+                                               << "_id"
+                                               << 0))
+                            << "protocolVersion"
+                            << 1),
                        HostAndPort("node1", 12345));
 
-    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(10, 0));
-    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(10, 0));
+    auto repl = getReplCoord();
+    long long term = 0;
+    ASSERT_OK(repl->setFollowerMode(MemberState::RS_SECONDARY));
 
-    shutdown();
+    OpTime rollbackCommonPoint = OpTime({1, 2}, term);
+    OpTime commitPoint = OpTime({1, 2}, term);
+    ASSERT_EQUALS(Timestamp::min(), getStorageInterface()->getStableTimestamp());
 
-    auto result = getReplCoord()->waitUntilOpTime(
-        &txn, ReadConcernArgs(OpTimeWithTermOne(50, 0), ReadConcernLevel::kLocalReadConcern));
+    repl->setMyLastAppliedOpTime(OpTime({0, 1}, term));
+    // Advance commit point when it has the same term as the last applied.
+    repl->advanceCommitPoint(commitPoint);
 
-    ASSERT_TRUE(result.didWait());
-    ASSERT_EQUALS(ErrorCodes::ShutdownInProgress, result.getStatus());
+    repl->setMyLastAppliedOpTime(OpTime({1, 1}, term));
+    repl->setMyLastAppliedOpTime(OpTime({1, 2}, term));
+    repl->setMyLastAppliedOpTime(OpTime({1, 3}, term));
+    repl->setMyLastAppliedOpTime(OpTime({1, 4}, term));
+
+    // The stable timestamp should be equal to the commit point timestamp.
+    const Timestamp stableTimestamp = getStorageInterface()->getStableTimestamp();
+    Timestamp expectedStableTimestamp = commitPoint.getTimestamp();
+    ASSERT_EQUALS(expectedStableTimestamp, stableTimestamp);
+
+    // The stable optime candidate set should contain optimes >= the stable optime.
+    std::set<OpTime> opTimeCandidates = repl->getStableOpTimeCandidates_forTest();
+    std::set<OpTime> expectedOpTimeCandidates = {
+        OpTime({1, 2}, term), OpTime({1, 3}, term), OpTime({1, 4}, term)};
+    ASSERT_OPTIME_SET_EQ(expectedOpTimeCandidates, opTimeCandidates);
+
+    // Transition to ROLLBACK. The set of stable optime candidates should not have changed.
+    ASSERT_OK(repl->setFollowerMode(MemberState::RS_ROLLBACK));
+    opTimeCandidates = repl->getStableOpTimeCandidates_forTest();
+    ASSERT_OPTIME_SET_EQ(expectedOpTimeCandidates, opTimeCandidates);
+
+    // Simulate a rollback to the common point.
+    auto opCtx = makeOperationContext();
+    getExternalState()->setLastOpTime(rollbackCommonPoint);
+    repl->resetLastOpTimesFromOplog(opCtx.get(),
+                                    ReplicationCoordinator::DataConsistency::Inconsistent);
+
+    // Transition to RECOVERING from ROLLBACK.
+    ASSERT_OK(repl->setFollowerMode(MemberState::RS_RECOVERING));
+
+    // Make sure the stable optime candidate set has been cleared of all entries past the common
+    // point.
+    opTimeCandidates = repl->getStableOpTimeCandidates_forTest();
+    auto stableOpTime = repl->getStableOpTime_forTest();
+    ASSERT(stableOpTime);
+    expectedOpTimeCandidates = {*stableOpTime};
+    ASSERT_OPTIME_SET_EQ(expectedOpTimeCandidates, opTimeCandidates);
+}
+
+TEST_F(StableOpTimeTest, OpTimeCandidatesAreNotAddedWhenStateIsNotConsistent) {
+
+    initReplSetMode();
+    auto repl = getReplCoord();
+    long long term = getTopoCoord().getTerm();
+
+    OpTime consistentOpTime = OpTime({1, 1}, term);
+    OpTime inconsistentOpTime = OpTime({1, 2}, term);
+    std::set<OpTime> expectedOpTimeCandidates = {OpTime({1, 1}, term)};
+
+    // Set the lastApplied optime forward when data is consistent, and check that it was added to
+    // the candidate set.
+    repl->setMyLastAppliedOpTimeForward(consistentOpTime,
+                                        ReplicationCoordinator::DataConsistency::Consistent);
+    ASSERT_EQUALS(consistentOpTime, repl->getMyLastAppliedOpTime());
+    ASSERT_OPTIME_SET_EQ(expectedOpTimeCandidates, repl->getStableOpTimeCandidates_forTest());
+
+    // Set the lastApplied optime forward when data is not consistent, and check that it wasn't
+    // added to the candidate set.
+    repl->setMyLastAppliedOpTimeForward(inconsistentOpTime,
+                                        ReplicationCoordinator::DataConsistency::Inconsistent);
+    ASSERT_EQUALS(inconsistentOpTime, repl->getMyLastAppliedOpTime());
+    ASSERT_OPTIME_SET_EQ(expectedOpTimeCandidates, repl->getStableOpTimeCandidates_forTest());
+}
+
+
+TEST_F(ReplCoordTest, NodeReturnsShutdownInProgressWhenWaitingUntilAnOpTimeDuringShutdown) {
+    assertStartSuccess(BSON("_id"
+                            << "mySet"
+                            << "version"
+                            << 2
+                            << "members"
+                            << BSON_ARRAY(BSON("host"
+                                               << "node1:12345"
+                                               << "_id"
+                                               << 0))),
+                       HostAndPort("node1", 12345));
+
+    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(10, 1));
+    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(10, 1));
+
+    auto opCtx = makeOperationContext();
+
+    shutdown(opCtx.get());
+
+    auto status = getReplCoord()->waitUntilOpTimeForRead(
+        opCtx.get(),
+        ReadConcernArgs(OpTimeWithTermOne(50, 0), ReadConcernLevel::kLocalReadConcern));
+    ASSERT_EQ(status, ErrorCodes::ShutdownInProgress);
 }
 
 TEST_F(ReplCoordTest, NodeReturnsInterruptedWhenWaitingUntilAnOpTimeIsInterrupted) {
-    OperationContextReplMock txn;
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 2 << "members" << BSON_ARRAY(BSON("host"
-                                                                              << "node1:12345"
-                                                                              << "_id" << 0))),
+                            << "version"
+                            << 2
+                            << "members"
+                            << BSON_ARRAY(BSON("host"
+                                               << "node1:12345"
+                                               << "_id"
+                                               << 0))),
                        HostAndPort("node1", 12345));
 
-    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(10, 0));
-    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(10, 0));
+    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(10, 1));
+    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(10, 1));
 
-    txn.setCheckForInterruptStatus(Status(ErrorCodes::Interrupted, "test"));
+    const auto opCtx = makeOperationContext();
+    killOperation(opCtx.get());
 
-    auto result = getReplCoord()->waitUntilOpTime(
-        &txn, ReadConcernArgs(OpTimeWithTermOne(50, 0), ReadConcernLevel::kLocalReadConcern));
-
-    ASSERT_TRUE(result.didWait());
-    ASSERT_EQUALS(ErrorCodes::Interrupted, result.getStatus());
+    auto status = getReplCoord()->waitUntilOpTimeForRead(
+        opCtx.get(),
+        ReadConcernArgs(OpTimeWithTermOne(50, 0), ReadConcernLevel::kLocalReadConcern));
+    ASSERT_EQ(status, ErrorCodes::Interrupted);
 }
 
 TEST_F(ReplCoordTest, NodeReturnsOkImmediatelyWhenWaitingUntilOpTimePassesNoOpTime) {
-    OperationContextNoop txn;
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 2 << "members" << BSON_ARRAY(BSON("host"
-                                                                              << "node1:12345"
-                                                                              << "_id" << 0))),
+                            << "version"
+                            << 2
+                            << "members"
+                            << BSON_ARRAY(BSON("host"
+                                               << "node1:12345"
+                                               << "_id"
+                                               << 0))),
                        HostAndPort("node1", 12345));
 
-    auto result = getReplCoord()->waitUntilOpTime(&txn, ReadConcernArgs());
+    auto opCtx = makeOperationContext();
 
-    ASSERT(result.didWait());
-    ASSERT_OK(result.getStatus());
+    ASSERT_OK(getReplCoord()->waitUntilOpTimeForRead(opCtx.get(), ReadConcernArgs()));
 }
 
 TEST_F(ReplCoordTest, NodeReturnsOkImmediatelyWhenWaitingUntilOpTimePassesAnOpTimePriorToOurLast) {
-    OperationContextNoop txn;
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 2 << "members" << BSON_ARRAY(BSON("host"
-                                                                              << "node1:12345"
-                                                                              << "_id" << 0))),
+                            << "version"
+                            << 2
+                            << "members"
+                            << BSON_ARRAY(BSON("host"
+                                               << "node1:12345"
+                                               << "_id"
+                                               << 0))),
                        HostAndPort("node1", 12345));
 
-    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(100, 0));
-    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(100, 0));
-    auto result = getReplCoord()->waitUntilOpTime(
-        &txn, ReadConcernArgs(OpTimeWithTermOne(50, 0), ReadConcernLevel::kLocalReadConcern));
+    getReplCoord()->setMyLastAppliedOpTime(OpTimeWithTermOne(100, 1));
+    getReplCoord()->setMyLastDurableOpTime(OpTimeWithTermOne(100, 1));
 
-    ASSERT_TRUE(result.didWait());
-    ASSERT_OK(result.getStatus());
+    auto opCtx = makeOperationContext();
+
+    ASSERT_OK(getReplCoord()->waitUntilOpTimeForRead(
+        opCtx.get(),
+        ReadConcernArgs(OpTimeWithTermOne(50, 0), ReadConcernLevel::kLocalReadConcern)));
 }
 
 TEST_F(ReplCoordTest, NodeReturnsOkImmediatelyWhenWaitingUntilOpTimePassesAnOpTimeEqualToOurLast) {
-    OperationContextNoop txn;
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 2 << "members" << BSON_ARRAY(BSON("host"
-                                                                              << "node1:12345"
-                                                                              << "_id" << 0))),
+                            << "version"
+                            << 2
+                            << "members"
+                            << BSON_ARRAY(BSON("host"
+                                               << "node1:12345"
+                                               << "_id"
+                                               << 0))),
                        HostAndPort("node1", 12345));
 
 
-    OpTimeWithTermOne time(100, 0);
+    OpTimeWithTermOne time(100, 1);
     getReplCoord()->setMyLastAppliedOpTime(time);
     getReplCoord()->setMyLastDurableOpTime(time);
-    auto result = getReplCoord()->waitUntilOpTime(
-        &txn, ReadConcernArgs(time, ReadConcernLevel::kLocalReadConcern));
 
-    ASSERT_TRUE(result.didWait());
-    ASSERT_OK(result.getStatus());
+    auto opCtx = makeOperationContext();
+
+    ASSERT_OK(getReplCoord()->waitUntilOpTimeForRead(
+        opCtx.get(), ReadConcernArgs(time, ReadConcernLevel::kLocalReadConcern)));
 }
 
 TEST_F(ReplCoordTest,
        NodeReturnsNotAReplicaSetWhenWaitUntilOpTimeIsRunWithoutMajorityReadConcernEnabled) {
     init(ReplSettings());
-    OperationContextNoop txn;
-    auto result = getReplCoord()->waitUntilOpTime(
-        &txn, ReadConcernArgs(OpTimeWithTermOne(50, 0), ReadConcernLevel::kLocalReadConcern));
 
-    ASSERT_FALSE(result.didWait());
-    ASSERT_EQUALS(ErrorCodes::NotAReplicaSet, result.getStatus());
+    auto opCtx = makeOperationContext();
+
+    auto status = getReplCoord()->waitUntilOpTimeForRead(
+        opCtx.get(),
+        ReadConcernArgs(OpTimeWithTermOne(50, 0), ReadConcernLevel::kLocalReadConcern));
+    ASSERT_EQ(status, ErrorCodes::NotAReplicaSet);
 }
 
 TEST_F(ReplCoordTest, NodeReturnsNotAReplicaSetWhenWaitUntilOpTimeIsRunAgainstAStandaloneNode) {
-    auto settings = ReplSettings();
-    settings.setMajorityReadConcernEnabled(true);
-    init(settings);
+    init(ReplSettings());
 
-    OperationContextNoop txn;
-    auto result = getReplCoord()->waitUntilOpTime(
-        &txn, ReadConcernArgs(OpTime(Timestamp(50, 0), 0), ReadConcernLevel::kMajorityReadConcern));
+    auto opCtx = makeOperationContext();
 
-    ASSERT_FALSE(result.didWait());
-    ASSERT_EQUALS(ErrorCodes::NotAReplicaSet, result.getStatus());
+    auto status = getReplCoord()->waitUntilOpTimeForRead(
+        opCtx.get(),
+        ReadConcernArgs(OpTime(Timestamp(50, 0), 0), ReadConcernLevel::kMajorityReadConcern));
+    ASSERT_EQ(status, ErrorCodes::NotAReplicaSet);
 }
 
 // TODO(dannenberg): revisit these after talking with mathias (redundant with other set?)
 TEST_F(ReplCoordTest, ReadAfterCommittedWhileShutdown) {
-    OperationContextNoop txn;
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 2 << "members" << BSON_ARRAY(BSON("host"
-                                                                              << "node1:12345"
-                                                                              << "_id" << 0))),
+                            << "version"
+                            << 2
+                            << "members"
+                            << BSON_ARRAY(BSON("host"
+                                               << "node1:12345"
+                                               << "_id"
+                                               << 0))),
                        HostAndPort("node1", 12345));
-    runSingleNodeElection(getReplCoord());
 
-    getReplCoord()->setMyLastAppliedOpTime(OpTime(Timestamp(10, 0), 0));
-    getReplCoord()->setMyLastDurableOpTime(OpTime(Timestamp(10, 0), 0));
+    auto opCtx = makeOperationContext();
+    runSingleNodeElection(opCtx.get());
 
-    shutdown();
+    getReplCoord()->setMyLastAppliedOpTime(OpTime(Timestamp(10, 1), 0));
+    getReplCoord()->setMyLastDurableOpTime(OpTime(Timestamp(10, 1), 0));
 
-    auto result = getReplCoord()->waitUntilOpTime(
-        &txn, ReadConcernArgs(OpTime(Timestamp(50, 0), 0), ReadConcernLevel::kMajorityReadConcern));
+    shutdown(opCtx.get());
 
-    ASSERT_TRUE(result.didWait());
-    ASSERT_EQUALS(ErrorCodes::ShutdownInProgress, result.getStatus());
+    auto status = getReplCoord()->waitUntilOpTimeForRead(
+        opCtx.get(),
+        ReadConcernArgs(OpTime(Timestamp(50, 0), 0), ReadConcernLevel::kMajorityReadConcern));
+    ASSERT_EQUALS(status, ErrorCodes::ShutdownInProgress);
 }
 
 TEST_F(ReplCoordTest, ReadAfterCommittedInterrupted) {
-    OperationContextReplMock txn;
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 2 << "members" << BSON_ARRAY(BSON("host"
-                                                                              << "node1:12345"
-                                                                              << "_id" << 0))),
+                            << "version"
+                            << 2
+                            << "members"
+                            << BSON_ARRAY(BSON("host"
+                                               << "node1:12345"
+                                               << "_id"
+                                               << 0))),
                        HostAndPort("node1", 12345));
-    runSingleNodeElection(getReplCoord());
+    const auto opCtx = makeOperationContext();
+    runSingleNodeElection(opCtx.get());
 
-    getReplCoord()->setMyLastAppliedOpTime(OpTime(Timestamp(10, 0), 0));
-    getReplCoord()->setMyLastDurableOpTime(OpTime(Timestamp(10, 0), 0));
-
-    txn.setCheckForInterruptStatus(Status(ErrorCodes::Interrupted, "test"));
-
-    auto result = getReplCoord()->waitUntilOpTime(
-        &txn, ReadConcernArgs(OpTime(Timestamp(50, 0), 0), ReadConcernLevel::kMajorityReadConcern));
-
-    ASSERT_TRUE(result.didWait());
-    ASSERT_EQUALS(ErrorCodes::Interrupted, result.getStatus());
+    getReplCoord()->setMyLastAppliedOpTime(OpTime(Timestamp(10, 1), 0));
+    getReplCoord()->setMyLastDurableOpTime(OpTime(Timestamp(10, 1), 0));
+    killOperation(opCtx.get());
+    auto status = getReplCoord()->waitUntilOpTimeForRead(
+        opCtx.get(),
+        ReadConcernArgs(OpTime(Timestamp(50, 0), 0), ReadConcernLevel::kMajorityReadConcern));
+    ASSERT_EQUALS(status, ErrorCodes::Interrupted);
 }
 
 TEST_F(ReplCoordTest, ReadAfterCommittedGreaterOpTime) {
-    OperationContextNoop txn;
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 2 << "members" << BSON_ARRAY(BSON("host"
-                                                                              << "node1:12345"
-                                                                              << "_id" << 0))),
+                            << "version"
+                            << 2
+                            << "members"
+                            << BSON_ARRAY(BSON("host"
+                                               << "node1:12345"
+                                               << "_id"
+                                               << 0))),
                        HostAndPort("node1", 12345));
-    runSingleNodeElection(getReplCoord());
+    auto opCtx = makeOperationContext();
+    runSingleNodeElection(opCtx.get());
 
-    getReplCoord()->setMyLastAppliedOpTime(OpTime(Timestamp(100, 0), 1));
-    getReplCoord()->setMyLastDurableOpTime(OpTime(Timestamp(100, 0), 1));
-    getReplCoord()->createSnapshot(&txn, OpTime(Timestamp(100, 0), 1), SnapshotName(1));
-    auto result = getReplCoord()->waitUntilOpTime(
-        &txn, ReadConcernArgs(OpTime(Timestamp(50, 0), 1), ReadConcernLevel::kMajorityReadConcern));
+    getReplCoord()->setMyLastAppliedOpTime(OpTime(Timestamp(100, 1), 1));
+    getReplCoord()->setMyLastDurableOpTime(OpTime(Timestamp(100, 1), 1));
 
-    ASSERT_TRUE(result.didWait());
-    ASSERT_OK(result.getStatus());
+    ASSERT_OK(getReplCoord()->waitUntilOpTimeForRead(
+        opCtx.get(),
+        ReadConcernArgs(OpTime(Timestamp(50, 0), 1), ReadConcernLevel::kMajorityReadConcern)));
 }
 
 TEST_F(ReplCoordTest, ReadAfterCommittedEqualOpTime) {
-    OperationContextNoop txn;
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 2 << "members" << BSON_ARRAY(BSON("host"
-                                                                              << "node1:12345"
-                                                                              << "_id" << 0))),
+                            << "version"
+                            << 2
+                            << "members"
+                            << BSON_ARRAY(BSON("host"
+                                               << "node1:12345"
+                                               << "_id"
+                                               << 0))),
                        HostAndPort("node1", 12345));
-    runSingleNodeElection(getReplCoord());
-    OpTime time(Timestamp(100, 0), 1);
+    auto opCtx = makeOperationContext();
+    runSingleNodeElection(opCtx.get());
+
+    OpTime time(Timestamp(100, 1), 1);
     getReplCoord()->setMyLastAppliedOpTime(time);
     getReplCoord()->setMyLastDurableOpTime(time);
-    getReplCoord()->createSnapshot(&txn, time, SnapshotName(1));
-    auto result = getReplCoord()->waitUntilOpTime(
-        &txn, ReadConcernArgs(time, ReadConcernLevel::kMajorityReadConcern));
 
-    ASSERT_TRUE(result.didWait());
-    ASSERT_OK(result.getStatus());
+    ASSERT_OK(getReplCoord()->waitUntilOpTimeForRead(
+        opCtx.get(), ReadConcernArgs(time, ReadConcernLevel::kMajorityReadConcern)));
 }
 
 TEST_F(ReplCoordTest, ReadAfterCommittedDeferredGreaterOpTime) {
-    OperationContextNoop txn;
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 2 << "members" << BSON_ARRAY(BSON("host"
-                                                                              << "node1:12345"
-                                                                              << "_id" << 0))),
+                            << "version"
+                            << 2
+                            << "members"
+                            << BSON_ARRAY(BSON("host"
+                                               << "node1:12345"
+                                               << "_id"
+                                               << 0))),
                        HostAndPort("node1", 12345));
-    runSingleNodeElection(getReplCoord());
-    getReplCoord()->setMyLastAppliedOpTime(OpTime(Timestamp(0, 0), 1));
-    getReplCoord()->setMyLastDurableOpTime(OpTime(Timestamp(0, 0), 1));
-    OpTime committedOpTime(Timestamp(200, 0), 1);
-    auto pseudoLogOp =
-        stdx::async(stdx::launch::async,
-                    [this, &committedOpTime]() {
-                        // Not guaranteed to be scheduled after waitUntil blocks...
-                        getReplCoord()->setMyLastAppliedOpTime(committedOpTime);
-                        getReplCoord()->setMyLastDurableOpTime(committedOpTime);
-                        getReplCoord()->createSnapshot(nullptr, committedOpTime, SnapshotName(1));
-                    });
 
-    auto result = getReplCoord()->waitUntilOpTime(
-        &txn,
-        ReadConcernArgs(OpTime(Timestamp(100, 0), 1), ReadConcernLevel::kMajorityReadConcern));
-    pseudoLogOp.get();
+    auto opCtx = makeOperationContext();
+    runSingleNodeElection(opCtx.get());
+    getReplCoord()->setMyLastAppliedOpTime(OpTime(Timestamp(100, 1), 1));
+    getReplCoord()->setMyLastDurableOpTime(OpTime(Timestamp(100, 1), 1));
+    OpTime committedOpTime(Timestamp(200, 1), 1);
+    auto pseudoLogOp = stdx::async(stdx::launch::async, [this, &committedOpTime]() {
+        // Not guaranteed to be scheduled after waitUntil blocks...
+        getReplCoord()->setMyLastAppliedOpTime(committedOpTime);
+        getReplCoord()->setMyLastDurableOpTime(committedOpTime);
+    });
 
-    ASSERT_TRUE(result.didWait());
-    ASSERT_OK(result.getStatus());
+    ASSERT_OK(getReplCoord()->waitUntilOpTimeForRead(
+        opCtx.get(),
+        ReadConcernArgs(OpTime(Timestamp(100, 0), 1), ReadConcernLevel::kMajorityReadConcern)));
 }
 
 TEST_F(ReplCoordTest, ReadAfterCommittedDeferredEqualOpTime) {
-    OperationContextNoop txn;
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 2 << "members" << BSON_ARRAY(BSON("host"
-                                                                              << "node1:12345"
-                                                                              << "_id" << 0))),
+                            << "version"
+                            << 2
+                            << "members"
+                            << BSON_ARRAY(BSON("host"
+                                               << "node1:12345"
+                                               << "_id"
+                                               << 0))),
                        HostAndPort("node1", 12345));
-    runSingleNodeElection(getReplCoord());
-    getReplCoord()->setMyLastAppliedOpTime(OpTime(Timestamp(0, 0), 1));
-    getReplCoord()->setMyLastDurableOpTime(OpTime(Timestamp(0, 0), 1));
+    auto opCtx = makeOperationContext();
+    runSingleNodeElection(opCtx.get());
+    getReplCoord()->setMyLastAppliedOpTime(OpTime(Timestamp(100, 1), 1));
+    getReplCoord()->setMyLastDurableOpTime(OpTime(Timestamp(100, 1), 1));
 
-    OpTime opTimeToWait(Timestamp(100, 0), 1);
+    OpTime opTimeToWait(Timestamp(100, 1), 1);
 
-    auto pseudoLogOp =
-        stdx::async(stdx::launch::async,
-                    [this, &opTimeToWait]() {
-                        // Not guaranteed to be scheduled after waitUntil blocks...
-                        getReplCoord()->setMyLastAppliedOpTime(opTimeToWait);
-                        getReplCoord()->setMyLastDurableOpTime(opTimeToWait);
-                        getReplCoord()->createSnapshot(nullptr, opTimeToWait, SnapshotName(1));
-                    });
+    auto pseudoLogOp = stdx::async(stdx::launch::async, [this, &opTimeToWait]() {
+        // Not guaranteed to be scheduled after waitUntil blocks...
+        getReplCoord()->setMyLastAppliedOpTime(opTimeToWait);
+        getReplCoord()->setMyLastDurableOpTime(opTimeToWait);
+    });
 
-    auto result = getReplCoord()->waitUntilOpTime(
-        &txn, ReadConcernArgs(opTimeToWait, ReadConcernLevel::kMajorityReadConcern));
+    ASSERT_OK(getReplCoord()->waitUntilOpTimeForRead(
+        opCtx.get(), ReadConcernArgs(opTimeToWait, ReadConcernLevel::kMajorityReadConcern)));
     pseudoLogOp.get();
-
-    ASSERT_TRUE(result.didWait());
-    ASSERT_OK(result.getStatus());
 }
 
 TEST_F(ReplCoordTest, IgnoreTheContentsOfMetadataWhenItsConfigVersionDoesNotMatchOurs) {
     // Ensure that we do not process ReplSetMetadata when ConfigVersions do not match.
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 2 << "members"
+                            << "version"
+                            << 2
+                            << "members"
                             << BSON_ARRAY(BSON("host"
                                                << "node1:12345"
-                                               << "_id" << 0)
+                                               << "_id"
+                                               << 0)
                                           << BSON("host"
                                                   << "node2:12345"
-                                                  << "_id" << 1) << BSON("host"
-                                                                         << "node3:12345"
-                                                                         << "_id" << 2))),
+                                                  << "_id"
+                                                  << 1)
+                                          << BSON("host"
+                                                  << "node3:12345"
+                                                  << "_id"
+                                                  << 2))),
                        HostAndPort("node1", 12345));
     ASSERT_EQUALS(OpTime(Timestamp(0, 0), 0), getReplCoord()->getLastCommittedOpTime());
 
     // lower configVersion
     StatusWith<rpc::ReplSetMetadata> metadata = rpc::ReplSetMetadata::readFromMetadata(BSON(
-        rpc::kReplSetMetadataFieldName << BSON(
-            "lastOpCommitted" << BSON("ts" << Timestamp(10, 0) << "t" << 2) << "lastOpVisible"
-                              << BSON("ts" << Timestamp(10, 0) << "t" << 2) << "configVersion" << 1
-                              << "primaryIndex" << 2 << "term" << 2 << "syncSourceIndex" << 1)));
-    getReplCoord()->processReplSetMetadata(metadata.getValue(), true);
-    ASSERT_EQUALS(OpTime(Timestamp(0, 0), 0), getReplCoord()->getLastCommittedOpTime());
+        rpc::kReplSetMetadataFieldName
+        << BSON("lastOpCommitted" << BSON("ts" << Timestamp(10, 0) << "t" << 2) << "lastOpVisible"
+                                  << BSON("ts" << Timestamp(10, 0) << "t" << 2)
+                                  << "configVersion"
+                                  << 1
+                                  << "primaryIndex"
+                                  << 2
+                                  << "term"
+                                  << 2
+                                  << "syncSourceIndex"
+                                  << 1)));
+    getReplCoord()->processReplSetMetadata(metadata.getValue());
+    ASSERT_EQUALS(0, getReplCoord()->getTerm());
 
     // higher configVersion
-    StatusWith<rpc::ReplSetMetadata> metadata2 = rpc::ReplSetMetadata::readFromMetadata(
-        BSON(rpc::kReplSetMetadataFieldName
-             << BSON("lastOpCommitted"
-                     << BSON("ts" << Timestamp(10, 0) << "t" << 2) << "lastOpVisible"
-                     << BSON("ts" << Timestamp(10, 0) << "t" << 2) << "configVersion" << 100
-                     << "primaryIndex" << 2 << "term" << 2 << "syncSourceIndex" << 1)));
-    getReplCoord()->processReplSetMetadata(metadata2.getValue(), true);
-    ASSERT_EQUALS(OpTime(Timestamp(0, 0), 0), getReplCoord()->getLastCommittedOpTime());
+    StatusWith<rpc::ReplSetMetadata> metadata2 = rpc::ReplSetMetadata::readFromMetadata(BSON(
+        rpc::kReplSetMetadataFieldName
+        << BSON("lastOpCommitted" << BSON("ts" << Timestamp(10, 0) << "t" << 2) << "lastOpVisible"
+                                  << BSON("ts" << Timestamp(10, 0) << "t" << 2)
+                                  << "configVersion"
+                                  << 100
+                                  << "primaryIndex"
+                                  << 2
+                                  << "term"
+                                  << 2
+                                  << "syncSourceIndex"
+                                  << 1)));
+    getReplCoord()->processReplSetMetadata(metadata2.getValue());
+    ASSERT_EQUALS(0, getReplCoord()->getTerm());
 }
 
-TEST_F(ReplCoordTest, UpdateLastCommittedOpTimeWhenTheLastCommittedOpTimeFromMetadataIsNewer) {
+TEST_F(ReplCoordTest, UpdateLastCommittedOpTimeWhenTheLastCommittedOpTimeIsNewer) {
     // Ensure that LastCommittedOpTime updates when a newer OpTime comes in via ReplSetMetadata,
     // but not if the OpTime is older than the current LastCommittedOpTime.
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 2 << "members"
+                            << "version"
+                            << 2
+                            << "members"
                             << BSON_ARRAY(BSON("host"
                                                << "node1:12345"
-                                               << "_id" << 0)
+                                               << "_id"
+                                               << 0)
                                           << BSON("host"
                                                   << "node2:12345"
-                                                  << "_id" << 1) << BSON("host"
-                                                                         << "node3:12345"
-                                                                         << "_id" << 2))
-                            << "protocolVersion" << 1),
+                                                  << "_id"
+                                                  << 1)
+                                          << BSON("host"
+                                                  << "node3:12345"
+                                                  << "_id"
+                                                  << 2))
+                            << "protocolVersion"
+                            << 1),
                        HostAndPort("node1", 12345));
-    getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY);
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
     ASSERT_EQUALS(OpTime(Timestamp(0, 0), 0), getReplCoord()->getLastCommittedOpTime());
-    OperationContextNoop txn;
-    getReplCoord()->updateTerm(&txn, 1);
+    auto opCtx = makeOperationContext();
+    getReplCoord()->updateTerm(opCtx.get(), 1).transitional_ignore();
     ASSERT_EQUALS(1, getReplCoord()->getTerm());
 
-    OpTime time(Timestamp(10, 0), 1);
-    getReplCoord()->createSnapshot(&txn, time, SnapshotName(1));
+    OpTime time(Timestamp(10, 1), 1);
+    OpTime oldTime(Timestamp(9, 1), 1);
+    getReplCoord()->setMyLastAppliedOpTime(time);
 
     // higher OpTime, should change
-    StatusWith<rpc::ReplSetMetadata> metadata = rpc::ReplSetMetadata::readFromMetadata(BSON(
-        rpc::kReplSetMetadataFieldName << BSON(
-            "lastOpCommitted" << BSON("ts" << Timestamp(10, 0) << "t" << 1) << "lastOpVisible"
-                              << BSON("ts" << Timestamp(10, 0) << "t" << 1) << "configVersion" << 2
-                              << "primaryIndex" << 2 << "term" << 1 << "syncSourceIndex" << 1)));
-    getReplCoord()->processReplSetMetadata(metadata.getValue(), true);
-    ASSERT_EQUALS(OpTime(Timestamp(10, 0), 1), getReplCoord()->getLastCommittedOpTime());
-    ASSERT_EQUALS(OpTime(Timestamp(10, 0), 1), getReplCoord()->getCurrentCommittedSnapshotOpTime());
+    getReplCoord()->advanceCommitPoint(time);
+    ASSERT_EQUALS(time, getReplCoord()->getLastCommittedOpTime());
+    ASSERT_EQUALS(time, getReplCoord()->getCurrentCommittedSnapshotOpTime());
 
     // lower OpTime, should not change
-    StatusWith<rpc::ReplSetMetadata> metadata2 = rpc::ReplSetMetadata::readFromMetadata(BSON(
-        rpc::kReplSetMetadataFieldName << BSON(
-            "lastOpCommitted" << BSON("ts" << Timestamp(9, 0) << "t" << 1) << "lastOpVisible"
-                              << BSON("ts" << Timestamp(9, 0) << "t" << 1) << "configVersion" << 2
-                              << "primaryIndex" << 2 << "term" << 1 << "syncSourceIndex" << 1)));
-    getReplCoord()->processReplSetMetadata(metadata2.getValue(), true);
-    ASSERT_EQUALS(OpTime(Timestamp(10, 0), 1), getReplCoord()->getLastCommittedOpTime());
+    getReplCoord()->advanceCommitPoint(oldTime);
+    ASSERT_EQUALS(time, getReplCoord()->getLastCommittedOpTime());
+    ASSERT_EQUALS(time, getReplCoord()->getCurrentCommittedSnapshotOpTime());
 }
-
 TEST_F(ReplCoordTest, UpdateTermWhenTheTermFromMetadataIsNewerButNeverUpdateCurrentPrimaryIndex) {
     // Ensure that the term is updated if and only if the term is greater than our current term.
     // Ensure that currentPrimaryIndex is never altered by ReplSetMetadata.
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 2 << "members"
+                            << "version"
+                            << 2
+                            << "members"
                             << BSON_ARRAY(BSON("host"
                                                << "node1:12345"
-                                               << "_id" << 0)
+                                               << "_id"
+                                               << 0)
                                           << BSON("host"
                                                   << "node2:12345"
-                                                  << "_id" << 1) << BSON("host"
-                                                                         << "node3:12345"
-                                                                         << "_id" << 2))
-                            << "protocolVersion" << 1),
+                                                  << "_id"
+                                                  << 1)
+                                          << BSON("host"
+                                                  << "node3:12345"
+                                                  << "_id"
+                                                  << 2))
+                            << "protocolVersion"
+                            << 1),
                        HostAndPort("node1", 12345));
     ASSERT_EQUALS(OpTime(Timestamp(0, 0), 0), getReplCoord()->getLastCommittedOpTime());
-    OperationContextNoop txn;
-    getReplCoord()->updateTerm(&txn, 1);
+    auto opCtx = makeOperationContext();
+    getReplCoord()->updateTerm(opCtx.get(), 1).transitional_ignore();
     ASSERT_EQUALS(1, getReplCoord()->getTerm());
 
     // higher term, should change
     StatusWith<rpc::ReplSetMetadata> metadata = rpc::ReplSetMetadata::readFromMetadata(BSON(
-        rpc::kReplSetMetadataFieldName << BSON(
-            "lastOpCommitted" << BSON("ts" << Timestamp(10, 0) << "t" << 3) << "lastOpVisible"
-                              << BSON("ts" << Timestamp(10, 0) << "t" << 3) << "configVersion" << 2
-                              << "primaryIndex" << 2 << "term" << 3 << "syncSourceIndex" << 1)));
-    getReplCoord()->processReplSetMetadata(metadata.getValue(), true);
-    ASSERT_EQUALS(OpTime(Timestamp(10, 0), 3), getReplCoord()->getLastCommittedOpTime());
+        rpc::kReplSetMetadataFieldName
+        << BSON("lastOpCommitted" << BSON("ts" << Timestamp(10, 0) << "t" << 3) << "lastOpVisible"
+                                  << BSON("ts" << Timestamp(10, 0) << "t" << 3)
+                                  << "configVersion"
+                                  << 2
+                                  << "primaryIndex"
+                                  << 2
+                                  << "term"
+                                  << 3
+                                  << "syncSourceIndex"
+                                  << 1)));
+    getReplCoord()->processReplSetMetadata(metadata.getValue());
     ASSERT_EQUALS(3, getReplCoord()->getTerm());
     ASSERT_EQUALS(-1, getTopoCoord().getCurrentPrimaryIndex());
+    ASSERT_EQUALS(OpTime(Timestamp(0, 0), 0), getReplCoord()->getLastCommittedOpTime());
 
     // lower term, should not change
     StatusWith<rpc::ReplSetMetadata> metadata2 = rpc::ReplSetMetadata::readFromMetadata(BSON(
-        rpc::kReplSetMetadataFieldName << BSON(
-            "lastOpCommitted" << BSON("ts" << Timestamp(11, 0) << "t" << 3) << "lastOpVisible"
-                              << BSON("ts" << Timestamp(11, 0) << "t" << 3) << "configVersion" << 2
-                              << "primaryIndex" << 1 << "term" << 2 << "syncSourceIndex" << 1)));
-    getReplCoord()->processReplSetMetadata(metadata2.getValue(), true);
-    ASSERT_EQUALS(OpTime(Timestamp(11, 0), 3), getReplCoord()->getLastCommittedOpTime());
+        rpc::kReplSetMetadataFieldName
+        << BSON("lastOpCommitted" << BSON("ts" << Timestamp(11, 0) << "t" << 3) << "lastOpVisible"
+                                  << BSON("ts" << Timestamp(11, 0) << "t" << 3)
+                                  << "configVersion"
+                                  << 2
+                                  << "primaryIndex"
+                                  << 1
+                                  << "term"
+                                  << 2
+                                  << "syncSourceIndex"
+                                  << 1)));
+    getReplCoord()->processReplSetMetadata(metadata2.getValue());
     ASSERT_EQUALS(3, getReplCoord()->getTerm());
     ASSERT_EQUALS(-1, getTopoCoord().getCurrentPrimaryIndex());
+    ASSERT_EQUALS(OpTime(Timestamp(0, 0), 0), getReplCoord()->getLastCommittedOpTime());
 
     // same term, should not change
     StatusWith<rpc::ReplSetMetadata> metadata3 = rpc::ReplSetMetadata::readFromMetadata(BSON(
-        rpc::kReplSetMetadataFieldName << BSON(
-            "lastOpCommitted" << BSON("ts" << Timestamp(11, 0) << "t" << 3) << "lastOpVisible"
-                              << BSON("ts" << Timestamp(11, 0) << "t" << 3) << "configVersion" << 2
-                              << "primaryIndex" << 1 << "term" << 3 << "syncSourceIndex" << 1)));
-    getReplCoord()->processReplSetMetadata(metadata3.getValue(), true);
-    ASSERT_EQUALS(OpTime(Timestamp(11, 0), 3), getReplCoord()->getLastCommittedOpTime());
+        rpc::kReplSetMetadataFieldName
+        << BSON("lastOpCommitted" << BSON("ts" << Timestamp(11, 0) << "t" << 3) << "lastOpVisible"
+                                  << BSON("ts" << Timestamp(11, 0) << "t" << 3)
+                                  << "configVersion"
+                                  << 2
+                                  << "primaryIndex"
+                                  << 1
+                                  << "term"
+                                  << 3
+                                  << "syncSourceIndex"
+                                  << 1)));
+    getReplCoord()->processReplSetMetadata(metadata3.getValue());
     ASSERT_EQUALS(3, getReplCoord()->getTerm());
     ASSERT_EQUALS(-1, getTopoCoord().getCurrentPrimaryIndex());
+    ASSERT_EQUALS(OpTime(Timestamp(0, 0), 0), getReplCoord()->getLastCommittedOpTime());
 }
 
 TEST_F(ReplCoordTest,
@@ -3627,17 +4659,23 @@ TEST_F(ReplCoordTest,
     // Ensure that the metadata is processed if it is contained in a heartbeat response.
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 2 << "members" << BSON_ARRAY(BSON("host"
-                                                                              << "node1:12345"
-                                                                              << "_id" << 0)
-                                                                         << BSON("host"
-                                                                                 << "node2:12345"
-                                                                                 << "_id" << 1))
-                            << "protocolVersion" << 1),
+                            << "version"
+                            << 2
+                            << "members"
+                            << BSON_ARRAY(BSON("host"
+                                               << "node1:12345"
+                                               << "_id"
+                                               << 0)
+                                          << BSON("host"
+                                                  << "node2:12345"
+                                                  << "_id"
+                                                  << 1))
+                            << "protocolVersion"
+                            << 1),
                        HostAndPort("node1", 12345));
     ASSERT_EQUALS(OpTime(Timestamp(0, 0), 0), getReplCoord()->getLastCommittedOpTime());
-    OperationContextNoop txn;
-    getReplCoord()->updateTerm(&txn, 1);
+    auto opCtx = makeOperationContext();
+    getReplCoord()->updateTerm(opCtx.get(), 1).transitional_ignore();
     ASSERT_EQUALS(1, getReplCoord()->getTerm());
 
     auto replCoord = getReplCoord();
@@ -3647,9 +4685,15 @@ TEST_F(ReplCoordTest,
     StatusWith<rpc::ReplSetMetadata> metadata = rpc::ReplSetMetadata::readFromMetadata(BSON(
         rpc::kReplSetMetadataFieldName
         << BSON("lastOpCommitted" << BSON("ts" << Timestamp(10, 0) << "t" << 3) << "lastOpVisible"
-                                  << BSON("ts" << Timestamp(10, 0) << "t" << 3) << "configVersion"
-                                  << config.getConfigVersion() << "primaryIndex" << 1 << "term" << 3
-                                  << "syncSourceIndex" << 1)));
+                                  << BSON("ts" << Timestamp(10, 0) << "t" << 3)
+                                  << "configVersion"
+                                  << config.getConfigVersion()
+                                  << "primaryIndex"
+                                  << 1
+                                  << "term"
+                                  << 3
+                                  << "syncSourceIndex"
+                                  << 1)));
     BSONObjBuilder metadataBuilder;
     ASSERT_OK(metadata.getValue().writeToMetadata(&metadataBuilder));
     auto metadataObj = metadataBuilder.obj();
@@ -3676,21 +4720,116 @@ TEST_F(ReplCoordTest,
     ASSERT_EQUALS(-1, getTopoCoord().getCurrentPrimaryIndex());
 }
 
+TEST_F(ReplCoordTest, AdvanceCommitPointFromSyncSourceCanSetCommitPointToLastAppliedIgnoringTerm) {
+    assertStartSuccess(BSON("_id"
+                            << "mySet"
+                            << "version"
+                            << 2
+                            << "members"
+                            << BSON_ARRAY(BSON("host"
+                                               << "node1:12345"
+                                               << "_id"
+                                               << 0)
+                                          << BSON("host"
+                                                  << "node2:12345"
+                                                  << "_id"
+                                                  << 1))
+                            << "protocolVersion"
+                            << 1),
+                       HostAndPort("node1", 12345));
+    ASSERT_EQUALS(OpTime(), getReplCoord()->getLastCommittedOpTime());
+
+    auto lastApplied = OpTime({10, 1}, 1);
+    auto commitPoint = OpTime({15, 1}, 2);
+    getReplCoord()->setMyLastAppliedOpTime(lastApplied);
+
+    getReplCoord()->advanceCommitPoint(commitPoint);
+
+    // The commit point can be set to lastApplied, even though lastApplied is in a lower term.
+    ASSERT_EQUALS(lastApplied, getReplCoord()->getLastCommittedOpTime());
+}
+
+TEST_F(ReplCoordTest, PrepareOplogQueryMetadata) {
+    assertStartSuccess(BSON("_id"
+                            << "mySet"
+                            << "version"
+                            << 2
+                            << "members"
+                            << BSON_ARRAY(BSON("host"
+                                               << "node1:12345"
+                                               << "_id"
+                                               << 0)
+                                          << BSON("host"
+                                                  << "node2:12345"
+                                                  << "_id"
+                                                  << 1)
+                                          << BSON("host"
+                                                  << "node3:12345"
+                                                  << "_id"
+                                                  << 2))
+                            << "protocolVersion"
+                            << 1),
+                       HostAndPort("node1", 12345));
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+
+    OpTime optime1{Timestamp(10, 0), 5};
+    OpTime optime2{Timestamp(11, 2), 5};
+
+    getReplCoord()->setMyLastAppliedOpTime(optime2);
+    getReplCoord()->advanceCommitPoint(optime1);
+
+    auto opCtx = makeOperationContext();
+
+    BSONObjBuilder metadataBob;
+    getReplCoord()->prepareReplMetadata(
+        BSON(rpc::kOplogQueryMetadataFieldName << 1 << rpc::kReplSetMetadataFieldName << 1),
+        OpTime(),
+        &metadataBob);
+
+    BSONObj metadata = metadataBob.done();
+    log() << metadata;
+
+    auto oqMetadata = rpc::OplogQueryMetadata::readFromMetadata(metadata);
+    ASSERT_OK(oqMetadata.getStatus());
+    ASSERT_EQ(oqMetadata.getValue().getLastOpCommitted(), optime1);
+    ASSERT_EQ(oqMetadata.getValue().getLastOpApplied(), optime2);
+    ASSERT_EQ(oqMetadata.getValue().getRBID(), 100);
+    ASSERT_EQ(oqMetadata.getValue().getSyncSourceIndex(), -1);
+    ASSERT_EQ(oqMetadata.getValue().getPrimaryIndex(), -1);
+
+    auto replMetadata = rpc::ReplSetMetadata::readFromMetadata(metadata);
+    ASSERT_OK(replMetadata.getStatus());
+    ASSERT_EQ(replMetadata.getValue().getLastOpCommitted(), optime1);
+    ASSERT_EQ(replMetadata.getValue().getLastOpVisible(), OpTime());
+    ASSERT_EQ(replMetadata.getValue().getConfigVersion(), 2);
+    ASSERT_EQ(replMetadata.getValue().getTerm(), 0);
+    ASSERT_EQ(replMetadata.getValue().getSyncSourceIndex(), -1);
+    ASSERT_EQ(replMetadata.getValue().getPrimaryIndex(), -1);
+}
+
 TEST_F(ReplCoordTest, TermAndLastCommittedOpTimeUpdatedFromHeartbeatWhenArbiter) {
     // Ensure that the metadata is processed if it is contained in a heartbeat response.
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 2 << "members"
+                            << "version"
+                            << 2
+                            << "members"
                             << BSON_ARRAY(BSON("host"
                                                << "node1:12345"
-                                               << "_id" << 0 << "arbiterOnly" << true)
+                                               << "_id"
+                                               << 0
+                                               << "arbiterOnly"
+                                               << true)
                                           << BSON("host"
                                                   << "node2:12345"
-                                                  << "_id" << 1)) << "protocolVersion" << 1),
+                                                  << "_id"
+                                                  << 1))
+                            << "protocolVersion"
+                            << 1),
                        HostAndPort("node1", 12345));
     ASSERT_EQUALS(OpTime(Timestamp(0, 0), 0), getReplCoord()->getLastCommittedOpTime());
-    OperationContextNoop txn;
-    getReplCoord()->updateTerm(&txn, 1);
+    auto opCtx = makeOperationContext();
+    getReplCoord()->updateTerm(opCtx.get(), 1).transitional_ignore();
     ASSERT_EQUALS(1, getReplCoord()->getTerm());
 
     auto replCoord = getReplCoord();
@@ -3700,10 +4839,16 @@ TEST_F(ReplCoordTest, TermAndLastCommittedOpTimeUpdatedFromHeartbeatWhenArbiter)
     // commit point via heartbeats.
     StatusWith<rpc::ReplSetMetadata> metadata = rpc::ReplSetMetadata::readFromMetadata(BSON(
         rpc::kReplSetMetadataFieldName
-        << BSON("lastOpCommitted" << BSON("ts" << Timestamp(10, 0) << "t" << 3) << "lastOpVisible"
-                                  << BSON("ts" << Timestamp(10, 0) << "t" << 3) << "configVersion"
-                                  << config.getConfigVersion() << "primaryIndex" << 1 << "term" << 3
-                                  << "syncSourceIndex" << 1)));
+        << BSON("lastOpCommitted" << BSON("ts" << Timestamp(10, 1) << "t" << 3) << "lastOpVisible"
+                                  << BSON("ts" << Timestamp(10, 1) << "t" << 3)
+                                  << "configVersion"
+                                  << config.getConfigVersion()
+                                  << "primaryIndex"
+                                  << 1
+                                  << "term"
+                                  << 3
+                                  << "syncSourceIndex"
+                                  << 1)));
     BSONObjBuilder metadataBuilder;
     ASSERT_OK(metadata.getValue().writeToMetadata(&metadataBuilder));
     auto metadataObj = metadataBuilder.obj();
@@ -3725,7 +4870,7 @@ TEST_F(ReplCoordTest, TermAndLastCommittedOpTimeUpdatedFromHeartbeatWhenArbiter)
     net->runReadyNetworkOperations();
     net->exitNetwork();
 
-    ASSERT_EQUALS(OpTime(Timestamp(10, 0), 3), getReplCoord()->getLastCommittedOpTime());
+    ASSERT_EQUALS(OpTime(Timestamp(10, 1), 3), getReplCoord()->getLastCommittedOpTime());
     ASSERT_EQUALS(3, getReplCoord()->getTerm());
     ASSERT_EQUALS(-1, getTopoCoord().getCurrentPrimaryIndex());
 }
@@ -3734,17 +4879,23 @@ TEST_F(ReplCoordTest,
        ScheduleElectionToBeRunInElectionTimeoutFromNowWhenCancelAndRescheduleElectionTimeoutIsRun) {
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "protocolVersion" << 1 << "version" << 2 << "members"
+                            << "protocolVersion"
+                            << 1
+                            << "version"
+                            << 2
+                            << "members"
                             << BSON_ARRAY(BSON("host"
                                                << "node1:12345"
-                                               << "_id" << 0)
+                                               << "_id"
+                                               << 0)
                                           << BSON("host"
                                                   << "node2:12345"
-                                                  << "_id" << 1))),
+                                                  << "_id"
+                                                  << 1))),
                        HostAndPort("node1", 12345));
 
     ReplicationCoordinatorImpl* replCoord = getReplCoord();
-    ASSERT_TRUE(replCoord->setFollowerMode(MemberState::RS_SECONDARY));
+    ASSERT_OK(replCoord->setFollowerMode(MemberState::RS_SECONDARY));
 
     getReplCoord()->cancelAndRescheduleElectionTimeout();
 
@@ -3776,39 +4927,25 @@ TEST_F(ReplCoordTest,
                                replCoord->getElectionTimeout_forTest());
 }
 
-TEST_F(ReplCoordTest, DoNotScheduleElectionWhenCancelAndRescheduleElectionTimeoutIsRunInPV0) {
-    assertStartSuccess(BSON("_id"
-                            << "mySet"
-                            << "protocolVersion" << 0 << "version" << 2 << "members"
-                            << BSON_ARRAY(BSON("host"
-                                               << "node1:12345"
-                                               << "_id" << 0)
-                                          << BSON("host"
-                                                  << "node2:12345"
-                                                  << "_id" << 1))),
-                       HostAndPort("node1", 12345));
-    ReplicationCoordinatorImpl* replCoord = getReplCoord();
-    ASSERT_TRUE(replCoord->setFollowerMode(MemberState::RS_SECONDARY));
-
-    getReplCoord()->cancelAndRescheduleElectionTimeout();
-
-    auto electionTimeoutWhen = replCoord->getElectionTimeout_forTest();
-    ASSERT_EQUALS(Date_t(), electionTimeoutWhen);
-}
-
 TEST_F(ReplCoordTest, DoNotScheduleElectionWhenCancelAndRescheduleElectionTimeoutIsRunInRollback) {
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "protocolVersion" << 1 << "version" << 2 << "members"
+                            << "protocolVersion"
+                            << 1
+                            << "version"
+                            << 2
+                            << "members"
                             << BSON_ARRAY(BSON("host"
                                                << "node1:12345"
-                                               << "_id" << 0)
+                                               << "_id"
+                                               << 0)
                                           << BSON("host"
                                                   << "node2:12345"
-                                                  << "_id" << 1))),
+                                                  << "_id"
+                                                  << 1))),
                        HostAndPort("node1", 12345));
     ReplicationCoordinatorImpl* replCoord = getReplCoord();
-    ASSERT_TRUE(replCoord->setFollowerMode(MemberState::RS_ROLLBACK));
+    ASSERT_OK(replCoord->setFollowerMode(MemberState::RS_ROLLBACK));
 
     getReplCoord()->cancelAndRescheduleElectionTimeout();
 
@@ -3820,16 +4957,26 @@ TEST_F(ReplCoordTest,
        DoNotScheduleElectionWhenCancelAndRescheduleElectionTimeoutIsRunWhileUnelectable) {
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "protocolVersion" << 1 << "version" << 2 << "members"
+                            << "protocolVersion"
+                            << 1
+                            << "version"
+                            << 2
+                            << "members"
                             << BSON_ARRAY(BSON("host"
                                                << "node1:12345"
-                                               << "_id" << 0 << "priority" << 0 << "hidden" << true)
+                                               << "_id"
+                                               << 0
+                                               << "priority"
+                                               << 0
+                                               << "hidden"
+                                               << true)
                                           << BSON("host"
                                                   << "node2:12345"
-                                                  << "_id" << 1))),
+                                                  << "_id"
+                                                  << 1))),
                        HostAndPort("node1", 12345));
     ReplicationCoordinatorImpl* replCoord = getReplCoord();
-    ASSERT_TRUE(replCoord->setFollowerMode(MemberState::RS_SECONDARY));
+    ASSERT_OK(replCoord->setFollowerMode(MemberState::RS_SECONDARY));
 
     getReplCoord()->cancelAndRescheduleElectionTimeout();
 
@@ -3841,17 +4988,23 @@ TEST_F(ReplCoordTest,
        DoNotScheduleElectionWhenCancelAndRescheduleElectionTimeoutIsRunWhileRemoved) {
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "protocolVersion" << 1 << "version" << 2 << "members"
+                            << "protocolVersion"
+                            << 1
+                            << "version"
+                            << 2
+                            << "members"
                             << BSON_ARRAY(BSON("host"
                                                << "node1:12345"
-                                               << "_id" << 0)
+                                               << "_id"
+                                               << 0)
                                           << BSON("host"
                                                   << "node2:12345"
-                                                  << "_id" << 1))),
+                                                  << "_id"
+                                                  << 1))),
                        HostAndPort("node1", 12345));
 
     ReplicationCoordinatorImpl* replCoord = getReplCoord();
-    ASSERT_TRUE(replCoord->setFollowerMode(MemberState::RS_SECONDARY));
+    ASSERT_OK(replCoord->setFollowerMode(MemberState::RS_SECONDARY));
 
     getReplCoord()->cancelAndRescheduleElectionTimeout();
 
@@ -3869,13 +5022,20 @@ TEST_F(ReplCoordTest,
 
     // Respond to node1's heartbeat command with a config that excludes node1.
     ReplSetHeartbeatResponse hbResp;
-    ReplicaSetConfig config;
-    config.initialize(BSON("_id"
-                           << "mySet"
-                           << "protocolVersion" << 1 << "version" << 3 << "members"
-                           << BSON_ARRAY(BSON("host"
-                                              << "node2:12345"
-                                              << "_id" << 1))));
+    ReplSetConfig config;
+    config
+        .initialize(BSON("_id"
+                         << "mySet"
+                         << "protocolVersion"
+                         << 1
+                         << "version"
+                         << 3
+                         << "members"
+                         << BSON_ARRAY(BSON("host"
+                                            << "node2:12345"
+                                            << "_id"
+                                            << 1))))
+        .transitional_ignore();
     hbResp.setConfig(config);
     hbResp.setConfigVersion(3);
     hbResp.setSetName("mySet");
@@ -3896,17 +5056,23 @@ TEST_F(ReplCoordTest,
        RescheduleElectionTimeoutWhenProcessingHeartbeatResponseFromPrimaryInSameTerm) {
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "protocolVersion" << 1 << "version" << 2 << "members"
+                            << "protocolVersion"
+                            << 1
+                            << "version"
+                            << 2
+                            << "members"
                             << BSON_ARRAY(BSON("host"
                                                << "node1:12345"
-                                               << "_id" << 0)
+                                               << "_id"
+                                               << 0)
                                           << BSON("host"
                                                   << "node2:12345"
-                                                  << "_id" << 1))),
+                                                  << "_id"
+                                                  << 1))),
                        HostAndPort("node1", 12345));
 
     ReplicationCoordinatorImpl* replCoord = getReplCoord();
-    ASSERT_TRUE(replCoord->setFollowerMode(MemberState::RS_SECONDARY));
+    ASSERT_OK(replCoord->setFollowerMode(MemberState::RS_SECONDARY));
 
     auto electionTimeoutWhen = replCoord->getElectionTimeout_forTest();
     ASSERT_NOT_EQUALS(Date_t(), electionTimeoutWhen);
@@ -3944,17 +5110,23 @@ TEST_F(ReplCoordTest,
        DontRescheduleElectionTimeoutWhenProcessingHeartbeatResponseFromPrimaryInDiffertTerm) {
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "protocolVersion" << 1 << "version" << 2 << "members"
+                            << "protocolVersion"
+                            << 1
+                            << "version"
+                            << 2
+                            << "members"
                             << BSON_ARRAY(BSON("host"
                                                << "node1:12345"
-                                               << "_id" << 0)
+                                               << "_id"
+                                               << 0)
                                           << BSON("host"
                                                   << "node2:12345"
-                                                  << "_id" << 1))),
+                                                  << "_id"
+                                                  << 1))),
                        HostAndPort("node1", 12345));
 
     ReplicationCoordinatorImpl* replCoord = getReplCoord();
-    ASSERT_TRUE(replCoord->setFollowerMode(MemberState::RS_SECONDARY));
+    ASSERT_OK(replCoord->setFollowerMode(MemberState::RS_SECONDARY));
 
     auto electionTimeoutWhen = replCoord->getElectionTimeout_forTest();
     ASSERT_NOT_EQUALS(Date_t(), electionTimeoutWhen);
@@ -3992,17 +5164,23 @@ TEST_F(ReplCoordTest,
        CancelAndRescheduleElectionTimeoutWhenProcessingHeartbeatResponseWithoutState) {
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "protocolVersion" << 1 << "version" << 2 << "members"
+                            << "protocolVersion"
+                            << 1
+                            << "version"
+                            << 2
+                            << "members"
                             << BSON_ARRAY(BSON("host"
                                                << "node1:12345"
-                                               << "_id" << 0)
+                                               << "_id"
+                                               << 0)
                                           << BSON("host"
                                                   << "node2:12345"
-                                                  << "_id" << 1))),
+                                                  << "_id"
+                                                  << 1))),
                        HostAndPort("node1", 12345));
 
     ReplicationCoordinatorImpl* replCoord = getReplCoord();
-    ASSERT_TRUE(replCoord->setFollowerMode(MemberState::RS_SECONDARY));
+    ASSERT_OK(replCoord->setFollowerMode(MemberState::RS_SECONDARY));
 
     auto electionTimeoutWhen = replCoord->getElectionTimeout_forTest();
     ASSERT_NOT_EQUALS(Date_t(), electionTimeoutWhen);
@@ -4038,12 +5216,15 @@ TEST_F(ReplCoordTest, AdvanceCommittedSnapshotToMostRecentSnapshotPriorToOpTimeW
 
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 1 << "members"
+                            << "version"
+                            << 1
+                            << "members"
                             << BSON_ARRAY(BSON("_id" << 0 << "host"
                                                      << "test1:1234"))),
                        HostAndPort("test1", 1234));
-    OperationContextReplMock txn;
-    runSingleNodeElection(getReplCoord());
+
+    auto opCtx = makeOperationContext();
+    runSingleNodeElection(opCtx.get());
 
     OpTime time1(Timestamp(100, 1), 1);
     OpTime time2(Timestamp(100, 2), 1);
@@ -4052,79 +5233,18 @@ TEST_F(ReplCoordTest, AdvanceCommittedSnapshotToMostRecentSnapshotPriorToOpTimeW
     OpTime time5(Timestamp(100, 5), 1);
     OpTime time6(Timestamp(100, 6), 1);
 
-    getReplCoord()->createSnapshot(&txn, time1, SnapshotName(1));
-    getReplCoord()->createSnapshot(&txn, time2, SnapshotName(2));
-    getReplCoord()->createSnapshot(&txn, time5, SnapshotName(3));
+    getReplCoord()->setMyLastAppliedOpTime(time1);
+    getReplCoord()->setMyLastAppliedOpTime(time2);
+    getReplCoord()->setMyLastAppliedOpTime(time5);
 
     // ensure current snapshot follows price is right rules (closest but not greater than)
-    getReplCoord()->setMyLastAppliedOpTime(time3);
+
     getReplCoord()->setMyLastDurableOpTime(time3);
     ASSERT_EQUALS(time2, getReplCoord()->getCurrentCommittedSnapshotOpTime());
-    getReplCoord()->setMyLastAppliedOpTime(time4);
     getReplCoord()->setMyLastDurableOpTime(time4);
     ASSERT_EQUALS(time2, getReplCoord()->getCurrentCommittedSnapshotOpTime());
-}
-
-TEST_F(ReplCoordTest, DoNotAdvanceCommittedSnapshotWhenAnOpTimeIsNewerThanOurLatestSnapshot) {
-    init("mySet");
-
-    assertStartSuccess(BSON("_id"
-                            << "mySet"
-                            << "version" << 1 << "members"
-                            << BSON_ARRAY(BSON("_id" << 0 << "host"
-                                                     << "test1:1234"))),
-                       HostAndPort("test1", 1234));
-    OperationContextReplMock txn;
-    runSingleNodeElection(getReplCoord());
-
-    OpTime time1(Timestamp(100, 1), 1);
-    OpTime time2(Timestamp(100, 2), 1);
-    OpTime time3(Timestamp(100, 3), 1);
-    OpTime time4(Timestamp(100, 4), 1);
-    OpTime time5(Timestamp(100, 5), 1);
-    OpTime time6(Timestamp(100, 6), 1);
-
-    getReplCoord()->createSnapshot(&txn, time1, SnapshotName(1));
-    getReplCoord()->createSnapshot(&txn, time2, SnapshotName(2));
-    getReplCoord()->createSnapshot(&txn, time5, SnapshotName(3));
-
-    // ensure current snapshot will not advance beyond existing snapshots
-    getReplCoord()->setMyLastAppliedOpTime(time6);
-    getReplCoord()->setMyLastDurableOpTime(time6);
+    getReplCoord()->setMyLastDurableOpTime(time5);
     ASSERT_EQUALS(time5, getReplCoord()->getCurrentCommittedSnapshotOpTime());
-}
-
-TEST_F(ReplCoordTest,
-       AdvanceCommittedSnapshotWhenASnapshotAtNewestAsOldAsOurNewestOpTimeIsCreated) {
-    init("mySet");
-
-    assertStartSuccess(BSON("_id"
-                            << "mySet"
-                            << "version" << 1 << "members"
-                            << BSON_ARRAY(BSON("_id" << 0 << "host"
-                                                     << "test1:1234"))),
-                       HostAndPort("test1", 1234));
-    OperationContextReplMock txn;
-    runSingleNodeElection(getReplCoord());
-
-    OpTime time1(Timestamp(100, 1), 1);
-    OpTime time2(Timestamp(100, 2), 1);
-    OpTime time3(Timestamp(100, 3), 1);
-    OpTime time4(Timestamp(100, 4), 1);
-    OpTime time5(Timestamp(100, 5), 1);
-    OpTime time6(Timestamp(100, 6), 1);
-
-    getReplCoord()->createSnapshot(&txn, time1, SnapshotName(1));
-    getReplCoord()->createSnapshot(&txn, time2, SnapshotName(2));
-    getReplCoord()->createSnapshot(&txn, time5, SnapshotName(3));
-
-    getReplCoord()->setMyLastAppliedOpTime(time6);
-    getReplCoord()->setMyLastDurableOpTime(time6);
-    ASSERT_EQUALS(time5, getReplCoord()->getCurrentCommittedSnapshotOpTime());
-
-    // ensure current snapshot updates on new snapshot if we are that far
-    getReplCoord()->createSnapshot(&txn, time6, SnapshotName(4));
-    ASSERT_EQUALS(time6, getReplCoord()->getCurrentCommittedSnapshotOpTime());
 }
 
 TEST_F(ReplCoordTest, ZeroCommittedSnapshotWhenAllSnapshotsAreDropped) {
@@ -4132,12 +5252,15 @@ TEST_F(ReplCoordTest, ZeroCommittedSnapshotWhenAllSnapshotsAreDropped) {
 
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 1 << "members"
+                            << "version"
+                            << 1
+                            << "members"
                             << BSON_ARRAY(BSON("_id" << 0 << "host"
                                                      << "test1:1234"))),
                        HostAndPort("test1", 1234));
-    OperationContextReplMock txn;
-    runSingleNodeElection(getReplCoord());
+
+    auto opCtx = makeOperationContext();
+    runSingleNodeElection(opCtx.get());
 
     OpTime time1(Timestamp(100, 1), 1);
     OpTime time2(Timestamp(100, 2), 1);
@@ -4146,9 +5269,10 @@ TEST_F(ReplCoordTest, ZeroCommittedSnapshotWhenAllSnapshotsAreDropped) {
     OpTime time5(Timestamp(100, 5), 1);
     OpTime time6(Timestamp(100, 6), 1);
 
-    getReplCoord()->createSnapshot(&txn, time1, SnapshotName(1));
-    getReplCoord()->createSnapshot(&txn, time2, SnapshotName(2));
-    getReplCoord()->createSnapshot(&txn, time5, SnapshotName(3));
+    getReplCoord()->setMyLastAppliedOpTime(time1);
+    getReplCoord()->setMyLastAppliedOpTime(time2);
+    getReplCoord()->setMyLastAppliedOpTime(time5);
+    getReplCoord()->setMyLastDurableOpTime(time5);
 
     // ensure dropping all snapshots should reset the current committed snapshot
     getReplCoord()->dropAllSnapshots();
@@ -4160,87 +5284,176 @@ TEST_F(ReplCoordTest, DoNotAdvanceCommittedSnapshotWhenAppliedOpTimeChanges) {
 
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 1 << "members"
+                            << "version"
+                            << 1
+                            << "members"
                             << BSON_ARRAY(BSON("_id" << 0 << "host"
                                                      << "test1:1234"))),
                        HostAndPort("test1", 1234));
-    OperationContextReplMock txn;
-    runSingleNodeElection(getReplCoord());
+
+    auto opCtx = makeOperationContext();
+    runSingleNodeElection(opCtx.get());
 
     OpTime time1(Timestamp(100, 1), 1);
     OpTime time2(Timestamp(100, 2), 1);
-
-    getReplCoord()->createSnapshot(&txn, time1, SnapshotName(1));
 
     getReplCoord()->setMyLastAppliedOpTime(time1);
     ASSERT_EQUALS(OpTime(), getReplCoord()->getCurrentCommittedSnapshotOpTime());
     getReplCoord()->setMyLastAppliedOpTime(time2);
     ASSERT_EQUALS(OpTime(), getReplCoord()->getCurrentCommittedSnapshotOpTime());
-    getReplCoord()->setMyLastAppliedOpTime(time2);
     getReplCoord()->setMyLastDurableOpTime(time2);
-    ASSERT_EQUALS(time1, getReplCoord()->getCurrentCommittedSnapshotOpTime());
+    ASSERT_EQUALS(time2, getReplCoord()->getCurrentCommittedSnapshotOpTime());
 }
 
 TEST_F(ReplCoordTest,
        NodeChangesMyLastOpTimeWhenAndOnlyWhensetMyLastDurableOpTimeReceivesANewerOpTime4DurableSE) {
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 2 << "members" << BSON_ARRAY(BSON("host"
-                                                                              << "node1:12345"
-                                                                              << "_id" << 0))),
+                            << "version"
+                            << 2
+                            << "members"
+                            << BSON_ARRAY(BSON("host"
+                                               << "node1:12345"
+                                               << "_id"
+                                               << 0))),
                        HostAndPort("node1", 12345));
 
 
-    OpTime time1(Timestamp(100, 1), 1);
-    OpTime time2(Timestamp(100, 2), 1);
-    OpTime time3(Timestamp(100, 3), 1);
+    auto term = getTopoCoord().getTerm();
+    OpTime time1(Timestamp(100, 1), term);
+    OpTime time2(Timestamp(100, 2), term);
+    OpTime time3(Timestamp(100, 3), term);
 
+    auto consistency = ReplicationCoordinator::DataConsistency::Consistent;
     getReplCoord()->setMyLastAppliedOpTime(time1);
     ASSERT_EQUALS(time1, getReplCoord()->getMyLastAppliedOpTime());
-    getReplCoord()->setMyLastAppliedOpTimeForward(time3);
+    getReplCoord()->setMyLastAppliedOpTimeForward(time3, consistency);
     ASSERT_EQUALS(time3, getReplCoord()->getMyLastAppliedOpTime());
-    getReplCoord()->setMyLastAppliedOpTimeForward(time2);
+    getReplCoord()->setMyLastAppliedOpTimeForward(time2, consistency);
     getReplCoord()->setMyLastDurableOpTimeForward(time2);
     ASSERT_EQUALS(time3, getReplCoord()->getMyLastAppliedOpTime());
 }
 
-TEST_F(ReplCoordTest,
-       NodeChangesMyLastOpTimeWhenSetMyLastDurableOpTimeReceivesANewerOpTimeWithoutJournaling) {
+DEATH_TEST_F(ReplCoordTest,
+             SetMyLastOpTimeToTimestampLesserThanCurrentLastOpTimeTimestampButWithHigherTerm,
+             "opTime.getTimestamp() > myLastAppliedOpTime.getTimestamp()") {
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 2 << "members" << BSON_ARRAY(BSON("host"
-                                                                              << "node1:12345"
-                                                                              << "_id" << 0))),
+                            << "version"
+                            << 2
+                            << "members"
+                            << BSON_ARRAY(BSON("host"
+                                               << "node1:12345"
+                                               << "_id"
+                                               << 0))),
                        HostAndPort("node1", 12345));
 
 
-    setStorageEngineDurable(false);
-
     OpTime time1(Timestamp(100, 1), 1);
-    OpTime time2(Timestamp(100, 2), 1);
-    OpTime time3(Timestamp(100, 3), 1);
+    OpTime time2(Timestamp(99, 1), 2);
 
+    auto consistency = ReplicationCoordinator::DataConsistency::Consistent;
     getReplCoord()->setMyLastAppliedOpTime(time1);
     ASSERT_EQUALS(time1, getReplCoord()->getMyLastAppliedOpTime());
-    getReplCoord()->setMyLastAppliedOpTimeForward(time3);
-    ASSERT_EQUALS(time3, getReplCoord()->getMyLastAppliedOpTime());
-    ASSERT_EQUALS(time3, getReplCoord()->getMyLastDurableOpTime());
-    getReplCoord()->setMyLastAppliedOpTimeForward(time2);
-    ASSERT_EQUALS(time3, getReplCoord()->getMyLastAppliedOpTime());
-    ASSERT_EQUALS(time3, getReplCoord()->getMyLastDurableOpTime());
+    // Since in pv1, oplog entries are ordered by non-decreasing
+    // term and strictly increasing timestamp, it leads to invariant failure.
+    getReplCoord()->setMyLastAppliedOpTimeForward(time2, consistency);
+}
+
+DEATH_TEST_F(ReplCoordTest,
+             SetMyLastOpTimeToTimestampEqualToCurrentLastOpTimeTimestampButWithHigherTerm,
+             "opTime.getTimestamp() > myLastAppliedOpTime.getTimestamp()") {
+    assertStartSuccess(BSON("_id"
+                            << "mySet"
+                            << "version"
+                            << 2
+                            << "members"
+                            << BSON_ARRAY(BSON("host"
+                                               << "node1:12345"
+                                               << "_id"
+                                               << 0))),
+                       HostAndPort("node1", 12345));
+
+
+    OpTime time1(Timestamp(100, 1), 1);
+    OpTime time2(Timestamp(100, 1), 2);
+
+    auto consistency = ReplicationCoordinator::DataConsistency::Consistent;
+    getReplCoord()->setMyLastAppliedOpTime(time1);
+    ASSERT_EQUALS(time1, getReplCoord()->getMyLastAppliedOpTime());
+    // Since in pv1, oplog entries are ordered by non-decreasing
+    // term and strictly increasing timestamp, it leads to invariant failure.
+    getReplCoord()->setMyLastAppliedOpTimeForward(time2, consistency);
+}
+
+DEATH_TEST_F(ReplCoordTest,
+             SetMyLastOpTimeToTimestampGreaterThanCurrentLastOpTimeTimestampButWithLesserTerm,
+             "opTime.getTimestamp() < myLastAppliedOpTime.getTimestamp()") {
+    assertStartSuccess(BSON("_id"
+                            << "mySet"
+                            << "version"
+                            << 2
+                            << "members"
+                            << BSON_ARRAY(BSON("host"
+                                               << "node1:12345"
+                                               << "_id"
+                                               << 0))),
+                       HostAndPort("node1", 12345));
+
+
+    OpTime time1(Timestamp(100, 1), 1);
+    OpTime time2(Timestamp(100, 2), 0);
+
+    auto consistency = ReplicationCoordinator::DataConsistency::Consistent;
+    getReplCoord()->setMyLastAppliedOpTime(time1);
+    ASSERT_EQUALS(time1, getReplCoord()->getMyLastAppliedOpTime());
+    // Since in pv1, oplog entries are ordered by non-decreasing
+    // term and strictly increasing timestamp, it leads to invariant failure.
+    getReplCoord()->setMyLastAppliedOpTimeForward(time2, consistency);
+}
+
+DEATH_TEST_F(ReplCoordTest,
+             SetMyLastOpTimeToTimestampEqualToCurrentLastOpTimeTimestampButWithLesserTerm,
+             "opTime.getTimestamp() < myLastAppliedOpTime.getTimestamp()") {
+    assertStartSuccess(BSON("_id"
+                            << "mySet"
+                            << "version"
+                            << 2
+                            << "members"
+                            << BSON_ARRAY(BSON("host"
+                                               << "node1:12345"
+                                               << "_id"
+                                               << 0))),
+                       HostAndPort("node1", 12345));
+
+
+    OpTime time1(Timestamp(100, 1), 1);
+    OpTime time2(Timestamp(100, 1), 0);
+
+    auto consistency = ReplicationCoordinator::DataConsistency::Consistent;
+    getReplCoord()->setMyLastAppliedOpTime(time1);
+    ASSERT_EQUALS(time1, getReplCoord()->getMyLastAppliedOpTime());
+    // Since in pv1, oplog entries are ordered by non-decreasing
+    // term and strictly increasing timestamp, it leads to invariant failure.
+    getReplCoord()->setMyLastAppliedOpTimeForward(time2, consistency);
 }
 
 TEST_F(ReplCoordTest, OnlyForwardSyncProgressForOtherNodesWhenTheNodesAreBelievedToBeUp) {
     assertStartSuccess(
         BSON("_id"
              << "mySet"
-             << "version" << 1 << "members"
+             << "version"
+             << 1
+             << "members"
              << BSON_ARRAY(BSON("_id" << 0 << "host"
                                       << "test1:1234")
                            << BSON("_id" << 1 << "host"
-                                         << "test2:1234") << BSON("_id" << 2 << "host"
-                                                                        << "test3:1234"))
-             << "protocolVersion" << 1 << "settings"
+                                         << "test2:1234")
+                           << BSON("_id" << 2 << "host"
+                                         << "test3:1234"))
+             << "protocolVersion"
+             << 1
+             << "settings"
              << BSON("electionTimeoutMillis" << 2000 << "heartbeatIntervalMillis" << 40000)),
         HostAndPort("test1", 1234));
     OpTime optime(Timestamp(100, 2), 0);
@@ -4250,37 +5463,22 @@ TEST_F(ReplCoordTest, OnlyForwardSyncProgressForOtherNodesWhenTheNodesAreBelieve
     ASSERT_OK(getReplCoord()->setLastDurableOptime_forTest(1, 1, optime));
 
     // Check that we have two entries in our UpdatePosition (us and node 1).
-    BSONObjBuilder cmdBuilder;
-    getReplCoord()->prepareReplSetUpdatePositionCommand(&cmdBuilder);
-    BSONObj cmd = cmdBuilder.done();
+    BSONObj cmd = unittest::assertGet(getReplCoord()->prepareReplSetUpdatePositionCommand());
     std::set<long long> memberIds;
-    BSONForEach(entryElement, cmd["optimes"].Obj()) {
+    BSONForEach(entryElement, cmd[UpdatePositionArgs::kUpdateArrayFieldName].Obj()) {
         BSONObj entry = entryElement.Obj();
-        long long memberId = entry["memberId"].Number();
+        long long memberId = entry[UpdatePositionArgs::kMemberIdFieldName].Number();
         memberIds.insert(memberId);
         OpTime appliedOpTime;
         OpTime durableOpTime;
-        bsonExtractOpTimeField(entry, "appliedOpTime", &appliedOpTime);
+        bsonExtractOpTimeField(entry, UpdatePositionArgs::kAppliedOpTimeFieldName, &appliedOpTime)
+            .transitional_ignore();
         ASSERT_EQUALS(optime, appliedOpTime);
-        bsonExtractOpTimeField(entry, "durableOpTime", &durableOpTime);
+        bsonExtractOpTimeField(entry, UpdatePositionArgs::kDurableOpTimeFieldName, &durableOpTime)
+            .transitional_ignore();
         ASSERT_EQUALS(optime, durableOpTime);
     }
     ASSERT_EQUALS(2U, memberIds.size());
-
-    // Check that this true for old style (pre-3.2.2) UpdatePosition as well.
-    BSONObjBuilder cmdBuilder2;
-    getReplCoord()->prepareOldReplSetUpdatePositionCommand(&cmdBuilder2);
-    BSONObj cmd2 = cmdBuilder2.done();
-    std::set<long long> memberIds2;
-    BSONForEach(entryElement, cmd2["optimes"].Obj()) {
-        BSONObj entry = entryElement.Obj();
-        long long memberId = entry["memberId"].Number();
-        memberIds2.insert(memberId);
-        OpTime entryOpTime;
-        bsonExtractOpTimeField(entry, "optime", &entryOpTime);
-        ASSERT_EQUALS(optime, entryOpTime);
-    }
-    ASSERT_EQUALS(2U, memberIds2.size());
 
     // Advance the clock far enough to cause the other node to be marked as DOWN.
     const Date_t startDate = getNet()->now();
@@ -4296,150 +5494,189 @@ TEST_F(ReplCoordTest, OnlyForwardSyncProgressForOtherNodesWhenTheNodesAreBelieve
 
     // Check there is one entry in our UpdatePosition, since we shouldn't forward for a
     // DOWN node.
-    BSONObjBuilder cmdBuilder3;
-    getReplCoord()->prepareReplSetUpdatePositionCommand(&cmdBuilder3);
-    BSONObj cmd3 = cmdBuilder3.done();
-    std::set<long long> memberIds3;
-    BSONForEach(entryElement, cmd3["optimes"].Obj()) {
+    BSONObj cmd2 = unittest::assertGet(getReplCoord()->prepareReplSetUpdatePositionCommand());
+    std::set<long long> memberIds2;
+    BSONForEach(entryElement, cmd2[UpdatePositionArgs::kUpdateArrayFieldName].Obj()) {
         BSONObj entry = entryElement.Obj();
-        long long memberId = entry["memberId"].Number();
-        memberIds3.insert(memberId);
+        long long memberId = entry[UpdatePositionArgs::kMemberIdFieldName].Number();
+        memberIds2.insert(memberId);
         OpTime appliedOpTime;
         OpTime durableOpTime;
-        bsonExtractOpTimeField(entry, "appliedOpTime", &appliedOpTime);
+        bsonExtractOpTimeField(entry, UpdatePositionArgs::kAppliedOpTimeFieldName, &appliedOpTime)
+            .transitional_ignore();
         ASSERT_EQUALS(optime, appliedOpTime);
-        bsonExtractOpTimeField(entry, "durableOpTime", &durableOpTime);
+        bsonExtractOpTimeField(entry, UpdatePositionArgs::kDurableOpTimeFieldName, &durableOpTime)
+            .transitional_ignore();
         ASSERT_EQUALS(optime, durableOpTime);
     }
-    ASSERT_EQUALS(1U, memberIds3.size());
-
-    // Check that this true for old style (pre-3.2.2) UpdatePosition as well.
-    BSONObjBuilder cmdBuilder4;
-    getReplCoord()->prepareOldReplSetUpdatePositionCommand(&cmdBuilder4);
-    BSONObj cmd4 = cmdBuilder4.done();
-    std::set<long long> memberIds4;
-    BSONForEach(entryElement, cmd4["optimes"].Obj()) {
-        BSONObj entry = entryElement.Obj();
-        long long memberId = entry["memberId"].Number();
-        memberIds4.insert(memberId);
-        OpTime entryOpTime;
-        bsonExtractOpTimeField(entry, "optime", &entryOpTime);
-        ASSERT_EQUALS(optime, entryOpTime);
-    }
-    ASSERT_EQUALS(1U, memberIds4.size());
+    ASSERT_EQUALS(1U, memberIds2.size());
 }
 
-TEST_F(ReplCoordTest, NewStyleUpdatePositionCmdHasMetadata) {
+TEST_F(ReplCoordTest, UpdatePositionCmdHasMetadata) {
     assertStartSuccess(
         BSON("_id"
              << "mySet"
-             << "version" << 1 << "members"
+             << "version"
+             << 1
+             << "members"
              << BSON_ARRAY(BSON("_id" << 0 << "host"
                                       << "test1:1234")
                            << BSON("_id" << 1 << "host"
-                                         << "test2:1234") << BSON("_id" << 2 << "host"
-                                                                        << "test3:1234"))
-             << "protocolVersion" << 1 << "settings"
+                                         << "test2:1234")
+                           << BSON("_id" << 2 << "host"
+                                         << "test3:1234"))
+             << "protocolVersion"
+             << 1
+             << "settings"
              << BSON("electionTimeoutMillis" << 2000 << "heartbeatIntervalMillis" << 40000)),
         HostAndPort("test1", 1234));
     OpTime optime(Timestamp(100, 2), 0);
     getReplCoord()->setMyLastAppliedOpTime(optime);
     getReplCoord()->setMyLastDurableOpTime(optime);
+    auto opCtx = makeOperationContext();
 
     // Set last committed optime via metadata.
-    OperationContextReplMock txn;
     rpc::ReplSetMetadata syncSourceMetadata(optime.getTerm(), optime, optime, 1, OID(), -1, 1);
-    getReplCoord()->processReplSetMetadata(syncSourceMetadata, true);
-    getReplCoord()->createSnapshot(&txn, optime, SnapshotName(1));
+    getReplCoord()->processReplSetMetadata(syncSourceMetadata);
+    getReplCoord()->advanceCommitPoint(optime);
 
-    BSONObjBuilder cmdBuilder;
-    ASSERT_TRUE(getReplCoord()->prepareReplSetUpdatePositionCommand(&cmdBuilder));
-    BSONObj cmd = cmdBuilder.obj();
+    BSONObj cmd = unittest::assertGet(getReplCoord()->prepareReplSetUpdatePositionCommand());
     auto metadata = unittest::assertGet(rpc::ReplSetMetadata::readFromMetadata(cmd));
     ASSERT_EQUALS(metadata.getTerm(), getReplCoord()->getTerm());
     ASSERT_EQUALS(metadata.getLastOpVisible(), optime);
+
+    auto oqMetadataStatus = rpc::OplogQueryMetadata::readFromMetadata(cmd);
+    ASSERT_EQUALS(oqMetadataStatus.getStatus(), ErrorCodes::NoSuchKey);
 }
 
 TEST_F(ReplCoordTest, StepDownWhenHandleLivenessTimeoutMarksAMajorityOfVotingNodesDown) {
     assertStartSuccess(
         BSON("_id"
              << "mySet"
-             << "version" << 2 << "members"
+             << "version"
+             << 2
+             << "members"
              << BSON_ARRAY(BSON("host"
                                 << "node1:12345"
-                                << "_id" << 0)
+                                << "_id"
+                                << 0)
                            << BSON("host"
                                    << "node2:12345"
-                                   << "_id" << 1) << BSON("host"
-                                                          << "node3:12345"
-                                                          << "_id" << 2) << BSON("host"
-                                                                                 << "node4:12345"
-                                                                                 << "_id" << 3)
+                                   << "_id"
+                                   << 1)
+                           << BSON("host"
+                                   << "node3:12345"
+                                   << "_id"
+                                   << 2)
+                           << BSON("host"
+                                   << "node4:12345"
+                                   << "_id"
+                                   << 3)
                            << BSON("host"
                                    << "node5:12345"
-                                   << "_id" << 4)) << "protocolVersion" << 1 << "settings"
+                                   << "_id"
+                                   << 4))
+             << "protocolVersion"
+             << 1
+             << "settings"
              << BSON("electionTimeoutMillis" << 2000 << "heartbeatIntervalMillis" << 40000)),
         HostAndPort("node1", 12345));
-    ASSERT(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
     OpTime startingOpTime = OpTime(Timestamp(100, 1), 0);
     getReplCoord()->setMyLastAppliedOpTime(startingOpTime);
     getReplCoord()->setMyLastDurableOpTime(startingOpTime);
 
     // Receive notification that every node is up.
-    OldUpdatePositionArgs args;
-    ASSERT_OK(args.initialize(
-        BSON("replSetUpdatePosition"
-             << 1 << "optimes" << BSON_ARRAY(BSON("cfgver" << 2 << "memberId" << 1 << "optime"
-                                                           << startingOpTime.getTimestamp())
-                                             << BSON("cfgver" << 2 << "memberId" << 2 << "optime"
-                                                              << startingOpTime.getTimestamp())
-                                             << BSON("cfgver" << 2 << "memberId" << 3 << "optime"
-                                                              << startingOpTime.getTimestamp())
-                                             << BSON("cfgver" << 2 << "memberId" << 4 << "optime"
-                                                              << startingOpTime.getTimestamp())))));
+    UpdatePositionArgs args;
+    ASSERT_OK(
+        args.initialize(BSON(UpdatePositionArgs::kCommandFieldName
+                             << 1
+                             << UpdatePositionArgs::kUpdateArrayFieldName
+                             << BSON_ARRAY(BSON(UpdatePositionArgs::kConfigVersionFieldName
+                                                << 2
+                                                << UpdatePositionArgs::kMemberIdFieldName
+                                                << 1
+                                                << UpdatePositionArgs::kAppliedOpTimeFieldName
+                                                << startingOpTime.toBSON()
+                                                << UpdatePositionArgs::kDurableOpTimeFieldName
+                                                << startingOpTime.toBSON())
+                                           << BSON(UpdatePositionArgs::kConfigVersionFieldName
+                                                   << 2
+                                                   << UpdatePositionArgs::kMemberIdFieldName
+                                                   << 2
+                                                   << UpdatePositionArgs::kAppliedOpTimeFieldName
+                                                   << startingOpTime.toBSON()
+                                                   << UpdatePositionArgs::kDurableOpTimeFieldName
+                                                   << startingOpTime.toBSON())
+                                           << BSON(UpdatePositionArgs::kConfigVersionFieldName
+                                                   << 2
+                                                   << UpdatePositionArgs::kMemberIdFieldName
+                                                   << 3
+                                                   << UpdatePositionArgs::kAppliedOpTimeFieldName
+                                                   << startingOpTime.toBSON()
+                                                   << UpdatePositionArgs::kDurableOpTimeFieldName
+                                                   << startingOpTime.toBSON())
+                                           << BSON(UpdatePositionArgs::kConfigVersionFieldName
+                                                   << 2
+                                                   << UpdatePositionArgs::kMemberIdFieldName
+                                                   << 4
+                                                   << UpdatePositionArgs::kAppliedOpTimeFieldName
+                                                   << startingOpTime.toBSON()
+                                                   << UpdatePositionArgs::kDurableOpTimeFieldName
+                                                   << startingOpTime.toBSON())))));
 
     ASSERT_OK(getReplCoord()->processReplSetUpdatePosition(args, 0));
     // Become PRIMARY.
     simulateSuccessfulV1Election();
 
-    // Keep two nodes alive.
-    OldUpdatePositionArgs args1;
-    ASSERT_OK(args1.initialize(
-        BSON("replSetUpdatePosition"
-             << 1 << "optimes" << BSON_ARRAY(BSON("cfgver" << 2 << "memberId" << 1 << "optime"
-                                                           << startingOpTime.getTimestamp())
-                                             << BSON("cfgver" << 2 << "memberId" << 2 << "optime"
-                                                              << startingOpTime.getTimestamp())))));
+    // Keep two nodes alive via UpdatePosition.
+    UpdatePositionArgs args1;
+    ASSERT_OK(
+        args1.initialize(BSON(UpdatePositionArgs::kCommandFieldName
+                              << 1
+                              << UpdatePositionArgs::kUpdateArrayFieldName
+                              << BSON_ARRAY(BSON(UpdatePositionArgs::kConfigVersionFieldName
+                                                 << 2
+                                                 << UpdatePositionArgs::kMemberIdFieldName
+                                                 << 1
+                                                 << UpdatePositionArgs::kAppliedOpTimeFieldName
+                                                 << startingOpTime.toBSON()
+                                                 << UpdatePositionArgs::kDurableOpTimeFieldName
+                                                 << startingOpTime.toBSON())
+                                            << BSON(UpdatePositionArgs::kConfigVersionFieldName
+                                                    << 2
+                                                    << UpdatePositionArgs::kMemberIdFieldName
+                                                    << 2
+                                                    << UpdatePositionArgs::kAppliedOpTimeFieldName
+                                                    << startingOpTime.toBSON()
+                                                    << UpdatePositionArgs::kDurableOpTimeFieldName
+                                                    << startingOpTime.toBSON())))));
+    const Date_t startDate = getNet()->now();
+    getNet()->enterNetwork();
+    getNet()->runUntil(startDate + Milliseconds(100));
     ASSERT_OK(getReplCoord()->processReplSetUpdatePosition(args1, 0));
 
     // Confirm that the node remains PRIMARY after the other two nodes are marked DOWN.
-    const Date_t startDate = getNet()->now();
-    getNet()->enterNetwork();
-    getNet()->runUntil(startDate + Milliseconds(1980));
+    getNet()->runUntil(startDate + Milliseconds(2080));
     getNet()->exitNetwork();
     ASSERT_EQUALS(MemberState::RS_PRIMARY, getReplCoord()->getMemberState().s);
 
-    // Keep one node alive via two methods (UpdatePosition and requestHeartbeat).
-    OldUpdatePositionArgs args2;
-    ASSERT_OK(args2.initialize(
-        BSON("replSetUpdatePosition"
-             << 1 << "optimes" << BSON_ARRAY(BSON("cfgver" << 2 << "memberId" << 1 << "optime"
-                                                           << startingOpTime.getTimestamp())))));
-    ASSERT_OK(getReplCoord()->processReplSetUpdatePosition(args2, 0));
-
-    ReplSetHeartbeatArgs hbArgs;
+    // Keep the same two nodes alive via v1 heartbeat.
+    ReplSetHeartbeatArgsV1 hbArgs;
     hbArgs.setSetName("mySet");
-    hbArgs.setProtocolVersion(1);
     hbArgs.setConfigVersion(2);
     hbArgs.setSenderId(1);
     hbArgs.setSenderHost(HostAndPort("node2", 12345));
+    hbArgs.setTerm(0);
     ReplSetHeartbeatResponse hbResp;
-    ASSERT_OK(getReplCoord()->processHeartbeat(hbArgs, &hbResp));
+    ASSERT_OK(getReplCoord()->processHeartbeatV1(hbArgs, &hbResp));
+    hbArgs.setSenderId(2);
+    hbArgs.setSenderHost(HostAndPort("node3", 12345));
+    ASSERT_OK(getReplCoord()->processHeartbeatV1(hbArgs, &hbResp));
 
-    // Confirm that the node relinquishes PRIMARY after only one node is left UP.
-    const Date_t startDate1 = getNet()->now();
-    const Date_t endDate = startDate1 + Milliseconds(1980);
+    // Confirm that the node remains PRIMARY after the timeout from the UpdatePosition expires.
     getNet()->enterNetwork();
+    const Date_t endDate = startDate + Milliseconds(2200);
     while (getNet()->now() < endDate) {
         getNet()->runUntil(endDate);
         if (getNet()->now() < endDate) {
@@ -4447,12 +5684,44 @@ TEST_F(ReplCoordTest, StepDownWhenHandleLivenessTimeoutMarksAMajorityOfVotingNod
         }
     }
     getNet()->exitNetwork();
+    ASSERT_EQUALS(MemberState::RS_PRIMARY, getReplCoord()->getMemberState().s);
 
-    // Ensure all global exclusive lock tasks (eg. _stepDownFinish) run to completion.
-    auto exec = getReplExec();
-    auto work = [](const executor::TaskExecutor::CallbackArgs&) {};
-    exec->wait(unittest::assertGet(exec->scheduleWorkWithGlobalExclusiveLock(work)));
-    ASSERT_EQUALS(MemberState::RS_SECONDARY, getReplCoord()->getMemberState().s);
+    // Keep one node alive via two methods (UpdatePosition and requestHeartbeat).
+    UpdatePositionArgs args2;
+    ASSERT_OK(
+        args2.initialize(BSON(UpdatePositionArgs::kCommandFieldName
+                              << 1
+                              << UpdatePositionArgs::kUpdateArrayFieldName
+                              << BSON_ARRAY(BSON(UpdatePositionArgs::kConfigVersionFieldName
+                                                 << 2
+                                                 << UpdatePositionArgs::kMemberIdFieldName
+                                                 << 1
+                                                 << UpdatePositionArgs::kDurableOpTimeFieldName
+                                                 << startingOpTime.toBSON()
+                                                 << UpdatePositionArgs::kAppliedOpTimeFieldName
+                                                 << startingOpTime.toBSON())))));
+    ASSERT_OK(getReplCoord()->processReplSetUpdatePosition(args2, 0));
+
+    hbArgs.setSetName("mySet");
+    hbArgs.setConfigVersion(2);
+    hbArgs.setSenderId(1);
+    hbArgs.setSenderHost(HostAndPort("node2", 12345));
+    hbArgs.setTerm(0);
+    ASSERT_OK(getReplCoord()->processHeartbeatV1(hbArgs, &hbResp));
+
+    // Confirm that the node relinquishes PRIMARY after only one node is left UP.
+    const Date_t startDate1 = getNet()->now();
+    const Date_t endDate1 = startDate1 + Milliseconds(1980);
+    getNet()->enterNetwork();
+    while (getNet()->now() < endDate1) {
+        getNet()->runUntil(endDate1);
+        if (getNet()->now() < endDate1) {
+            getNet()->blackHole(getNet()->getNextReadyRequest());
+        }
+    }
+    getNet()->exitNetwork();
+
+    ASSERT_OK(getReplCoord()->waitForMemberState(MemberState::RS_SECONDARY, Hours{1}));
 }
 
 TEST_F(ReplCoordTest, WaitForMemberState) {
@@ -4460,21 +5729,23 @@ TEST_F(ReplCoordTest, WaitForMemberState) {
 
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 1 << "members"
+                            << "version"
+                            << 1
+                            << "members"
                             << BSON_ARRAY(BSON("_id" << 0 << "host"
                                                      << "test1:1234"))),
                        HostAndPort("test1", 1234));
     auto replCoord = getReplCoord();
     auto initialTerm = replCoord->getTerm();
-    replCoord->setMyLastAppliedOpTime(OpTime(Timestamp(1, 0), 0));
-    replCoord->setMyLastDurableOpTime(OpTime(Timestamp(1, 0), 0));
-    ASSERT_TRUE(replCoord->setFollowerMode(MemberState::RS_SECONDARY));
-
-    // Successful dry run election increases term.
-    ASSERT_EQUALS(initialTerm + 1, replCoord->getTerm());
+    replCoord->setMyLastAppliedOpTime(OpTime(Timestamp(1, 1), 0));
+    replCoord->setMyLastDurableOpTime(OpTime(Timestamp(1, 1), 0));
+    ASSERT_OK(replCoord->setFollowerMode(MemberState::RS_SECONDARY));
 
     // Single node cluster - this node should start election on setFollowerMode() completion.
     replCoord->waitForElectionFinish_forTest();
+
+    // Successful dry run election increases term.
+    ASSERT_EQUALS(initialTerm + 1, replCoord->getTerm());
 
     auto timeout = Milliseconds(1);
     ASSERT_OK(replCoord->waitForMemberState(MemberState::RS_PRIMARY, timeout));
@@ -4495,110 +5766,38 @@ TEST_F(ReplCoordTest, WaitForDrainFinish) {
 
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 1 << "members"
+                            << "version"
+                            << 1
+                            << "members"
                             << BSON_ARRAY(BSON("_id" << 0 << "host"
                                                      << "test1:1234"))),
                        HostAndPort("test1", 1234));
     auto replCoord = getReplCoord();
     auto initialTerm = replCoord->getTerm();
-    replCoord->setMyLastAppliedOpTime(OpTime(Timestamp(1, 0), 0));
-    replCoord->setMyLastDurableOpTime(OpTime(Timestamp(1, 0), 0));
-    ASSERT_TRUE(replCoord->setFollowerMode(MemberState::RS_SECONDARY));
-
-    // Successful dry run election increases term.
-    ASSERT_EQUALS(initialTerm + 1, replCoord->getTerm());
+    replCoord->setMyLastAppliedOpTime(OpTime(Timestamp(1, 1), 0));
+    replCoord->setMyLastDurableOpTime(OpTime(Timestamp(1, 1), 0));
+    ASSERT_OK(replCoord->setFollowerMode(MemberState::RS_SECONDARY));
 
     // Single node cluster - this node should start election on setFollowerMode() completion.
     replCoord->waitForElectionFinish_forTest();
 
+    // Successful dry run election increases term.
+    ASSERT_EQUALS(initialTerm + 1, replCoord->getTerm());
+
     auto timeout = Milliseconds(1);
     ASSERT_OK(replCoord->waitForMemberState(MemberState::RS_PRIMARY, timeout));
 
-    ASSERT_TRUE(replCoord->isWaitingForApplierToDrain());
+    ASSERT(replCoord->getApplierState() == ReplicationCoordinator::ApplierState::Draining);
     ASSERT_EQUALS(ErrorCodes::ExceededTimeLimit, replCoord->waitForDrainFinish(timeout));
 
     ASSERT_EQUALS(ErrorCodes::BadValue, replCoord->waitForDrainFinish(Milliseconds(-1)));
 
-    OperationContextReplMock txn;
-    replCoord->signalDrainComplete(&txn);
+    const auto opCtx = makeOperationContext();
+    signalDrainComplete(opCtx.get());
     ASSERT_OK(replCoord->waitForDrainFinish(timeout));
 
     // Zero timeout is fine.
     ASSERT_OK(replCoord->waitForDrainFinish(Milliseconds(0)));
-}
-
-TEST_F(ReplCoordTest, UpdatePositionArgsReturnsNoSuchKeyWhenParsingOldUpdatePositionArgs) {
-    OldUpdatePositionArgs args;
-    UpdatePositionArgs args2;
-    OpTime opTime = OpTime(Timestamp(100, 1), 0);
-    ASSERT_EQUALS(
-        ErrorCodes::NoSuchKey,
-        args2.initialize(BSON(
-            "replSetUpdatePosition"
-            << 1 << "optimes"
-            << BSON_ARRAY(
-                   BSON("cfgver" << 2 << "memberId" << 1 << "optime" << opTime.getTimestamp())
-                   << BSON("cfgver" << 2 << "memberId" << 2 << "optime" << opTime.getTimestamp())
-                   << BSON("cfgver" << 2 << "memberId" << 3 << "optime" << opTime.getTimestamp())
-                   << BSON("cfgver" << 2 << "memberId" << 4 << "optime"
-                                    << opTime.getTimestamp())))));
-
-    ASSERT_OK(args.initialize(
-        BSON("replSetUpdatePosition"
-             << 1 << "optimes"
-             << BSON_ARRAY(
-                    BSON("cfgver" << 2 << "memberId" << 1 << "optime" << opTime.getTimestamp())
-                    << BSON("cfgver" << 2 << "memberId" << 2 << "optime" << opTime.getTimestamp())
-                    << BSON("cfgver" << 2 << "memberId" << 3 << "optime" << opTime.getTimestamp())
-                    << BSON("cfgver" << 2 << "memberId" << 4 << "optime"
-                                     << opTime.getTimestamp())))));
-}
-
-
-TEST_F(ReplCoordTest, OldUpdatePositionArgsReturnsBadValueWhenParsingUpdatePositionArgs) {
-    OldUpdatePositionArgs args;
-    UpdatePositionArgs args2;
-    OpTime opTime = OpTime(Timestamp(100, 1), 0);
-    ASSERT_EQUALS(
-        ErrorCodes::BadValue,
-        args.initialize(BSON(
-            "replSetUpdatePosition"
-            << 1 << "optimes"
-            << BSON_ARRAY(BSON("cfgver" << 2 << "memberId" << 1 << "durableOpTime"
-                                        << BSON("ts" << opTime.getTimestamp() << "t" << 3)
-                                        << "appliedOpTime"
-                                        << BSON("ts" << opTime.getTimestamp() << "t" << 3))
-                          << BSON("cfgver" << 2 << "memberId" << 2 << "durableOpTime"
-                                           << BSON("ts" << opTime.getTimestamp() << "t" << 3)
-                                           << "appliedOpTime"
-                                           << BSON("ts" << opTime.getTimestamp() << "t" << 3))
-                          << BSON("cfgver" << 2 << "memberId" << 3 << "durableOpTime"
-                                           << BSON("ts" << opTime.getTimestamp() << "t" << 3)
-                                           << "appliedOpTime"
-                                           << BSON("ts" << opTime.getTimestamp() << "t" << 3))
-                          << BSON("cfgver" << 2 << "memberId" << 4 << "durableOpTime"
-                                           << BSON("ts" << opTime.getTimestamp() << "t" << 3)
-                                           << "appliedOpTime"
-                                           << BSON("ts" << opTime.getTimestamp() << "t" << 3))))));
-    ASSERT_OK(args2.initialize(
-        BSON("replSetUpdatePosition"
-             << 1 << "optimes"
-             << BSON_ARRAY(BSON("cfgver" << 2 << "memberId" << 1 << "durableOpTime"
-                                         << BSON("ts" << opTime.getTimestamp() << "t" << 3)
-                                         << "appliedOpTime"
-                                         << BSON("ts" << opTime.getTimestamp() << "t" << 3))
-                           << BSON("cfgver" << 2 << "memberId" << 2 << "durableOpTime"
-                                            << BSON("ts" << opTime.getTimestamp() << "t" << 3)
-                                            << "appliedOpTime"
-                                            << BSON("ts" << opTime.getTimestamp() << "t" << 3))
-                           << BSON("cfgver" << 2 << "memberId" << 3 << "durableOpTime"
-                                            << BSON("ts" << opTime.getTimestamp() << "t" << 3)
-                                            << "appliedOpTime"
-                                            << BSON("ts" << opTime.getTimestamp() << "t" << 3))
-                           << BSON("cfgver" << 2 << "memberId" << 4 << "durableOpTime"
-                                            << BSON("ts" << opTime.getTimestamp() << "t" << 3)
-                                            << "appliedOpTime"
-                                            << BSON("ts" << opTime.getTimestamp() << "t" << 3))))));
 }
 
 TEST_F(
@@ -4608,10 +5807,13 @@ TEST_F(
 
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 1 << "members"
+                            << "version"
+                            << 1
+                            << "members"
                             << BSON_ARRAY(BSON("_id" << 0 << "host"
                                                      << "test1:1234"))
-                            << "writeConcernMajorityJournalDefault" << false),
+                            << "writeConcernMajorityJournalDefault"
+                            << false),
                        HostAndPort("test1", 1234));
 
     WriteConcernOptions wc;
@@ -4628,10 +5830,13 @@ TEST_F(
 
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 1 << "members"
+                            << "version"
+                            << 1
+                            << "members"
                             << BSON_ARRAY(BSON("_id" << 0 << "host"
                                                      << "test1:1234"))
-                            << "writeConcernMajorityJournalDefault" << true),
+                            << "writeConcernMajorityJournalDefault"
+                            << true),
                        HostAndPort("test1", 1234));
 
     WriteConcernOptions wc;
@@ -4646,10 +5851,13 @@ TEST_F(ReplCoordTest, PopulateUnsetWriteConcernOptionsSyncModeReturnsInputIfSync
 
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 1 << "members"
+                            << "version"
+                            << 1
+                            << "members"
                             << BSON_ARRAY(BSON("_id" << 0 << "host"
                                                      << "test1:1234"))
-                            << "writeConcernMajorityJournalDefault" << false),
+                            << "writeConcernMajorityJournalDefault"
+                            << false),
                        HostAndPort("test1", 1234));
 
     WriteConcernOptions wc;
@@ -4671,10 +5879,13 @@ TEST_F(ReplCoordTest, PopulateUnsetWriteConcernOptionsSyncModeReturnsInputIfWMod
 
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 1 << "members"
+                            << "version"
+                            << 1
+                            << "members"
                             << BSON_ARRAY(BSON("_id" << 0 << "host"
                                                      << "test1:1234"))
-                            << "writeConcernMajorityJournalDefault" << false),
+                            << "writeConcernMajorityJournalDefault"
+                            << false),
                        HostAndPort("test1", 1234));
 
     WriteConcernOptions wc;
@@ -4691,37 +5902,50 @@ TEST_F(ReplCoordTest, PopulateUnsetWriteConcernOptionsSyncModeReturnsInputIfWMod
 TEST_F(ReplCoordTest, NodeStoresElectionVotes) {
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 2 << "members"
+                            << "version"
+                            << 2
+                            << "members"
                             << BSON_ARRAY(BSON("host"
                                                << "node1:12345"
-                                               << "_id" << 0)
+                                               << "_id"
+                                               << 0)
                                           << BSON("host"
                                                   << "node2:12345"
-                                                  << "_id" << 1) << BSON("host"
-                                                                         << "node3:12345"
-                                                                         << "_id" << 2))),
+                                                  << "_id"
+                                                  << 1)
+                                          << BSON("host"
+                                                  << "node3:12345"
+                                                  << "_id"
+                                                  << 2))),
                        HostAndPort("node1", 12345));
-    auto time = OpTime(Timestamp(100, 0), 1);
-    ASSERT(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+    auto time = OpTimeWithTermOne(100, 1);
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
     getReplCoord()->setMyLastAppliedOpTime(time);
     getReplCoord()->setMyLastDurableOpTime(time);
     simulateSuccessfulV1Election();
 
-    OperationContextReplMock txn;
+    auto opCtx = makeOperationContext();
 
     ReplSetRequestVotesArgs args;
-    ASSERT_OK(args.initialize(BSON(
-        "replSetRequestVotes" << 1 << "setName"
-                              << "mySet"
-                              << "term" << 7LL << "candidateIndex" << 2LL << "configVersion" << 2LL
-                              << "dryRun" << false << "lastCommittedOp" << time.toBSON())));
+    ASSERT_OK(args.initialize(BSON("replSetRequestVotes" << 1 << "setName"
+                                                         << "mySet"
+                                                         << "term"
+                                                         << 7LL
+                                                         << "candidateIndex"
+                                                         << 2LL
+                                                         << "configVersion"
+                                                         << 2LL
+                                                         << "dryRun"
+                                                         << false
+                                                         << "lastCommittedOp"
+                                                         << time.asOpTime().toBSON())));
     ReplSetRequestVotesResponse response;
 
-    ASSERT_OK(getReplCoord()->processReplSetRequestVotes(&txn, args, &response));
+    ASSERT_OK(getReplCoord()->processReplSetRequestVotes(opCtx.get(), args, &response));
     ASSERT_EQUALS("", response.getReason());
     ASSERT_TRUE(response.getVoteGranted());
 
-    auto lastVote = getExternalState()->loadLocalLastVoteDocument(&txn);
+    auto lastVote = getExternalState()->loadLocalLastVoteDocument(opCtx.get());
     ASSERT_OK(lastVote.getStatus());
 
     // This is not a dry-run election so the last vote should include the new term and candidate.
@@ -4732,43 +5956,169 @@ TEST_F(ReplCoordTest, NodeStoresElectionVotes) {
 TEST_F(ReplCoordTest, NodeDoesNotStoreDryRunVotes) {
     assertStartSuccess(BSON("_id"
                             << "mySet"
-                            << "version" << 2 << "members"
+                            << "version"
+                            << 2
+                            << "members"
                             << BSON_ARRAY(BSON("host"
                                                << "node1:12345"
-                                               << "_id" << 0)
+                                               << "_id"
+                                               << 0)
                                           << BSON("host"
                                                   << "node2:12345"
-                                                  << "_id" << 1) << BSON("host"
-                                                                         << "node3:12345"
-                                                                         << "_id" << 2))),
+                                                  << "_id"
+                                                  << 1)
+                                          << BSON("host"
+                                                  << "node3:12345"
+                                                  << "_id"
+                                                  << 2))),
                        HostAndPort("node1", 12345));
-    auto time = OpTime(Timestamp(100, 0), 1);
-    ASSERT(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+    auto time = OpTimeWithTermOne(100, 1);
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
     getReplCoord()->setMyLastAppliedOpTime(time);
     getReplCoord()->setMyLastDurableOpTime(time);
     simulateSuccessfulV1Election();
 
-    OperationContextReplMock txn;
+    auto opCtx = makeOperationContext();
 
     ReplSetRequestVotesArgs args;
-    ASSERT_OK(args.initialize(BSON(
-        "replSetRequestVotes" << 1 << "setName"
-                              << "mySet"
-                              << "term" << 7LL << "candidateIndex" << 2LL << "configVersion" << 2LL
-                              << "dryRun" << true << "lastCommittedOp" << time.toBSON())));
+    ASSERT_OK(args.initialize(BSON("replSetRequestVotes" << 1 << "setName"
+                                                         << "mySet"
+                                                         << "term"
+                                                         << 7LL
+                                                         << "candidateIndex"
+                                                         << 2LL
+                                                         << "configVersion"
+                                                         << 2LL
+                                                         << "dryRun"
+                                                         << true
+                                                         << "lastCommittedOp"
+                                                         << time.asOpTime().toBSON())));
     ReplSetRequestVotesResponse response;
 
-    ASSERT_OK(getReplCoord()->processReplSetRequestVotes(&txn, args, &response));
+    ASSERT_OK(getReplCoord()->processReplSetRequestVotes(opCtx.get(), args, &response));
     ASSERT_EQUALS("", response.getReason());
     ASSERT_TRUE(response.getVoteGranted());
 
-    auto lastVote = getExternalState()->loadLocalLastVoteDocument(&txn);
+    auto lastVote = getExternalState()->loadLocalLastVoteDocument(opCtx.get());
     ASSERT_OK(lastVote.getStatus());
 
     // This is a dry-run election so the last vote should not be updated with the new term and
     // candidate.
     ASSERT_EQUALS(lastVote.getValue().getTerm(), 1);
     ASSERT_EQUALS(lastVote.getValue().getCandidateIndex(), 0);
+}
+
+TEST_F(ReplCoordTest, NodeFailsVoteRequestIfItFailsToStoreLastVote) {
+    // Set up a 2-node replica set config.
+    assertStartSuccess(BSON("_id"
+                            << "mySet"
+                            << "version"
+                            << 2
+                            << "members"
+                            << BSON_ARRAY(BSON("host"
+                                               << "node1:12345"
+                                               << "_id"
+                                               << 0)
+                                          << BSON("host"
+                                                  << "node2:12345"
+                                                  << "_id"
+                                                  << 1))),
+                       HostAndPort("node1", 12345));
+    auto time = OpTimeWithTermOne(100, 1);
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+    getReplCoord()->setMyLastAppliedOpTime(time);
+    getReplCoord()->setMyLastDurableOpTime(time);
+    simulateSuccessfulV1Election();
+
+    // Get our current term, as primary.
+    ASSERT(getReplCoord()->getMemberState().primary());
+    auto initTerm = getReplCoord()->getTerm();
+
+    auto opCtx = makeOperationContext();
+
+    ReplSetRequestVotesArgs args;
+    ASSERT_OK(args.initialize(BSON("replSetRequestVotes" << 1 << "setName"
+                                                         << "mySet"
+                                                         << "term"
+                                                         << initTerm + 1  // term of new candidate.
+                                                         << "candidateIndex"
+                                                         << 1LL
+                                                         << "configVersion"
+                                                         << 2LL
+                                                         << "dryRun"
+                                                         << false
+                                                         << "lastCommittedOp"
+                                                         << time.asOpTime().toBSON())));
+    ReplSetRequestVotesResponse response;
+
+    // Simulate a failure to write the 'last vote' document. The specific error code isn't
+    // important.
+    getExternalState()->setStoreLocalLastVoteDocumentStatus(
+        Status(ErrorCodes::OutOfDiskSpace, "failed to write last vote document"));
+
+    // Make sure the vote request fails. If an error is returned, the filled out response is
+    // invalid, so we do not check its contents.
+    auto status = getReplCoord()->processReplSetRequestVotes(opCtx.get(), args, &response);
+    ASSERT_EQ(ErrorCodes::OutOfDiskSpace, status.code());
+
+    auto lastVote = unittest::assertGet(getExternalState()->loadLocalLastVoteDocument(opCtx.get()));
+
+    // The last vote doc should store the vote of the first election, not the one we failed to cast
+    // our vote in.
+    ASSERT_EQUALS(lastVote.getTerm(), initTerm);
+    ASSERT_EQUALS(lastVote.getCandidateIndex(), 0);
+}
+
+TEST_F(ReplCoordTest, NodeNodesNotGrantVoteIfInTerminalShutdown) {
+    // Set up a 2-node replica set config.
+    assertStartSuccess(BSON("_id"
+                            << "mySet"
+                            << "version"
+                            << 2
+                            << "members"
+                            << BSON_ARRAY(BSON("host"
+                                               << "node1:12345"
+                                               << "_id"
+                                               << 0)
+                                          << BSON("host"
+                                                  << "node2:12345"
+                                                  << "_id"
+                                                  << 1))),
+                       HostAndPort("node1", 12345));
+    auto time = OpTimeWithTermOne(100, 1);
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+    getReplCoord()->setMyLastAppliedOpTime(time);
+    getReplCoord()->setMyLastDurableOpTime(time);
+    simulateSuccessfulV1Election();
+
+    // Get our current term, as primary.
+    ASSERT(getReplCoord()->getMemberState().primary());
+    auto initTerm = getReplCoord()->getTerm();
+
+    auto opCtx = makeOperationContext();
+
+    ReplSetRequestVotesArgs args;
+    ASSERT_OK(args.initialize(BSON("replSetRequestVotes" << 1 << "setName"
+                                                         << "mySet"
+                                                         << "term"
+                                                         << initTerm + 1  // term of new candidate.
+                                                         << "candidateIndex"
+                                                         << 1LL
+                                                         << "configVersion"
+                                                         << 2LL
+                                                         << "dryRun"
+                                                         << false
+                                                         << "lastCommittedOp"
+                                                         << time.asOpTime().toBSON())));
+    ReplSetRequestVotesResponse response;
+
+    getReplCoord()->enterTerminalShutdown();
+
+    auto r = getReplCoord()->processReplSetRequestVotes(opCtx.get(), args, &response);
+
+    ASSERT_NOT_OK(r);
+    ASSERT_EQUALS("In the process of shutting down", r.reason());
+    ASSERT_EQUALS(ErrorCodes::ShutdownInProgress, r.code());
 }
 
 // TODO(schwerin): Unit test election id updating

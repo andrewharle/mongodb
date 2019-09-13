@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-# Public Domain 2014-2016 MongoDB, Inc.
+# Public Domain 2014-2019 MongoDB, Inc.
 # Public Domain 2008-2014 WiredTiger, Inc.
 #
 # This is free and unencumbered software released into the public domain.
@@ -51,7 +51,8 @@ class test_txn12(wttest.WiredTigerTestCase, suite_subprocess):
         msg = '/next_random.*boolean/'
         self.assertRaisesWithMessage(wiredtiger.WiredTigerError,
             lambda:session.open_cursor(self.uri, None, "next_random=bar"), msg)
-        # This commit should succeed as we have done no writes.
+        # This commit should succeed as open cursor should not set transaction
+        # error.
         session.commit_transaction()
 
         # Create a read/write transaction.
@@ -60,9 +61,9 @@ class test_txn12(wttest.WiredTigerTestCase, suite_subprocess):
         c[123] = 123
         self.assertRaisesWithMessage(wiredtiger.WiredTigerError,
             lambda:session.open_cursor(self.uri, None, "next_random=bar"), msg)
-        # This commit should fail as we have written something
-        self.assertRaisesWithMessage(wiredtiger.WiredTigerError,
-            lambda:session.commit_transaction(), '/requires rollback/')
+        # This commit should succeed as open cursor should not set transaction
+        # error.
+        session.commit_transaction()
 
 if __name__ == '__main__':
     wttest.run()

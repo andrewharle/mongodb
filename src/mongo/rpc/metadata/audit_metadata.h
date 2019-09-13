@@ -1,23 +1,25 @@
-/*
- *    Copyright (C) 2015 MongoDB Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -32,9 +34,9 @@
 #include <vector>
 
 #include "mongo/base/disallow_copying.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/auth/user_name.h"
 #include "mongo/db/auth/role_name.h"
+#include "mongo/db/auth/user_name.h"
+#include "mongo/db/operation_context.h"
 
 namespace mongo {
 class BSONObj;
@@ -65,16 +67,6 @@ public:
 
     Status writeToMetadata(BSONObjBuilder* metadataBob) const;
 
-    static Status downconvert(const BSONObj& command,
-                              const BSONObj& metadata,
-                              BSONObjBuilder* legacyCommandBob,
-                              int* legacyQueryFlags);
-
-    static Status upconvert(const BSONObj& legacyCommand,
-                            const int legacyQueryFlags,
-                            BSONObjBuilder* commandBob,
-                            BSONObjBuilder* metadataBob);
-
     using UsersAndRoles = std::tuple<std::vector<UserName>, std::vector<RoleName>>;
 
     const boost::optional<UsersAndRoles>& getImpersonatedUsersAndRoles() const;
@@ -88,16 +80,6 @@ public:
 private:
     boost::optional<UsersAndRoles> _impersonatedUsersAndRoles;
 };
-
-/**
- * The legacy field name used to hold impersonated users.
- */
-extern const char kLegacyImpersonatedUsersFieldName[];
-
-/**
- * The legacy field name used to hold impersonated roles.
- */
-extern const char kLegacyImpersonatedRolesFieldName[];
 
 }  // namespace rpc
 }  // namespace mongo

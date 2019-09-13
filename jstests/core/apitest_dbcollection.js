@@ -1,5 +1,11 @@
 /**
- *   Tests for the db collection
+ * Tests for the db collection
+ *
+ * @tags: [
+ *  requires_fastcount,
+ *  requires_collstats,
+ *  requires_capped,
+ * ]
  */
 
 /*
@@ -42,7 +48,9 @@ for (i = 0; i < 100; i++) {
 (function() {
     var validateResult = assert.commandWorked(db.getCollection("test_db").validate());
     // Extract validation results from mongos output if running in a sharded context.
-    if (jsTest.isMongos(db.getMongo())) {
+    var isShardedNS = validateResult.hasOwnProperty('raw');
+
+    if (isShardedNS) {
         // Sample mongos format:
         // {
         //   raw: {
@@ -75,7 +83,7 @@ for (i = 0; i < 100; i++) {
               validateResult.ns,
               'incorrect namespace in db.collection.validate() result: ' + tojson(validateResult));
     assert(validateResult.valid, 'collection validation failed');
-    assert.eq(100, validateResult.nrecords, 11);
+    assert.eq(100, validateResult.nrecords, "11");
 }());
 
 /*
@@ -212,9 +220,7 @@ assert.eq(0, db.getCollection("test_db").getIndexes().length, "24");
     }
 
     // indexDetailsKey - show indexDetails results for this index key only.
-    var indexKey = {
-        a: 1
-    };
+    var indexKey = {a: 1};
     var indexName = getIndexName(indexKey);
     checkIndexDetails({indexDetails: true, indexDetailsKey: indexKey}, indexName);
 
@@ -224,7 +230,7 @@ assert.eq(0, db.getCollection("test_db").getIndexes().length, "24");
     // Cannot specify both indexDetailsKey and indexDetailsName.
     var error = assert.throws(function() {
         t.stats({indexDetails: true, indexDetailsKey: indexKey, indexDetailsName: indexName});
-    }, null, 'indexDetailsKey and indexDetailsName cannot be used at the same time');
+    }, [], 'indexDetailsKey and indexDetailsName cannot be used at the same time');
     assert.eq(Error,
               error.constructor,
               'db.collection.stats() failed when both indexDetailsKey and indexDetailsName ' +

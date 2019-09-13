@@ -1,28 +1,31 @@
-/*    Copyright 2012 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/platform/basic.h"
@@ -36,10 +39,10 @@
 #include "mongo/rpc/command_reply_builder.h"
 #include "mongo/rpc/metadata.h"
 #include "mongo/stdx/memory.h"
-#include "mongo/util/mongoutils/str.h"
-#include "mongo/util/net/sock.h"
-#include "mongo/util/time_support.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/mongoutils/str.h"
+#include "mongo/util/net/socket_exception.h"
+#include "mongo/util/time_support.h"
 
 using std::string;
 using std::vector;
@@ -136,20 +139,16 @@ void MockRemoteDBServer::remove(const string& ns, Query query, int flags) {
     _dataMgr.erase(ns);
 }
 
-rpc::UniqueReply MockRemoteDBServer::runCommandWithMetadata(MockRemoteDBServer::InstanceID id,
-                                                            StringData database,
-                                                            StringData commandName,
-                                                            const BSONObj& metadata,
-                                                            const BSONObj& commandArgs) {
+rpc::UniqueReply MockRemoteDBServer::runCommand(InstanceID id, const OpMsgRequest& request) {
     checkIfUp(id);
-    std::string cmdName = commandName.toString();
+    std::string cmdName = request.getCommandName().toString();
 
     BSONObj reply;
     {
         scoped_spinlock lk(_lock);
 
         uassert(ErrorCodes::IllegalOperation,
-                str::stream() << "no reply for command: " << commandName,
+                str::stream() << "no reply for command: " << cmdName,
                 _cmdMap.count(cmdName));
 
         reply = _cmdMap[cmdName]->next();
@@ -174,25 +173,6 @@ rpc::UniqueReply MockRemoteDBServer::runCommandWithMetadata(MockRemoteDBServer::
                        .done();
     auto replyView = stdx::make_unique<rpc::CommandReply>(&message);
     return rpc::UniqueReply(std::move(message), std::move(replyView));
-}
-
-bool MockRemoteDBServer::runCommand(MockRemoteDBServer::InstanceID id,
-                                    const string& dbname,
-                                    const BSONObj& cmdObj,
-                                    BSONObj& info,
-                                    int options) {
-    BSONObj upconvertedRequest;
-    BSONObj upconvertedMetadata;
-    std::tie(upconvertedRequest, upconvertedMetadata) =
-        uassertStatusOK(rpc::upconvertRequestMetadata(cmdObj, options));
-
-    StringData commandName = upconvertedRequest.firstElementFieldName();
-
-    auto res =
-        runCommandWithMetadata(id, dbname, commandName, upconvertedMetadata, upconvertedRequest);
-
-    info = res->getCommandReply().getOwned();
-    return info["ok"].trueValue();
 }
 
 mongo::BSONArray MockRemoteDBServer::query(MockRemoteDBServer::InstanceID id,
@@ -255,7 +235,7 @@ void MockRemoteDBServer::checkIfUp(InstanceID id) const {
     scoped_spinlock sLock(_lock);
 
     if (!_isRunning || id < _instanceID) {
-        throw mongo::SocketException(mongo::SocketException::CLOSED, _hostAndPort);
+        throwSocketError(mongo::SocketErrorKind::CLOSED, _hostAndPort);
     }
 }
 }

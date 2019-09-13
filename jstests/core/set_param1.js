@@ -1,10 +1,21 @@
+// @tags: [
+//   assumes_superuser_permissions,
+//   does_not_support_stepdowns,
+// ]
+
 // Tests for accessing logLevel server parameter using getParameter/setParameter commands
 // and shell helpers.
 
 old = db.adminCommand({"getParameter": "*"});
+// the first time getParameter sends a request to with a shardingTaskExecutor and this sets an
+// operationTime. The following commands do not use shardingTaskExecutor.
+delete old["operationTime"];
+delete old["$clusterTime"];
 tmp1 = db.adminCommand({"setParameter": 1, "logLevel": 5});
 tmp2 = db.adminCommand({"setParameter": 1, "logLevel": old.logLevel});
 now = db.adminCommand({"getParameter": "*"});
+delete now["operationTime"];
+delete now["$clusterTime"];
 
 assert.eq(old, now, "A");
 assert.eq(old.logLevel, tmp1.was, "B");
@@ -28,14 +39,12 @@ assert.neq(undefined,
 assert.commandFailed(db.adminCommand({"setParameter": 1, logComponentVerbosity: "not an object"}));
 
 // Non-numeric verbosity for component should be rejected.
-assert.commandFailed(db.adminCommand({
-    "setParameter": 1,
-    logComponentVerbosity: {storage: {journal: {verbosity: "not a number"}}}
-}));
+assert.commandFailed(db.adminCommand(
+    {"setParameter": 1, logComponentVerbosity: {storage: {journal: {verbosity: "not a number"}}}}));
 
 // Invalid component shall be rejected
-assert.commandFailed(db.adminCommand(
-    {"setParameter": 1, logComponentVerbosity: {NoSuchComponent: {verbosity: 2}}}));
+assert.commandFailed(
+    db.adminCommand({"setParameter": 1, logComponentVerbosity: {NoSuchComponent: {verbosity: 2}}}));
 
 // Set multiple component log levels at once.
 (function() {
@@ -116,3 +125,60 @@ assert.commandFailed(db.adminCommand(
 // Restore old verbosity values.
 assert.commandWorked(
     db.adminCommand({"setParameter": 1, logComponentVerbosity: old.logComponentVerbosity}));
+
+var isMongos = (db.isMaster().msg === 'isdbgrid');
+if (!isMongos) {
+    //
+    // oplogFetcherSteadyStateMaxFetcherRestarts
+    //
+    var origRestarts = assert
+                           .commandWorked(db.adminCommand(
+                               {getParameter: 1, oplogFetcherSteadyStateMaxFetcherRestarts: 1}))
+                           .oplogFetcherSteadyStateMaxFetcherRestarts;
+    assert.gte(origRestarts,
+               0,
+               'default value of oplogFetcherSteadyStateMaxFetcherRestarts cannot be negative');
+    assert.commandFailedWithCode(
+        db.adminCommand({setParameter: 1, oplogFetcherSteadyStateMaxFetcherRestarts: -1}),
+        ErrorCodes.BadValue,
+        'server should reject negative values for oplogFetcherSteadyStateMaxFetcherRestarts');
+    assert.commandWorked(
+        db.adminCommand({setParameter: 1, oplogFetcherSteadyStateMaxFetcherRestarts: 0}));
+    assert.commandWorked(db.adminCommand(
+        {setParameter: 1, oplogFetcherSteadyStateMaxFetcherRestarts: origRestarts + 20}));
+    assert.eq(origRestarts + 20,
+              assert
+                  .commandWorked(db.adminCommand(
+                      {getParameter: 1, oplogFetcherSteadyStateMaxFetcherRestarts: 1}))
+                  .oplogFetcherSteadyStateMaxFetcherRestarts);
+    // Restore original value.
+    assert.commandWorked(db.adminCommand(
+        {setParameter: 1, oplogFetcherSteadyStateMaxFetcherRestarts: origRestarts}));
+
+    //
+    // oplogFetcherInitialSyncStateMaxFetcherRestarts
+    //
+    origRestarts = assert
+                       .commandWorked(db.adminCommand(
+                           {getParameter: 1, oplogFetcherInitialSyncMaxFetcherRestarts: 1}))
+                       .oplogFetcherInitialSyncMaxFetcherRestarts;
+    assert.gte(origRestarts,
+               0,
+               'default value of oplogFetcherSteadyStateMaxFetcherRestarts cannot be negative');
+    assert.commandFailedWithCode(
+        db.adminCommand({setParameter: 1, oplogFetcherInitialSyncMaxFetcherRestarts: -1}),
+        ErrorCodes.BadValue,
+        'server should reject negative values for oplogFetcherSteadyStateMaxFetcherRestarts');
+    assert.commandWorked(
+        db.adminCommand({setParameter: 1, oplogFetcherInitialSyncMaxFetcherRestarts: 0}));
+    assert.commandWorked(db.adminCommand(
+        {setParameter: 1, oplogFetcherInitialSyncMaxFetcherRestarts: origRestarts + 20}));
+    assert.eq(origRestarts + 20,
+              assert
+                  .commandWorked(db.adminCommand(
+                      {getParameter: 1, oplogFetcherInitialSyncMaxFetcherRestarts: 1}))
+                  .oplogFetcherInitialSyncMaxFetcherRestarts);
+    // Restore original value.
+    assert.commandWorked(db.adminCommand(
+        {setParameter: 1, oplogFetcherInitialSyncMaxFetcherRestarts: origRestarts}));
+}

@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -30,81 +32,75 @@
 
 #include "mongo/rpc/command_request_builder.h"
 
-#include <utility>
-
-#include "mongo/stdx/memory.h"
+#include "mongo/client/read_preference.h"
+#include "mongo/db/command_generic_argument.h"
+#include "mongo/db/commands.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/net/message.h"
 
 namespace mongo {
 namespace rpc {
 
-CommandRequestBuilder::CommandRequestBuilder() : CommandRequestBuilder(Message()) {}
+namespace {
+// OP_COMMAND put some generic arguments in the metadata and some in the body.
+bool fieldGoesInMetadata(StringData commandName, StringData field) {
+    if (!isGenericArgument(field))
+        return false;  // All non-generic arguments go to the body.
 
-CommandRequestBuilder::~CommandRequestBuilder() {}
+    // For some reason this goes in the body only for a single command...
+    if (field == "$replData")
+        return commandName != "replSetUpdatePosition";
 
-CommandRequestBuilder::CommandRequestBuilder(Message&& message) : _message{std::move(message)} {
-    _builder.skip(mongo::MsgData::MsgDataHeaderSize);  // Leave room for message header.
+    // These generic arguments went in the body.
+    return !(field == "maxTimeMS" || field == "readConcern" || field == "writeConcern" ||
+             field == "shardVersion");
 }
+}  // namespace
 
-CommandRequestBuilder& CommandRequestBuilder::setDatabase(StringData database) {
-    invariant(_state == State::kDatabase);
-    _builder.appendStr(database);
-    _state = State::kCommandName;
-    return *this;
-}
+Message opCommandRequestFromOpMsgRequest(const OpMsgRequest& request) {
+    const auto commandName = request.getCommandName();
 
-CommandRequestBuilder& CommandRequestBuilder::setCommandName(StringData commandName) {
-    invariant(_state == State::kCommandName);
-    _builder.appendStr(commandName);
-    _state = State::kCommandArgs;
-    return *this;
-}
+    BufBuilder builder;
+    builder.skip(mongo::MsgData::MsgDataHeaderSize);  // Leave room for message header.
+    builder.appendStr(request.getDatabase());
+    builder.appendStr(commandName);
 
-CommandRequestBuilder& CommandRequestBuilder::setCommandArgs(BSONObj commandArgs) {
-    invariant(_state == State::kCommandArgs);
-    commandArgs.appendSelfToBufBuilder(_builder);
-    _state = State::kMetadata;
-    return *this;
-}
+    // OP_COMMAND is only used when communicating with 3.4 nodes and they serialize their metadata
+    // fields differently. In addition to field-level differences, some generic arguments are pulled
+    // out to a metadata object, separate from the body. We do all down-conversion here so that the
+    // rest of the code only has to deal with the current format.
+    BSONObjBuilder metadataBuilder;  // Will be appended to the message after we finish the body.
+    {
+        BSONObjBuilder bodyBuilder(builder);
+        for (auto elem : request.body) {
+            const auto fieldName = elem.fieldNameStringData();
+            if (fieldName == "$configServerState") {
+                metadataBuilder.appendAs(elem, "configsvr");
+            } else if (fieldName == "$readPreference") {
+                BSONObjBuilder ssmBuilder(metadataBuilder.subobjStart("$ssm"));
+                ssmBuilder.append(elem);
+                ssmBuilder.append("$secondaryOk",
+                                  uassertStatusOK(ReadPreferenceSetting::fromInnerBSON(elem))
+                                      .canRunOnSecondary());
+            } else if (fieldName == "$db") {
+                // skip
+            } else if (fieldGoesInMetadata(commandName, fieldName)) {
+                metadataBuilder.append(elem);
+            } else {
+                bodyBuilder.append(elem);
+            }
+        }
+        for (auto&& seq : request.sequences) {
+            invariant(seq.name.find('.') == std::string::npos);  // Only support top-level for now.
+            dassert(!bodyBuilder.asTempObj().hasField(seq.name));
+            bodyBuilder.append(seq.name, seq.objs);
+        }
+    }
+    metadataBuilder.obj().appendSelfToBufBuilder(builder);
 
-CommandRequestBuilder& CommandRequestBuilder::setMetadata(BSONObj metadata) {
-    invariant(_state == State::kMetadata);
-    metadata.appendSelfToBufBuilder(_builder);
-    _state = State::kInputDocs;
-    return *this;
-}
-
-CommandRequestBuilder& CommandRequestBuilder::addInputDocs(DocumentRange inputDocs) {
-    invariant(_state == State::kInputDocs);
-    auto rangeData = inputDocs.data();
-    _builder.appendBuf(rangeData.data(), rangeData.length());
-    return *this;
-}
-
-CommandRequestBuilder& CommandRequestBuilder::addInputDoc(BSONObj inputDoc) {
-    invariant(_state == State::kInputDocs);
-    inputDoc.appendSelfToBufBuilder(_builder);
-    return *this;
-}
-
-RequestBuilderInterface::State CommandRequestBuilder::getState() const {
-    return _state;
-}
-
-Protocol CommandRequestBuilder::getProtocol() const {
-    return rpc::Protocol::kOpCommandV1;
-}
-
-Message CommandRequestBuilder::done() {
-    invariant(_state == State::kInputDocs);
-    MsgData::View msg = _builder.buf();
-    msg.setLen(_builder.len());
+    MsgData::View msg = builder.buf();
+    msg.setLen(builder.len());
     msg.setOperation(dbCommand);
-    _builder.decouple();                     // release ownership from BufBuilder.
-    _message.setData(msg.view2ptr(), true);  // transfer ownership to Message.
-    _state = State::kDone;
-    return std::move(_message);
+    return Message(builder.release());
 }
 
 }  // namespace rpc

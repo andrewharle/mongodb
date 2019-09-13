@@ -14,7 +14,7 @@
 
     // Shard the collection
     s.adminCommand({enablesharding: "test"});
-    s.ensurePrimaryShard('test', 'shard0001');
+    s.ensurePrimaryShard('test', s.shard1.shardName);
     s.adminCommand({shardcollection: "test.limit_push", key: {x: 1}});
 
     // Now split the and move the data between the shards
@@ -22,18 +22,16 @@
     s.adminCommand({
         moveChunk: "test.limit_push",
         find: {x: 51},
-        to: s.getOther(s.getServer("test")).name,
+        to: s.getOther(s.getPrimaryShard("test")).name,
         _waitForDelete: true
     });
 
     // Check that the chunck have split correctly
-    assert.eq(2, s.config.chunks.count(), "wrong number of chunks");
+    assert.eq(2, s.config.chunks.count({"ns": "test.limit_push"}), "wrong number of chunks");
 
     // The query is asking for the maximum value below a given value
     // db.limit_push.find( { x : { $lt : 60} } ).sort( { x:-1} ).limit(1)
-    q = {
-        x: {$lt: 60}
-    };
+    q = {x: {$lt: 60}};
 
     // Make sure the basic queries are correct
     assert.eq(60, db.limit_push.find(q).count(), "Did not find 60 documents");

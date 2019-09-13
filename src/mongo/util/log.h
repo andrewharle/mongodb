@@ -1,30 +1,33 @@
 // @file log.h
 
-/*    Copyright 2009 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 // #pragma once is not used in this header.
@@ -49,8 +52,10 @@
 #include "mongo/logger/log_component.h"
 #include "mongo/logger/logger.h"
 #include "mongo/logger/logstream_builder.h"
+#include "mongo/logger/redaction.h"
 #include "mongo/logger/tee.h"
 #include "mongo/util/concurrency/thread_name.h"
+#include "mongo/util/errno_util.h"
 
 // Provide log component in global scope so that MONGO_LOG will always have a valid component.
 // Global log component will be kDefault unless overridden by MONGO_LOG_DEFAULT_COMPONENT.
@@ -161,8 +166,12 @@ inline LogstreamBuilder log(logger::LogComponent::Value componentValue) {
 /**
  * Runs the same logic as log()/warning()/error(), without actually outputting a stream.
  */
+inline bool shouldLog(logger::LogComponent logComponent, logger::LogSeverity severity) {
+    return logger::globalLogDomain()->shouldLog(logComponent, severity);
+}
+
 inline bool shouldLog(logger::LogSeverity severity) {
-    return logger::globalLogDomain()->shouldLog(::MongoLogDefaultComponent_component, severity);
+    return shouldLog(::MongoLogDefaultComponent_component, severity);
 }
 
 }  // namespace
@@ -224,20 +233,18 @@ inline bool shouldLog(logger::LogSeverity severity) {
  */
 bool rotateLogs(bool renameFiles);
 
-/** output the error # and error message with prefix.
-    handy for use as parm in uassert/massert.
-    */
-std::string errnoWithPrefix(StringData prefix);
-
 extern Tee* const warnings;            // Things put here go in serverStatus
 extern Tee* const startupWarningsLog;  // Things put here get reported in MMS
-
-std::string errnoWithDescription(int errorcode = -1);
 
 /**
  * Write the current context (backtrace), along with the optional "msg".
  */
 void logContext(const char* msg = NULL);
+
+/**
+ * Turns the global log manager into a plain console logger (no adornments).
+ */
+void setPlainConsoleLogger();
 
 }  // namespace mongo
 

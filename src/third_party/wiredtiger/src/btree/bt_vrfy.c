@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -118,8 +118,8 @@ __verify_config_offsets(
 static int
 __verify_layout(WT_SESSION_IMPL *session, WT_VSTUFF *vs)
 {
-	uint64_t total;
 	size_t i;
+	uint64_t total;
 
 	for (i = 0, total = 0; i < WT_ELEMENTS(vs->depth_internal); ++i)
 		total += vs->depth_internal[i];
@@ -384,7 +384,7 @@ __verify_tree(WT_SESSION_IMPL *session, WT_REF *ref, WT_VSTUFF *vs)
 	if (vs->dump_blocks)
 		WT_RET(__wt_debug_disk(session, page->dsk, NULL));
 	if (vs->dump_pages)
-		WT_RET(__wt_debug_page(session, ref, NULL));
+		WT_RET(__wt_debug_page(session, NULL, ref, NULL));
 #endif
 
 	/*
@@ -696,9 +696,10 @@ __verify_overflow_cell(
 	const WT_PAGE_HEADER *dsk;
 	uint32_t cell_num, i;
 
+	*found = false;
+
 	btree = S2BT(session);
 	unpack = &_unpack;
-	*found = false;
 
 	/*
 	 * If a tree is empty (just created), it won't have a disk image;

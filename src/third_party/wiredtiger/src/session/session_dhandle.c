@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -119,7 +119,7 @@ __wt_session_lock_dhandle(
 	WT_DECL_RET;
 	bool is_open, lock_busy, want_exclusive;
 
-	*is_deadp = 0;
+	*is_deadp = false;
 
 	dhandle = session->dhandle;
 	btree = dhandle->handle;
@@ -139,8 +139,8 @@ __wt_session_lock_dhandle(
 	if (dhandle->excl_session == session) {
 		if (!LF_ISSET(WT_DHANDLE_LOCK_ONLY) &&
 		    (!F_ISSET(dhandle, WT_DHANDLE_OPEN) ||
-		    F_ISSET(btree, WT_BTREE_SPECIAL_FLAGS)))
-			return (EBUSY);
+		    (btree != NULL && F_ISSET(btree, WT_BTREE_SPECIAL_FLAGS))))
+			return (__wt_set_return(session, EBUSY));
 		++dhandle->excl_ref;
 		return (0);
 	}
@@ -158,7 +158,7 @@ __wt_session_lock_dhandle(
 	for (;;) {
 		/* If the handle is dead, give up. */
 		if (F_ISSET(dhandle, WT_DHANDLE_DEAD)) {
-			*is_deadp = 1;
+			*is_deadp = true;
 			return (0);
 		}
 
@@ -166,8 +166,8 @@ __wt_session_lock_dhandle(
 		 * If the handle is already open for a special operation,
 		 * give up.
 		 */
-		if (F_ISSET(btree, WT_BTREE_SPECIAL_FLAGS))
-			return (EBUSY);
+		if (btree != NULL && F_ISSET(btree, WT_BTREE_SPECIAL_FLAGS))
+			return (__wt_set_return(session, EBUSY));
 
 		/*
 		 * If the handle is open, get a read lock and recheck.
@@ -182,7 +182,7 @@ __wt_session_lock_dhandle(
 		    (!want_exclusive || lock_busy)) {
 			__wt_readlock(session, &dhandle->rwlock);
 			if (F_ISSET(dhandle, WT_DHANDLE_DEAD)) {
-				*is_deadp = 1;
+				*is_deadp = true;
 				__wt_readunlock(session, &dhandle->rwlock);
 				return (0);
 			}
@@ -203,7 +203,7 @@ __wt_session_lock_dhandle(
 		if ((ret =
 		    __wt_try_writelock(session, &dhandle->rwlock)) == 0) {
 			if (F_ISSET(dhandle, WT_DHANDLE_DEAD)) {
-				*is_deadp = 1;
+				*is_deadp = true;
 				__wt_writeunlock(session, &dhandle->rwlock);
 				return (0);
 			}
@@ -235,16 +235,17 @@ __wt_session_lock_dhandle(
 		lock_busy = true;
 
 		/* Give other threads a chance to make progress. */
+		WT_STAT_CONN_INCR(session, dhandle_lock_blocked);
 		__wt_yield();
 	}
 }
 
 /*
- * __wt_session_release_btree --
- *	Unlock a btree handle.
+ * __wt_session_release_dhandle --
+ *	Unlock a data handle.
  */
 int
-__wt_session_release_btree(WT_SESSION_IMPL *session)
+__wt_session_release_dhandle(WT_SESSION_IMPL *session)
 {
 	WT_BTREE *btree;
 	WT_DATA_HANDLE *dhandle;
@@ -252,8 +253,8 @@ __wt_session_release_btree(WT_SESSION_IMPL *session)
 	WT_DECL_RET;
 	bool locked, write_locked;
 
-	btree = S2BT(session);
 	dhandle = session->dhandle;
+	btree = dhandle->handle;
 	write_locked = F_ISSET(dhandle, WT_DHANDLE_EXCLUSIVE);
 	locked = true;
 
@@ -261,17 +262,18 @@ __wt_session_release_btree(WT_SESSION_IMPL *session)
 	 * If we had special flags set, close the handle so that future access
 	 * can get a handle without special flags.
 	 */
-	if (F_ISSET(dhandle, WT_DHANDLE_DISCARD | WT_DHANDLE_DISCARD_FORCE)) {
+	if (F_ISSET(dhandle, WT_DHANDLE_DISCARD | WT_DHANDLE_DISCARD_KILL)) {
 		WT_SAVE_DHANDLE(session, __session_find_dhandle(session,
 		    dhandle->name, dhandle->checkpoint, &dhandle_cache));
 		if (dhandle_cache != NULL)
 			__session_discard_dhandle(session, dhandle_cache);
 	}
 
-	if (F_ISSET(dhandle, WT_DHANDLE_DISCARD_FORCE)) {
-		ret = __wt_conn_btree_sync_and_close(session, false, true);
-		F_CLR(dhandle, WT_DHANDLE_DISCARD_FORCE);
-	} else if (F_ISSET(btree, WT_BTREE_BULK)) {
+	/*
+	 * Close the handle if we are finishing a bulk load or if the handle is
+	 * set to discard on release.
+	 */
+	if (btree != NULL && F_ISSET(btree, WT_BTREE_BULK)) {
 		WT_ASSERT(session, F_ISSET(dhandle, WT_DHANDLE_EXCLUSIVE) &&
 		    !F_ISSET(dhandle, WT_DHANDLE_DISCARD));
 		/*
@@ -280,12 +282,14 @@ __wt_session_release_btree(WT_SESSION_IMPL *session)
 		 * of handles.
 		 */
 		WT_WITH_SCHEMA_LOCK(session, ret =
-		    __wt_conn_btree_sync_and_close(session, false, false));
-	} else if (F_ISSET(dhandle, WT_DHANDLE_DISCARD) ||
-	    F_ISSET(btree, WT_BTREE_SPECIAL_FLAGS)) {
+		    __wt_conn_dhandle_close(session, false, false));
+	} else if ((btree != NULL && F_ISSET(btree, WT_BTREE_SPECIAL_FLAGS)) ||
+	    F_ISSET(dhandle, WT_DHANDLE_DISCARD | WT_DHANDLE_DISCARD_KILL)) {
 		WT_ASSERT(session, F_ISSET(dhandle, WT_DHANDLE_EXCLUSIVE));
-		ret = __wt_conn_btree_sync_and_close(session, false, false);
-		F_CLR(dhandle, WT_DHANDLE_DISCARD);
+
+		ret = __wt_conn_dhandle_close(session, false,
+		    F_ISSET(dhandle, WT_DHANDLE_DISCARD_KILL));
+		F_CLR(dhandle, WT_DHANDLE_DISCARD | WT_DHANDLE_DISCARD_KILL);
 	}
 
 	if (session == dhandle->excl_session) {
@@ -317,8 +321,8 @@ __wt_session_get_btree_ckpt(WT_SESSION_IMPL *session,
 {
 	WT_CONFIG_ITEM cval;
 	WT_DECL_RET;
-	bool last_ckpt;
 	const char *checkpoint;
+	bool last_ckpt;
 
 	last_ckpt = false;
 	checkpoint = NULL;
@@ -343,7 +347,7 @@ retry:			WT_RET(__wt_meta_checkpoint_last_name(
 			    session, cval.str, cval.len, &checkpoint));
 	}
 
-	ret = __wt_session_get_btree(session, uri, checkpoint, cfg, flags);
+	ret = __wt_session_get_dhandle(session, uri, checkpoint, cfg, flags);
 	__wt_free(session, checkpoint);
 
 	/*
@@ -370,10 +374,12 @@ retry:			WT_RET(__wt_meta_checkpoint_last_name(
 void
 __wt_session_close_cache(WT_SESSION_IMPL *session)
 {
-	WT_DATA_HANDLE_CACHE *dhandle_cache;
+	WT_DATA_HANDLE_CACHE *dhandle_cache, *dhandle_cache_tmp;
 
-	while ((dhandle_cache = TAILQ_FIRST(&session->dhandles)) != NULL)
+	WT_TAILQ_SAFE_REMOVE_BEGIN(dhandle_cache,
+	    &session->dhandles, q, dhandle_cache_tmp) {
 		__session_discard_dhandle(session, dhandle_cache);
+	} WT_TAILQ_SAFE_REMOVE_END
 }
 
 /*
@@ -385,7 +391,7 @@ __session_dhandle_sweep(WT_SESSION_IMPL *session)
 {
 	WT_CONNECTION_IMPL *conn;
 	WT_DATA_HANDLE *dhandle;
-	WT_DATA_HANDLE_CACHE *dhandle_cache, *dhandle_cache_next;
+	WT_DATA_HANDLE_CACHE *dhandle_cache, *dhandle_cache_tmp;
 	time_t now;
 
 	conn = S2C(session);
@@ -401,9 +407,8 @@ __session_dhandle_sweep(WT_SESSION_IMPL *session)
 
 	WT_STAT_CONN_INCR(session, dh_session_sweeps);
 
-	dhandle_cache = TAILQ_FIRST(&session->dhandles);
-	while (dhandle_cache != NULL) {
-		dhandle_cache_next = TAILQ_NEXT(dhandle_cache, q);
+	TAILQ_FOREACH_SAFE(dhandle_cache,
+	    &session->dhandles, q, dhandle_cache_tmp) {
 		dhandle = dhandle_cache->dhandle;
 		if (dhandle != session->dhandle &&
 		    dhandle->session_inuse == 0 &&
@@ -415,7 +420,6 @@ __session_dhandle_sweep(WT_SESSION_IMPL *session)
 			WT_ASSERT(session, !WT_IS_METADATA(dhandle));
 			__session_discard_dhandle(session, dhandle_cache);
 		}
-		dhandle_cache = dhandle_cache_next;
 	}
 }
 
@@ -485,11 +489,11 @@ __session_get_dhandle(
 }
 
 /*
- * __wt_session_get_btree --
- *	Get a btree handle for the given name, set session->dhandle.
+ * __wt_session_get_dhandle --
+ *	Get a data handle for the given name, set session->dhandle.
  */
 int
-__wt_session_get_btree(WT_SESSION_IMPL *session,
+__wt_session_get_dhandle(WT_SESSION_IMPL *session,
     const char *uri, const char *checkpoint, const char *cfg[], uint32_t flags)
 {
 	WT_DATA_HANDLE *dhandle;
@@ -532,14 +536,14 @@ __wt_session_get_btree(WT_SESSION_IMPL *session,
 			__wt_writeunlock(session, &dhandle->rwlock);
 
 			WT_WITH_SCHEMA_LOCK(session,
-			    ret = __wt_session_get_btree(
+			    ret = __wt_session_get_dhandle(
 				session, uri, checkpoint, cfg, flags));
 
 			return (ret);
 		}
 
 		/* Open the handle. */
-		if ((ret = __wt_conn_btree_open(session, cfg, flags)) == 0 &&
+		if ((ret = __wt_conn_dhandle_open(session, cfg, flags)) == 0 &&
 		    LF_ISSET(WT_DHANDLE_EXCLUSIVE))
 			break;
 
@@ -582,10 +586,10 @@ __wt_session_lock_checkpoint(WT_SESSION_IMPL *session, const char *checkpoint)
 	 * while we are creating the new checkpoint.  Hold the lock until the
 	 * checkpoint completes.
 	 */
-	WT_ERR(__wt_session_get_btree(session, saved_dhandle->name,
+	WT_ERR(__wt_session_get_dhandle(session, saved_dhandle->name,
 	    checkpoint, NULL, WT_DHANDLE_EXCLUSIVE | WT_DHANDLE_LOCK_ONLY));
 	if ((ret = __wt_meta_track_handle_lock(session, false)) != 0) {
-		WT_TRET(__wt_session_release_btree(session));
+		WT_TRET(__wt_session_release_dhandle(session));
 		goto err;
 	}
 

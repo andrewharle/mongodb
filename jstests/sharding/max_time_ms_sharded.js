@@ -13,13 +13,11 @@
     var shards = [st.shard0, st.shard1];
     var coll = mongos.getCollection("foo.bar");
     var admin = mongos.getDB("admin");
-    var exceededTimeLimit = 50;  // ErrorCodes::ExceededTimeLimit
     var cursor;
     var res;
 
     // Helper function to configure "maxTimeAlwaysTimeOut" fail point on shards, which forces mongod
-    // to
-    // throw if it receives an operation with a max time.  See fail point declaration for complete
+    // to throw if it receives an operation with a max time. See fail point declaration for complete
     // description.
     var configureMaxTimeAlwaysTimeOut = function(mode) {
         assert.commandWorked(shards[0].getDB("admin").runCommand(
@@ -29,8 +27,7 @@
     };
 
     // Helper function to configure "maxTimeAlwaysTimeOut" fail point on shards, which prohibits
-    // mongod
-    // from enforcing time limits.  See fail point declaration for complete description.
+    // mongod from enforcing time limits. See fail point declaration for complete description.
     var configureMaxTimeNeverTimeOut = function(mode) {
         assert.commandWorked(shards[0].getDB("admin").runCommand(
             {configureFailPoint: "maxTimeNeverTimeOut", mode: mode}));
@@ -42,11 +39,11 @@
     // Pre-split collection: shard 0 takes {_id: {$lt: 0}}, shard 1 takes {_id: {$gte: 0}}.
     //
     assert.commandWorked(admin.runCommand({enableSharding: coll.getDB().getName()}));
-    st.ensurePrimaryShard(coll.getDB().toString(), "shard0000");
+    st.ensurePrimaryShard(coll.getDB().toString(), st.shard0.shardName);
     assert.commandWorked(admin.runCommand({shardCollection: coll.getFullName(), key: {_id: 1}}));
     assert.commandWorked(admin.runCommand({split: coll.getFullName(), middle: {_id: 0}}));
     assert.commandWorked(
-        admin.runCommand({moveChunk: coll.getFullName(), find: {_id: 0}, to: "shard0001"}));
+        admin.runCommand({moveChunk: coll.getFullName(), find: {_id: 0}, to: st.shard1.shardName}));
 
     //
     // Insert 100 documents into sharded collection, such that each shard owns 50.
@@ -84,15 +81,24 @@
     // Test that mongos correctly times out max time sharded getmore operations.  Uses
     // maxTimeNeverTimeOut to ensure mongod doesn't enforce a time limit.
     //
-    // TODO: This is unimplemented.  A test for this functionality should be written as
-    // part of the work for SERVER-19410.
-    //
 
     configureMaxTimeNeverTimeOut("alwaysOn");
 
-    // Positive test.  TODO: see above.
+    // Positive test. ~10s operation, 2s limit. The operation takes ~10s because each shard
+    // processes 25 batches of ~400ms each, and the shards are processing getMores in parallel.
+    cursor = coll.find({
+        $where: function() {
+            sleep(200);
+            return true;
+        }
+    });
+    cursor.batchSize(2);
+    cursor.maxTimeMS(2 * 1000);
+    assert.doesNotThrow(
+        () => cursor.next(), [], "did not expect mongos to time out first batch of query");
+    assert.throws(() => cursor.itcount(), [], "expected mongos to abort getmore due to time limit");
 
-    // Negative test.  ~10s operation, with a high (1-day) limit.
+    // Negative test. ~5s operation, with a high (1-day) limit.
     cursor = coll.find({
         $where: function() {
             sleep(100);
@@ -117,12 +123,11 @@
 
     // Positive test for "validate".
     configureMaxTimeAlwaysTimeOut("alwaysOn");
-    res = coll.runCommand("validate", {maxTimeMS: 60 * 1000});
-    assert.commandFailed(
-        res, "expected validate to fail in mongod due to maxTimeAlwaysTimeOut fail point");
-    assert.eq(res["code"],
-              exceededTimeLimit,
-              "expected code " + exceededTimeLimit + " from validate, instead got: " + tojson(res));
+    assert.commandFailedWithCode(
+        coll.runCommand("validate", {maxTimeMS: 60 * 1000}),
+        ErrorCodes.MaxTimeMSExpired,
+        "expected vailidate to fail with code " + ErrorCodes.MaxTimeMSExpired +
+            " due to maxTimeAlwaysTimeOut fail point, but instead got: " + tojson(res));
 
     // Negative test for "validate".
     configureMaxTimeAlwaysTimeOut("off");
@@ -131,12 +136,11 @@
 
     // Positive test for "count".
     configureMaxTimeAlwaysTimeOut("alwaysOn");
-    res = coll.runCommand("count", {maxTimeMS: 60 * 1000});
-    assert.commandFailed(res,
-                         "expected count to fail in mongod due to maxTimeAlwaysTimeOut fail point");
-    assert.eq(res["code"],
-              exceededTimeLimit,
-              "expected code " + exceededTimeLimit + " from count , instead got: " + tojson(res));
+    assert.commandFailedWithCode(coll.runCommand("count", {maxTimeMS: 60 * 1000}),
+                                 ErrorCodes.MaxTimeMSExpired,
+                                 "expected count to fail with code " + ErrorCodes.MaxTimeMSExpired +
+                                     " due to maxTimeAlwaysTimeOut fail point, but instead got: " +
+                                     tojson(res));
 
     // Negative test for "count".
     configureMaxTimeAlwaysTimeOut("off");
@@ -145,13 +149,11 @@
 
     // Positive test for "collStats".
     configureMaxTimeAlwaysTimeOut("alwaysOn");
-    res = coll.runCommand("collStats", {maxTimeMS: 60 * 1000});
-    assert.commandFailed(
-        res, "expected collStats to fail in mongod due to maxTimeAlwaysTimeOut fail point");
-    assert.eq(
-        res["code"],
-        exceededTimeLimit,
-        "expected code " + exceededTimeLimit + " from collStats, instead got: " + tojson(res));
+    assert.commandFailedWithCode(
+        coll.runCommand("collStats", {maxTimeMS: 60 * 1000}),
+        ErrorCodes.MaxTimeMSExpired,
+        "expected collStats to fail with code " + ErrorCodes.MaxTimeMSExpired +
+            " due to maxTimeAlwaysTimeOut fail point, but instead got: " + tojson(res));
 
     // Negative test for "collStats".
     configureMaxTimeAlwaysTimeOut("off");
@@ -160,81 +162,109 @@
 
     // Positive test for "mapReduce".
     configureMaxTimeAlwaysTimeOut("alwaysOn");
-    res = coll.runCommand("mapReduce",
-                          {
-                            map: function() {
-                                emit(0, 0);
-                            },
-                            reduce: function(key, values) {
-                                return 0;
-                            },
-                            out: {inline: 1},
-                            maxTimeMS: 60 * 1000
-                          });
-    assert.commandFailed(
-        res, "expected mapReduce to fail in mongod due to maxTimeAlwaysTimeOut fail point");
-    assert.eq(
-        res["code"],
-        exceededTimeLimit,
-        "expected code " + exceededTimeLimit + " from mapReduce, instead got: " + tojson(res));
+    res = coll.runCommand("mapReduce", {
+        map: function() {
+            emit(0, 0);
+        },
+        reduce: function(key, values) {
+            return 0;
+        },
+        out: {inline: 1},
+        maxTimeMS: 60 * 1000
+    });
+    assert.commandFailedWithCode(
+        res,
+        ErrorCodes.MaxTimeMSExpired,
+        "expected mapReduce to fail with code " + ErrorCodes.MaxTimeMSExpired +
+            " due to maxTimeAlwaysTimeOut fail point, but instead got: " + tojson(res));
 
     // Negative test for "mapReduce".
     configureMaxTimeAlwaysTimeOut("off");
-    assert.commandWorked(coll.runCommand("mapReduce",
-                                         {
-                                           map: function() {
-                                               emit(0, 0);
-                                           },
-                                           reduce: function(key, values) {
-                                               return 0;
-                                           },
-                                           out: {inline: 1},
-                                           maxTimeMS: 60 * 1000
-                                         }),
+    assert.commandWorked(coll.runCommand("mapReduce", {
+        map: function() {
+            emit(0, 0);
+        },
+        reduce: function(key, values) {
+            return 0;
+        },
+        out: {inline: 1},
+        maxTimeMS: 60 * 1000
+    }),
                          "expected mapReduce to not hit time limit in mongod");
 
     // Positive test for "aggregate".
     configureMaxTimeAlwaysTimeOut("alwaysOn");
-    res = coll.runCommand("aggregate", {pipeline: [], maxTimeMS: 60 * 1000});
-    assert.commandFailed(
-        res, "expected aggregate to fail in mongod due to maxTimeAlwaysTimeOut fail point");
-    assert.eq(
-        res["code"],
-        exceededTimeLimit,
-        "expected code " + exceededTimeLimit + " from aggregate , instead got: " + tojson(res));
+    assert.commandFailedWithCode(
+        coll.runCommand("aggregate", {pipeline: [], cursor: {}, maxTimeMS: 60 * 1000}),
+        ErrorCodes.MaxTimeMSExpired,
+        "expected aggregate to fail with code " + ErrorCodes.MaxTimeMSExpired +
+            " due to maxTimeAlwaysTimeOut fail point, but instead got: " + tojson(res));
 
     // Negative test for "aggregate".
     configureMaxTimeAlwaysTimeOut("off");
-    assert.commandWorked(coll.runCommand("aggregate", {pipeline: [], maxTimeMS: 60 * 1000}),
-                         "expected aggregate to not hit time limit in mongod");
+    assert.commandWorked(
+        coll.runCommand("aggregate", {pipeline: [], cursor: {}, maxTimeMS: 60 * 1000}),
+        "expected aggregate to not hit time limit in mongod");
 
-    // Positive test for "moveChunk".
-    configureMaxTimeAlwaysTimeOut("alwaysOn");
-    res = admin.runCommand({
-        moveChunk: coll.getFullName(),
-        find: {_id: 0},
-        to: "shard0000",
-        maxTimeMS: 1000 * 60 * 60 * 24
-    });
-    assert.commandFailed(
-        res, "expected moveChunk to fail in mongod due to maxTimeAlwaysTimeOut fail point");
-    assert.eq(
-        res["code"],
-        exceededTimeLimit,
-        "expected code " + exceededTimeLimit + " from moveChunk, instead got: " + tojson(res));
+    // Test that the maxTimeMS is still enforced on the shards even if we do not spend much time in
+    // mongos blocking.
 
-    // Negative test for "moveChunk".
-    configureMaxTimeAlwaysTimeOut("off");
-    assert.commandWorked(admin.runCommand({
-        moveChunk: coll.getFullName(),
-        find: {_id: 0},
-        to: "shard0000",
-        maxTimeMS: 1000 * 60 * 60 * 24
-    }),
-                         "expected moveChunk to not hit time limit in mongod");
+    // Manually run a find here so we can be sure cursor establishment happens with batch size 0.
+    res = assert.commandWorked(coll.runCommand({
+        find: coll.getName(),
+        filter: {
+            $where: function() {
+                if (this._id < 0) {
+                    // Slow down the query only on one of the shards. Each shard has 50 documents so
+                    // we expect this shard to take ~5 seconds to return a batch.
+                    sleep(200);
+                }
+                return true;
+            }
+        },
+        maxTimeMS: 2000,
+        batchSize: 0
+    }));
+    // Use a batch size of 50 to allow returning results from the fast shard as soon as they're
+    // ready, as opposed to waiting to return one 16MB batch at a time.
+    const kBatchSize = 50;
+    cursor = new DBCommandCursor(coll.getDB(), res, kBatchSize);
+    // The fast shard should return relatively quickly.
+    for (let i = 0; i < 50; ++i) {
+        let next = assert.doesNotThrow(
+            () => cursor.next(), [], "did not expect mongos to time out first batch of query");
+        assert.gte(next._id, 0);
+    }
+    // Sleep on the client-side so mongos's time budget is not being used.
+    sleep(3 * 1000);
+    // Even though mongos has not been blocking this whole time, the shard has been busy computing
+    // the next batch and should have timed out.
+    assert.throws(() => cursor.next(), [], "expected mongos to abort getMore due to time limit");
 
-    // TODO Test additional commmands.
+    // The moveChunk tests are disabled due to SERVER-30179
+    //
+    // // Positive test for "moveChunk".
+    // configureMaxTimeAlwaysTimeOut("alwaysOn");
+    // res = admin.runCommand({
+    // moveChunk: coll.getFullName(),
+    // find: {_id: 0},
+    // to: st.shard0.shardName,
+    // maxTimeMS: 1000 * 60 * 60 * 24
+    // });
+    // assert.commandFailed(
+    // res,
+    // "expected moveChunk to fail due to maxTimeAlwaysTimeOut fail point, but instead got: " +
+    // tojson(res));
+
+    // // Negative test for "moveChunk".
+    // configureMaxTimeAlwaysTimeOut("off");
+    // assert.commandWorked(admin.runCommand({
+    // moveChunk: coll.getFullName(),
+    // find: {_id: 0},
+    // to: st.shard0.shardName,
+    // maxTimeMS: 1000 * 60 * 60 * 24
+    // }),
+    // "expected moveChunk to not hit time limit in mongod");
 
     st.stop();
-
 })();

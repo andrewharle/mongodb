@@ -1,3 +1,11 @@
+// @tags: [
+//     # Cannot implicitly shard accessed collections because of unsupported group operator on
+//     # sharded collection.
+//     assumes_unsharded_collection,
+//
+//     # group uses javascript
+//     requires_scripting,
+// ]
 
 t = db.eval2;
 t.drop();

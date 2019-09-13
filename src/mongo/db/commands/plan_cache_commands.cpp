@@ -1,37 +1,39 @@
+
 /**
-*    Copyright (C) 2013 MongoDB Inc.
-*
-*    This program is free software: you can redistribute it and/or  modify
-*    it under the terms of the GNU Affero General Public License, version 3,
-*    as published by the Free Software Foundation.
-*
-*    This program is distributed in the hope that it will be useful,
-*    but WITHOUT ANY WARRANTY; without even the implied warranty of
-*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*    GNU Affero General Public License for more details.
-*
-*    You should have received a copy of the GNU Affero General Public License
-*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*
-*    As a special exception, the copyright holders give permission to link the
-*    code of portions of this program with the OpenSSL library under certain
-*    conditions as described in each individual source file and distribute
-*    linked combinations including the program with the OpenSSL library. You
-*    must comply with the GNU Affero General Public License in all respects for
-*    all of the code used other than as permitted herein. If you modify file(s)
-*    with this exception, you may extend this exception to your version of the
-*    file(s), but you are not obligated to do so. If you do not wish to do so,
-*    delete this exception statement from your version. If you delete this
-*    exception statement from all source files in the program, then also delete
-*    it in the license file.
-*/
+ *    Copyright (C) 2018-present MongoDB, Inc.
+ *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
+ *
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
+ */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kCommand
 
 #include "mongo/platform/basic.h"
 
-#include <string>
 #include <sstream>
+#include <string>
 
 #include "mongo/base/init.h"
 #include "mongo/base/status.h"
@@ -43,6 +45,7 @@
 #include "mongo/db/db_raii.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/matcher/extensions_callback_real.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/db/query/explain.h"
 #include "mongo/db/query/plan_ranker.h"
 #include "mongo/util/log.h"
@@ -53,24 +56,11 @@ using std::string;
 using std::unique_ptr;
 using namespace mongo;
 
-/**
- * Utility function to extract error code and message from status
- * and append to BSON results.
- */
-void addStatus(const Status& status, BSONObjBuilder& builder) {
-    builder.append("ok", status.isOK() ? 1.0 : 0.0);
-    if (!status.isOK()) {
-        builder.append("code", status.code());
-    }
-    if (!status.reason().empty()) {
-        builder.append("errmsg", status.reason());
-    }
-}
 
 /**
  * Retrieves a collection's plan cache from the database.
  */
-static Status getPlanCache(OperationContext* txn,
+static Status getPlanCache(OperationContext* opCtx,
                            Collection* collection,
                            const string& ns,
                            PlanCache** planCacheOut) {
@@ -96,8 +86,8 @@ static Status getPlanCache(OperationContext* txn,
 // available to the client.
 //
 
-MONGO_INITIALIZER_WITH_PREREQUISITES(SetupPlanCacheCommands,
-                                     MONGO_NO_PREREQUISITES)(InitializerContext* context) {
+MONGO_INITIALIZER_WITH_PREREQUISITES(SetupPlanCacheCommands, MONGO_NO_PREREQUISITES)
+(InitializerContext* context) {
     // PlanCacheCommand constructors refer to static ActionType instances.
     // Registering commands in a mongo static initializer ensures that
     // the ActionType construction will be completed first.
@@ -120,45 +110,34 @@ using std::unique_ptr;
 PlanCacheCommand::PlanCacheCommand(const string& name,
                                    const string& helpText,
                                    ActionType actionType)
-    : Command(name), helpText(helpText), actionType(actionType) {}
+    : BasicCommand(name), helpText(helpText), actionType(actionType) {}
 
-bool PlanCacheCommand::run(OperationContext* txn,
+bool PlanCacheCommand::run(OperationContext* opCtx,
                            const string& dbname,
-                           BSONObj& cmdObj,
-                           int options,
-                           string& errmsg,
+                           const BSONObj& cmdObj,
                            BSONObjBuilder& result) {
-    string ns = parseNs(dbname, cmdObj);
-
-    Status status = runPlanCacheCommand(txn, ns, cmdObj, &result);
-
-    if (!status.isOK()) {
-        addStatus(status, result);
-        return false;
-    }
-
+    const NamespaceString nss(CommandHelpers::parseNsCollectionRequired(dbname, cmdObj));
+    Status status = runPlanCacheCommand(opCtx, nss.ns(), cmdObj, &result);
+    uassertStatusOK(status);
     return true;
 }
 
-bool PlanCacheCommand::isWriteCommandForConfigServer() const {
+
+bool PlanCacheCommand::supportsWriteConcern(const BSONObj& cmd) const {
     return false;
 }
 
-bool PlanCacheCommand::slaveOk() const {
-    return false;
+Command::AllowedOnSecondary PlanCacheCommand::secondaryAllowed(ServiceContext*) const {
+    return AllowedOnSecondary::kOptIn;
 }
 
-bool PlanCacheCommand::slaveOverrideOk() const {
-    return true;
+std::string PlanCacheCommand::help() const {
+    return helpText;
 }
 
-void PlanCacheCommand::help(stringstream& ss) const {
-    ss << helpText;
-}
-
-Status PlanCacheCommand::checkAuthForCommand(ClientBasic* client,
+Status PlanCacheCommand::checkAuthForCommand(Client* client,
                                              const std::string& dbname,
-                                             const BSONObj& cmdObj) {
+                                             const BSONObj& cmdObj) const {
     AuthorizationSession* authzSession = AuthorizationSession::get(client);
     ResourcePattern pattern = parseResourcePattern(dbname, cmdObj);
 
@@ -170,7 +149,7 @@ Status PlanCacheCommand::checkAuthForCommand(ClientBasic* client,
 }
 
 // static
-StatusWith<unique_ptr<CanonicalQuery>> PlanCacheCommand::canonicalize(OperationContext* txn,
+StatusWith<unique_ptr<CanonicalQuery>> PlanCacheCommand::canonicalize(OperationContext* opCtx,
                                                                       const string& ns,
                                                                       const BSONObj& cmdObj) {
     // query - required
@@ -206,12 +185,34 @@ StatusWith<unique_ptr<CanonicalQuery>> PlanCacheCommand::canonicalize(OperationC
         projObj = projElt.Obj();
     }
 
+    // collation - optional
+    BSONObj collationObj;
+    if (auto collationElt = cmdObj["collation"]) {
+        if (!collationElt.isABSONObj()) {
+            return Status(ErrorCodes::BadValue, "optional field collation must be an object");
+        }
+        collationObj = collationElt.Obj();
+        if (collationObj.isEmpty()) {
+            return Status(ErrorCodes::BadValue,
+                          "optional field collation cannot be an empty object");
+        }
+    }
+
     // Create canonical query
     const NamespaceString nss(ns);
-    const ExtensionsCallbackReal extensionsCallback(txn, &nss);
-
-    auto statusWithCQ = CanonicalQuery::canonicalize(
-        std::move(nss), queryObj, sortObj, projObj, extensionsCallback);
+    auto qr = stdx::make_unique<QueryRequest>(std::move(nss));
+    qr->setFilter(queryObj);
+    qr->setSort(sortObj);
+    qr->setProj(projObj);
+    qr->setCollation(collationObj);
+    const ExtensionsCallbackReal extensionsCallback(opCtx, &nss);
+    const boost::intrusive_ptr<ExpressionContext> expCtx;
+    auto statusWithCQ =
+        CanonicalQuery::canonicalize(opCtx,
+                                     std::move(qr),
+                                     expCtx,
+                                     extensionsCallback,
+                                     MatchExpressionParser::kAllowAllSpecialFeatures);
     if (!statusWithCQ.isOK()) {
         return statusWithCQ.getStatus();
     }
@@ -224,15 +225,15 @@ PlanCacheListQueryShapes::PlanCacheListQueryShapes()
                        "Displays all query shapes in a collection.",
                        ActionType::planCacheRead) {}
 
-Status PlanCacheListQueryShapes::runPlanCacheCommand(OperationContext* txn,
+Status PlanCacheListQueryShapes::runPlanCacheCommand(OperationContext* opCtx,
                                                      const string& ns,
-                                                     BSONObj& cmdObj,
+                                                     const BSONObj& cmdObj,
                                                      BSONObjBuilder* bob) {
     // This is a read lock. The query cache is owned by the collection.
-    AutoGetCollectionForRead ctx(txn, ns);
+    AutoGetCollectionForReadCommand ctx(opCtx, NamespaceString(ns));
 
     PlanCache* planCache;
-    Status status = getPlanCache(txn, ctx.getCollection(), ns, &planCache);
+    Status status = getPlanCache(opCtx, ctx.getCollection(), ns, &planCache);
     if (!status.isOK()) {
         // No collection - return results with empty shapes array.
         BSONArrayBuilder arrayBuilder(bob->subarrayStart("shapes"));
@@ -258,6 +259,9 @@ Status PlanCacheListQueryShapes::list(const PlanCache& planCache, BSONObjBuilder
         shapeBuilder.append("query", entry->query);
         shapeBuilder.append("sort", entry->sort);
         shapeBuilder.append("projection", entry->projection);
+        if (!entry->collation.isEmpty()) {
+            shapeBuilder.append("collation", entry->collation);
+        }
         shapeBuilder.doneFast();
 
         // Release resources for cached solution after extracting query shape.
@@ -273,24 +277,24 @@ PlanCacheClear::PlanCacheClear()
                        "Drops one or all cached queries in a collection.",
                        ActionType::planCacheWrite) {}
 
-Status PlanCacheClear::runPlanCacheCommand(OperationContext* txn,
+Status PlanCacheClear::runPlanCacheCommand(OperationContext* opCtx,
                                            const std::string& ns,
-                                           BSONObj& cmdObj,
+                                           const BSONObj& cmdObj,
                                            BSONObjBuilder* bob) {
     // This is a read lock. The query cache is owned by the collection.
-    AutoGetCollectionForRead ctx(txn, ns);
+    AutoGetCollectionForReadCommand ctx(opCtx, NamespaceString(ns));
 
     PlanCache* planCache;
-    Status status = getPlanCache(txn, ctx.getCollection(), ns, &planCache);
+    Status status = getPlanCache(opCtx, ctx.getCollection(), ns, &planCache);
     if (!status.isOK()) {
         // No collection - nothing to do. Return OK status.
         return Status::OK();
     }
-    return clear(txn, planCache, ns, cmdObj);
+    return clear(opCtx, planCache, ns, cmdObj);
 }
 
 // static
-Status PlanCacheClear::clear(OperationContext* txn,
+Status PlanCacheClear::clear(OperationContext* opCtx,
                              PlanCache* planCache,
                              const string& ns,
                              const BSONObj& cmdObj) {
@@ -301,7 +305,7 @@ Status PlanCacheClear::clear(OperationContext* txn,
     // - clear plans for single query shape when a query shape is described in the
     //   command arguments.
     if (cmdObj.hasField("query")) {
-        auto statusWithCQ = PlanCacheCommand::canonicalize(txn, ns, cmdObj);
+        auto statusWithCQ = PlanCacheCommand::canonicalize(opCtx, ns, cmdObj);
         if (!statusWithCQ.isOK()) {
             return statusWithCQ.getStatus();
         }
@@ -311,8 +315,9 @@ Status PlanCacheClear::clear(OperationContext* txn,
         if (!planCache->contains(*cq)) {
             // Log if asked to clear non-existent query shape.
             LOG(1) << ns << ": query shape doesn't exist in PlanCache - "
-                   << cq->getQueryObj().toString() << "(sort: " << cq->getParsed().getSort()
-                   << "; projection: " << cq->getParsed().getProj() << ")";
+                   << redact(cq->getQueryObj()) << "(sort: " << cq->getQueryRequest().getSort()
+                   << "; projection: " << cq->getQueryRequest().getProj()
+                   << "; collation: " << cq->getQueryRequest().getCollation() << ")";
             return Status::OK();
         }
 
@@ -321,18 +326,20 @@ Status PlanCacheClear::clear(OperationContext* txn,
             return result;
         }
 
-        LOG(1) << ns << ": removed plan cache entry - " << cq->getQueryObj().toString()
-               << "(sort: " << cq->getParsed().getSort()
-               << "; projection: " << cq->getParsed().getProj() << ")";
+        LOG(1) << ns << ": removed plan cache entry - " << redact(cq->getQueryObj())
+               << "(sort: " << cq->getQueryRequest().getSort()
+               << "; projection: " << cq->getQueryRequest().getProj()
+               << "; collation: " << cq->getQueryRequest().getCollation() << ")";
 
         return Status::OK();
     }
 
-    // If query is not provided, make sure sort and projection are not in arguments.
+    // If query is not provided, make sure sort, projection, and collation are not in arguments.
     // We do not want to clear the entire cache inadvertently when the user
     // forgets to provide a value for "query".
-    if (cmdObj.hasField("sort") || cmdObj.hasField("projection")) {
-        return Status(ErrorCodes::BadValue, "sort or projection provided without query");
+    if (cmdObj.hasField("sort") || cmdObj.hasField("projection") || cmdObj.hasField("collation")) {
+        return Status(ErrorCodes::BadValue,
+                      "sort, projection, or collation provided without query");
     }
 
     planCache->clear();
@@ -347,30 +354,30 @@ PlanCacheListPlans::PlanCacheListPlans()
                        "Displays the cached plans for a query shape.",
                        ActionType::planCacheRead) {}
 
-Status PlanCacheListPlans::runPlanCacheCommand(OperationContext* txn,
+Status PlanCacheListPlans::runPlanCacheCommand(OperationContext* opCtx,
                                                const std::string& ns,
-                                               BSONObj& cmdObj,
+                                               const BSONObj& cmdObj,
                                                BSONObjBuilder* bob) {
-    AutoGetCollectionForRead ctx(txn, ns);
+    AutoGetCollectionForReadCommand ctx(opCtx, NamespaceString(ns));
 
     PlanCache* planCache;
-    Status status = getPlanCache(txn, ctx.getCollection(), ns, &planCache);
+    Status status = getPlanCache(opCtx, ctx.getCollection(), ns, &planCache);
     if (!status.isOK()) {
         // No collection - return empty plans array.
         BSONArrayBuilder plansBuilder(bob->subarrayStart("plans"));
         plansBuilder.doneFast();
         return Status::OK();
     }
-    return list(txn, *planCache, ns, cmdObj, bob);
+    return list(opCtx, *planCache, ns, cmdObj, bob);
 }
 
 // static
-Status PlanCacheListPlans::list(OperationContext* txn,
+Status PlanCacheListPlans::list(OperationContext* opCtx,
                                 const PlanCache& planCache,
                                 const std::string& ns,
                                 const BSONObj& cmdObj,
                                 BSONObjBuilder* bob) {
-    auto statusWithCQ = canonicalize(txn, ns, cmdObj);
+    auto statusWithCQ = canonicalize(opCtx, ns, cmdObj);
     if (!statusWithCQ.isOK()) {
         return statusWithCQ.getStatus();
     }
@@ -398,10 +405,8 @@ Status PlanCacheListPlans::list(OperationContext* txn,
     for (size_t i = 0; i < numPlans; ++i) {
         BSONObjBuilder planBob(plansBuilder.subobjStart());
 
-        // Create plan details field.
-        // Currently, simple string representationg of
-        // SolutionCacheData. Need to revisit format when we
-        // need to parse user-provided plan details for planCacheAddPlan.
+        // Create the plan details field. Currently, this is a simple string representation of
+        // SolutionCacheData.
         SolutionCacheData* scd = entry->plannerData[i];
         BSONObjBuilder detailsBob(planBob.subobjStart("details"));
         detailsBob.append("solution", scd->toString());
@@ -412,7 +417,7 @@ Status PlanCacheListPlans::list(OperationContext* txn,
         BSONObjBuilder reasonBob(planBob.subobjStart("reason"));
         reasonBob.append("score", entry->decision->scores[i]);
         BSONObjBuilder statsBob(reasonBob.subobjStart("stats"));
-        PlanStageStats* stats = entry->decision->stats.vector()[i];
+        PlanStageStats* stats = entry->decision->stats[i].get();
         if (stats) {
             Explain::statsToBSON(*stats, &statsBob);
         }
@@ -434,7 +439,11 @@ Status PlanCacheListPlans::list(OperationContext* txn,
 
         planBob.append("filterSet", scd->indexFilterApplied);
     }
+
     plansBuilder.doneFast();
+
+    // Append the time the entry was inserted into the plan cache.
+    bob->append("timeOfCreation", entry->timeOfCreation);
 
     return Status::OK();
 }

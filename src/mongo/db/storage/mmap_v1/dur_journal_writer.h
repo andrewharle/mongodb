@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -31,9 +33,9 @@
 #include "mongo/base/disallow_copying.h"
 #include "mongo/db/storage/journal_listener.h"
 #include "mongo/db/storage/mmap_v1/aligned_builder.h"
+#include "mongo/db/storage/mmap_v1/commit_notifier.h"
 #include "mongo/db/storage/mmap_v1/dur_journalformat.h"
 #include "mongo/stdx/thread.h"
-#include "mongo/util/concurrency/synchronization.h"
 #include "mongo/util/queue.h"
 
 namespace mongo {
@@ -84,7 +86,7 @@ public:
 
         // Specifies the commit number which flushing this buffer would notify. This value is
         // zero, if there is no data to be flushed or if the buffer is noop/shutdown.
-        NotifyAll::When _commitNumber;
+        CommitNotifier::When _commitNumber;
 
         // Special buffer that's posted when there is nothing to be written to the journal,
         // but we want to order a notification so it happens after all other writes have
@@ -115,7 +117,9 @@ public:
      *      more than this number of journal writes that have not completed, the write calls
      *      will block.
      */
-    JournalWriter(NotifyAll* commitNotify, NotifyAll* applyToDataFilesNotify, size_t numBuffers);
+    JournalWriter(CommitNotifier* commitNotify,
+                  CommitNotifier* applyToDataFilesNotify,
+                  size_t numBuffers);
     ~JournalWriter();
 
     /**
@@ -154,7 +158,7 @@ public:
      * @param commitNumber What commit number to be notified once the buffer has been written
      *      to disk.
      */
-    void writeBuffer(Buffer* buffer, NotifyAll::When commitNumber);
+    void writeBuffer(Buffer* buffer, CommitNotifier::When commitNumber);
 
     /**
      * Ensures that all previously submitted write requests complete. This call is blocking.
@@ -175,10 +179,10 @@ private:
 
     // This gets notified as journal buffers are written. It is not owned and needs to outlive
     // the journal writer object.
-    NotifyAll* const _commitNotify;
+    CommitNotifier* const _commitNotify;
 
     // This gets notified as journal buffers are done being applied to the shared view
-    NotifyAll* const _applyToDataFilesNotify;
+    CommitNotifier* const _applyToDataFilesNotify;
 
     // Wraps and controls the journal writer thread
     stdx::thread _journalWriterThreadHandle;
@@ -188,7 +192,7 @@ private:
 
     // Queue of buffers, which need to be written by the journal writer thread
     BufferQueue _journalQueue;
-    NotifyAll::When _lastCommitNumber;
+    CommitNotifier::When _lastCommitNumber;
 
     // Queue of buffers, whose write has been completed by the journal writer thread.
     BufferQueue _readyQueue;

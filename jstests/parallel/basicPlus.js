@@ -21,14 +21,11 @@ for (var i = 4; i < 8; ++i) {
                         expected % 1000 == 0,
                         expected % 500 == 0);
         g.addInsert({_id: j});
+        // Add currentOp commands running in parallel. Historically there have been many race
+        // conditions between various commands and the currentOp command.
+        g.addCurrentOp();
     }
     t.add(EventGenerator.dispatch, g.getEvents());
 }
 
 t.run("one or more tests failed", true);
-
-assert(c.validate().valid, "validate failed");
-db.getCollectionNames().forEach(function(x) {
-    v = db[x].validate();
-    assert(v.valid, "validate failed for " + x + " with " + tojson(v));
-});

@@ -1,4 +1,3 @@
-
 t = db.geoa;
 t.drop();
 

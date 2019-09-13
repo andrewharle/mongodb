@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -28,7 +30,6 @@
 
 #pragma once
 
-#include <boost/config.hpp>
 #include <chrono>
 #include <ctime>
 #include <exception>
@@ -56,19 +57,16 @@ namespace stdx {
  * wrapping and to simplify the implementation.
  */
 class thread : private ::std::thread {  // NOLINT
-    using super = ::std::thread;        // NOLINT
-
 public:
     using ::std::thread::native_handle_type;  // NOLINT
     using ::std::thread::id;                  // NOLINT
 
-    thread() BOOST_NOEXCEPT : super() {}
+    thread() noexcept : ::std::thread::thread() {}  // NOLINT
 
     thread(const thread&) = delete;
 
-    thread(thread&& other) BOOST_NOEXCEPT
-        : super(static_cast<::std::thread&&>(std::move(other))) {  // NOLINT
-    }
+    thread(thread&& other) noexcept
+        : ::std::thread::thread(static_cast<::std::thread&&>(std::move(other))) {}  // NOLINT
 
     /**
      * As of C++14, the Function overload for std::thread requires that this constructor only
@@ -81,15 +79,15 @@ public:
         class... Args,
         typename std::enable_if<!std::is_same<thread, typename std::decay<Function>::type>::value,
                                 int>::type = 0>
-    explicit thread(Function&& f, Args&&... args) try
-        : super(std::forward<Function>(f), std::forward<Args>(args)...) {
-    } catch (...) {
+    explicit thread(Function&& f, Args&&... args) try:
+        ::std::thread::thread(std::forward<Function>(f), std::forward<Args>(args)...) {}  // NOLINT
+    catch (...) {
         std::terminate();
     }
 
     thread& operator=(const thread&) = delete;
 
-    thread& operator=(thread&& other) BOOST_NOEXCEPT {
+    thread& operator=(thread&& other) noexcept {
         return static_cast<thread&>(
             ::std::thread::operator=(static_cast<::std::thread&&>(std::move(other))));  // NOLINT
     };
@@ -102,12 +100,12 @@ public:
     using ::std::thread::join;    // NOLINT
     using ::std::thread::detach;  // NOLINT
 
-    void swap(thread& other) BOOST_NOEXCEPT {
+    void swap(thread& other) noexcept {
         ::std::thread::swap(static_cast<::std::thread&>(other));  // NOLINT
     }
 };
 
-inline void swap(thread& lhs, thread& rhs) BOOST_NOEXCEPT {
+inline void swap(thread& lhs, thread& rhs) noexcept {
     lhs.swap(rhs);
 }
 
@@ -128,7 +126,7 @@ inline void sleep_for(const std::chrono::duration<Rep, Period>& sleep_duration) 
         std::chrono::duration_cast<std::chrono::seconds>(sleep_duration);  // NOLINT
     const auto nanoseconds =
         std::chrono::duration_cast<std::chrono::nanoseconds>(sleep_duration - seconds);  // NOLINT
-    struct timespec sleepVal = {static_cast<std::time_t>(seconds.count()),               // NOLINT
+    struct timespec sleepVal = {static_cast<std::time_t>(seconds.count()),
                                 static_cast<long>(nanoseconds.count())};
     struct timespec remainVal;
     while (nanosleep(&sleepVal, &remainVal) == -1 && errno == EINTR) {

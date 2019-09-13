@@ -7,7 +7,6 @@
  * command against it. The previous "to" namespace is used as the next "from"
  * namespace.
  */
-load('jstests/concurrency/fsm_workload_helpers/drop_utils.js');  // for dropCollections
 
 var $config = (function() {
 
@@ -36,22 +35,11 @@ var $config = (function() {
             this.fromCollName = toCollName;
         }
 
-        return {
-            init: init,
-            rename: rename
-        };
+        return {init: init, rename: rename};
 
     })();
 
-    var transitions = {
-        init: {rename: 1},
-        rename: {rename: 1}
-    };
-
-    function teardown(db, collName, cluster) {
-        var pattern = new RegExp('^' + this.prefix + '\\d+_\\d+$');
-        dropCollections(db, pattern);
-    }
+    var transitions = {init: {rename: 1}, rename: {rename: 1}};
 
     return {
         threadCount: 10,
@@ -59,7 +47,6 @@ var $config = (function() {
         data: data,
         states: states,
         transitions: transitions,
-        teardown: teardown
     };
 
 })();

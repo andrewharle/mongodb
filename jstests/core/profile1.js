@@ -1,3 +1,13 @@
+// @tags: [
+//   assumes_superuser_permissions,
+//   creates_and_authenticates_user,
+//   does_not_support_stepdowns,
+//   requires_capped,
+//   requires_collstats,
+//   requires_non_retryable_commands,
+//   requires_profiling,
+// ]
+
 (function() {
     "use strict";
     function profileCursor(query) {
@@ -35,7 +45,6 @@
         // With pre-created system.profile (capped)
         db.runCommand({profile: 0});
         db.getCollection("system.profile").drop();
-        assert(!db.getLastError(), "Z");
         assert.eq(0, db.runCommand({profile: -1}).was, "A");
 
         // Create 32MB profile (capped) collection
@@ -87,18 +96,13 @@
 
         resetProfile(2);
         db.profile1.drop();
-        var q = {
-            _id: 5
-        };
-        var u = {
-            $inc: {x: 1}
-        };
+        var q = {_id: 5};
+        var u = {$inc: {x: 1}};
         db.profile1.update(q, u);
         var r = profileCursor({ns: db.profile1.getFullName()}).sort({$natural: -1})[0];
-        assert.eq(q, r.query, "Y1: " + tojson(r));
-        assert.eq(u, r.updateobj, "Y2");
-        assert.eq("update", r.op, "Y3");
-        assert.eq("profile1.profile1", r.ns, "Y4");
+        assert.eq({q: q, u: u, multi: false, upsert: false}, r.command, tojson(r));
+        assert.eq("update", r.op, tojson(r));
+        assert.eq("profile1.profile1", r.ns, tojson(r));
     } finally {
         // disable profiling for subsequent tests
         assert.commandWorked(db.runCommand({profile: 0}));

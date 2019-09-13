@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -35,6 +37,7 @@
 #include "mongo/base/status.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/concurrency/idle_thread_block.h"
 #include "mongo/util/concurrency/thread_name.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
@@ -132,32 +135,34 @@ void ThreadPool::join() {
         stdx::unique_lock<stdx::mutex> lk(_mutex);
         _join_inlock(&lk);
     } catch (...) {
+        severe() << "Exception escaped join in thread pool " << _options.poolName << ": "
+                 << exceptionToStatus();
         std::terminate();
     }
 }
 
 void ThreadPool::_join_inlock(stdx::unique_lock<stdx::mutex>* lk) {
-    _stateChange.wait(*lk,
-                      [this] {
-                          switch (_state) {
-                              case preStart:
-                                  return false;
-                              case running:
-                                  return false;
-                              case joinRequired:
-                                  return true;
-                              case joining:
-                              case shutdownComplete:
-                                  severe() << "Attempted to join pool " << _options.poolName
-                                           << " more than once";
-                                  fassertFailed(28700);
-                          }
-                          MONGO_UNREACHABLE;
-                      });
+    _stateChange.wait(*lk, [this] {
+        switch (_state) {
+            case preStart:
+                return false;
+            case running:
+                return false;
+            case joinRequired:
+                return true;
+            case joining:
+            case shutdownComplete:
+                severe() << "Attempted to join pool " << _options.poolName << " more than once";
+                fassertFailed(28700);
+        }
+        MONGO_UNREACHABLE;
+    });
     _setState_inlock(joining);
     ++_numIdleThreads;
-    while (!_pendingTasks.empty()) {
-        _doOneTask(lk);
+    if (!_pendingTasks.empty()) {
+        lk->unlock();
+        _drainPendingTasks();
+        lk->lock();
     }
     --_numIdleThreads;
     ThreadList threadsToJoin;
@@ -169,6 +174,22 @@ void ThreadPool::_join_inlock(stdx::unique_lock<stdx::mutex>* lk) {
     lk->lock();
     invariant(_state == joining);
     _setState_inlock(shutdownComplete);
+}
+
+void ThreadPool::_drainPendingTasks() {
+    // Tasks cannot be run inline because they can create OperationContexts and the join() caller
+    // may already have one associated with the thread.
+    stdx::thread cleanThread = stdx::thread([&] {
+        const std::string threadName = str::stream() << _options.threadNamePrefix
+                                                     << _nextThreadId++;
+        setThreadName(threadName);
+        _options.onCreateThread(threadName);
+        stdx::unique_lock<stdx::mutex> lock(_mutex);
+        while (!_pendingTasks.empty()) {
+            _doOneTask(&lock);
+        }
+    });
+    cleanThread.join();
 }
 
 Status ThreadPool::schedule(Task task) {
@@ -208,7 +229,7 @@ void ThreadPool::waitForIdle() {
     }
 }
 
-ThreadPool::Stats ThreadPool::getStats() {
+ThreadPool::Stats ThreadPool::getStats() const {
     stdx::lock_guard<stdx::mutex> lk(_mutex);
     Stats result;
     result.options = _options;
@@ -220,13 +241,15 @@ ThreadPool::Stats ThreadPool::getStats() {
 }
 
 void ThreadPool::_workerThreadBody(ThreadPool* pool, const std::string& threadName) {
-    std::string poolName = pool->_options.poolName;
     setThreadName(threadName);
+    pool->_options.onCreateThread(threadName);
+    const auto poolName = pool->_options.poolName;
     LOG(1) << "starting thread in pool " << poolName;
     try {
         pool->_consumeTasks();
     } catch (...) {
-        severe() << "Exception reached top of stack in thread pool " << poolName;
+        severe() << "Exception reached top of stack in thread pool " << poolName << ": "
+                 << exceptionToStatus();
         std::terminate();
     }
 
@@ -260,6 +283,7 @@ void ThreadPool::_consumeTasks() {
 
                 LOG(3) << "Not reaping because the earliest retirement date is "
                        << nextThreadRetirementDate;
+                MONGO_IDLE_THREAD_BLOCK;
                 _workAvailable.wait_until(lk, nextThreadRetirementDate.toSystemTimePoint());
             } else {
                 // Since the number of threads is not more than minThreads, this thread is not
@@ -268,6 +292,7 @@ void ThreadPool::_consumeTasks() {
                 // would be eligible for retirement once they had no work left to do.
                 LOG(3) << "waiting for work; I am one of " << _threads.size() << " thread(s);"
                        << " the minimum number of threads is " << _options.minThreads;
+                MONGO_IDLE_THREAD_BLOCK;
                 _workAvailable.wait(lk);
             }
             continue;
@@ -328,7 +353,8 @@ void ThreadPool::_doOneTask(stdx::unique_lock<stdx::mutex>* lk) {
             _poolIsIdle.notify_all();
         }
     } catch (...) {
-        severe() << "Exception escaped task in thread pool " << _options.poolName;
+        severe() << "Exception escaped task in thread pool " << _options.poolName << ": "
+                 << exceptionToStatus();
         std::terminate();
     }
 }
@@ -358,12 +384,12 @@ void ThreadPool::_startWorkerThread_inlock() {
     invariant(_threads.size() < _options.maxThreads);
     const std::string threadName = str::stream() << _options.threadNamePrefix << _nextThreadId++;
     try {
-        _threads.emplace_back(stdx::bind(&ThreadPool::_workerThreadBody, this, threadName));
+        _threads.emplace_back([this, threadName] { _workerThreadBody(this, threadName); });
         ++_numIdleThreads;
     } catch (const std::exception& ex) {
         error() << "Failed to start " << threadName << "; " << _threads.size()
                 << " other thread(s) still running in pool " << _options.poolName
-                << "; caught exception: " << ex.what();
+                << "; caught exception: " << redact(ex.what());
     }
 }
 

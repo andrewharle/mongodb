@@ -1,52 +1,58 @@
 // processinfo_darwin.cpp
 
-/*    Copyright 2009 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kControl
 
 #include "mongo/platform/basic.h"
-#include "mongo/util/processinfo.h"
-#include "mongo/util/log.h"
-#include "mongo/db/jsobj.h"
 
-#include <mach/vm_statistics.h>
-#include <mach/task_info.h>
-#include <mach/mach_init.h>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+
+#include <iostream>
 #include <mach/mach_host.h>
+#include <mach/mach_init.h>
 #include <mach/mach_traps.h>
 #include <mach/task.h>
+#include <mach/task_info.h>
 #include <mach/vm_map.h>
-#include <mach/shared_region.h>
-#include <iostream>
+#include <mach/vm_statistics.h>
 
-#include <sys/types.h>
 #include <sys/mman.h>
 #include <sys/sysctl.h>
+#include <sys/types.h>
+
+#include "mongo/db/jsobj.h"
+#include "mongo/util/log.h"
+#include "mongo/util/processinfo.h"
 
 using namespace std;
 
@@ -58,6 +64,14 @@ ProcessInfo::~ProcessInfo() {}
 
 bool ProcessInfo::supported() {
     return true;
+}
+
+// get the number of CPUs available to the scheduler
+boost::optional<unsigned long> ProcessInfo::getNumCoresForProcess() {
+    long nprocs = sysconf(_SC_NPROCESSORS_ONLN);
+    if (nprocs)
+        return nprocs;
+    return boost::none;
 }
 
 int ProcessInfo::getVirtualMemorySize() {
@@ -144,7 +158,7 @@ Variant getSysctlByName(const char* sysctlName) {
     } while (status == -1 && errno == ENOMEM);
     if (status == -1) {
         // unrecoverable error from sysctlbyname
-        log() << sysctlName << " unavailable" << endl;
+        log() << sysctlName << " unavailable";
         return "";
     }
 
@@ -160,11 +174,11 @@ long long getSysctlByName<NumberVal>(const char* sysctlName) {
     long long value = 0;
     size_t len = sizeof(value);
     if (sysctlbyname(sysctlName, &value, &len, NULL, 0) < 0) {
-        log() << "Unable to resolve sysctl " << sysctlName << " (number) " << endl;
+        log() << "Unable to resolve sysctl " << sysctlName << " (number) ";
     }
     if (len > 8) {
         log() << "Unable to resolve sysctl " << sysctlName << " as integer.  System returned "
-              << len << " bytes." << endl;
+              << len << " bytes.";
     }
     return value;
 }
@@ -175,6 +189,7 @@ void ProcessInfo::SystemInfo::collectSystemInfo() {
     osVersion = getSysctlByName<string>("kern.osrelease");
     addrSize = (getSysctlByName<NumberVal>("hw.cpu64bit_capable") ? 64 : 32);
     memSize = getSysctlByName<NumberVal>("hw.memsize");
+    memLimit = memSize;
     numCores = getSysctlByName<NumberVal>("hw.ncpu");  // includes hyperthreading cores
     pageSize = static_cast<unsigned long long>(sysconf(_SC_PAGESIZE));
     cpuArch = getSysctlByName<string>("hw.machine");
@@ -213,7 +228,7 @@ bool ProcessInfo::blockCheckSupported() {
 bool ProcessInfo::blockInMemory(const void* start) {
     char x = 0;
     if (mincore(alignToStartOfPage(start), getPageSize(), &x)) {
-        log() << "mincore failed: " << errnoWithDescription() << endl;
+        log() << "mincore failed: " << errnoWithDescription();
         return 1;
     }
     return x & 0x1;
@@ -222,7 +237,7 @@ bool ProcessInfo::blockInMemory(const void* start) {
 bool ProcessInfo::pagesInMemory(const void* start, size_t numPages, vector<char>* out) {
     out->resize(numPages);
     if (mincore(alignToStartOfPage(start), numPages * getPageSize(), &out->front())) {
-        log() << "mincore failed: " << errnoWithDescription() << endl;
+        log() << "mincore failed: " << errnoWithDescription();
         return false;
     }
     for (size_t i = 0; i < numPages; ++i) {

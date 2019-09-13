@@ -1,3 +1,5 @@
+// @tags: [requires_non_retryable_commands]
+
 // Test for SERVER-7017
 // We shouldn't rename a collection when one of its indexes will generate a namespace
 // that is greater than 120 chars. To do this we create a long index name and try
@@ -20,7 +22,7 @@ dbc.ensureIndex({
 // Checking for the newly created index and the _id index in original collection
 assert.eq(2, dbc.getIndexes().length, "Long Rename Init");
 // Should fail to rename collection as the index namespace is too long
-assert.commandFailed(dbc.renameCollection(dbd), "Long Rename Exec");
+assert.commandFailed(dbc.renameCollection(d), "Long Rename Exec");
 // Since we failed we should have the 2 indexes unmoved and no indexes under the new collection name
 assert.eq(2, dbc.getIndexes().length, "Long Rename Result 1");
 assert.eq(0, dbd.getIndexes().length, "Long Rename Result 2");

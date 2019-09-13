@@ -1,17 +1,17 @@
-// Check that doing updates done during a migrate all go to the right place
+/**
+ * Check that doing updates done during a migrate all go to the right place
+ *
+ * This test is labeled resource intensive because its total io_write is 36MB compared to a median
+ * of 5MB across all sharding tests in wiredTiger.
+ * @tags: [resource_intensive]
+ */
 (function() {
 
-    var s = new ShardingTest({
-        name: "slow_sharding_balance4",
-        shards: 2,
-        mongos: 1,
-        other: {chunkSize: 1, enableAutoSplit: true}
-    });
+    var s = new ShardingTest({shards: 2, mongos: 1, other: {chunkSize: 1, enableAutoSplit: true}});
 
-    s.adminCommand({enablesharding: "test"});
-    s.ensurePrimaryShard('test', 'shard0001');
-    s.adminCommand({shardcollection: "test.foo", key: {_id: 1}});
-    assert.eq(1, s.config.chunks.count(), "setup1");
+    assert.commandWorked(s.s0.adminCommand({enablesharding: "test"}));
+    s.ensurePrimaryShard('test', s.shard1.shardName);
+    assert.commandWorked(s.s0.adminCommand({shardcollection: "test.foo", key: {_id: 1}}));
 
     s.config.settings.find().forEach(printjson);
 
@@ -25,7 +25,7 @@
 
     num = 0;
 
-    counts = {};
+    var counts = {};
 
     //
     // TODO: Rewrite to make much clearer.
@@ -39,13 +39,10 @@
     //
 
     function doUpdate(bulk, includeString, optionalId) {
-        var up = {
-            $inc: {x: 1}
-        };
-        if (includeString)
-            up["$set"] = {
-                s: bigString
-            };
+        var up = {$inc: {x: 1}};
+        if (includeString) {
+            up["$set"] = {s: bigString};
+        }
         var myid = optionalId == undefined ? Random.randInt(N) : optionalId;
         bulk.find({_id: myid}).upsert().update(up);
 
@@ -53,9 +50,10 @@
         return myid;
     }
 
+    Random.setRandomSeed();
+
     // Initially update all documents from 1 to N, otherwise later checks can fail because no
-    // document
-    // previously existed
+    // document previously existed
     var bulk = db.foo.initializeUnorderedBulkOp();
     for (i = 0; i < N; i++) {
         doUpdate(bulk, true, i);
@@ -74,7 +72,7 @@
     }
     check("initial at end");
 
-    assert.lt(20, s.config.chunks.count(), "setup2");
+    assert.lt(20, s.config.chunks.count({"ns": "test.foo"}), "setup2");
 
     function check(msg, dontAssert) {
         for (var x in counts) {
@@ -110,22 +108,46 @@
         return true;
     }
 
+    var consecutiveNoProgressMadeErrors = 0;
+
     function diff1() {
         jsTest.log("Running diff1...");
 
-        bulk = db.foo.initializeUnorderedBulkOp();
+        var bulk = db.foo.initializeUnorderedBulkOp();
         var myid = doUpdate(bulk, false);
-        var res = assert.writeOK(bulk.execute());
+        var res = bulk.execute();
 
-        assert.eq(1,
-                  res.nModified,
-                  "diff myid: " + myid + " 2: " + res.toString() + "\n" + " correct count is: " +
-                      counts[myid] + " db says count is: " + tojson(db.foo.findOne({_id: myid})));
+        assert(res instanceof BulkWriteResult,
+               'Result from bulk.execute should be of type BulkWriteResult');
+        if (res.hasWriteErrors()) {
+            res.writeErrors.forEach(function(err) {
+                // Ignore up to 3 consecutive NoProgressMade errors for the cases where migration
+                // might be going faster than the writes are executing
+                if (err.code == ErrorCodes.NoProgressMade) {
+                    consecutiveNoProgressMadeErrors++;
+                    if (consecutiveNoProgressMadeErrors < 3) {
+                        return;
+                    }
+                }
+
+                assert.writeOK(res);
+            });
+        } else {
+            consecutiveNoProgressMadeErrors = 0;
+
+            assert.eq(1,
+                      res.nModified,
+                      "diff myid: " + myid + " 2: " + res.toString() + "\n" +
+                          " correct count is: " + counts[myid] + " db says count is: " +
+                          tojson(db.foo.findOne({_id: myid})));
+        }
 
         var x = s.chunkCounts("foo");
         if (Math.random() > .999)
             printjson(x);
-        return Math.max(x.shard0000, x.shard0001) - Math.min(x.shard0000, x.shard0001);
+
+        return Math.max(x[s.shard0.shardName], x[s.shard1.shardName]) -
+            Math.min(x[s.shard0.shardName], x[s.shard1.shardName]);
     }
 
     assert.lt(20, diff1(), "initial load");
@@ -139,5 +161,4 @@
     }, "balance didn't happen", 1000 * 60 * 20, 1);
 
     s.stop();
-
 })();

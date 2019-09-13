@@ -1,38 +1,41 @@
 // durable_mapped_file.h
 
-/*
-*
-*    Copyright (C) 2008 10gen Inc.
-*
-*    This program is free software: you can redistribute it and/or  modify
-*    it under the terms of the GNU Affero General Public License, version 3,
-*    as published by the Free Software Foundation.
-*
-*    This program is distributed in the hope that it will be useful,
-*    but WITHOUT ANY WARRANTY; without even the implied warranty of
-*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*    GNU Affero General Public License for more details.
-*
-*    You should have received a copy of the GNU Affero General Public License
-*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*
-*    As a special exception, the copyright holders give permission to link the
-*    code of portions of this program with the OpenSSL library under certain
-*    conditions as described in each individual source file and distribute
-*    linked combinations including the program with the OpenSSL library. You
-*    must comply with the GNU Affero General Public License in all respects for
-*    all of the code used other than as permitted herein. If you modify file(s)
-*    with this exception, you may extend this exception to your version of the
-*    file(s), but you are not obligated to do so. If you do not wish to do so,
-*    delete this exception statement from your version. If you delete this
-*    exception statement from all source files in the program, then also delete
-*    it in the license file.
-*/
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
+ *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
+ *
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
+ */
 
 #pragma once
 
+#include "mongo/base/static_assert.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/db/storage/mmap_v1/mmap.h"
-#include "mongo/db/storage/paths.h"
+#include "mongo/db/storage/mmap_v1/paths.h"
 #include "mongo/stdx/mutex.h"
 
 namespace mongo {
@@ -49,11 +52,16 @@ protected:
     }
 
 public:
-    DurableMappedFile();
+    explicit DurableMappedFile(OperationContext* opCtx, OptionSet options = NONE);
     virtual ~DurableMappedFile();
 
+    /**
+     * Callers must be holding a `LockMongoFilesExclusive`.
+     */
+    virtual void close(OperationContext* opCtx);
+
     /** @return true if opened ok. */
-    bool open(const std::string& fname, bool sequentialHint /*typically we open with this false*/);
+    bool open(OperationContext* opCtx, const std::string& fname);
 
     /** @return file length */
     unsigned long long length() const {
@@ -70,10 +78,9 @@ public:
 
     /* Creates with length if DNE, otherwise uses existing file length,
        passed length.
-       @param sequentialHint if true will be sequentially accessed
        @return true for ok
     */
-    bool create(const std::string& fname, unsigned long long& len, bool sequentialHint);
+    bool create(OperationContext* opCtx, const std::string& fname, unsigned long long& len);
 
     /* Get the "standard" view (which is the private one).
        @return the private view.
@@ -117,7 +124,7 @@ public:
         _willNeedRemap = true;
     }
 
-    void remapThePrivateView();
+    void remapThePrivateView(OperationContext* opCtx);
 
     virtual bool isDurableMappedFile() {
         return true;
@@ -160,13 +167,13 @@ public:
     static const unsigned long long MaxWinMemory = 128ULL * 1024 * 1024 * 1024 * 1024;
 
     // Make sure that the chunk memory covers the Max Windows user process VM space
-    static_assert(MaxChunkMemory == MaxWinMemory,
-                  "Need a larger bitset to cover max process VM space");
+    MONGO_STATIC_ASSERT_MSG(MaxChunkMemory == MaxWinMemory,
+                            "Need a larger bitset to cover max process VM space");
 
 public:
     MemoryMappedCOWBitset() {
-        static_assert(MemoryMappedCOWBitset::MaxChunkBytes == sizeof(bits),
-                      "Validate our predicted bitset size is correct");
+        MONGO_STATIC_ASSERT_MSG(MemoryMappedCOWBitset::MaxChunkBytes == sizeof(bits),
+                                "Validate our predicted bitset size is correct");
     }
 
     bool get(uintptr_t i) const {

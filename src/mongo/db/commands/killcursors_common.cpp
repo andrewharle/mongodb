@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -39,40 +41,38 @@
 
 namespace mongo {
 
-Status KillCursorsCmdBase::checkAuthForCommand(ClientBasic* client,
+Status KillCursorsCmdBase::checkAuthForCommand(Client* client,
                                                const std::string& dbname,
-                                               const BSONObj& cmdObj) {
-    auto statusWithRequest = KillCursorsRequest::parseFromBSON(dbname, cmdObj);
+                                               const BSONObj& cmdObj) const {
+    const auto statusWithRequest = KillCursorsRequest::parseFromBSON(dbname, cmdObj);
     if (!statusWithRequest.isOK()) {
         return statusWithRequest.getStatus();
     }
-    auto killCursorsRequest = std::move(statusWithRequest.getValue());
+    const auto killCursorsRequest = statusWithRequest.getValue();
 
-    AuthorizationSession* as = AuthorizationSession::get(client);
-
+    const auto& nss = killCursorsRequest.nss;
     for (CursorId id : killCursorsRequest.cursorIds) {
-        Status authorizationStatus = as->checkAuthForKillCursors(killCursorsRequest.nss, id);
-
-        if (!authorizationStatus.isOK()) {
-            audit::logKillCursorsAuthzCheck(
-                client, killCursorsRequest.nss, id, ErrorCodes::Unauthorized);
-            return authorizationStatus;
+        const auto status = _checkAuth(client, nss, id);
+        if (!status.isOK()) {
+            if (status.code() == ErrorCodes::CursorNotFound) {
+                // Not found isn't an authorization issue.
+                // run() will raise it as a return value.
+                continue;
+            }
+            audit::logKillCursorsAuthzCheck(client, nss, id, status.code());
+            return status;
         }
     }
 
     return Status::OK();
 }
 
-bool KillCursorsCmdBase::run(OperationContext* txn,
+bool KillCursorsCmdBase::run(OperationContext* opCtx,
                              const std::string& dbname,
-                             BSONObj& cmdObj,
-                             int options,
-                             std::string& errmsg,
+                             const BSONObj& cmdObj,
                              BSONObjBuilder& result) {
     auto statusWithRequest = KillCursorsRequest::parseFromBSON(dbname, cmdObj);
-    if (!statusWithRequest.isOK()) {
-        return appendCommandStatus(result, statusWithRequest.getStatus());
-    }
+    uassertStatusOK(statusWithRequest.getStatus());
     auto killCursorsRequest = std::move(statusWithRequest.getValue());
 
     std::vector<CursorId> cursorsKilled;
@@ -81,7 +81,7 @@ bool KillCursorsCmdBase::run(OperationContext* txn,
     std::vector<CursorId> cursorsUnknown;
 
     for (CursorId id : killCursorsRequest.cursorIds) {
-        Status status = _killCursor(txn, killCursorsRequest.nss, id);
+        Status status = _killCursor(opCtx, killCursorsRequest.nss, id);
         if (status.isOK()) {
             cursorsKilled.push_back(id);
         } else if (status.code() == ErrorCodes::CursorNotFound) {
@@ -91,7 +91,7 @@ bool KillCursorsCmdBase::run(OperationContext* txn,
         }
 
         audit::logKillCursorsAuthzCheck(
-            txn->getClient(), killCursorsRequest.nss, id, status.code());
+            opCtx->getClient(), killCursorsRequest.nss, id, status.code());
     }
 
     KillCursorsResponse killCursorsResponse(

@@ -25,11 +25,11 @@
     assert.commandWorked(coll.ensureIndex({b: "text"}));
 
     assert.commandWorked(db.adminCommand({enableSharding: db.getName()}));
-    st.ensurePrimaryShard(db.getName(), "shard0000");
+    st.ensurePrimaryShard(db.getName(), st.shard0.shardName);
     db.adminCommand({shardCollection: coll.getFullName(), key: {_id: 1}});
     assert.commandWorked(db.adminCommand({split: coll.getFullName(), middle: {_id: 0}}));
     assert.commandWorked(
-        db.adminCommand({moveChunk: coll.getFullName(), find: {_id: 1}, to: "shard0001"}));
+        db.adminCommand({moveChunk: coll.getFullName(), find: {_id: 1}, to: st.shard1.shardName}));
 
     // Find with no options.
     cmdRes = db.runCommand({find: coll.getName()});
@@ -77,6 +77,16 @@
     assert.eq(cmdRes.cursor.ns, coll.getFullName());
     assert.eq(cmdRes.cursor.firstBatch.length, 1);
     assert.eq(cmdRes.cursor.firstBatch[0], {_id: -5, a: 8});
+
+    // Find where adding limit/ntoreturn and skip overflows.
+    var largeInt = new NumberLong('9223372036854775807');
+    cmdRes = db.runCommand({find: coll.getName(), skip: largeInt, limit: largeInt});
+    assert.commandFailed(cmdRes);
+    cmdRes = db.runCommand({find: coll.getName(), skip: largeInt, ntoreturn: largeInt});
+    assert.commandFailed(cmdRes);
+    cmdRes = db.runCommand(
+        {find: coll.getName(), skip: largeInt, ntoreturn: largeInt, singleBatch: true});
+    assert.commandFailed(cmdRes);
 
     // A predicate with $where.
     cmdRes = db.runCommand({find: coll.getName(), filter: {$where: "this._id == 5"}});

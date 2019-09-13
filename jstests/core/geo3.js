@@ -1,3 +1,4 @@
+// @tags: [requires_fastcount]
 
 t = db.geo3;
 t.drop();
@@ -29,9 +30,7 @@ filtered1.results.forEach(function(z) {
 function avgA(q, len) {
     if (!len)
         len = 10;
-    var realq = {
-        loc: {$near: [50, 50]}
-    };
+    var realq = {loc: {$near: [50, 50]}};
     if (q)
         Object.extend(realq, q);
     var as = t.find(realq).limit(len).map(function(z) {
@@ -49,10 +48,8 @@ function testFiltering(msg) {
 
 testFiltering("just loc");
 
-t.dropIndex({loc: "2d"});
-assert.eq(1, t.getIndexKeys().length, "setup 3a");
-t.ensureIndex({loc: "2d", a: 1});
-assert.eq(2, t.getIndexKeys().length, "setup 3b");
+assert.commandWorked(t.dropIndex({loc: "2d"}));
+assert.commandWorked(t.ensureIndex({loc: "2d", a: 1}));
 
 filtered2 = db.runCommand({geoNear: t.getName(), near: [50, 50], num: 10, query: {a: 2}});
 assert.eq(10, filtered2.results.length, "B3");
@@ -65,10 +62,8 @@ assert.gt(filtered1.stats.objectsLoaded, filtered2.stats.objectsLoaded, "C3");
 
 testFiltering("loc and a");
 
-t.dropIndex({loc: "2d", a: 1});
-assert.eq(1, t.getIndexKeys().length, "setup 4a");
-t.ensureIndex({loc: "2d", b: 1});
-assert.eq(2, t.getIndexKeys().length, "setup 4b");
+assert.commandWorked(t.dropIndex({loc: "2d", a: 1}));
+assert.commandWorked(t.ensureIndex({loc: "2d", b: 1}));
 
 testFiltering("loc and b");
 

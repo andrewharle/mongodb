@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -17,14 +17,14 @@ static int __col_insert_alloc(
  */
 int
 __wt_col_modify(WT_SESSION_IMPL *session, WT_CURSOR_BTREE *cbt,
-    uint64_t recno, WT_ITEM *value,
-    WT_UPDATE *upd_arg, bool is_remove, bool exclusive)
+    uint64_t recno, const WT_ITEM *value,
+    WT_UPDATE *upd_arg, u_int modify_type, bool exclusive)
 {
+	static const WT_ITEM col_fix_remove = { "", 1, NULL, 0, 0 };
 	WT_BTREE *btree;
 	WT_DECL_RET;
 	WT_INSERT *ins;
 	WT_INSERT_HEAD *ins_head, **ins_headp;
-	WT_ITEM _value;
 	WT_PAGE *page;
 	WT_PAGE_MODIFY *mod;
 	WT_UPDATE *old_upd, *upd;
@@ -38,43 +38,93 @@ __wt_col_modify(WT_SESSION_IMPL *session, WT_CURSOR_BTREE *cbt,
 	upd = upd_arg;
 	append = logged = false;
 
-	/* This code expects a remove to have a NULL value. */
-	if (is_remove) {
-		if (btree->type == BTREE_COL_FIX) {
-			value = &_value;
-			value->data = "";
-			value->size = 1;
-		} else
-			value = NULL;
-	} else {
+	if (upd_arg == NULL) {
+		if (modify_type == WT_UPDATE_RESERVE ||
+		    modify_type == WT_UPDATE_TOMBSTONE) {
+			/*
+			 * Fixed-size column-store doesn't have on-page deleted
+			 * values, it's a nul byte.
+			 */
+			if (modify_type == WT_UPDATE_TOMBSTONE &&
+			    btree->type == BTREE_COL_FIX) {
+				modify_type = WT_UPDATE_STANDARD;
+				value = &col_fix_remove;
+			}
+		}
+
 		/*
-		 * There's some chance the application specified a record past
-		 * the last record on the page.  If that's the case, and we're
+		 * There's a chance the application specified a record past the
+		 * last record on the page. If that's the case and we're
 		 * inserting a new WT_INSERT/WT_UPDATE pair, it goes on the
 		 * append list, not the update list. Also, an out-of-band recno
 		 * implies an append operation, we're allocating a new row.
+		 * Ignore any information obtained from the search.
 		 */
-		if (recno == WT_RECNO_OOB ||
+		WT_ASSERT(session, recno != WT_RECNO_OOB || cbt->compare != 0);
+		if (cbt->compare != 0 &&
+		    (recno == WT_RECNO_OOB ||
 		    recno > (btree->type == BTREE_COL_VAR ?
 		    __col_var_last_recno(cbt->ref) :
-		    __col_fix_last_recno(cbt->ref)))
+		    __col_fix_last_recno(cbt->ref)))) {
 			append = true;
+			cbt->ins = NULL;
+			cbt->ins_head = NULL;
+		}
 	}
+
+	/* We're going to modify the page, we should have loaded history. */
+	WT_ASSERT(session, cbt->ref->state != WT_REF_LIMBO);
 
 	/* If we don't yet have a modify structure, we'll need one. */
 	WT_RET(__wt_page_modify_init(session, page));
 	mod = page->modify;
 
 	/*
+	 * If modifying a record not previously modified, but which is in the
+	 * same update slot as a previously modified record, cursor.ins will
+	 * not be set because there's no list of update records for this recno,
+	 * but cursor.ins_head will be set to point to the correct update slot.
+	 * Acquire the necessary insert information, then create a new update
+	 * entry and link it into the existing list. We get here if a page has
+	 * a single cell representing multiple records (the records have the
+	 * same value), and then a record in the cell is updated or removed,
+	 * creating the update list for the cell, and then a cursor iterates
+	 * into that same cell to update/remove a different record. We find the
+	 * correct slot in the update array, but we don't find an update list
+	 * (because it doesn't exist), and don't have the information we need
+	 * to do the insert. Normally, we wouldn't care (we could fail and do
+	 * a search for the record which would configure everything for the
+	 * insert), but range truncation does this pattern for every record in
+	 * the cell, and the performance is terrible. For that reason, catch it
+	 * here.
+	 */
+	if (cbt->ins == NULL && cbt->ins_head != NULL) {
+		cbt->ins = __col_insert_search(
+		    cbt->ins_head, cbt->ins_stack, cbt->next_stack, recno);
+		if (cbt->ins != NULL) {
+			if (WT_INSERT_RECNO(cbt->ins) == recno)
+				cbt->compare = 0;
+			else {
+				/*
+				 * The test below is for cursor.compare set to 0
+				 * and cursor.ins set: cursor.compare wasn't set
+				 * by the search we just did, and has an unknown
+				 * value. Clear cursor.ins to avoid the test.
+				 */
+				cbt->ins = NULL;
+			}
+		}
+	}
+
+	/*
 	 * Delete, insert or update a column-store entry.
 	 *
-	 * If modifying a previously modified record, create a new WT_UPDATE
-	 * entry and have a serialized function link it into an existing
-	 * WT_INSERT entry's WT_UPDATE list.
+	 * If modifying a previously modified record, cursor.ins will be set to
+	 * point to the correct update list. Create a new update entry and link
+	 * it into the existing list.
 	 *
-	 * Else, allocate an insert array as necessary, build a WT_INSERT and
-	 * WT_UPDATE structure pair, and call a serialized function to insert
-	 * the WT_INSERT structure.
+	 * Else, allocate an insert array as necessary, build an insert/update
+	 * structure pair, and link it into place.
 	 */
 	if (cbt->compare == 0 && cbt->ins != NULL) {
 		/*
@@ -84,11 +134,11 @@ __wt_col_modify(WT_SESSION_IMPL *session, WT_CURSOR_BTREE *cbt,
 		WT_ASSERT(session, upd_arg == NULL);
 
 		/* Make sure the update can proceed. */
-		WT_ERR(__wt_txn_update_check(
-		    session, old_upd = cbt->ins->upd));
+		WT_ERR(__wt_txn_update_check(session, old_upd = cbt->ins->upd));
 
 		/* Allocate a WT_UPDATE structure and transaction ID. */
-		WT_ERR(__wt_update_alloc(session, value, &upd, &upd_size));
+		WT_ERR(__wt_update_alloc(session,
+		    value, &upd, &upd_size, modify_type));
 		WT_ERR(__wt_txn_modify(session, upd));
 		logged = true;
 
@@ -148,8 +198,8 @@ __wt_col_modify(WT_SESSION_IMPL *session, WT_CURSOR_BTREE *cbt,
 		    mod->mod_col_split_recno > recno));
 
 		if (upd_arg == NULL) {
-			WT_ERR(
-			    __wt_update_alloc(session, value, &upd, &upd_size));
+			WT_ERR(__wt_update_alloc(session,
+			    value, &upd, &upd_size, modify_type));
 			WT_ERR(__wt_txn_modify(session, upd));
 			logged = true;
 
@@ -191,11 +241,21 @@ __wt_col_modify(WT_SESSION_IMPL *session, WT_CURSOR_BTREE *cbt,
 			WT_ERR(__wt_insert_serial(
 			    session, page, cbt->ins_head, cbt->ins_stack,
 			    &ins, ins_size, skipdepth, exclusive));
+
 	}
 
 	/* If the update was successful, add it to the in-memory log. */
-	if (logged)
+	if (logged && modify_type != WT_UPDATE_RESERVE) {
 		WT_ERR(__wt_txn_log_op(session, cbt));
+
+		/*
+		 * In case of append, the recno (key) for the value is assigned
+		 * now. Set the recno in the transaction operation to be used
+		 * incase this transaction is prepared to retrieve the update
+		 * corresponding to this operation.
+		 */
+		__wt_txn_op_set_recno(session, cbt->recno);
+	}
 
 	if (0) {
 err:		/*

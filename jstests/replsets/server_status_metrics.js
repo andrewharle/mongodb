@@ -25,6 +25,7 @@ function testSecondaryMetrics(secondary, opCount, offset) {
     assert(ss.metrics.repl.preload.docs.num >= 0, "preload.indexes num missing");
     assert(ss.metrics.repl.preload.indexes.totalMillis >= 0, "preload.indexes time missing");
 
+    assert.eq(ss.metrics.repl.apply.batchSize, opCount + offset, "apply ops batch size mismatch");
     assert(ss.metrics.repl.apply.batches.num > 0, "no batches");
     assert(ss.metrics.repl.apply.batches.totalMillis >= 0, "missing batch time");
     assert.eq(ss.metrics.repl.apply.ops, opCount + offset, "wrong number of applied ops");
@@ -55,11 +56,7 @@ assert.writeOK(bulk.execute({w: 2}));
 
 testSecondaryMetrics(secondary, 1000, secondaryBaseOplogInserts);
 
-var options = {
-    writeConcern: {w: 2},
-    multi: true,
-    upsert: true
-};
+var options = {writeConcern: {w: 2}, multi: true, upsert: true};
 assert.writeOK(testDB.a.update({}, {$set: {d: new Date()}}, options));
 
 testSecondaryMetrics(secondary, 2000, secondaryBaseOplogInserts);

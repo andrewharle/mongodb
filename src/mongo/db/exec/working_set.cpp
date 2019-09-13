@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2013 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -28,6 +30,7 @@
 
 #include "mongo/db/exec/working_set.h"
 
+#include "mongo/db/bson/dotted_path_support.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/record_fetcher.h"
@@ -35,6 +38,8 @@
 namespace mongo {
 
 using std::string;
+
+namespace dps = ::mongo::dotted_path_support;
 
 WorkingSet::MemberHolder::MemberHolder() : member(NULL) {}
 WorkingSet::MemberHolder::~MemberHolder() {}
@@ -83,7 +88,7 @@ void WorkingSet::flagForReview(WorkingSetID i) {
     _flagged.insert(i);
 }
 
-const unordered_set<WorkingSetID>& WorkingSet::getFlagged() const {
+const stdx::unordered_set<WorkingSetID>& WorkingSet::getFlagged() const {
     return _flagged;
 }
 
@@ -106,15 +111,15 @@ void WorkingSet::clear() {
     _yieldSensitiveIds.clear();
 }
 
-void WorkingSet::transitionToLocAndIdx(WorkingSetID id) {
+void WorkingSet::transitionToRecordIdAndIdx(WorkingSetID id) {
     WorkingSetMember* member = get(id);
-    member->_state = WorkingSetMember::LOC_AND_IDX;
+    member->_state = WorkingSetMember::RID_AND_IDX;
     _yieldSensitiveIds.push_back(id);
 }
 
-void WorkingSet::transitionToLocAndObj(WorkingSetID id) {
+void WorkingSet::transitionToRecordIdAndObj(WorkingSetID id) {
     WorkingSetMember* member = get(id);
-    member->_state = WorkingSetMember::LOC_AND_OBJ;
+    member->_state = WorkingSetMember::RID_AND_OBJ;
 }
 
 void WorkingSet::transitionToOwnedObj(WorkingSetID id) {
@@ -157,20 +162,20 @@ void WorkingSetMember::transitionToOwnedObj() {
 }
 
 
-bool WorkingSetMember::hasLoc() const {
-    return _state == LOC_AND_IDX || _state == LOC_AND_OBJ;
+bool WorkingSetMember::hasRecordId() const {
+    return _state == RID_AND_IDX || _state == RID_AND_OBJ;
 }
 
 bool WorkingSetMember::hasObj() const {
-    return _state == OWNED_OBJ || _state == LOC_AND_OBJ;
+    return _state == OWNED_OBJ || _state == RID_AND_OBJ;
 }
 
 bool WorkingSetMember::hasOwnedObj() const {
-    return _state == OWNED_OBJ || (_state == LOC_AND_OBJ && obj.value().isOwned());
+    return _state == OWNED_OBJ || (_state == RID_AND_OBJ && obj.value().isOwned());
 }
 
 void WorkingSetMember::makeObjOwnedIfNeeded() {
-    if (supportsDocLocking() && _state == LOC_AND_OBJ && !obj.value().isOwned()) {
+    if (supportsDocLocking() && _state == RID_AND_OBJ && !obj.value().isOwned()) {
         obj.setValue(obj.value().getOwned());
     }
 }
@@ -205,7 +210,7 @@ bool WorkingSetMember::hasFetcher() const {
 bool WorkingSetMember::getFieldDotted(const string& field, BSONElement* out) const {
     // If our state is such that we have an object, use it.
     if (hasObj()) {
-        *out = obj.value().getFieldDotted(field);
+        *out = dps::extractElementAtPath(obj.value(), field);
         return true;
     }
 
@@ -232,7 +237,7 @@ bool WorkingSetMember::getFieldDotted(const string& field, BSONElement* out) con
 size_t WorkingSetMember::getMemUsage() const {
     size_t memUsage = 0;
 
-    if (hasLoc()) {
+    if (hasRecordId()) {
         memUsage += sizeof(RecordId);
     }
 

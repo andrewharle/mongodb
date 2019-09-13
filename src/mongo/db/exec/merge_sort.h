@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -39,6 +41,7 @@
 
 namespace mongo {
 
+class CollatorInterface;
 // External params for the merge sort stage.  Declared below.
 class MergeSortStageParams;
 
@@ -63,9 +66,9 @@ public:
     void addChild(PlanStage* child);
 
     bool isEOF() final;
-    StageState work(WorkingSetID* out) final;
+    StageState doWork(WorkingSetID* out) final;
 
-    void doInvalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) final;
+    void doInvalidate(OperationContext* opCtx, const RecordId& dl, InvalidationType type) final;
 
     StageType stageType() const final {
         return STAGE_SORT_MERGE;
@@ -87,11 +90,15 @@ private:
     // The pattern that we're sorting by.
     BSONObj _pattern;
 
+    // Null if this merge sort stage orders strings according to simple binary compare. If non-null,
+    // represents the collator used to compare strings.
+    const CollatorInterface* _collator;
+
     // Are we deduplicating on RecordId?
     bool _dedup;
 
     // Which RecordIds have we seen?
-    unordered_set<RecordId, RecordId::Hasher> _seen;
+    stdx::unordered_set<RecordId, RecordId::Hasher> _seen;
 
     // In order to pick the next smallest value, we need each child work(...) until it produces
     // a result.  This is the queue of children that haven't given us a result yet.
@@ -122,7 +129,8 @@ private:
     // The comparison function used in our priority queue.
     class StageWithValueComparison {
     public:
-        StageWithValueComparison(WorkingSet* ws, BSONObj pattern) : _ws(ws), _pattern(pattern) {}
+        StageWithValueComparison(WorkingSet* ws, BSONObj pattern, const CollatorInterface* collator)
+            : _ws(ws), _pattern(pattern), _collator(collator) {}
 
         // Is lhs less than rhs?  Note that priority_queue is a max heap by default so we invert
         // the return from the expected value.
@@ -131,6 +139,7 @@ private:
     private:
         WorkingSet* _ws;
         BSONObj _pattern;
+        const CollatorInterface* _collator;
     };
 
     // The min heap of the results we're returning.
@@ -146,10 +155,14 @@ private:
 // Parameters that must be provided to a MergeSortStage
 class MergeSortStageParams {
 public:
-    MergeSortStageParams() : dedup(true) {}
+    MergeSortStageParams() : collator(NULL), dedup(true) {}
 
     // How we're sorting.
     BSONObj pattern;
+
+    // Null if this merge sort stage orders strings according to simple binary compare. If non-null,
+    // represents the collator used to compare strings.
+    const CollatorInterface* collator;
 
     // Do we deduplicate on RecordId?
     bool dedup;

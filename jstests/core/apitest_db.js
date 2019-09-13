@@ -1,8 +1,7 @@
+// @tags: [does_not_support_stepdowns]
+
 /**
  *   Tests for the db object enhancement
- *
- *    This test requires mmapv1.
- *    @tags: [requires_mmapv1]
  */
 
 assert("test" == db, "wrong database currently not test");
@@ -19,8 +18,6 @@ dd("b");
  *  be sure the public collection API is complete
  */
 assert(db.createCollection, "createCollection");
-assert(db.getProfilingLevel, "getProfilingLevel");
-assert(db.setProfilingLevel, "setProfilingLevel");
 assert(db.dbEval, "dbEval");
 assert(db.group, "group");
 
@@ -76,9 +73,9 @@ assert.docEq(validStorageEngineOptions,
 // The indexOptionDefaults must be a document that contains only a storageEngine field.
 db.idxOptions.drop();
 assert.commandFailed(db.createCollection('idxOptions', {indexOptionDefaults: 'not a document'}));
-assert.commandFailed(db.createCollection('idxOptions',
-                                         {indexOptionDefaults: {unknownOption: true}}),
-                     'created a collection with an unknown option to indexOptionDefaults');
+assert.commandFailed(
+    db.createCollection('idxOptions', {indexOptionDefaults: {unknownOption: true}}),
+    'created a collection with an unknown option to indexOptionDefaults');
 assert.commandWorked(db.createCollection('idxOptions', {indexOptionDefaults: {}}),
                      'should have been able to specify an empty object for indexOptionDefaults');
 assert(db.idxOptions.drop());
@@ -99,16 +96,10 @@ assert.commandFailed(
     'configured a storage engine with invalid options');
 
 // Tests that a non-active storage engine can be configured so long as it is registered.
-if (db.serverBuildInfo().bits === 64) {
-    // wiredTiger is not a registered storage engine on 32-bit systems.
-    var indexOptions = {
-        storageEngine: {}
-    };
-    if (storageEngineName === 'wiredTiger') {
-        indexOptions.storageEngine.mmapv1 = {};
-    } else {
-        indexOptions.storageEngine.wiredTiger = {};
-    }
+var alternateStorageEngine =
+    db.serverBuildInfo().storageEngines.find(engine => engine !== storageEngineName);
+if (alternateStorageEngine) {
+    var indexOptions = {storageEngine: {[alternateStorageEngine]: {}}};
     assert.commandWorked(db.createCollection('idxOptions', {indexOptionDefaults: indexOptions}),
                          'should have been able to configure a non-active storage engine');
     assert(db.idxOptions.drop());
@@ -125,35 +116,6 @@ assert.docEq({storageEngine: validStorageEngineOptions},
              'indexOptionDefaults were not applied: ' + tojson(collectionInfos));
 
 dd("e");
-
-/*
- *  profile level
- */
-
-db.setProfilingLevel(0);
-assert(db.getProfilingLevel() == 0, "prof level 0");
-
-db.setProfilingLevel(1);
-assert(db.getProfilingLevel() == 1, "p1");
-
-db.setProfilingLevel(2);
-assert(db.getProfilingLevel() == 2, "p2");
-
-db.setProfilingLevel(0);
-assert(db.getProfilingLevel() == 0, "prof level 0");
-
-dd("f");
-asserted = false;
-try {
-    db.setProfilingLevel(10);
-    assert(false);
-} catch (e) {
-    asserted = true;
-    assert(e.dbSetProfilingException);
-}
-assert(asserted, "should have asserted");
-
-dd("g");
 
 assert.eq("foo", db.getSisterDB("foo").getName());
 assert.eq("foo", db.getSiblingDB("foo").getName());

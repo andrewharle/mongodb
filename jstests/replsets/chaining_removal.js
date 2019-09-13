@@ -37,15 +37,12 @@
 
     // Force node 1 to sync directly from node 0.
     syncFrom(nodes[1], nodes[0], replTest);
-
     // Force node 4 to sync through node 1.
     syncFrom(nodes[4], nodes[1], replTest);
 
     // write that should reach all nodes
-    var timeout = 60 * 1000;
-    var options = {
-        writeConcern: {w: numNodes, wtimeout: timeout}
-    };
+    var timeout = ReplSetTest.kDefaultTimeoutMS;
+    var options = {writeConcern: {w: numNodes, wtimeout: timeout}};
     assert.writeOK(primary.getDB(name).foo.insert({x: 1}, options));
 
     // Re-enable 'maxSyncSourceLagSecs' checking on sync source.
@@ -67,7 +64,8 @@
 
     // ensure writing to all four nodes still works
     primary = replTest.getPrimary();
-    replTest.awaitReplication();
+    const liveSlaves = [nodes[1], nodes[2], nodes[3]];
+    replTest.awaitReplication(null, null, liveSlaves);
     options.writeConcern.w = 4;
     assert.writeOK(primary.getDB(name).foo.insert({x: 2}, options));
 

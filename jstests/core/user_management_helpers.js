@@ -1,3 +1,11 @@
+// @tags: [
+//   assumes_superuser_permissions,
+//   assumes_write_concern_unchanged,
+//   creates_and_authenticates_user,
+//   requires_auth,
+//   requires_non_retryable_commands,
+// ]
+
 // This test is a basic sanity check of the shell helpers for manipulating user objects
 // It is not a comprehensive test of the functionality of the user manipulation commands
 function assertHasRole(rolesArray, roleName, roleDB) {
@@ -85,7 +93,16 @@ function runTest(db) {
         db.createUser({user: 'user1', pwd: 'x', roles: [], passwordDigestor: 'foo'});
     });
     db.createUser({user: 'user1', pwd: 'x', roles: [], passwordDigestor: "server"});
-    db.createUser({user: 'user2', pwd: 'x', roles: [], passwordDigestor: "client"});
+
+    // Note that as of SERVER-32974, client-side digestion is only permitted under the SCRAM-SHA-1
+    // mechanism.
+    db.createUser({
+        user: 'user2',
+        pwd: 'x',
+        roles: [],
+        mechanisms: ['SCRAM-SHA-1'],
+        passwordDigestor: "client"
+    });
     assert(db.auth('user1', 'x'));
     assert(db.auth('user2', 'x'));
 
@@ -99,9 +116,19 @@ function runTest(db) {
         db.updateUser('user1', {pwd: 'y', passwordDigestor: 'foo'});
     });
     db.updateUser('user1', {pwd: 'y', passwordDigestor: 'server'});
-    db.updateUser('user2', {pwd: 'y', passwordDigestor: 'client'});
+    db.updateUser('user2', {pwd: 'y', mechanisms: ['SCRAM-SHA-1'], passwordDigestor: 'client'});
     assert(db.auth('user1', 'y'));
     assert(db.auth('user2', 'y'));
+
+    // Test createUser requires 'user' field
+    assert.throws(function() {
+        db.createUser({pwd: 'x', roles: ['dbAdmin']});
+    });
+
+    // Test createUser disallows 'createUser' field
+    assert.throws(function() {
+        db.createUser({createUser: 'ben', pwd: 'x', roles: ['dbAdmin']});
+    });
 }
 
 try {

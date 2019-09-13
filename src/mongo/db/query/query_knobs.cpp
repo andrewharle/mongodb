@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -27,6 +29,8 @@
  */
 
 #include "mongo/db/query/query_knobs.h"
+
+#include "mongo/bson/util/builder.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/server_parameters.h"
 
@@ -66,4 +70,31 @@ MONGO_EXPORT_SERVER_PARAMETER(internalQueryExecMaxBlockingSortBytes, int, 32 * 1
 MONGO_EXPORT_SERVER_PARAMETER(internalQueryExecYieldIterations, int, 128);
 MONGO_EXPORT_SERVER_PARAMETER(internalQueryExecYieldPeriodMS, int, 10);
 
+MONGO_EXPORT_SERVER_PARAMETER(internalQueryFacetBufferSizeBytes, int, 100 * 1024 * 1024);
+
+MONGO_EXPORT_SERVER_PARAMETER(internalLookupStageIntermediateDocumentMaxSizeBytes,
+                              long long,
+                              100 * 1024 * 1024)
+    ->withValidator([](const long long& newVal) {
+        if (newVal < BSONObjMaxInternalSize) {
+            return Status(ErrorCodes::BadValue,
+                          "internalLookupStageIntermediateDocumentMaxSizeBytes must be >= " +
+                              std::to_string(BSONObjMaxInternalSize));
+        }
+        return Status::OK();
+    });
+
+MONGO_EXPORT_SERVER_PARAMETER(internalInsertMaxBatchSize,
+                              int,
+                              internalQueryExecYieldIterations.load() / 2);
+
+MONGO_EXPORT_SERVER_PARAMETER(internalDocumentSourceCursorBatchSizeBytes, int, 4 * 1024 * 1024);
+
+MONGO_EXPORT_SERVER_PARAMETER(internalDocumentSourceLookupCacheSizeBytes, int, 100 * 1024 * 1024);
+
+MONGO_EXPORT_SERVER_PARAMETER(internalQueryPlannerGenerateCoveredWholeIndexScans, bool, false);
+
+MONGO_EXPORT_SERVER_PARAMETER(internalQueryIgnoreUnknownJSONSchemaKeywords, bool, false);
+
+MONGO_EXPORT_SERVER_PARAMETER(internalQueryProhibitBlockingMergeOnMongoS, bool, false);
 }  // namespace mongo

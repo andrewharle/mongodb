@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -29,8 +29,8 @@ int
 __wt_block_manager_create(
     WT_SESSION_IMPL *session, const char *filename, uint32_t allocsize)
 {
-	WT_DECL_RET;
 	WT_DECL_ITEM(tmp);
+	WT_DECL_RET;
 	WT_FH *fh;
 	int suffix;
 	bool exists;
@@ -150,10 +150,11 @@ __wt_block_open(WT_SESSION_IMPL *session,
 	uint64_t bucket, hash;
 	uint32_t flags;
 
+	*blockp = block = NULL;
+
 	__wt_verbose(session, WT_VERB_BLOCK, "open: %s", filename);
 
 	conn = S2C(session);
-	*blockp = block = NULL;
 	hash = __wt_hash_city64(filename, strlen(filename));
 	bucket = hash % WT_HASH_ARRAY_SIZE;
 	__wt_spin_lock(session, &conn->block_lock);
@@ -255,7 +256,7 @@ __wt_block_close(WT_SESSION_IMPL *session, WT_BLOCK *block)
 	conn = S2C(session);
 
 	__wt_verbose(session, WT_VERB_BLOCK,
-	    "close: %s", block->name == NULL ? "" : block->name );
+	    "close: %s", block->name == NULL ? "" : block->name);
 
 	__wt_spin_lock(session, &conn->block_lock);
 
@@ -318,7 +319,8 @@ __desc_read(WT_SESSION_IMPL *session, WT_BLOCK *block)
 	WT_BLOCK_DESC *desc;
 	WT_DECL_ITEM(buf);
 	WT_DECL_RET;
-	uint32_t checksum_calculate, checksum_tmp;
+	uint32_t checksum_saved, checksum_tmp;
+	bool checksum_matched;
 
 	/* If in-memory, we don't read or write the descriptor structure. */
 	if (F_ISSET(S2C(session), WT_CONN_IN_MEMORY))
@@ -339,10 +341,14 @@ __desc_read(WT_SESSION_IMPL *session, WT_BLOCK *block)
 	 * a calculated checksum that should match the checksum in the header.
 	 */
 	desc = buf->mem;
-	checksum_tmp = desc->checksum;
+	checksum_saved = checksum_tmp = desc->checksum;
+#ifdef WORDS_BIGENDIAN
+	checksum_tmp = __wt_bswap32(checksum_tmp);
+#endif
 	desc->checksum = 0;
-	checksum_calculate = __wt_checksum(desc, block->allocsize);
-	desc->checksum = checksum_tmp;
+	checksum_matched =
+	    __wt_checksum_match(desc, block->allocsize, checksum_tmp);
+	desc->checksum = checksum_saved;
 	__wt_block_desc_byteswap(desc);
 
 	/*
@@ -354,8 +360,7 @@ __desc_read(WT_SESSION_IMPL *session, WT_BLOCK *block)
 	 * may have entered the wrong file name, and is now frantically pounding
 	 * their interrupt key.
 	 */
-	if (desc->magic != WT_BLOCK_MAGIC ||
-	    desc->checksum != checksum_calculate)
+	if (desc->magic != WT_BLOCK_MAGIC || !checksum_matched)
 		WT_ERR_MSG(session, WT_ERROR,
 		    "%s does not appear to be a WiredTiger file", block->name);
 

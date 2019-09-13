@@ -1,3 +1,5 @@
+// @tags: [does_not_support_stepdowns]
+
 // See SERVER-9448
 // Test argument and receiver (aka 'this') objects and their children can be mutated
 // in Map, Reduce and Finalize functions
@@ -8,28 +10,20 @@ collection.insert({a: 1});
 
 var map = function() {
     // set property on receiver
-    this.feed = {
-        beef: 1
-    };
+    this.feed = {beef: 1};
 
     // modify property on receiever
-    this.a = {
-        cake: 1
-    };
+    this.a = {cake: 1};
     emit(this._id, this.feed);
     emit(this._id, this.a);
 };
 
 var reduce = function(key, values) {
     // set property on receiver
-    this.feed = {
-        beat: 1
-    };
+    this.feed = {beat: 1};
 
     // set property on key arg
-    key.fed = {
-        mochi: 1
-    };
+    key.fed = {mochi: 1};
 
     // push properties onto values array arg
     values.push(this.feed);
@@ -39,21 +33,15 @@ var reduce = function(key, values) {
     values.forEach(function(val) {
         val.mod = 1;
     });
-    return {
-        food: values
-    };
+    return {food: values};
 };
 
 var finalize = function(key, values) {
     // set property on receiver
-    this.feed = {
-        ice: 1
-    };
+    this.feed = {ice: 1};
 
     // set property on key arg
-    key.fed = {
-        cream: 1
-    };
+    key.fed = {cream: 1};
 
     // push properties onto values array arg
     printjson(values);

@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -33,13 +35,12 @@
 #include <algorithm>
 
 #include "mongo/db/catalog/collection.h"
-#include "mongo/db/index_names.h"
 #include "mongo/db/exec/scoped_timer.h"
 #include "mongo/db/exec/working_set_common.h"
 #include "mongo/db/exec/working_set_computed_data.h"
 #include "mongo/db/index/btree_key_generator.h"
+#include "mongo/db/index_names.h"
 #include "mongo/db/query/find_common.h"
-#include "mongo/db/query/lite_parsed_query.h"
 #include "mongo/db/query/query_knobs.h"
 #include "mongo/db/query/query_planner.h"
 #include "mongo/stdx/memory.h"
@@ -65,7 +66,7 @@ bool SortStage::WorkingSetComparator::operator()(const SortableDataItem& lhs,
         return result < 0;
     }
     // Indices use RecordId as an additional sort key so we must as well.
-    return lhs.loc < rhs.loc;
+    return lhs.recordId < rhs.recordId;
 }
 
 SortStage::SortStage(OperationContext* opCtx,
@@ -101,13 +102,8 @@ bool SortStage::isEOF() {
     return child()->isEOF() && _sorted && (_data.end() == _resultIterator);
 }
 
-PlanStage::StageState SortStage::work(WorkingSetID* out) {
-    ++_commonStats.works;
-
-    // Adds the amount of time taken by work() to executionTimeMillis.
-    ScopedTimer timer(&_commonStats.executionTimeMillis);
-
-    const size_t maxBytes = static_cast<size_t>(internalQueryExecMaxBlockingSortBytes);
+PlanStage::StageState SortStage::doWork(WorkingSetID* out) {
+    const size_t maxBytes = static_cast<size_t>(internalQueryExecMaxBlockingSortBytes.load());
     if (_memUsage > maxBytes) {
         mongoutils::str::stream ss;
         ss << "Sort operation used more than the maximum " << maxBytes
@@ -136,8 +132,8 @@ PlanStage::StageState SortStage::work(WorkingSetID* out) {
             verify(member->hasObj());
 
             // We might be sorting something that was invalidated at some point.
-            if (member->hasLoc()) {
-                _wsidByDiskLoc[member->loc] = id;
+            if (member->hasRecordId()) {
+                _wsidByRecordId[member->recordId] = id;
             }
 
             SortableDataItem item;
@@ -149,14 +145,13 @@ PlanStage::StageState SortStage::work(WorkingSetID* out) {
                 static_cast<const SortKeyComputedData*>(member->getComputed(WSM_SORT_KEY));
             item.sortKey = sortKeyComputedData->getSortKey();
 
-            if (member->hasLoc()) {
+            if (member->hasRecordId()) {
                 // The RecordId breaks ties when sorting two WSMs with the same sort key.
-                item.loc = member->loc;
+                item.recordId = member->recordId;
             }
 
             addToBuffer(item);
 
-            ++_commonStats.needTime;
             return PlanStage::NEED_TIME;
         } else if (PlanStage::IS_EOF == code) {
             // TODO: We don't need the lock for this.  We could ask for a yield and do this work
@@ -164,24 +159,14 @@ PlanStage::StageState SortStage::work(WorkingSetID* out) {
             sortBuffer();
             _resultIterator = _data.begin();
             _sorted = true;
-            ++_commonStats.needTime;
             return PlanStage::NEED_TIME;
         } else if (PlanStage::FAILURE == code || PlanStage::DEAD == code) {
+            // The stage which produces a failure is responsible for allocating a working set member
+            // with error details.
+            invariant(WorkingSet::INVALID_ID != id);
             *out = id;
-            // If a stage fails, it may create a status WSM to indicate why it
-            // failed, in which case 'id' is valid.  If ID is invalid, we
-            // create our own error message.
-            if (WorkingSet::INVALID_ID == id) {
-                mongoutils::str::stream ss;
-                ss << "sort stage failed to read in results to sort from child";
-                Status status(ErrorCodes::InternalError, ss);
-                *out = WorkingSetCommon::allocateStatusMember(_ws, status);
-            }
             return code;
-        } else if (PlanStage::NEED_TIME == code) {
-            ++_commonStats.needTime;
         } else if (PlanStage::NEED_YIELD == code) {
-            ++_commonStats.needYield;
             *out = id;
         }
 
@@ -197,15 +182,14 @@ PlanStage::StageState SortStage::work(WorkingSetID* out) {
     // If we're returning something, take it out of our DL -> WSID map so that future
     // calls to invalidate don't cause us to take action for a DL we're done with.
     WorkingSetMember* member = _ws->get(*out);
-    if (member->hasLoc()) {
-        _wsidByDiskLoc.erase(member->loc);
+    if (member->hasRecordId()) {
+        _wsidByRecordId.erase(member->recordId);
     }
 
-    ++_commonStats.advanced;
     return PlanStage::ADVANCED;
 }
 
-void SortStage::doInvalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) {
+void SortStage::doInvalidate(OperationContext* opCtx, const RecordId& dl, InvalidationType type) {
     // If we have a deletion, we can fetch and carry on.
     // If we have a mutation, it's easier to fetch and use the previous document.
     // So, no matter what, fetch and keep the doc in play.
@@ -213,25 +197,25 @@ void SortStage::doInvalidate(OperationContext* txn, const RecordId& dl, Invalida
     // _data contains indices into the WorkingSet, not actual data.  If a WorkingSetMember in
     // the WorkingSet needs to change state as a result of a RecordId invalidation, it will still
     // be at the same spot in the WorkingSet.  As such, we don't need to modify _data.
-    DataMap::iterator it = _wsidByDiskLoc.find(dl);
+    DataMap::iterator it = _wsidByRecordId.find(dl);
 
     // If we're holding on to data that's got the RecordId we're invalidating...
-    if (_wsidByDiskLoc.end() != it) {
+    if (_wsidByRecordId.end() != it) {
         // Grab the WSM that we're nuking.
         WorkingSetMember* member = _ws->get(it->second);
-        verify(member->loc == dl);
+        verify(member->recordId == dl);
 
-        WorkingSetCommon::fetchAndInvalidateLoc(txn, member, _collection);
+        WorkingSetCommon::fetchAndInvalidateRecordId(opCtx, member, _collection);
 
         // Remove the RecordId from our set of active DLs.
-        _wsidByDiskLoc.erase(it);
+        _wsidByRecordId.erase(it);
         ++_specificStats.forcedFetches;
     }
 }
 
 unique_ptr<PlanStageStats> SortStage::getStats() {
     _commonStats.isEOF = isEOF();
-    const size_t maxBytes = static_cast<size_t>(internalQueryExecMaxBlockingSortBytes);
+    const size_t maxBytes = static_cast<size_t>(internalQueryExecMaxBlockingSortBytes.load());
     _specificStats.memLimit = maxBytes;
     _specificStats.memUsage = _memUsage;
     _specificStats.limit = _limit;
@@ -328,8 +312,8 @@ void SortStage::addToBuffer(const SortableDataItem& item) {
     // RecordId invalidation map and free from working set.
     if (wsidToFree != WorkingSet::INVALID_ID) {
         WorkingSetMember* member = _ws->get(wsidToFree);
-        if (member->hasLoc()) {
-            _wsidByDiskLoc.erase(member->loc);
+        if (member->hasRecordId()) {
+            _wsidByRecordId.erase(member->recordId);
         }
         _ws->free(wsidToFree);
     }

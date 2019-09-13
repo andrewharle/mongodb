@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -41,72 +43,78 @@ using namespace mongo;
 namespace {
 
 TEST(QueryPlannerAnalysis, GetSortPatternBasic) {
-    ASSERT_EQUALS(fromjson("{a: 1}"), QueryPlannerAnalysis::getSortPattern(fromjson("{a: 1}")));
-    ASSERT_EQUALS(fromjson("{a: -1}"), QueryPlannerAnalysis::getSortPattern(fromjson("{a: -1}")));
-    ASSERT_EQUALS(fromjson("{a: 1, b: 1}"),
-                  QueryPlannerAnalysis::getSortPattern(fromjson("{a: 1, b: 1}")));
-    ASSERT_EQUALS(fromjson("{a: 1, b: -1}"),
-                  QueryPlannerAnalysis::getSortPattern(fromjson("{a: 1, b: -1}")));
-    ASSERT_EQUALS(fromjson("{a: -1, b: 1}"),
-                  QueryPlannerAnalysis::getSortPattern(fromjson("{a: -1, b: 1}")));
-    ASSERT_EQUALS(fromjson("{a: -1, b: -1}"),
-                  QueryPlannerAnalysis::getSortPattern(fromjson("{a: -1, b: -1}")));
+    ASSERT_BSONOBJ_EQ(fromjson("{a: 1}"), QueryPlannerAnalysis::getSortPattern(fromjson("{a: 1}")));
+    ASSERT_BSONOBJ_EQ(fromjson("{a: -1}"),
+                      QueryPlannerAnalysis::getSortPattern(fromjson("{a: -1}")));
+    ASSERT_BSONOBJ_EQ(fromjson("{a: 1, b: 1}"),
+                      QueryPlannerAnalysis::getSortPattern(fromjson("{a: 1, b: 1}")));
+    ASSERT_BSONOBJ_EQ(fromjson("{a: 1, b: -1}"),
+                      QueryPlannerAnalysis::getSortPattern(fromjson("{a: 1, b: -1}")));
+    ASSERT_BSONOBJ_EQ(fromjson("{a: -1, b: 1}"),
+                      QueryPlannerAnalysis::getSortPattern(fromjson("{a: -1, b: 1}")));
+    ASSERT_BSONOBJ_EQ(fromjson("{a: -1, b: -1}"),
+                      QueryPlannerAnalysis::getSortPattern(fromjson("{a: -1, b: -1}")));
 }
 
 TEST(QueryPlannerAnalysis, GetSortPatternOtherElements) {
-    ASSERT_EQUALS(fromjson("{a: 1}"), QueryPlannerAnalysis::getSortPattern(fromjson("{a: 0}")));
-    ASSERT_EQUALS(fromjson("{a: 1}"), QueryPlannerAnalysis::getSortPattern(fromjson("{a: 100}")));
-    ASSERT_EQUALS(fromjson("{a: 1}"),
-                  QueryPlannerAnalysis::getSortPattern(fromjson("{a: Infinity}")));
-    ASSERT_EQUALS(fromjson("{a: 1}"), QueryPlannerAnalysis::getSortPattern(fromjson("{a: true}")));
-    ASSERT_EQUALS(fromjson("{a: 1}"), QueryPlannerAnalysis::getSortPattern(fromjson("{a: false}")));
-    ASSERT_EQUALS(fromjson("{a: 1}"), QueryPlannerAnalysis::getSortPattern(fromjson("{a: []}")));
-    ASSERT_EQUALS(fromjson("{a: 1}"), QueryPlannerAnalysis::getSortPattern(fromjson("{a: {}}")));
+    ASSERT_BSONOBJ_EQ(fromjson("{a: 1}"), QueryPlannerAnalysis::getSortPattern(fromjson("{a: 0}")));
+    ASSERT_BSONOBJ_EQ(fromjson("{a: 1}"),
+                      QueryPlannerAnalysis::getSortPattern(fromjson("{a: 100}")));
+    ASSERT_BSONOBJ_EQ(fromjson("{a: 1}"),
+                      QueryPlannerAnalysis::getSortPattern(fromjson("{a: Infinity}")));
+    ASSERT_BSONOBJ_EQ(fromjson("{a: 1}"),
+                      QueryPlannerAnalysis::getSortPattern(fromjson("{a: true}")));
+    ASSERT_BSONOBJ_EQ(fromjson("{a: 1}"),
+                      QueryPlannerAnalysis::getSortPattern(fromjson("{a: false}")));
+    ASSERT_BSONOBJ_EQ(fromjson("{a: 1}"),
+                      QueryPlannerAnalysis::getSortPattern(fromjson("{a: []}")));
+    ASSERT_BSONOBJ_EQ(fromjson("{a: 1}"),
+                      QueryPlannerAnalysis::getSortPattern(fromjson("{a: {}}")));
 
-    ASSERT_EQUALS(fromjson("{a: -1}"), QueryPlannerAnalysis::getSortPattern(fromjson("{a: -100}")));
-    ASSERT_EQUALS(fromjson("{a: -1}"),
-                  QueryPlannerAnalysis::getSortPattern(fromjson("{a: -Infinity}")));
+    ASSERT_BSONOBJ_EQ(fromjson("{a: -1}"),
+                      QueryPlannerAnalysis::getSortPattern(fromjson("{a: -100}")));
+    ASSERT_BSONOBJ_EQ(fromjson("{a: -1}"),
+                      QueryPlannerAnalysis::getSortPattern(fromjson("{a: -Infinity}")));
 
-    ASSERT_EQUALS(fromjson("{}"), QueryPlannerAnalysis::getSortPattern(fromjson("{}")));
+    ASSERT_BSONOBJ_EQ(fromjson("{}"), QueryPlannerAnalysis::getSortPattern(fromjson("{}")));
 }
 
 TEST(QueryPlannerAnalysis, GetSortPatternSpecialIndexTypes) {
-    ASSERT_EQUALS(fromjson("{}"), QueryPlannerAnalysis::getSortPattern(fromjson("{a: 'hashed'}")));
-    ASSERT_EQUALS(fromjson("{}"), QueryPlannerAnalysis::getSortPattern(fromjson("{a: 'text'}")));
-    ASSERT_EQUALS(fromjson("{}"),
-                  QueryPlannerAnalysis::getSortPattern(fromjson("{a: '2dsphere'}")));
-    ASSERT_EQUALS(fromjson("{}"), QueryPlannerAnalysis::getSortPattern(fromjson("{a: ''}")));
-    ASSERT_EQUALS(fromjson("{}"), QueryPlannerAnalysis::getSortPattern(fromjson("{a: 'foo'}")));
+    ASSERT_BSONOBJ_EQ(fromjson("{}"),
+                      QueryPlannerAnalysis::getSortPattern(fromjson("{a: 'hashed'}")));
+    ASSERT_BSONOBJ_EQ(fromjson("{}"),
+                      QueryPlannerAnalysis::getSortPattern(fromjson("{a: 'text'}")));
+    ASSERT_BSONOBJ_EQ(fromjson("{}"),
+                      QueryPlannerAnalysis::getSortPattern(fromjson("{a: '2dsphere'}")));
+    ASSERT_BSONOBJ_EQ(fromjson("{}"), QueryPlannerAnalysis::getSortPattern(fromjson("{a: ''}")));
+    ASSERT_BSONOBJ_EQ(fromjson("{}"), QueryPlannerAnalysis::getSortPattern(fromjson("{a: 'foo'}")));
 
-    ASSERT_EQUALS(fromjson("{a: -1}"),
-                  QueryPlannerAnalysis::getSortPattern(fromjson("{a: -1, b: 'text'}")));
-    ASSERT_EQUALS(fromjson("{a: -1}"),
-                  QueryPlannerAnalysis::getSortPattern(fromjson("{a: -1, b: '2dsphere'}")));
-    ASSERT_EQUALS(fromjson("{a: 1}"),
-                  QueryPlannerAnalysis::getSortPattern(fromjson("{a: 1, b: 'text'}")));
-    ASSERT_EQUALS(fromjson("{a: 1}"),
-                  QueryPlannerAnalysis::getSortPattern(fromjson("{a: 1, b: '2dsphere'}")));
+    ASSERT_BSONOBJ_EQ(fromjson("{a: -1}"),
+                      QueryPlannerAnalysis::getSortPattern(fromjson("{a: -1, b: 'text'}")));
+    ASSERT_BSONOBJ_EQ(fromjson("{a: -1}"),
+                      QueryPlannerAnalysis::getSortPattern(fromjson("{a: -1, b: '2dsphere'}")));
+    ASSERT_BSONOBJ_EQ(fromjson("{a: 1}"),
+                      QueryPlannerAnalysis::getSortPattern(fromjson("{a: 1, b: 'text'}")));
+    ASSERT_BSONOBJ_EQ(fromjson("{a: 1}"),
+                      QueryPlannerAnalysis::getSortPattern(fromjson("{a: 1, b: '2dsphere'}")));
 
-    ASSERT_EQUALS(fromjson("{a: 1}"),
-                  QueryPlannerAnalysis::getSortPattern(fromjson("{a: 1, b: 'text', c: 1}")));
-    ASSERT_EQUALS(fromjson("{a: 1}"),
-                  QueryPlannerAnalysis::getSortPattern(fromjson(
-                      "{a: 1, b: '2dsphere',"
-                      " c: 1}")));
+    ASSERT_BSONOBJ_EQ(fromjson("{a: 1}"),
+                      QueryPlannerAnalysis::getSortPattern(fromjson("{a: 1, b: 'text', c: 1}")));
+    ASSERT_BSONOBJ_EQ(fromjson("{a: 1}"),
+                      QueryPlannerAnalysis::getSortPattern(fromjson("{a: 1, b: '2dsphere',"
+                                                                    " c: 1}")));
 
-    ASSERT_EQUALS(fromjson("{a: 1, b: 1}"),
-                  QueryPlannerAnalysis::getSortPattern(fromjson("{a: 1, b: 1, c: 'text'}")));
-    ASSERT_EQUALS(fromjson("{a: 1, b: 1}"),
-                  QueryPlannerAnalysis::getSortPattern(fromjson(
-                      "{a: 1, b: 1, c: 'text',"
-                      " d: 1}")));
+    ASSERT_BSONOBJ_EQ(fromjson("{a: 1, b: 1}"),
+                      QueryPlannerAnalysis::getSortPattern(fromjson("{a: 1, b: 1, c: 'text'}")));
+    ASSERT_BSONOBJ_EQ(fromjson("{a: 1, b: 1}"),
+                      QueryPlannerAnalysis::getSortPattern(fromjson("{a: 1, b: 1, c: 'text',"
+                                                                    " d: 1}")));
 }
 
 // Test the generation of sort orders provided by an index scan done by
 // IndexScanNode::computeProperties().
 TEST(QueryPlannerAnalysis, IxscanSortOrdersBasic) {
-    IndexScanNode ixscan;
-    ixscan.indexKeyPattern = fromjson("{a: 1, b: 1, c: 1, d: 1, e: 1}");
+    IndexScanNode ixscan(IndexEntry(fromjson("{a: 1, b: 1, c: 1, d: 1, e: 1}")));
 
     // Bounds are {a: [[1,1]], b: [[2,2]], c: [[3,3]], d: [[1,5]], e:[[1,1],[2,2]]},
     // all inclusive.
@@ -171,10 +179,10 @@ TEST(QueryPlannerAnalysis, GeoSkipValidation) {
     QueryPlannerParams params;
 
     std::unique_ptr<FetchNode> fetchNodePtr = stdx::make_unique<FetchNode>();
-    std::unique_ptr<GeoMatchExpression> exprPtr = stdx::make_unique<GeoMatchExpression>();
+    std::unique_ptr<GeoMatchExpression> exprPtr =
+        stdx::make_unique<GeoMatchExpression>("geometry.field", nullptr, BSONObj());
 
     GeoMatchExpression* expr = exprPtr.get();
-    expr->init("geometry.field", nullptr, BSONObj());
 
     FetchNode* fetchNode = fetchNodePtr.get();
     // Takes ownership.

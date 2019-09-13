@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -32,7 +34,9 @@
 #include <vector>
 
 #include "mongo/bson/oid.h"
-#include "mongo/platform/unordered_map.h"
+#include "mongo/db/repl/optime.h"
+#include "mongo/db/repl/optime_with.h"
+#include "mongo/stdx/unordered_map.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/time_support.h"
 
@@ -131,7 +135,7 @@ public:
         return _slaveDelay;
     }
 
-    const unordered_map<std::string, std::string> getTags() const {
+    const stdx::unordered_map<std::string, std::string> getTags() const {
         return _tags;
     }
 
@@ -141,6 +145,34 @@ public:
 
     const OID& getElectionId() const {
         return _electionId;
+    }
+
+    OpTime getLastWriteOpTime() const {
+        if (!_lastWrite) {
+            return OpTime();
+        }
+        return _lastWrite->opTime;
+    }
+
+    time_t getLastWriteDate() const {
+        if (!_lastWrite) {
+            return 0;
+        }
+        return _lastWrite->value;
+    }
+
+    OpTime getLastMajorityWriteOpTime() const {
+        if (!_lastMajorityWrite) {
+            return OpTime();
+        }
+        return _lastMajorityWrite->opTime;
+    }
+
+    time_t getLastMajorityWriteDate() const {
+        if (!_lastMajorityWrite) {
+            return 0;
+        }
+        return _lastMajorityWrite->value;
     }
 
     /**
@@ -194,6 +226,11 @@ public:
 
     void setElectionId(const OID& electionId);
 
+    void setLastWrite(const OpTime& lastWriteOpTime, const time_t lastWriteDate);
+
+    void setLastMajorityWrite(const OpTime& lastMajorityWriteOpTime,
+                              const time_t lastMajorityWriteDate);
+
     /**
      * Marks _configSet as false, which will cause future calls to toBSON/addToBSON to ignore
      * all other member variables and output a hardcoded response indicating that we have no
@@ -235,11 +272,13 @@ private:
     bool _buildIndexesSet;
     Seconds _slaveDelay;
     bool _slaveDelaySet;
-    unordered_map<std::string, std::string> _tags;
+    stdx::unordered_map<std::string, std::string> _tags;
     bool _tagsSet;
     HostAndPort _me;
     bool _meSet;
     OID _electionId;
+    boost::optional<OpTimeWith<time_t>> _lastWrite;
+    boost::optional<OpTimeWith<time_t>> _lastMajorityWrite;
 
     // If _configSet is false this means we don't have a valid repl set config, so toBSON
     // will return a set of hardcoded values that indicate this.

@@ -2,10 +2,31 @@
 
 Import("env")
 
-generateErrorCodes = env.Command(
-    target=['error_codes.h', 'error_codes.cpp'],
-    source=['generate_error_codes.py', 'error_codes.err'],
-    action=['$PYTHON ${SOURCES[0]} cpp ${SOURCES[1]} --cpp-header=${TARGETS[0]} --cpp-source=${TARGETS[1]}'])
+env = env.Clone()
+
+
+# This needs to use its own env to tell scons to suppress scanning the .tpl.h and .tpl.cpp inputs
+# for #includes since they aren't directly preprocessed. Scons will still scan the generated files
+# to produce the correct implicit dependencies when they are compiled.
+env_for_error_codes = env.Clone()
+env_for_error_codes['SCANNERS'] = []
+generateErrorCodes = env_for_error_codes.Command(
+    target=[
+        'error_codes.h',
+        'error_codes.cpp'
+    ],
+    source=[
+        'generate_error_codes.py',
+        'error_codes.err',
+        'error_codes.tpl.h',
+        'error_codes.tpl.cpp',
+    ],
+    action=['$PYTHON ${SOURCES[0]} ${SOURCES[1]} '
+            '${SOURCES[2]}=${TARGETS[0]} '
+            '${SOURCES[3]}=${TARGETS[1]}'
+    ],
+)
+
 env.Alias('generated-sources', generateErrorCodes)
 
 env.CppUnitTest('base_test',
@@ -27,6 +48,7 @@ env.CppUnitTest('base_test',
                  'status_test.cpp',
                  'status_with_test.cpp',
                  'string_data_test.cpp',
+                 'uuid_test.cpp',
                 ])
 
 env.Library(
@@ -53,6 +75,15 @@ env.CppUnitTest(
     ],
 )
 
+env.CppUnitTest(
+    target=[
+        'clonable_ptr_test',
+    ],
+    source=[
+        'clonable_ptr_test.cpp',
+    ],
+)
+
 env.Library(
     target=[
         'secure_allocator'
@@ -62,6 +93,7 @@ env.Library(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/server_options_core',
         '$BUILD_DIR/mongo/util/processinfo',
         '$BUILD_DIR/mongo/util/secure_zero_memory',
     ],

@@ -3,10 +3,9 @@
 
     load("jstests/replsets/libs/tags.js");
 
-    // 3.2.1 is the final version to use the old style replSetUpdatePosition command.
-    var oldVersion = "3.2.1";
+    var oldVersion = "last-stable";
     var newVersion = "latest";
-    var nodes = [
+    let nodes = [
         {binVersion: newVersion},
         {binVersion: oldVersion},
         {binVersion: newVersion},

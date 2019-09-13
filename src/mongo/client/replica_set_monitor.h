@@ -1,40 +1,49 @@
-/*    Copyright 2014 MongoDB Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
 
 #include <atomic>
+#include <memory>
+#include <memory>
 #include <set>
 #include <string>
 
 #include "mongo/base/disallow_copying.h"
 #include "mongo/base/string_data.h"
+#include "mongo/client/mongo_uri.h"
+#include "mongo/executor/task_executor.h"
+#include "mongo/platform/atomic_word.h"
 #include "mongo/stdx/functional.h"
 #include "mongo/util/net/hostandport.h"
+#include "mongo/util/time_support.h"
 
 namespace mongo {
 
@@ -47,7 +56,7 @@ typedef std::shared_ptr<ReplicaSetMonitor> ReplicaSetMonitorPtr;
  * Holds state about a replica set and provides a means to refresh the local view.
  * All methods perform the required synchronization to allow callers from multiple threads.
  */
-class ReplicaSetMonitor {
+class ReplicaSetMonitor : public std::enable_shared_from_this<ReplicaSetMonitor> {
     MONGO_DISALLOW_COPYING(ReplicaSetMonitor);
 
 public:
@@ -63,6 +72,13 @@ public:
      */
     ReplicaSetMonitor(StringData name, const std::set<HostAndPort>& seeds);
 
+    ReplicaSetMonitor(const MongoURI& uri);
+
+    /**
+     * Schedules the initial refresh task into task executor.
+     */
+    void init();
+
     /**
      * Returns a host matching the given read preference or an error, if no host matches.
      *
@@ -71,11 +87,11 @@ public:
      *   wait for one to become available for up to the specified time and periodically refresh
      *   the view of the set. The call may return with an error earlier than the specified value,
      *   if none of the known hosts for the set are reachable within some number of attempts.
+     *   Note that if a maxWait of 0ms is specified, this method may still attempt to contact
+     *   every host in the replica set up to one time.
      *
      * Known errors are:
      *  FailedToSatisfyReadPreference, if node cannot be found, which matches the read preference.
-     *  ReplicaSetNotFound, if none of the known hosts for the replica set are reachable within
-     *      maxConsecutiveFailedChecks number of attempts.
      */
     StatusWith<HostAndPort> getHostOrRefresh(const ReadPreferenceSetting& readPref,
                                              Milliseconds maxWait = kDefaultFindHostTimeout);
@@ -129,13 +145,6 @@ public:
     int getMaxWireVersion() const;
 
     /**
-     * This call will return false if this monitor ever enters a state where none of the nodes could
-     * be contacted for some amount of attempts. Such monitors will be removed from the periodic
-     * refresh thread.
-     */
-    bool isSetUsable() const;
-
-    /**
      * The name of the set.
      */
     std::string getName() const;
@@ -143,8 +152,15 @@ public:
     /**
      * Returns a std::string with the format name/server1,server2.
      * If name is empty, returns just comma-separated list of servers.
+     * It IS updated to reflect the current members of the set.
      */
     std::string getServerAddress() const;
+
+    /**
+     * Returns the URI that was used to construct this monitor.
+     * It IS NOT updated to reflect the current members of the set.
+     */
+    const MongoURI& getOriginalUri() const;
 
     /**
      * Is server part of this set? Uses only cached information.
@@ -152,9 +168,10 @@ public:
     bool contains(const HostAndPort& server) const;
 
     /**
-     * Writes information about our cached view of the set to a BSONObjBuilder.
+     * Writes information about our cached view of the set to a BSONObjBuilder. If
+     * forFTDC, trim to minimize its size for full-time diagnostic data capture.
      */
-    void appendInfo(BSONObjBuilder& b) const;
+    void appendInfo(BSONObjBuilder& b, bool forFTDC = false) const;
 
     /**
      * Returns true if the monitor knows a usable primary from it's interal view.
@@ -162,9 +179,17 @@ public:
     bool isKnownToHaveGoodPrimary() const;
 
     /**
+     * Marks the instance as removed to exit refresh sooner.
+     */
+    void markAsRemoved();
+
+    /**
      * Creates a new ReplicaSetMonitor, if it doesn't already exist.
      */
-    static void createIfNeeded(const std::string& name, const std::set<HostAndPort>& servers);
+    static std::shared_ptr<ReplicaSetMonitor> createIfNeeded(const std::string& name,
+                                                             const std::set<HostAndPort>& servers);
+
+    static std::shared_ptr<ReplicaSetMonitor> createIfNeeded(const MongoURI& uri);
 
     /**
      * gets a cached Monitor per name. If the monitor is not found and createFromSeed is false,
@@ -206,9 +231,25 @@ public:
     /**
      * Permanently stops all monitoring on replica sets and clears all cached information
      * as well. As a consequence, NEVER call this if you have other threads that have a
-     * DBClientReplicaSet instance.
+     * DBClientReplicaSet instance. This method should be used for unit test only.
      */
     static void cleanup();
+
+    /**
+     * Use these to speed up tests by disabling the sleep-and-retry loops and cause errors to be
+     * reported immediately.
+     */
+    static void disableRefreshRetries_forTest();
+
+    /**
+     * Permanently stops all monitoring on replica sets.
+     */
+    static void shutdown();
+
+    /**
+     * Returns the refresh period that is given to all new SetStates.
+     */
+    static Seconds getDefaultRefreshPeriod();
 
     //
     // internal types (defined in replica_set_monitor_internal.h)
@@ -224,13 +265,7 @@ public:
      * Allows tests to set initial conditions and introspect the current state.
      */
     explicit ReplicaSetMonitor(const SetStatePtr& initialState) : _state(initialState) {}
-
-    /**
-     * If a ReplicaSetMonitor has been refreshed more than this many times in a row without
-     * finding any live nodes claiming to be in the set, the ReplicaSetMonitorWatcher will stop
-     * periodic background refreshes of this set.
-     */
-    static std::atomic<int> maxConsecutiveFailedChecks;  // NOLINT
+    ~ReplicaSetMonitor();
 
     /**
      * The default timeout, which will be used for finding a replica set host if the caller does
@@ -248,7 +283,23 @@ public:
     static bool useDeterministicHostSelection;
 
 private:
+    /**
+     * Schedules a refresh via the task executor. (Task is automatically canceled in the d-tor.)
+     */
+    void _scheduleRefresh(Date_t when);
+
+    /**
+     * This function refreshes the replica set and calls _scheduleRefresh() again.
+     */
+    void _doScheduledRefresh(const executor::TaskExecutor::CallbackHandle& currentHandle);
+
+    // Serializes refresh and protects _refresherHandle
+    stdx::mutex _mutex;
+    executor::TaskExecutor::CallbackHandle _refresherHandle;
+
     const SetStatePtr _state;
+    executor::TaskExecutor* _executor;
+    AtomicBool _isRemovedFromManager{false};
 };
 
 
@@ -271,9 +322,7 @@ public:
      *
      * This is called by ReplicaSetMonitor::getHostWithRefresh()
      */
-    HostAndPort refreshUntilMatches(const ReadPreferenceSetting& criteria) {
-        return _refreshUntilMatches(&criteria);
-    };
+    HostAndPort refreshUntilMatches(const ReadPreferenceSetting& criteria);
 
     /**
      * Refresh all hosts. Equivalent to refreshUntilMatches with a criteria that never
@@ -281,9 +330,7 @@ public:
      *
      * This is intended to be called periodically, possibly from a background thread.
      */
-    void refreshAll() {
-        _refreshUntilMatches(NULL);
-    }
+    void refreshAll();
 
     //
     // Remaining methods are only for testing and internal use.
@@ -331,13 +378,6 @@ public:
     void failedHost(const HostAndPort& host, const Status& status);
 
     /**
-     * True if this Refresher started a new full scan rather than joining an existing one.
-     */
-    bool startedNewScan() const {
-        return _startedNewScan;
-    }
-
-    /**
      * Starts a new scan over the hosts in set.
      */
     static ScanStatePtr startNewScan(const SetState* set);
@@ -373,7 +413,6 @@ private:
     // Both pointers are never NULL
     SetStatePtr _set;
     ScanStatePtr _scan;  // May differ from _set->currentScan if a new scan has started.
-    bool _startedNewScan;
 };
 
 }  // namespace mongo

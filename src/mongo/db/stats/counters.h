@@ -1,24 +1,26 @@
 // counters.h
-/*
- *    Copyright (C) 2010 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -29,12 +31,13 @@
 
 #pragma once
 
-#include "mongo/platform/basic.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/platform/atomic_word.h"
-#include "mongo/util/net/message.h"
-#include "mongo/util/processinfo.h"
+#include "mongo/platform/basic.h"
+#include "mongo/rpc/message.h"
 #include "mongo/util/concurrency/spin_lock.h"
+#include "mongo/util/processinfo.h"
+#include "mongo/util/with_alignment.h"
 
 namespace mongo {
 
@@ -45,7 +48,7 @@ namespace mongo {
 class OpCounters {
 public:
     OpCounters();
-    void incInsertInWriteLock(int n);
+    void gotInserts(int n);
     void gotInsert();
     void gotQuery();
     void gotUpdate();
@@ -80,14 +83,12 @@ public:
 private:
     void _checkWrap();
 
-    // todo: there will be a lot of cache line contention on these.  need to do something
-    //       else eventually.
-    AtomicUInt32 _insert;
-    AtomicUInt32 _query;
-    AtomicUInt32 _update;
-    AtomicUInt32 _delete;
-    AtomicUInt32 _getmore;
-    AtomicUInt32 _command;
+    CacheAligned<AtomicUInt32> _insert;
+    CacheAligned<AtomicUInt32> _query;
+    CacheAligned<AtomicUInt32> _update;
+    CacheAligned<AtomicUInt32> _delete;
+    CacheAligned<AtomicUInt32> _getmore;
+    CacheAligned<AtomicUInt32> _command;
 };
 
 extern OpCounters globalOpCounters;
@@ -95,14 +96,32 @@ extern OpCounters replOpCounters;
 
 class NetworkCounter {
 public:
-    NetworkCounter() : _bytesIn(0), _bytesOut(0), _requests(0) {}
-    void hit(long long bytesIn, long long bytesOut);
+    // Increment the counters for the number of bytes read directly off the wire
+    void hitPhysicalIn(long long bytes);
+    void hitPhysicalOut(long long bytes);
+
+    // Increment the counters for the number of bytes passed out of the TransportLayer to the
+    // server
+    void hitLogicalIn(long long bytes);
+    void hitLogicalOut(long long bytes);
+
     void append(BSONObjBuilder& b);
 
 private:
-    AtomicInt64 _bytesIn;
-    AtomicInt64 _bytesOut;
-    AtomicInt64 _requests;
+    CacheAligned<AtomicInt64> _physicalBytesIn{0};
+    CacheAligned<AtomicInt64> _physicalBytesOut{0};
+
+    // These two counters are always incremented at the same time, so
+    // we place them on the same cache line.
+    struct Together {
+        AtomicInt64 logicalBytesIn{0};
+        AtomicInt64 requests{0};
+    };
+    CacheAligned<Together> _together{};
+    static_assert(sizeof(decltype(_together)) <= stdx::hardware_constructive_interference_size,
+                  "cache line spill");
+
+    CacheAligned<AtomicInt64> _logicalBytesOut{0};
 };
 
 extern NetworkCounter networkCounter;

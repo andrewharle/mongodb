@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -50,16 +52,17 @@ void OrStage::addChild(PlanStage* child) {
     _children.emplace_back(child);
 }
 
+void OrStage::addChildren(Children childrenToAdd) {
+    _children.insert(_children.end(),
+                     std::make_move_iterator(childrenToAdd.begin()),
+                     std::make_move_iterator(childrenToAdd.end()));
+}
+
 bool OrStage::isEOF() {
     return _currentChild >= _children.size();
 }
 
-PlanStage::StageState OrStage::work(WorkingSetID* out) {
-    ++_commonStats.works;
-
-    // Adds the amount of time taken by work() to executionTimeMillis.
-    ScopedTimer timer(&_commonStats.executionTimeMillis);
-
+PlanStage::StageState OrStage::doWork(WorkingSetID* out) {
     if (isEOF()) {
         return PlanStage::IS_EOF;
     }
@@ -71,31 +74,28 @@ PlanStage::StageState OrStage::work(WorkingSetID* out) {
         WorkingSetMember* member = _ws->get(id);
 
         // If we're deduping (and there's something to dedup by)
-        if (_dedup && member->hasLoc()) {
+        if (_dedup && member->hasRecordId()) {
             ++_specificStats.dupsTested;
 
             // ...and we've seen the RecordId before
-            if (_seen.end() != _seen.find(member->loc)) {
+            if (_seen.end() != _seen.find(member->recordId)) {
                 // ...drop it.
                 ++_specificStats.dupsDropped;
                 _ws->free(id);
-                ++_commonStats.needTime;
                 return PlanStage::NEED_TIME;
             } else {
                 // Otherwise, note that we've seen it.
-                _seen.insert(member->loc);
+                _seen.insert(member->recordId);
             }
         }
 
         if (Filter::passes(member, _filter)) {
             // Match!  return it.
             *out = id;
-            ++_commonStats.advanced;
             return PlanStage::ADVANCED;
         } else {
             // Does not match, try again.
             _ws->free(id);
-            ++_commonStats.needTime;
             return PlanStage::NEED_TIME;
         }
     } else if (PlanStage::IS_EOF == childStatus) {
@@ -106,25 +106,15 @@ PlanStage::StageState OrStage::work(WorkingSetID* out) {
         if (isEOF()) {
             return PlanStage::IS_EOF;
         } else {
-            ++_commonStats.needTime;
             return PlanStage::NEED_TIME;
         }
     } else if (PlanStage::FAILURE == childStatus || PlanStage::DEAD == childStatus) {
+        // The stage which produces a failure is responsible for allocating a working set member
+        // with error details.
+        invariant(WorkingSet::INVALID_ID != id);
         *out = id;
-        // If a stage fails, it may create a status WSM to indicate why it
-        // failed, in which case 'id' is valid.  If ID is invalid, we
-        // create our own error message.
-        if (WorkingSet::INVALID_ID == id) {
-            mongoutils::str::stream ss;
-            ss << "OR stage failed to read in results from child " << _currentChild;
-            Status status(ErrorCodes::InternalError, ss);
-            *out = WorkingSetCommon::allocateStatusMember(_ws, status);
-        }
         return childStatus;
-    } else if (PlanStage::NEED_TIME == childStatus) {
-        ++_commonStats.needTime;
     } else if (PlanStage::NEED_YIELD == childStatus) {
-        ++_commonStats.needYield;
         *out = id;
     }
 
@@ -132,7 +122,7 @@ PlanStage::StageState OrStage::work(WorkingSetID* out) {
     return childStatus;
 }
 
-void OrStage::doInvalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) {
+void OrStage::doInvalidate(OperationContext* opCtx, const RecordId& dl, InvalidationType type) {
     // TODO remove this since calling isEOF is illegal inside of doInvalidate().
     if (isEOF()) {
         return;
@@ -141,9 +131,9 @@ void OrStage::doInvalidate(OperationContext* txn, const RecordId& dl, Invalidati
     // If we see DL again it is not the same record as it once was so we still want to
     // return it.
     if (_dedup && INVALIDATION_DELETION == type) {
-        unordered_set<RecordId, RecordId::Hasher>::iterator it = _seen.find(dl);
+        stdx::unordered_set<RecordId, RecordId::Hasher>::iterator it = _seen.find(dl);
         if (_seen.end() != it) {
-            ++_specificStats.locsForgotten;
+            ++_specificStats.recordIdsForgotten;
             _seen.erase(dl);
         }
     }
@@ -155,7 +145,7 @@ unique_ptr<PlanStageStats> OrStage::getStats() {
     // Add a BSON representation of the filter to the stats tree, if there is one.
     if (NULL != _filter) {
         BSONObjBuilder bob;
-        _filter->toBSON(&bob);
+        _filter->serialize(&bob);
         _commonStats.filter = bob.obj();
     }
 

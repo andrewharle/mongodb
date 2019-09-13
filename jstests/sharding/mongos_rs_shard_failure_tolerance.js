@@ -10,6 +10,11 @@
 // sequence), idle (connection is connected but not used before a shard change), and new
 // (connection connected after shard change).
 //
+
+// Checking UUID consistency involves talking to shard primaries, but by the end of this test, one
+// shard does not have a primary.
+TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
+
 (function() {
     'use strict';
 
@@ -17,7 +22,6 @@
 
     var mongos = st.s0;
     var admin = mongos.getDB("admin");
-    var shards = mongos.getDB("config").shards.find().toArray();
 
     assert.commandWorked(admin.runCommand({setParameter: 1, traceExceptions: true}));
 
@@ -27,16 +31,30 @@
     // Create the unsharded database
     assert.writeOK(collUnsharded.insert({some: "doc"}));
     assert.writeOK(collUnsharded.remove({}));
-    printjson(admin.runCommand({movePrimary: collUnsharded.getDB().toString(), to: shards[0]._id}));
+    assert.commandWorked(
+        admin.runCommand({movePrimary: collUnsharded.getDB().toString(), to: st.shard0.shardName}));
 
     // Create the sharded database
     assert.commandWorked(admin.runCommand({enableSharding: collSharded.getDB().toString()}));
-    printjson(admin.runCommand({movePrimary: collSharded.getDB().toString(), to: shards[0]._id}));
+    assert.commandWorked(
+        admin.runCommand({movePrimary: collSharded.getDB().toString(), to: st.shard0.shardName}));
     assert.commandWorked(
         admin.runCommand({shardCollection: collSharded.toString(), key: {_id: 1}}));
     assert.commandWorked(admin.runCommand({split: collSharded.toString(), middle: {_id: 0}}));
-    assert.commandWorked(
-        admin.runCommand({moveChunk: collSharded.toString(), find: {_id: 0}, to: shards[1]._id}));
+    assert.commandWorked(admin.runCommand(
+        {moveChunk: collSharded.toString(), find: {_id: 0}, to: st.shard1.shardName}));
+
+    // Secondaries do not refresh their in-memory routing table until a request with a higher
+    // version is received, and refreshing requires communication with the primary to obtain the
+    // newest version. Read from the secondaries once before taking down primaries to ensure they
+    // have loaded the routing table into memory.
+    // TODO SERVER-30148: replace this with calls to awaitReplication() on each shard owning data
+    // for the sharded collection once secondaries refresh proactively.
+    var mongosSetupConn = new Mongo(mongos.host);
+    mongosSetupConn.setReadPref("secondary");
+    assert(!mongosSetupConn.getCollection(collSharded.toString()).find({}).hasNext());
+
+    gc();  // Clean up connections
 
     st.printShardingStatus();
 
@@ -50,9 +68,7 @@
     var mongosConnIdle = null;
     var mongosConnNew = null;
 
-    var wc = {
-        writeConcern: {w: 2, wtimeout: 60000}
-    };
+    var wc = {writeConcern: {w: 2, wtimeout: 60000}};
 
     assert.writeOK(mongosConnActive.getCollection(collSharded.toString()).insert({_id: -1}, wc));
     assert.writeOK(mongosConnActive.getCollection(collSharded.toString()).insert({_id: 1}, wc));

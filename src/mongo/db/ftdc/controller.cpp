@@ -1,29 +1,31 @@
+
 /**
- * Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- * This program is free software: you can redistribute it and/or  modify
- * it under the terms of the GNU Affero General Public License, version 3,
- * as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
- * As a special exception, the copyright holders give permission to link the
- * code of portions of this program with the OpenSSL library under certain
- * conditions as described in each individual source file and distribute
- * linked combinations including the program with the OpenSSL library. You
- * must comply with the GNU Affero General Public License in all respects
- * for all of the code used other than as permitted herein. If you modify
- * file(s) with this exception, you may extend this exception to your
- * version of the file(s), but you are not obligated to do so. If you do not
- * wish to do so, delete this exception statement from your version. If you
- * delete this exception statement from all source files in the program,
- * then also delete it in the license file.
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kFTDC
@@ -40,15 +42,26 @@
 #include "mongo/stdx/memory.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/stdx/thread.h"
+#include "mongo/util/concurrency/idle_thread_block.h"
 #include "mongo/util/exit.h"
 #include "mongo/util/log.h"
 #include "mongo/util/time_support.h"
 
 namespace mongo {
 
-void FTDCController::setEnabled(bool enabled) {
+Status FTDCController::setEnabled(bool enabled) {
     stdx::lock_guard<stdx::mutex> lock(_mutex);
+
+    if (_path.empty()) {
+        return Status(ErrorCodes::FTDCPathNotSet,
+                      str::stream() << "FTDC cannot be enabled without setting the set parameter "
+                                       "'diagnosticDataCollectionDirectoryPath' first.");
+    }
+
     _configTemp.enabled = enabled;
+    _condvar.notify_one();
+
+    return Status::OK();
 }
 
 void FTDCController::setPeriod(Milliseconds millis) {
@@ -81,6 +94,23 @@ void FTDCController::setMaxSamplesPerInterimMetricChunk(size_t size) {
     _condvar.notify_one();
 }
 
+Status FTDCController::setDirectory(const boost::filesystem::path& path) {
+    stdx::lock_guard<stdx::mutex> lock(_mutex);
+
+    if (!_path.empty()) {
+        return Status(ErrorCodes::FTDCPathAlreadySet,
+                      str::stream() << "FTDC path has already been set to '" << _path.string()
+                                    << "'. It cannot be changed.");
+    }
+
+    _path = path;
+
+    // Do not notify for the change since it has to be enabled via setEnabled.
+
+    return Status::OK();
+}
+
+
 void FTDCController::addPeriodicCollector(std::unique_ptr<FTDCCollectorInterface> collector) {
     {
         stdx::lock_guard<stdx::mutex> lock(_mutex);
@@ -111,7 +141,7 @@ void FTDCController::start() {
           << _path.generic_string() << "'";
 
     // Start the thread
-    _thread = stdx::thread(stdx::bind(&FTDCController::doLoop, this));
+    _thread = stdx::thread([this] { doLoop(); });
 
     {
         stdx::lock_guard<stdx::mutex> lock(_mutex);
@@ -169,7 +199,7 @@ void FTDCController::doLoop() {
         while (true) {
             // Compute the next interval to run regardless of how we were woken up
             // Skipping an interval due to a race condition with a config signal is harmless.
-            auto now = getGlobalServiceContext()->getClockSource()->now();
+            auto now = getGlobalServiceContext()->getPreciseClockSource()->now();
 
             // Get next time to run at
             auto next_time = FTDCUtil::roundTime(now, _config.period);
@@ -177,6 +207,7 @@ void FTDCController::doLoop() {
             // Wait for the next run or signal to shutdown
             {
                 stdx::unique_lock<stdx::mutex> lock(_mutex);
+                MONGO_IDLE_THREAD_BLOCK;
 
                 // We ignore spurious wakeups by just doing an iteration of the loop
                 auto status = _condvar.wait_until(lock, next_time.toSystemTimePoint());
@@ -201,7 +232,7 @@ void FTDCController::doLoop() {
             }
 
             // TODO: consider only running this thread if we are enabled
-            // for now, we just keep an idle thread as it is simplier
+            // for now, we just keep an idle thread as it is simpler
             if (_config.enabled) {
                 // Delay initialization of FTDCFileManager until we are sure the user has enabled
                 // FTDC

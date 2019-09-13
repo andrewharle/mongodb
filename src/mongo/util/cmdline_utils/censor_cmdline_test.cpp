@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2012 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -221,7 +223,8 @@ TEST(BSONObjCensorTests, Strings) {
                        << "also not a password"
                        << "processManagement.windowsService.servicePassword"
                        << "this password should also be censored"
-                       << "lastarg" << false);
+                       << "lastarg"
+                       << false);
 
     BSONObj res = BSON("firstarg"
                        << "not a password"
@@ -233,38 +236,48 @@ TEST(BSONObjCensorTests, Strings) {
                        << "also not a password"
                        << "processManagement.windowsService.servicePassword"
                        << "<password>"
-                       << "lastarg" << false);
+                       << "lastarg"
+                       << false);
 
     cmdline_utils::censorBSONObj(&obj);
-    ASSERT_EQUALS(res, obj);
+    ASSERT_BSONOBJ_EQ(res, obj);
 }
 
 TEST(BSONObjCensorTests, Arrays) {
-    BSONObj obj =
-        BSON("firstarg"
-             << "not a password"
-             << "net.ssl.PEMKeyPassword" << BSON_ARRAY("first censored password"
-                                                       << "next censored password")
-             << "net.ssl.clusterPassword" << BSON_ARRAY("first censored password"
-                                                        << "next censored password") << "middlearg"
-             << "also not a password"
-             << "processManagement.windowsService.servicePassword"
-             << BSON_ARRAY("first censored password"
-                           << "next censored password") << "lastarg" << false);
+    BSONObj obj = BSON("firstarg"
+                       << "not a password"
+                       << "net.ssl.PEMKeyPassword"
+                       << BSON_ARRAY("first censored password"
+                                     << "next censored password")
+                       << "net.ssl.clusterPassword"
+                       << BSON_ARRAY("first censored password"
+                                     << "next censored password")
+                       << "middlearg"
+                       << "also not a password"
+                       << "processManagement.windowsService.servicePassword"
+                       << BSON_ARRAY("first censored password"
+                                     << "next censored password")
+                       << "lastarg"
+                       << false);
 
     BSONObj res = BSON("firstarg"
                        << "not a password"
-                       << "net.ssl.PEMKeyPassword" << BSON_ARRAY("<password>"
-                                                                 << "<password>")
-                       << "net.ssl.clusterPassword" << BSON_ARRAY("<password>"
-                                                                  << "<password>") << "middlearg"
+                       << "net.ssl.PEMKeyPassword"
+                       << BSON_ARRAY("<password>"
+                                     << "<password>")
+                       << "net.ssl.clusterPassword"
+                       << BSON_ARRAY("<password>"
+                                     << "<password>")
+                       << "middlearg"
                        << "also not a password"
                        << "processManagement.windowsService.servicePassword"
                        << BSON_ARRAY("<password>"
-                                     << "<password>") << "lastarg" << false);
+                                     << "<password>")
+                       << "lastarg"
+                       << false);
 
     cmdline_utils::censorBSONObj(&obj);
-    ASSERT_EQUALS(res, obj);
+    ASSERT_BSONOBJ_EQ(res, obj);
 }
 
 TEST(BSONObjCensorTests, SubObjects) {
@@ -272,29 +285,35 @@ TEST(BSONObjCensorTests, SubObjects) {
         BSON("firstarg"
              << "not a password"
              << "net"
-             << BSON("ssl" << BSON("PEMKeyPassword"
-                                   << BSON_ARRAY("first censored password"
-                                                 << "next censored password") << "PEMKeyPassword"
-                                   << "should be censored too"
-                                   << "clusterPassword" << BSON_ARRAY("first censored password"
-                                                                      << "next censored password")
-                                   << "clusterPassword"
-                                   << "should be censored too")) << "lastarg" << false);
+             << BSON("ssl" << BSON("PEMKeyPassword" << BSON_ARRAY("first censored password"
+                                                                  << "next censored password")
+                                                    << "PEMKeyPassword"
+                                                    << "should be censored too"
+                                                    << "clusterPassword"
+                                                    << BSON_ARRAY("first censored password"
+                                                                  << "next censored password")
+                                                    << "clusterPassword"
+                                                    << "should be censored too"))
+             << "lastarg"
+             << false);
 
-    BSONObj res = BSON(
-        "firstarg"
-        << "not a password"
-        << "net"
-        << BSON("ssl" << BSON("PEMKeyPassword" << BSON_ARRAY("<password>"
-                                                             << "<password>") << "PEMKeyPassword"
-                                               << "<password>"
-                                               << "clusterPassword" << BSON_ARRAY("<password>"
-                                                                                  << "<password>")
-                                               << "clusterPassword"
-                                               << "<password>")) << "lastarg" << false);
+    BSONObj res = BSON("firstarg"
+                       << "not a password"
+                       << "net"
+                       << BSON("ssl" << BSON("PEMKeyPassword" << BSON_ARRAY("<password>"
+                                                                            << "<password>")
+                                                              << "PEMKeyPassword"
+                                                              << "<password>"
+                                                              << "clusterPassword"
+                                                              << BSON_ARRAY("<password>"
+                                                                            << "<password>")
+                                                              << "clusterPassword"
+                                                              << "<password>"))
+                       << "lastarg"
+                       << false);
 
     cmdline_utils::censorBSONObj(&obj);
-    ASSERT_EQUALS(res, obj);
+    ASSERT_BSONOBJ_EQ(res, obj);
 }
 
 }  // namespace

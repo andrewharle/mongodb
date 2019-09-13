@@ -1,5 +1,8 @@
 // Verify that we can index multiple geo fields with 2dsphere, and that
 // performance is what we expect it to be with indexing both fields.
+//
+// @tags: [requires_fastcount]
+
 var t = db.geo_s2twofields;
 t.drop();
 
@@ -13,14 +16,8 @@ function randomCoord(center, minDistDeg, maxDistDeg) {
     return [center[0] + dx, center[1] + dy];
 }
 
-var nyc = {
-    type: "Point",
-    coordinates: [-74.0064, 40.7142]
-};
-var miami = {
-    type: "Point",
-    coordinates: [-80.1303, 25.7903]
-};
+var nyc = {type: "Point", coordinates: [-74.0064, 40.7142]};
+var miami = {type: "Point", coordinates: [-80.1303, 25.7903]};
 var maxPoints = 10000;
 var degrees = 5;
 
@@ -29,10 +26,8 @@ for (var i = 0; i < maxPoints; ++i) {
     var fromCoord = randomCoord(nyc.coordinates, 0, degrees);
     var toCoord = randomCoord(miami.coordinates, 0, degrees);
 
-    arr.push({
-        from: {type: "Point", coordinates: fromCoord},
-        to: {type: "Point", coordinates: toCoord}
-    });
+    arr.push(
+        {from: {type: "Point", coordinates: fromCoord}, to: {type: "Point", coordinates: toCoord}});
 }
 res = t.insert(arr);
 assert.writeOK(res);
@@ -65,31 +60,25 @@ function timeWithoutAndWithAnIndex(index, query) {
 
 var maxQueryRad = 0.5 * PI / 180.0;
 // When we're not looking at ALL the data, anything indexed should beat not-indexed.
-var smallQuery =
-    timeWithoutAndWithAnIndex({to: "2dsphere", from: "2dsphere"},
-                              {
-                                from: {$within: {$centerSphere: [nyc.coordinates, maxQueryRad]}},
-                                to: {$within: {$centerSphere: [miami.coordinates, maxQueryRad]}}
-                              });
+var smallQuery = timeWithoutAndWithAnIndex({to: "2dsphere", from: "2dsphere"}, {
+    from: {$within: {$centerSphere: [nyc.coordinates, maxQueryRad]}},
+    to: {$within: {$centerSphere: [miami.coordinates, maxQueryRad]}}
+});
 print("Indexed time " + smallQuery[1] + " unindexed " + smallQuery[0]);
 // assert(smallQuery[0] > smallQuery[1]);
 
 // Let's just index one field.
-var smallQuery =
-    timeWithoutAndWithAnIndex({to: "2dsphere"},
-                              {
-                                from: {$within: {$centerSphere: [nyc.coordinates, maxQueryRad]}},
-                                to: {$within: {$centerSphere: [miami.coordinates, maxQueryRad]}}
-                              });
+var smallQuery = timeWithoutAndWithAnIndex({to: "2dsphere"}, {
+    from: {$within: {$centerSphere: [nyc.coordinates, maxQueryRad]}},
+    to: {$within: {$centerSphere: [miami.coordinates, maxQueryRad]}}
+});
 print("Indexed time " + smallQuery[1] + " unindexed " + smallQuery[0]);
 // assert(smallQuery[0] > smallQuery[1]);
 
 // And the other one.
-var smallQuery =
-    timeWithoutAndWithAnIndex({from: "2dsphere"},
-                              {
-                                from: {$within: {$centerSphere: [nyc.coordinates, maxQueryRad]}},
-                                to: {$within: {$centerSphere: [miami.coordinates, maxQueryRad]}}
-                              });
+var smallQuery = timeWithoutAndWithAnIndex({from: "2dsphere"}, {
+    from: {$within: {$centerSphere: [nyc.coordinates, maxQueryRad]}},
+    to: {$within: {$centerSphere: [miami.coordinates, maxQueryRad]}}
+});
 print("Indexed time " + smallQuery[1] + " unindexed " + smallQuery[0]);
 // assert(smallQuery[0] > smallQuery[1]);

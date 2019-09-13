@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -28,6 +30,7 @@
 
 #include "mongo/db/exec/distinct_scan.h"
 
+#include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/exec/filter.h"
 #include "mongo/db/exec/scoped_timer.h"
@@ -45,19 +48,24 @@ using stdx::make_unique;
 // static
 const char* DistinctScan::kStageType = "DISTINCT_SCAN";
 
-DistinctScan::DistinctScan(OperationContext* txn,
+DistinctScan::DistinctScan(OperationContext* opCtx,
                            const DistinctParams& params,
                            WorkingSet* workingSet)
-    : PlanStage(kStageType, txn),
+    : PlanStage(kStageType, opCtx),
       _workingSet(workingSet),
       _descriptor(params.descriptor),
       _iam(params.descriptor->getIndexCatalog()->getIndex(params.descriptor)),
       _params(params),
       _checker(&_params.bounds, _descriptor->keyPattern(), _params.direction) {
     _specificStats.keyPattern = _params.descriptor->keyPattern();
+    if (BSONElement collationElement = _params.descriptor->getInfoElement("collation")) {
+        invariant(collationElement.isABSONObj());
+        _specificStats.collation = collationElement.Obj().getOwned();
+    }
     _specificStats.indexName = _params.descriptor->indexName();
-    _specificStats.indexVersion = _params.descriptor->version();
+    _specificStats.indexVersion = static_cast<int>(_params.descriptor->version());
     _specificStats.isMultiKey = _params.descriptor->isMultikey(getOpCtx());
+    _specificStats.multiKeyPaths = _params.descriptor->getMultikeyPaths(getOpCtx());
     _specificStats.isUnique = _params.descriptor->unique();
     _specificStats.isSparse = _params.descriptor->isSparse();
     _specificStats.isPartial = _params.descriptor->isPartial();
@@ -67,20 +75,16 @@ DistinctScan::DistinctScan(OperationContext* txn,
     _commonStats.isEOF = !_checker.getStartSeekPoint(&_seekPoint);
 }
 
-PlanStage::StageState DistinctScan::work(WorkingSetID* out) {
-    ++_commonStats.works;
+PlanStage::StageState DistinctScan::doWork(WorkingSetID* out) {
     if (_commonStats.isEOF)
         return PlanStage::IS_EOF;
-
-    // Adds the amount of time taken by work() to executionTimeMillis.
-    ScopedTimer timer(&_commonStats.executionTimeMillis);
 
     boost::optional<IndexKeyEntry> kv;
     try {
         if (!_cursor)
             _cursor = _iam->newCursor(getOpCtx(), _params.direction == 1);
         kv = _cursor->seek(_seekPoint);
-    } catch (const WriteConflictException& wce) {
+    } catch (const WriteConflictException&) {
         *out = WorkingSet::INVALID_ID;
         return PlanStage::NEED_YIELD;
     }
@@ -95,7 +99,6 @@ PlanStage::StageState DistinctScan::work(WorkingSetID* out) {
     switch (_checker.checkKey(kv->key, &_seekPoint)) {
         case IndexBoundsChecker::MUST_ADVANCE:
             // Try again next time. The checker has adjusted the _seekPoint.
-            ++_commonStats.needTime;
             return PlanStage::NEED_TIME;
 
         case IndexBoundsChecker::DONE:
@@ -117,15 +120,14 @@ PlanStage::StageState DistinctScan::work(WorkingSetID* out) {
             // Package up the result for the caller.
             WorkingSetID id = _workingSet->allocate();
             WorkingSetMember* member = _workingSet->get(id);
-            member->loc = kv->loc;
+            member->recordId = kv->loc;
             member->keyData.push_back(IndexKeyDatum(_descriptor->keyPattern(), kv->key, _iam));
-            _workingSet->transitionToLocAndIdx(id);
+            _workingSet->transitionToRecordIdAndIdx(id);
 
             *out = id;
-            ++_commonStats.advanced;
             return PlanStage::ADVANCED;
     }
-    invariant(false);
+    MONGO_UNREACHABLE;
 }
 
 bool DistinctScan::isEOF() {

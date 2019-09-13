@@ -1,28 +1,31 @@
-/*    Copyright 2009 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/platform/basic.h"
@@ -36,8 +39,9 @@
 #include "mongo/base/string_data.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/db/server_options.h"
-#include "mongo/util/mongoutils/str.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/mongoutils/str.h"
+#include "mongo/util/stringutils.h"
 
 namespace mongo {
 
@@ -57,6 +61,10 @@ HostAndPort::HostAndPort(StringData text) {
 }
 
 HostAndPort::HostAndPort(const std::string& h, int p) : _host(h), _port(p) {}
+
+HostAndPort::HostAndPort(SockAddr addr) : _addr(std::move(addr)) {
+    uassertStatusOK(initialize(_addr->toString(true)));
+}
 
 bool HostAndPort::operator<(const HostAndPort& r) const {
     const int cmp = host().compare(r.host());
@@ -81,6 +89,23 @@ bool HostAndPort::isLocalHost() const {
             );
 }
 
+bool HostAndPort::isDefaultRoute() const {
+    if (_host == "0.0.0.0") {
+        return true;
+    }
+
+    // There are multiple ways to write IPv6 addresses.
+    // We're looking for any representation of the address "0:0:0:0:0:0:0:0".
+    // A single sequence of "0" bytes in an IPv6 address may be represented as "::",
+    // so we must also match addresses like "::" or "0::0:0".
+    // Return false if a character other than ':' or '0' is contained in the address.
+    auto firstNonDefaultIPv6Char =
+        std::find_if(std::begin(_host), std::end(_host), [](const char& c) {
+            return c != ':' && c != '0' && c != '[' && c != ']';
+        });
+    return firstNonDefaultIPv6Char == std::end(_host);
+}
+
 std::string HostAndPort::toString() const {
     StringBuilder ss;
     append(ss);
@@ -94,7 +119,9 @@ void HostAndPort::append(StringBuilder& ss) const {
     } else {
         ss << host();
     }
-    ss << ':' << port();
+    if (host().find('/') == std::string::npos) {
+        ss << ':' << port();
+    }
 }
 
 bool HostAndPort::empty() const {
@@ -123,11 +150,18 @@ Status HostAndPort::initialize(StringData s) {
         hostPart = s.substr(openBracketPos + 1, closeBracketPos - openBracketPos - 1);
         // prevent accidental assignment of port to the value of the final portion of hostPart
         if (colonPos < closeBracketPos) {
+            // If the last colon is inside the brackets, then there must not be a port.
+            if (s.size() != closeBracketPos + 1) {
+                return Status(ErrorCodes::FailedToParse,
+                              str::stream() << "missing colon after ']' before the port in "
+                                            << s.toString());
+            }
             colonPos = std::string::npos;
         } else if (colonPos != closeBracketPos + 1) {
             return Status(ErrorCodes::FailedToParse,
                           str::stream() << "Extraneous characters between ']' and pre-port ':'"
-                                        << " in " << s.toString());
+                                        << " in "
+                                        << s.toString());
         }
     } else if (closeBracketPos != std::string::npos) {
         return Status(ErrorCodes::FailedToParse,
@@ -142,7 +176,8 @@ Status HostAndPort::initialize(StringData s) {
     if (hostPart.empty()) {
         return Status(ErrorCodes::FailedToParse,
                       str::stream() << "Empty host component parsing HostAndPort from \""
-                                    << escape(s.toString()) << "\"");
+                                    << escape(s.toString())
+                                    << "\"");
     }
 
     int port;
@@ -152,11 +187,12 @@ Status HostAndPort::initialize(StringData s) {
         if (!status.isOK()) {
             return status;
         }
-        if (port <= 0) {
+        if (port <= 0 || port > 65535) {
             return Status(ErrorCodes::FailedToParse,
                           str::stream() << "Port number " << port
                                         << " out of range parsing HostAndPort from \""
-                                        << escape(s.toString()) << "\"");
+                                        << escape(s.toString())
+                                        << "\"");
         }
     } else {
         port = -1;
@@ -175,10 +211,10 @@ StringBuilderImpl<Allocator>& operator<<(StringBuilderImpl<Allocator>& os, const
     return os << hp.toString();
 }
 
-template StringBuilderImpl<TrivialAllocator>& operator<<(StringBuilderImpl<TrivialAllocator>&,
-                                                         const HostAndPort&);
 template StringBuilderImpl<StackAllocator>& operator<<(StringBuilderImpl<StackAllocator>&,
                                                        const HostAndPort&);
+template StringBuilderImpl<SharedBufferAllocator>& operator<<(
+    StringBuilderImpl<SharedBufferAllocator>&, const HostAndPort&);
 
 }  // namespace mongo
 

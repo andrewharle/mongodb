@@ -1,28 +1,31 @@
-/*    Copyright 2014 MongoDB Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
@@ -32,14 +35,13 @@
 #include <cstring>
 #include <type_traits>
 
+#include "mongo/base/static_assert.h"
 #include "mongo/config.h"
 #include "mongo/platform/decimal128.h"
 
 #pragma push_macro("MONGO_UINT16_SWAB")
 #pragma push_macro("MONGO_UINT32_SWAB")
 #pragma push_macro("MONGO_UINT64_SWAB")
-#pragma push_macro("MONGO_LITTLE_ENDIAN")
-#pragma push_macro("MONGO_BIG_ENDIAN")
 #pragma push_macro("htobe16")
 #pragma push_macro("htobe32")
 #pragma push_macro("htobe64")
@@ -56,8 +58,6 @@
 #undef MONGO_UINT16_SWAB
 #undef MONGO_UINT32_SWAB
 #undef MONGO_UINT64_SWAB
-#undef MONGO_LITTLE_ENDIAN
-#undef MONGO_BIG_ENDIAN
 #undef htobe16
 #undef htobe32
 #undef htobe64
@@ -74,7 +74,7 @@
 #define MONGO_LITTLE_ENDIAN 1234
 #define MONGO_BIG_ENDIAN 4321
 
-#if defined(_MSC_VER) && (_MSC_VER >= 1300)
+#if defined(_MSC_VER)
 #include <cstdlib>
 #define MONGO_UINT16_SWAB(v) _byteswap_ushort(v)
 #define MONGO_UINT32_SWAB(v) _byteswap_ulong(v)
@@ -344,7 +344,7 @@ struct ByteOrderConverter<float> {
     typedef float T;
 
     inline static T nativeToBig(T t) {
-        static_assert(sizeof(T) == sizeof(uint32_t), "sizeof(T) == sizeof(uint32_t)");
+        MONGO_STATIC_ASSERT(sizeof(T) == sizeof(uint32_t));
 
         uint32_t temp;
         std::memcpy(&temp, &t, sizeof(t));
@@ -383,7 +383,7 @@ struct ByteOrderConverter<double> {
     typedef double T;
 
     inline static T nativeToBig(T t) {
-        static_assert(sizeof(T) == sizeof(uint64_t), "sizeof(T) == sizeof(uint64_t)");
+        MONGO_STATIC_ASSERT(sizeof(T) == sizeof(uint64_t));
 
         uint64_t temp;
         std::memcpy(&temp, &t, sizeof(t));
@@ -456,32 +456,31 @@ struct IntegralTypeMap {
 
 template <>
 struct IntegralTypeMap<signed char> {
-    static_assert(CHAR_BIT == 8, "CHAR_BIT == 8");
+    MONGO_STATIC_ASSERT(CHAR_BIT == 8);
     typedef int8_t type;
 };
 
 template <>
 struct IntegralTypeMap<unsigned char> {
-    static_assert(CHAR_BIT == 8, "CHAR_BIT == 8");
+    MONGO_STATIC_ASSERT(CHAR_BIT == 8);
     typedef uint8_t type;
 };
 
 template <>
 struct IntegralTypeMap<char> {
-    static_assert(CHAR_BIT == 8, "CHAR_BIT == 8");
+    MONGO_STATIC_ASSERT(CHAR_BIT == 8);
     typedef std::conditional<std::is_signed<char>::value, int8_t, uint8_t>::type type;
 };
 
 template <>
 struct IntegralTypeMap<long long> {
-    static_assert(sizeof(long long) == sizeof(int64_t), "sizeof(long long) == sizeof(int64_t)");
+    MONGO_STATIC_ASSERT(sizeof(long long) == sizeof(int64_t));
     typedef int64_t type;
 };
 
 template <>
 struct IntegralTypeMap<unsigned long long> {
-    static_assert(sizeof(unsigned long long) == sizeof(uint64_t),
-                  "sizeof(unsigned long long) == sizeof(uint64_t)");
+    MONGO_STATIC_ASSERT(sizeof(unsigned long long) == sizeof(uint64_t));
     typedef uint64_t type;
 };
 
@@ -511,8 +510,6 @@ inline T littleToNative(T t) {
 #undef MONGO_UINT16_SWAB
 #undef MONGO_UINT32_SWAB
 #undef MONGO_UINT64_SWAB
-#undef MONGO_LITTLE_ENDIAN
-#undef MONGO_BIG_ENDIAN
 #undef htobe16
 #undef htobe32
 #undef htobe64
@@ -529,8 +526,6 @@ inline T littleToNative(T t) {
 #pragma pop_macro("MONGO_UINT16_SWAB")
 #pragma pop_macro("MONGO_UINT32_SWAB")
 #pragma pop_macro("MONGO_UINT64_SWAB")
-#pragma pop_macro("MONGO_LITTLE_ENDIAN")
-#pragma pop_macro("MONGO_BIG_ENDIAN")
 #pragma pop_macro("htobe16")
 #pragma pop_macro("htobe32")
 #pragma pop_macro("htobe64")

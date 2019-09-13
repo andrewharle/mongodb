@@ -1,23 +1,25 @@
-/*
- *    Copyright (C) 2015 MongoDB Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -33,48 +35,46 @@
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/client.h"
+#include "mongo/db/commands.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/stats/top.h"
-#include "mongo/db/commands.h"
 
 namespace {
 
 using namespace mongo;
 
-class TopCommand : public Command {
+class TopCommand : public BasicCommand {
 public:
-    TopCommand() : Command("top", true) {}
+    TopCommand() : BasicCommand("top") {}
 
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
     virtual bool adminOnly() const {
         return true;
     }
-    virtual bool isWriteCommandForConfigServer() const {
+    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
-    virtual void help(std::stringstream& help) const {
-        help << "usage by collection, in micros ";
+    std::string help() const override {
+        return "usage by collection, in micros ";
     }
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
+                                       std::vector<Privilege>* out) const {
         ActionSet actions;
         actions.addAction(ActionType::top);
         out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
     }
-    virtual bool run(OperationContext* txn,
+    virtual bool run(OperationContext* opCtx,
                      const std::string& db,
-                     BSONObj& cmdObj,
-                     int options,
-                     std::string& errmsg,
+                     const BSONObj& cmdObj,
                      BSONObjBuilder& result) {
         {
             BSONObjBuilder b(result.subobjStart("totals"));
             b.append("note", "all times in microseconds");
-            Top::get(txn->getClient()->getServiceContext()).append(b);
+            Top::get(opCtx->getClient()->getServiceContext()).append(b);
             b.done();
         }
         return true;

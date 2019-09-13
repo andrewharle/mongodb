@@ -1,29 +1,31 @@
+
 /**
- * Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- * This program is free software: you can redistribute it and/or  modify
- * it under the terms of the GNU Affero General Public License, version 3,
- * as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
- * As a special exception, the copyright holders give permission to link the
- * code of portions of this program with the OpenSSL library under certain
- * conditions as described in each individual source file and distribute
- * linked combinations including the program with the OpenSSL library. You
- * must comply with the GNU Affero General Public License in all respects
- * for all of the code used other than as permitted herein. If you modify
- * file(s) with this exception, you may extend this exception to your
- * version of the file(s), but you are not obligated to do so. If you do not
- * wish to do so, delete this exception statement from your version. If you
- * delete this exception statement from all source files in the program,
- * then also delete it in the license file.
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
@@ -53,13 +55,17 @@
 #include "mongo/scripting/mozjs/mongo.h"
 #include "mongo/scripting/mozjs/mongohelpers.h"
 #include "mongo/scripting/mozjs/nativefunction.h"
+#include "mongo/scripting/mozjs/numberdecimal.h"
 #include "mongo/scripting/mozjs/numberint.h"
 #include "mongo/scripting/mozjs/numberlong.h"
-#include "mongo/scripting/mozjs/numberdecimal.h"
 #include "mongo/scripting/mozjs/object.h"
 #include "mongo/scripting/mozjs/oid.h"
 #include "mongo/scripting/mozjs/regexp.h"
+#include "mongo/scripting/mozjs/session.h"
+#include "mongo/scripting/mozjs/status.h"
 #include "mongo/scripting/mozjs/timestamp.h"
+#include "mongo/scripting/mozjs/uri.h"
+#include "mongo/stdx/unordered_set.h"
 
 namespace mongo {
 namespace mozjs {
@@ -87,7 +93,7 @@ public:
 
     void reset() override;
 
-    void kill();
+    void kill() override;
 
     void interrupt();
 
@@ -95,11 +101,11 @@ public:
 
     OperationContext* getOpContext() const;
 
-    void registerOperation(OperationContext* txn) override;
+    void registerOperation(OperationContext* opCtx) override;
 
     void unregisterOperation() override;
 
-    void localConnectForDbEval(OperationContext* txn, const char* dbName) override;
+    void localConnectForDbEval(OperationContext* opCtx, const char* dbName) override;
 
     void externalSetup() override;
 
@@ -108,6 +114,8 @@ public:
     bool hasOutOfMemoryException() override;
 
     void gc() override;
+
+    void sleep(Milliseconds ms);
 
     bool isJavaScriptProtectionEnabled() const;
 
@@ -286,12 +294,30 @@ public:
     }
 
     template <typename T>
+    typename std::enable_if<std::is_same<T, SessionInfo>::value, WrapType<T>&>::type getProto() {
+        return _sessionProto;
+    }
+
+    template <typename T>
+    typename std::enable_if<std::is_same<T, MongoStatusInfo>::value, WrapType<T>&>::type
+    getProto() {
+        return _statusProto;
+    }
+
+    template <typename T>
     typename std::enable_if<std::is_same<T, TimestampInfo>::value, WrapType<T>&>::type getProto() {
         return _timestampProto;
     }
 
-    void setQuickExit(int exitCode);
-    bool getQuickExit(int* exitCode);
+    template <typename T>
+    typename std::enable_if<std::is_same<T, URIInfo>::value, WrapType<T>&>::type getProto() {
+        return _uriProto;
+    }
+
+    template <typename T>
+    typename std::enable_if<std::is_same<T, GlobalInfo>::value, WrapType<T>&>::type getProto() {
+        return _globalProto;
+    }
 
     static const char* const kExecResult;
     static const char* const kInvokeResult;
@@ -313,6 +339,35 @@ public:
         return _internedStrings.getInternedString(name);
     }
 
+    std::string buildStackString();
+
+    template <typename T, typename... Args>
+    T* trackedNew(Args&&... args) {
+        T* t = new T(std::forward<Args>(args)...);
+        _asanHandles.addPointer(t);
+        return t;
+    }
+
+    template <typename T>
+    void trackedDelete(T* t) {
+        _asanHandles.removePointer(t);
+        delete (t);
+    }
+
+    struct ASANHandles {
+        ASANHandles();
+        ~ASANHandles();
+
+        void addPointer(void* ptr);
+        void removePointer(void* ptr);
+
+        stdx::unordered_set<void*> _handles;
+
+        static ASANHandles* getThreadASANHandles();
+    };
+
+    void setStatus(Status status);
+
 private:
     template <typename ImplScopeFunction>
     auto _runSafely(ImplScopeFunction&& functionToRun) -> decltype(functionToRun());
@@ -328,11 +383,10 @@ private:
     struct MozRuntime {
     public:
         MozRuntime(const MozJSScriptEngine* engine);
-        ~MozRuntime();
 
-        PRThread* _thread = nullptr;
-        JSRuntime* _runtime = nullptr;
-        JSContext* _context = nullptr;
+        std::unique_ptr<PRThread, std::function<void(PRThread*)>> _thread;
+        std::unique_ptr<JSRuntime, std::function<void(JSRuntime*)>> _runtime;
+        std::unique_ptr<JSContext, std::function<void(JSContext*)>> _context;
     };
 
     /**
@@ -360,6 +414,7 @@ private:
 
     void setCompileOptions(JS::CompileOptions* co);
 
+    ASANHandles _asanHandles;
     MozJSScriptEngine* _engine;
     MozRuntime _mr;
     JSRuntime* _runtime;
@@ -368,7 +423,9 @@ private:
     JS::HandleObject _global;
     std::vector<JS::PersistentRootedValue> _funcs;
     InternedStringTable _internedStrings;
-    std::atomic<bool> _pendingKill;
+    Status _killStatus;
+    mutable std::mutex _mutex;
+    std::condition_variable _sleepCondition;
     std::string _error;
     unsigned int _opId;        // op id for this scope
     OperationContext* _opCtx;  // Op context for DbEval
@@ -376,23 +433,23 @@ private:
     std::atomic<bool> _pendingGC;
     ConnectState _connectState;
     Status _status;
-    int _exitCode;
-    bool _quickExit;
     std::string _parentStack;
     std::size_t _generation;
     bool _requireOwnedObjects;
     bool _hasOutOfMemoryException;
 
+    bool _inReportError;
+
     WrapType<BinDataInfo> _binDataProto;
     WrapType<BSONInfo> _bsonProto;
     WrapType<CodeInfo> _codeProto;
     WrapType<CountDownLatchInfo> _countDownLatchProto;
-    WrapType<CursorInfo> _cursorProto;
     WrapType<CursorHandleInfo> _cursorHandleProto;
+    WrapType<CursorInfo> _cursorProto;
     WrapType<DBCollectionInfo> _dbCollectionProto;
+    WrapType<DBInfo> _dbProto;
     WrapType<DBPointerInfo> _dbPointerProto;
     WrapType<DBQueryInfo> _dbQueryProto;
-    WrapType<DBInfo> _dbProto;
     WrapType<DBRefInfo> _dbRefProto;
     WrapType<ErrorInfo> _errorProto;
     WrapType<JSThreadInfo> _jsThreadProto;
@@ -402,17 +459,24 @@ private:
     WrapType<MongoHelpersInfo> _mongoHelpersProto;
     WrapType<MongoLocalInfo> _mongoLocalProto;
     WrapType<NativeFunctionInfo> _nativeFunctionProto;
+    WrapType<NumberDecimalInfo> _numberDecimalProto;
     WrapType<NumberIntInfo> _numberIntProto;
     WrapType<NumberLongInfo> _numberLongProto;
-    WrapType<NumberDecimalInfo> _numberDecimalProto;
     WrapType<ObjectInfo> _objectProto;
     WrapType<OIDInfo> _oidProto;
     WrapType<RegExpInfo> _regExpProto;
+    WrapType<SessionInfo> _sessionProto;
+    WrapType<MongoStatusInfo> _statusProto;
     WrapType<TimestampInfo> _timestampProto;
+    WrapType<URIInfo> _uriProto;
 };
 
 inline MozJSImplScope* getScope(JSContext* cx) {
     return static_cast<MozJSImplScope*>(JS_GetContextPrivate(cx));
+}
+
+inline MozJSImplScope* getScope(JSFreeOp* fop) {
+    return static_cast<MozJSImplScope*>(JS_GetRuntimePrivate(fop->runtime()));
 }
 
 }  // namespace mozjs

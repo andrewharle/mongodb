@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2013-2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -26,16 +28,17 @@
  *    it in the license file.
  */
 
+#include "mongo/db/ops/delete_request.h"
+#include "mongo/db/ops/parsed_delete.h"
+#include "mongo/db/ops/parsed_update.h"
+#include "mongo/db/ops/update_request.h"
 #include "mongo/db/query/canonical_query.h"
+#include "mongo/db/query/parsed_distinct.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/query_planner_params.h"
 #include "mongo/db/query/query_settings.h"
 #include "mongo/db/query/query_solution.h"
-#include "mongo/db/ops/delete_request.h"
-#include "mongo/db/ops/parsed_delete.h"
-#include "mongo/db/ops/parsed_update.h"
-#include "mongo/db/ops/update_driver.h"
-#include "mongo/db/ops/update_request.h"
+#include "mongo/db/update/update_driver.h"
 
 namespace mongo {
 
@@ -50,17 +53,25 @@ struct GroupRequest;
  * Used by getExecutor().
  * This function is public to facilitate testing.
  */
-void filterAllowedIndexEntries(const AllowedIndices& allowedIndices,
+void filterAllowedIndexEntries(const AllowedIndicesFilter& allowedIndicesFilter,
                                std::vector<IndexEntry>* indexEntries);
 
 /**
  * Fill out the provided 'plannerParams' for the 'canonicalQuery' operating on the collection
  * 'collection'.  Exposed for testing.
  */
-void fillOutPlannerParams(OperationContext* txn,
+void fillOutPlannerParams(OperationContext* opCtx,
                           Collection* collection,
                           CanonicalQuery* canonicalQuery,
                           QueryPlannerParams* plannerParams);
+
+/**
+ * Determines whether or not to wait for oplog visibility for a query. This is only used for
+ * collection scans on the oplog.
+ */
+bool shouldWaitForOplogVisibility(OperationContext* opCtx,
+                                  const Collection* collection,
+                                  bool tailable);
 
 /**
  * Get a plan executor for a query.
@@ -70,8 +81,8 @@ void fillOutPlannerParams(OperationContext* txn,
  *
  * If the query cannot be executed, returns a Status indicating why.
  */
-StatusWith<std::unique_ptr<PlanExecutor>> getExecutor(
-    OperationContext* txn,
+StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutor(
+    OperationContext* opCtx,
     Collection* collection,
     std::unique_ptr<CanonicalQuery> canonicalQuery,
     PlanExecutor::YieldPolicy yieldPolicy,
@@ -85,12 +96,21 @@ StatusWith<std::unique_ptr<PlanExecutor>> getExecutor(
  *
  * If the query cannot be executed, returns a Status indicating why.
  */
-StatusWith<std::unique_ptr<PlanExecutor>> getExecutorFind(
-    OperationContext* txn,
+StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorFind(
+    OperationContext* opCtx,
     Collection* collection,
     const NamespaceString& nss,
     std::unique_ptr<CanonicalQuery> canonicalQuery,
-    PlanExecutor::YieldPolicy yieldPolicy);
+    size_t plannerOptions = QueryPlannerParams::DEFAULT);
+
+/**
+ * Returns a plan executor for a legacy OP_QUERY find.
+ */
+StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorLegacyFind(
+    OperationContext* opCtx,
+    Collection* collection,
+    const NamespaceString& nss,
+    std::unique_ptr<CanonicalQuery> canonicalQuery);
 
 /**
  * If possible, turn the provided QuerySolution into a QuerySolution that uses a DistinctNode
@@ -108,14 +128,11 @@ bool turnIxscanIntoDistinctIxscan(QuerySolution* soln, const std::string& field)
  * possible values of a certain field.  As such, we can skip lots of data in certain cases (see
  * body of method for detail).
  */
-StatusWith<std::unique_ptr<PlanExecutor>> getExecutorDistinct(
-    OperationContext* txn,
+StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorDistinct(
+    OperationContext* opCtx,
     Collection* collection,
     const std::string& ns,
-    const BSONObj& query,
-    const std::string& field,
-    bool isExplain,
-    PlanExecutor::YieldPolicy yieldPolicy);
+    ParsedDistinct* parsedDistinct);
 
 /*
  * Get a PlanExecutor for a query executing as part of a count command.
@@ -124,18 +141,17 @@ StatusWith<std::unique_ptr<PlanExecutor>> getExecutorDistinct(
  * As such, with certain covered queries, we can skip the overhead of fetching etc. when
  * executing a count.
  */
-StatusWith<std::unique_ptr<PlanExecutor>> getExecutorCount(OperationContext* txn,
-                                                           Collection* collection,
-                                                           const CountRequest& request,
-                                                           bool explain,
-                                                           PlanExecutor::YieldPolicy yieldPolicy);
+StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorCount(
+    OperationContext* opCtx, Collection* collection, const CountRequest& request, bool explain);
 
 /**
  * Get a PlanExecutor for a delete operation. 'parsedDelete' describes the query predicate
  * and delete flags like 'isMulti'. The caller must hold the appropriate MODE_X or MODE_IX
  * locks, and must not release these locks until after the returned PlanExecutor is deleted.
  *
- * The returned PlanExecutor will yield if and only if parsedDelete->canYield().
+ * 'opDebug' Optional argument. When not null, will be used to record operation statistics.
+ *
+ * The returned PlanExecutor will used the YieldPolicy returned by parsedDelete->yieldPolicy().
  *
  * Does not take ownership of its arguments.
  *
@@ -144,9 +160,8 @@ StatusWith<std::unique_ptr<PlanExecutor>> getExecutorCount(OperationContext* txn
  *
  * If the query cannot be executed, returns a Status indicating why.
  */
-StatusWith<std::unique_ptr<PlanExecutor>> getExecutorDelete(OperationContext* txn,
-                                                            Collection* collection,
-                                                            ParsedDelete* parsedDelete);
+StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorDelete(
+    OperationContext* opCtx, OpDebug* opDebug, Collection* collection, ParsedDelete* parsedDelete);
 
 /**
  * Get a PlanExecutor for an update operation. 'parsedUpdate' describes the query predicate
@@ -154,7 +169,9 @@ StatusWith<std::unique_ptr<PlanExecutor>> getExecutorDelete(OperationContext* tx
  * to calling this function, and must not release these locks until after the returned
  * PlanExecutor is deleted.
  *
- * The returned PlanExecutor will yield if and only if parsedUpdate->canYield().
+ * 'opDebug' Optional argument. When not null, will be used to record operation statistics.
+ *
+ * The returned PlanExecutor will used the YieldPolicy returned by parsedUpdate->yieldPolicy().
  *
  * Does not take ownership of its arguments.
  *
@@ -163,10 +180,8 @@ StatusWith<std::unique_ptr<PlanExecutor>> getExecutorDelete(OperationContext* tx
  *
  * If the query cannot be executed, returns a Status indicating why.
  */
-StatusWith<std::unique_ptr<PlanExecutor>> getExecutorUpdate(OperationContext* txn,
-                                                            Collection* collection,
-                                                            ParsedUpdate* parsedUpdate,
-                                                            OpDebug* opDebug);
+StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorUpdate(
+    OperationContext* opCtx, OpDebug* opDebug, Collection* collection, ParsedUpdate* parsedUpdate);
 
 /**
  * Get a PlanExecutor for a group operation.
@@ -176,9 +191,7 @@ StatusWith<std::unique_ptr<PlanExecutor>> getExecutorUpdate(OperationContext* tx
  *
  * If an executor could not be created, returns a Status indicating why.
  */
-StatusWith<std::unique_ptr<PlanExecutor>> getExecutorGroup(OperationContext* txn,
-                                                           Collection* collection,
-                                                           const GroupRequest& request,
-                                                           PlanExecutor::YieldPolicy yieldPolicy);
+StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorGroup(
+    OperationContext* opCtx, Collection* collection, const GroupRequest& request);
 
 }  // namespace mongo

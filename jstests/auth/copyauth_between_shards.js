@@ -1,14 +1,11 @@
 // Test copyDatabase command inside a sharded cluster with and without auth.  Tests with auth are
 // currently disabled due to SERVER-13080.
+// @tags: [requires_sharding, requires_replication]
 
 var baseName = "jstests_clone_copyauth_between_shards";
 
 function copydbWithinShardedCluster(useReplSets, passCredentials, useAuth) {
-    var clusterConfig = {
-        shards: 1,
-        mongos: 1,
-        config: 1
-    };
+    var clusterConfig = {shards: 1, mongos: 1, config: 1};
 
     if (useAuth) {
         clusterConfig.auth = "";

@@ -1,5 +1,8 @@
 // check that there is preallocation on insert
 
+// Preallocation is an mmap only behavior.
+// @tags: [requires_mmapv1]
+
 var baseName = "jstests_preallocate2";
 
 var m = MongoRunner.runMongod({});
@@ -14,3 +17,5 @@ if (m.getDB(baseName).serverBits() < 64)
 assert.soon(function() {
     return m.getDBs().totalSize > expectedMB * 1000000;
 }, "\n\n\nFAIL preallocate.js expected second file to bring total size over " + expectedMB + "MB");
+
+MongoRunner.stopMongod(m);

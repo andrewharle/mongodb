@@ -1,3 +1,10 @@
+// @tags: [
+//   assumes_superuser_permissions,
+//   assumes_write_concern_unchanged,
+//   requires_auth,
+//   requires_non_retryable_commands,
+// ]
+
 // Ensure that inserts and updates of the system.users collection validate the schema of inserted
 // documents.
 
@@ -34,8 +41,7 @@ assert.commandWorked(mydb.runCommand({createUser: "spencer", pwd: "password", ro
 assert.commandWorked(mydb.runCommand({
     createUser: "andy",
     pwd: "password",
-    roles:
-        [{role: "dbAdmin", db: "validate_user_documents", hasRole: true, canDelegate: false}]
+    roles: [{role: "dbAdmin", db: "validate_user_documents", hasRole: true, canDelegate: false}]
 }));
 
 // Non-existent role; insert should fail

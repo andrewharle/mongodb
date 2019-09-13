@@ -3,6 +3,9 @@
  * also checks that fields that should not be in the document are absent
  */
 
+// Skip db hash check because node 2 is slave delayed and may time out on awaitReplication.
+TestData.skipCheckDBHashes = true;
+
 load("jstests/replsets/rslib.js");
 
 // function create the error message if an assert fails
@@ -119,8 +122,9 @@ var agreeOnPrimaryAndSetVersion = function(setVersion) {
 };
 
 var master = replTest.getPrimary();
+var expectedVersion = replTest.getReplSetConfigFromNode().version;
 assert.soon(function() {
-    return agreeOnPrimaryAndSetVersion(1);
+    return agreeOnPrimaryAndSetVersion(expectedVersion);
 }, "Nodes did not initiate in less than a minute", 60000);
 
 // check to see if the information from isMaster() is correct at each node
@@ -128,18 +132,19 @@ assert.soon(function() {
 checkMember({
     conn: master,
     name: "master",
-    goodValues: {setName: "ismaster", setVersion: 1, ismaster: true, secondary: false, ok: 1},
+    goodValues:
+        {setName: "ismaster", setVersion: expectedVersion, ismaster: true, secondary: false, ok: 1},
     wantedFields:
         ["hosts", "passives", "arbiters", "primary", "me", "maxBsonObjectSize", "localTime"],
     unwantedFields: ["arbiterOnly", "passive", "slaveDelay", "hidden", "tags", "buildIndexes"]
 });
 
 checkMember({
-    conn: replTest.liveNodes.slaves[0],
+    conn: replTest._slaves[0],
     name: "slave",
     goodValues: {
         setName: "ismaster",
-        setVersion: 1,
+        setVersion: expectedVersion,
         ismaster: false,
         secondary: true,
         passive: true,
@@ -151,11 +156,11 @@ checkMember({
 });
 
 checkMember({
-    conn: replTest.liveNodes.slaves[1],
+    conn: replTest._slaves[1],
     name: "delayed_slave",
     goodValues: {
         setName: "ismaster",
-        setVersion: 1,
+        setVersion: expectedVersion,
         ismaster: false,
         secondary: true,
         passive: true,
@@ -169,11 +174,11 @@ checkMember({
 });
 
 checkMember({
-    conn: replTest.liveNodes.slaves[2],
+    conn: replTest._slaves[2],
     name: "arbiter",
     goodValues: {
         setName: "ismaster",
-        setVersion: 1,
+        setVersion: expectedVersion,
         ismaster: false,
         secondary: false,
         arbiterOnly: true,
@@ -205,8 +210,9 @@ try {
 }
 
 master = replTest.getPrimary();
+expectedVersion = config.version;
 assert.soon(function() {
-    return agreeOnPrimaryAndSetVersion(2);
+    return agreeOnPrimaryAndSetVersion(expectedVersion);
 }, "Nodes did not sync in less than a minute", 60000);
 
 // check nodes for their new settings
@@ -215,7 +221,7 @@ checkMember({
     name: "master2",
     goodValues: {
         setName: "ismaster",
-        setVersion: 2,
+        setVersion: expectedVersion,
         ismaster: true,
         secondary: false,
         tags: {"disk": "ssd"},
@@ -227,11 +233,11 @@ checkMember({
 });
 
 checkMember({
-    conn: replTest.liveNodes.slaves[0],
+    conn: replTest._slaves[0],
     name: "first_slave",
     goodValues: {
         setName: "ismaster",
-        setVersion: 2,
+        setVersion: expectedVersion,
         ismaster: false,
         secondary: true,
         tags: {"disk": "ssd"},
@@ -244,11 +250,11 @@ checkMember({
 });
 
 checkMember({
-    conn: replTest.liveNodes.slaves[1],
+    conn: replTest._slaves[1],
     name: "very_delayed_slave",
     goodValues: {
         setName: "ismaster",
-        setVersion: 2,
+        setVersion: expectedVersion,
         ismaster: false,
         secondary: true,
         tags: {"disk": "hdd"},
@@ -263,11 +269,11 @@ checkMember({
 });
 
 checkMember({
-    conn: replTest.liveNodes.slaves[2],
+    conn: replTest._slaves[2],
     name: "arbiter",
     goodValues: {
         setName: "ismaster",
-        setVersion: 2,
+        setVersion: expectedVersion,
         ismaster: false,
         secondary: false,
         arbiterOnly: true,

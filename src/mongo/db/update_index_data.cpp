@@ -1,36 +1,38 @@
 // update_index_data.cpp
 
-/**
-*    Copyright (C) 2013 10gen Inc.
-*
-*    This program is free software: you can redistribute it and/or  modify
-*    it under the terms of the GNU Affero General Public License, version 3,
-*    as published by the Free Software Foundation.
-*
-*    This program is distributed in the hope that it will be useful,
-*    but WITHOUT ANY WARRANTY; without even the implied warranty of
-*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*    GNU Affero General Public License for more details.
-*
-*    You should have received a copy of the GNU Affero General Public License
-*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*
-*    As a special exception, the copyright holders give permission to link the
-*    code of portions of this program with the OpenSSL library under certain
-*    conditions as described in each individual source file and distribute
-*    linked combinations including the program with the OpenSSL library. You
-*    must comply with the GNU Affero General Public License in all respects for
-*    all of the code used other than as permitted herein. If you modify file(s)
-*    with this exception, you may extend this exception to your version of the
-*    file(s), but you are not obligated to do so. If you do not wish to do so,
-*    delete this exception statement from your version. If you delete this
-*    exception statement from all source files in the program, then also delete
-*    it in the license file.
-*/
 
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
+ *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
+ *
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
+ */
+
+#include "mongo/db/update_index_data.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/db/field_ref.h"
-#include "mongo/db/update_index_data.h"
 
 namespace mongo {
 
@@ -149,8 +151,31 @@ bool getCanonicalIndexField(StringData fullName, string* out) {
             while (j + 1 < fullName.size() && isdigit(fullName[j + 1]))
                 j++;
 
-            if (j + 1 == fullName.size() || fullName[j + 1] == '.') {
+            if (j + 1 == fullName.size()) {
                 // only digits found, skip forward
+                i = j;
+                modified = true;
+                continue;
+            }
+
+            // Check for consecutive digits separated by a period.
+            if (fullName[j + 1] == '.') {
+                // Peek ahead to see if the next set of characters are also numeric.
+                size_t k = j + 2;
+                while (k < fullName.size() && isdigit(fullName[k])) {
+                    k++;
+                }
+
+                // The second set of digits may end at the end of the path or a '.'.
+                if (k == fullName.size() || fullName[k] == '.') {
+                    // Found consecutive numerical path components. Since this implies a numeric
+                    // field name, return the prefix as the canonical index field. This is meant to
+                    // fix SERVER-37058.
+                    modified = true;
+                    break;
+                }
+
+                // Only one numerical path component, skip forward.
                 i = j;
                 modified = true;
                 continue;

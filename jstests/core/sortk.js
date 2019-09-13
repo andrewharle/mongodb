@@ -1,5 +1,13 @@
 // End-to-end testing for index scan explosion + merge sort.
 // SERVER-5063 and SERVER-1205.
+
+// @tags: [
+//     requires_non_retryable_writes,
+//
+//     # Uses $where operator
+//     requires_scripting,
+// ]
+
 t = db.jstests_sortk;
 t.drop();
 
@@ -17,17 +25,10 @@ resetCollection();
 t.ensureIndex({a: 1, b: 1});
 
 function simpleQuery(extraFields, sort, hint) {
-    query = {
-        a: {$in: [1, 2]}
-    };
+    query = {a: {$in: [1, 2]}};
     Object.extend(query, extraFields);
-    sort = sort || {
-        b: 1
-    };
-    hint = hint || {
-        a: 1,
-        b: 1
-    };
+    sort = sort || {b: 1};
+    hint = hint || {a: 1, b: 1};
     return t.find(query).sort(sort).hint(hint);
 }
 
@@ -133,9 +134,7 @@ assert.eq(0, andEqInQueryWithLimit(-2)[0].c);
 assert.eq(1, andEqInQueryWithLimit(-2)[1].c);
 
 function inQueryWithLimit(limit, sort) {
-    sort = sort || {
-        b: 1
-    };
+    sort = sort || {b: 1};
     return t.find({a: {$in: [0, 1]}}).sort(sort).hint({a: 1, b: 1, c: 1}).limit(limit);
 }
 

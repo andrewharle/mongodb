@@ -1,24 +1,26 @@
 
+
 /**
- *    Copyright (C) 2014 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -31,12 +33,16 @@
 
 #include "mongo/db/exec/geo_near.h"
 
+#include <memory>
+#include <vector>
+
 // For s2 search
 #include "third_party/s2/s2regionintersection.h"
 
 #include "mongo/base/owned_pointer_vector.h"
-#include "mongo/db/exec/index_scan.h"
+#include "mongo/db/bson/dotted_path_support.h"
 #include "mongo/db/exec/fetch.h"
+#include "mongo/db/exec/index_scan.h"
 #include "mongo/db/exec/working_set_computed_data.h"
 #include "mongo/db/geo/geoconstants.h"
 #include "mongo/db/geo/geoparser.h"
@@ -45,6 +51,7 @@
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/query/expression_index.h"
 #include "mongo/db/query/expression_index_knobs.h"
+#include "mongo/stdx/memory.h"
 #include "mongo/util/log.h"
 
 #include <algorithm>
@@ -53,6 +60,8 @@ namespace mongo {
 
 using std::abs;
 using std::unique_ptr;
+
+namespace dps = ::mongo::dotted_path_support;
 
 //
 // Shared GeoNear search functionality
@@ -96,11 +105,11 @@ struct StoredGeometry {
  */
 static void extractGeometries(const BSONObj& doc,
                               const string& path,
-                              vector<StoredGeometry*>* geometries) {
+                              std::vector<std::unique_ptr<StoredGeometry>>* geometries) {
     BSONElementSet geomElements;
     // NOTE: Annoyingly, we cannot just expand arrays b/c single 2d points are arrays, we need
     // to manually expand all results to check if they are geometries
-    doc.getFieldsDotted(path, geomElements, false /* expand arrays */);
+    dps::extractAllElementsAlongPath(doc, path, geomElements, false /* expand arrays */);
 
     for (BSONElementSet::iterator it = geomElements.begin(); it != geomElements.end(); ++it) {
         const BSONElement& el = *it;
@@ -108,7 +117,7 @@ static void extractGeometries(const BSONObj& doc,
 
         if (stored.get()) {
             // Valid geometry element
-            geometries->push_back(stored.release());
+            geometries->push_back(std::move(stored));
         } else if (el.type() == Array) {
             // Many geometries may be in an array
             BSONObjIterator arrIt(el.Obj());
@@ -118,14 +127,14 @@ static void extractGeometries(const BSONObj& doc,
 
                 if (stored.get()) {
                     // Valid geometry element
-                    geometries->push_back(stored.release());
+                    geometries->push_back(std::move(stored));
                 } else {
-                    warning() << "geoNear stage read non-geometry element " << nextEl.toString()
-                              << " in array " << el.toString();
+                    warning() << "geoNear stage read non-geometry element " << redact(nextEl)
+                              << " in array " << redact(el);
                 }
             }
         } else {
-            warning() << "geoNear stage read non-geometry element " << el.toString();
+            warning() << "geoNear stage read non-geometry element " << redact(el);
         }
     }
 }
@@ -144,14 +153,13 @@ static StatusWith<double> computeGeoNearDistance(const GeoNearParams& nearParams
     CRS queryCRS = nearParams.nearQuery->centroid->crs;
 
     // Extract all the geometries out of this document for the near query
-    OwnedPointerVector<StoredGeometry> geometriesOwned;
-    vector<StoredGeometry*>& geometries = geometriesOwned.mutableVector();
+    std::vector<std::unique_ptr<StoredGeometry>> geometries;
     extractGeometries(member->obj.value(), nearParams.nearQuery->field, &geometries);
 
     // Compute the minimum distance of all the geometries in the document
     double minDistance = -1;
     BSONObj minDistanceObj;
-    for (vector<StoredGeometry*>::iterator it = geometries.begin(); it != geometries.end(); ++it) {
+    for (auto it = geometries.begin(); it != geometries.end(); ++it) {
         StoredGeometry& stored = **it;
 
         // NOTE: A stored document with STRICT_SPHERE CRS is treated as a malformed document
@@ -282,17 +290,17 @@ public:
         // Since appendVertexNeighbors(level, output) requires level < hash.getBits(),
         // we have to start to find documents at most GeoHash::kMaxBits - 1. Thus the finest
         // search area is 16 * finest cell area at GeoHash::kMaxBits.
-        _currentLevel = std::max(0u, hashParams.bits - 1u);
+        _currentLevel = std::max(0, hashParams.bits - 1);
     }
 
-    PlanStage::StageState work(OperationContext* txn,
+    PlanStage::StageState work(OperationContext* opCtx,
                                WorkingSet* workingSet,
                                Collection* collection,
                                WorkingSetID* out,
                                double* estimatedDistance);
 
 private:
-    void buildIndexScan(OperationContext* txn, WorkingSet* workingSet, Collection* collection);
+    void buildIndexScan(OperationContext* opCtx, WorkingSet* workingSet, Collection* collection);
 
     PlanStage::Children* _children;     // Points to PlanStage::_children in the NearStage.
     const IndexDescriptor* _twoDIndex;  // Not owned here.
@@ -305,7 +313,7 @@ private:
 };
 
 // Initialize the internal states
-void GeoNear2DStage::DensityEstimator::buildIndexScan(OperationContext* txn,
+void GeoNear2DStage::DensityEstimator::buildIndexScan(OperationContext* opCtx,
                                                       WorkingSet* workingSet,
                                                       Collection* collection) {
     IndexScanParams scanParams;
@@ -334,7 +342,8 @@ void GeoNear2DStage::DensityEstimator::buildIndexScan(OperationContext* txn,
         mongo::BSONObjBuilder builder;
         it->appendHashMin(&builder, "");
         it->appendHashMax(&builder, "");
-        oil.intervals.push_back(IndexBoundsBuilder::makeRangeInterval(builder.obj(), true, true));
+        oil.intervals.push_back(IndexBoundsBuilder::makeRangeInterval(
+            builder.obj(), BoundInclusion::kIncludeBothStartAndEndKeys));
     }
 
     invariant(oil.isValidFor(1));
@@ -344,20 +353,20 @@ void GeoNear2DStage::DensityEstimator::buildIndexScan(OperationContext* txn,
     IndexBoundsBuilder::intersectize(oil, &scanParams.bounds.fields[twoDFieldPosition]);
 
     invariant(!_indexScan);
-    _indexScan = new IndexScan(txn, scanParams, workingSet, NULL);
+    _indexScan = new IndexScan(opCtx, scanParams, workingSet, NULL);
     _children->emplace_back(_indexScan);
 }
 
 // Return IS_EOF is we find a document in it's ancestor cells and set estimated distance
 // from the nearest document.
-PlanStage::StageState GeoNear2DStage::DensityEstimator::work(OperationContext* txn,
+PlanStage::StageState GeoNear2DStage::DensityEstimator::work(OperationContext* opCtx,
                                                              WorkingSet* workingSet,
                                                              Collection* collection,
                                                              WorkingSetID* out,
                                                              double* estimatedDistance) {
     if (!_indexScan) {
         // Setup index scan stage for current level.
-        buildIndexScan(txn, workingSet, collection);
+        buildIndexScan(opCtx, workingSet, collection);
     }
 
     WorkingSetID workingSetID;
@@ -425,7 +434,7 @@ PlanStage::StageState GeoNear2DStage::DensityEstimator::work(OperationContext* t
     return state;
 }
 
-PlanStage::StageState GeoNear2DStage::initialize(OperationContext* txn,
+PlanStage::StageState GeoNear2DStage::initialize(OperationContext* opCtx,
                                                  WorkingSet* workingSet,
                                                  Collection* collection,
                                                  WorkingSetID* out) {
@@ -436,7 +445,7 @@ PlanStage::StageState GeoNear2DStage::initialize(OperationContext* txn,
 
     double estimatedDistance;
     PlanStage::StageState state =
-        _densityEstimator->work(txn, workingSet, collection, out, &estimatedDistance);
+        _densityEstimator->work(opCtx, workingSet, collection, out, &estimatedDistance);
 
     if (state == PlanStage::IS_EOF) {
         // 2d index only works with legacy points as centroid. $nearSphere will project
@@ -472,11 +481,11 @@ PlanStage::StageState GeoNear2DStage::initialize(OperationContext* txn,
 static const string kTwoDIndexNearStage("GEO_NEAR_2D");
 
 GeoNear2DStage::GeoNear2DStage(const GeoNearParams& nearParams,
-                               OperationContext* txn,
+                               OperationContext* opCtx,
                                WorkingSet* workingSet,
                                Collection* collection,
                                IndexDescriptor* twoDIndex)
-    : NearStage(txn, kTwoDIndexNearStage.c_str(), STAGE_GEO_NEAR_2D, workingSet, collection),
+    : NearStage(opCtx, kTwoDIndexNearStage.c_str(), STAGE_GEO_NEAR_2D, workingSet, collection),
       _nearParams(nearParams),
       _twoDIndex(twoDIndex),
       _fullBounds(twoDDistanceBounds(nearParams, twoDIndex)),
@@ -484,6 +493,7 @@ GeoNear2DStage::GeoNear2DStage(const GeoNearParams& nearParams,
       _boundsIncrement(0.0) {
     _specificStats.keyPattern = twoDIndex->keyPattern();
     _specificStats.indexName = twoDIndex->indexName();
+    _specificStats.indexVersion = static_cast<int>(twoDIndex->version());
 }
 
 
@@ -497,15 +507,13 @@ namespace {
 class TwoDPtInAnnulusExpression : public LeafMatchExpression {
 public:
     TwoDPtInAnnulusExpression(const R2Annulus& annulus, StringData twoDPath)
-        : LeafMatchExpression(INTERNAL_2D_POINT_IN_ANNULUS), _annulus(annulus) {
-        initPath(twoDPath);
-    }
+        : LeafMatchExpression(INTERNAL_2D_POINT_IN_ANNULUS, twoDPath), _annulus(annulus) {}
 
-    void toBSON(BSONObjBuilder* out) const final {
+    void serialize(BSONObjBuilder* out) const final {
         out->append("TwoDPtInAnnulusExpression", true);
     }
 
-    bool matchesSingleElement(const BSONElement& e) const final {
+    bool matchesSingleElement(const BSONElement& e, MatchDetails* details = nullptr) const final {
         if (!e.isABSONObj())
             return false;
 
@@ -520,33 +528,41 @@ public:
     // These won't be called.
     //
 
+    BSONObj getSerializedRightHandSide() const final {
+        MONGO_UNREACHABLE;
+    }
+
     void debugString(StringBuilder& debug, int level = 0) const final {
-        invariant(false);
+        MONGO_UNREACHABLE;
     }
 
     bool equivalent(const MatchExpression* other) const final {
-        invariant(false);
+        MONGO_UNREACHABLE;
         return false;
     }
 
     unique_ptr<MatchExpression> shallowClone() const final {
-        invariant(false);
+        MONGO_UNREACHABLE;
         return NULL;
     }
 
 private:
+    ExpressionOptimizerFunc getOptimizer() const final {
+        return [](std::unique_ptr<MatchExpression> expression) { return expression; };
+    }
+
     R2Annulus _annulus;
 };
 
 // Helper class to maintain ownership of a match expression alongside an index scan
 class FetchStageWithMatch final : public FetchStage {
 public:
-    FetchStageWithMatch(OperationContext* txn,
+    FetchStageWithMatch(OperationContext* opCtx,
                         WorkingSet* ws,
                         PlanStage* child,
                         MatchExpression* filter,
                         const Collection* collection)
-        : FetchStage(txn, ws, child, filter, collection), _matcher(filter) {}
+        : FetchStage(opCtx, ws, child, filter, collection), _matcher(filter) {}
 
 private:
     // Owns matcher
@@ -586,7 +602,7 @@ static R2Annulus projectBoundsToTwoDDegrees(R2Annulus sphereBounds) {
 }
 
 StatusWith<NearStage::CoveredInterval*>  //
-    GeoNear2DStage::nextInterval(OperationContext* txn,
+    GeoNear2DStage::nextInterval(OperationContext* opCtx,
                                  WorkingSet* workingSet,
                                  Collection* collection) {
     // The search is finished if we searched at least once and all the way to the edge
@@ -694,7 +710,7 @@ StatusWith<NearStage::CoveredInterval*>  //
     const int twoDFieldPosition = 0;
 
     std::vector<GeoHash> unorderedCovering = ExpressionMapping::get2dCovering(
-        *coverRegion, _twoDIndex->infoObj(), internalGeoNearQuery2DMaxCoveringCells);
+        *coverRegion, _twoDIndex->infoObj(), internalGeoNearQuery2DMaxCoveringCells.load());
 
     // Make sure the same index key isn't visited twice
     R2CellUnion diffUnion;
@@ -718,10 +734,10 @@ StatusWith<NearStage::CoveredInterval*>  //
 
     // These parameters are stored by the index, and so must be ok
     GeoHashConverter::Parameters hashParams;
-    GeoHashConverter::parseParameters(_twoDIndex->infoObj(), &hashParams);
+    GeoHashConverter::parseParameters(_twoDIndex->infoObj(), &hashParams).transitional_ignore();
 
     // 2D indexes support covered search over additional fields they contain
-    IndexScan* scan = new IndexScan(txn, scanParams, workingSet, _nearParams.filter);
+    IndexScan* scan = new IndexScan(opCtx, scanParams, workingSet, _nearParams.filter);
 
     MatchExpression* docMatcher = nullptr;
 
@@ -732,7 +748,8 @@ StatusWith<NearStage::CoveredInterval*>  //
     }
 
     // FetchStage owns index scan
-    _children.emplace_back(new FetchStageWithMatch(txn, workingSet, scan, docMatcher, collection));
+    _children.emplace_back(
+        new FetchStageWithMatch(opCtx, workingSet, scan, docMatcher, collection));
 
     return StatusWith<CoveredInterval*>(new CoveredInterval(_children.back().get(),
                                                             true,
@@ -769,11 +786,11 @@ static int getFieldPosition(const IndexDescriptor* index, const string& fieldNam
 static const string kS2IndexNearStage("GEO_NEAR_2DSPHERE");
 
 GeoNear2DSphereStage::GeoNear2DSphereStage(const GeoNearParams& nearParams,
-                                           OperationContext* txn,
+                                           OperationContext* opCtx,
                                            WorkingSet* workingSet,
                                            Collection* collection,
                                            IndexDescriptor* s2Index)
-    : NearStage(txn, kS2IndexNearStage.c_str(), STAGE_GEO_NEAR_2DSPHERE, workingSet, collection),
+    : NearStage(opCtx, kS2IndexNearStage.c_str(), STAGE_GEO_NEAR_2DSPHERE, workingSet, collection),
       _nearParams(nearParams),
       _s2Index(s2Index),
       _fullBounds(geoNearDistanceBounds(*nearParams.nearQuery)),
@@ -781,7 +798,14 @@ GeoNear2DSphereStage::GeoNear2DSphereStage(const GeoNearParams& nearParams,
       _boundsIncrement(0.0) {
     _specificStats.keyPattern = s2Index->keyPattern();
     _specificStats.indexName = s2Index->indexName();
-    ExpressionParams::parse2dsphereParams(s2Index->infoObj(), &_indexParams);
+    _specificStats.indexVersion = static_cast<int>(s2Index->version());
+
+    // initialize2dsphereParams() does not require the collator during the GEO_NEAR_2DSPHERE stage.
+    // It only requires the collator for index key generation. For query execution,
+    // _nearParams.baseBounds should have collator-generated comparison keys in place of raw
+    // strings, and _nearParams.filter should have the collator.
+    const CollatorInterface* collator = nullptr;
+    ExpressionParams::initialize2dsphereParams(s2Index->infoObj(), collator, &_indexParams);
 }
 
 GeoNear2DSphereStage::~GeoNear2DSphereStage() {}
@@ -849,14 +873,14 @@ public:
 
     // Search for a document in neighbors at current level.
     // Return IS_EOF is such document exists and set the estimated distance to the nearest doc.
-    PlanStage::StageState work(OperationContext* txn,
+    PlanStage::StageState work(OperationContext* opCtx,
                                WorkingSet* workingSet,
                                Collection* collection,
                                WorkingSetID* out,
                                double* estimatedDistance);
 
 private:
-    void buildIndexScan(OperationContext* txn, WorkingSet* workingSet, Collection* collection);
+    void buildIndexScan(OperationContext* opCtx, WorkingSet* workingSet, Collection* collection);
 
     PlanStage::Children* _children;    // Points to PlanStage::_children in the NearStage.
     const IndexDescriptor* _s2Index;   // Not owned here.
@@ -868,7 +892,7 @@ private:
 };
 
 // Setup the index scan stage for neighbors at this level.
-void GeoNear2DSphereStage::DensityEstimator::buildIndexScan(OperationContext* txn,
+void GeoNear2DSphereStage::DensityEstimator::buildIndexScan(OperationContext* opCtx,
                                                             WorkingSet* workingSet,
                                                             Collection* collection) {
     IndexScanParams scanParams;
@@ -897,18 +921,18 @@ void GeoNear2DSphereStage::DensityEstimator::buildIndexScan(OperationContext* tx
 
     // Index scan
     invariant(!_indexScan);
-    _indexScan = new IndexScan(txn, scanParams, workingSet, NULL);
+    _indexScan = new IndexScan(opCtx, scanParams, workingSet, NULL);
     _children->emplace_back(_indexScan);
 }
 
-PlanStage::StageState GeoNear2DSphereStage::DensityEstimator::work(OperationContext* txn,
+PlanStage::StageState GeoNear2DSphereStage::DensityEstimator::work(OperationContext* opCtx,
                                                                    WorkingSet* workingSet,
                                                                    Collection* collection,
                                                                    WorkingSetID* out,
                                                                    double* estimatedDistance) {
     if (!_indexScan) {
         // Setup index scan stage for current level.
-        buildIndexScan(txn, workingSet, collection);
+        buildIndexScan(opCtx, workingSet, collection);
     }
 
     WorkingSetID workingSetID;
@@ -979,7 +1003,7 @@ PlanStage::StageState GeoNear2DSphereStage::DensityEstimator::work(OperationCont
 }
 
 
-PlanStage::StageState GeoNear2DSphereStage::initialize(OperationContext* txn,
+PlanStage::StageState GeoNear2DSphereStage::initialize(OperationContext* opCtx,
                                                        WorkingSet* workingSet,
                                                        Collection* collection,
                                                        WorkingSetID* out) {
@@ -990,7 +1014,7 @@ PlanStage::StageState GeoNear2DSphereStage::initialize(OperationContext* txn,
 
     double estimatedDistance;
     PlanStage::StageState state =
-        _densityEstimator->work(txn, workingSet, collection, out, &estimatedDistance);
+        _densityEstimator->work(opCtx, workingSet, collection, out, &estimatedDistance);
 
     if (state == IS_EOF) {
         // We find a document in 4 neighbors at current level, but didn't at previous level.
@@ -1011,7 +1035,7 @@ PlanStage::StageState GeoNear2DSphereStage::initialize(OperationContext* txn,
 }
 
 StatusWith<NearStage::CoveredInterval*>  //
-    GeoNear2DSphereStage::nextInterval(OperationContext* txn,
+    GeoNear2DSphereStage::nextInterval(OperationContext* opCtx,
                                        WorkingSet* workingSet,
                                        Collection* collection) {
     // The search is finished if we searched at least once and all the way to the edge
@@ -1081,10 +1105,10 @@ StatusWith<NearStage::CoveredInterval*>  //
     OrderedIntervalList* coveredIntervals = &scanParams.bounds.fields[s2FieldPosition];
     ExpressionMapping::S2CellIdsToIntervalsWithParents(cover, _indexParams, coveredIntervals);
 
-    IndexScan* scan = new IndexScan(txn, scanParams, workingSet, nullptr);
+    IndexScan* scan = new IndexScan(opCtx, scanParams, workingSet, nullptr);
 
     // FetchStage owns index scan
-    _children.emplace_back(new FetchStage(txn, workingSet, scan, _nearParams.filter, collection));
+    _children.emplace_back(new FetchStage(opCtx, workingSet, scan, _nearParams.filter, collection));
 
     return StatusWith<CoveredInterval*>(new CoveredInterval(_children.back().get(),
                                                             true,

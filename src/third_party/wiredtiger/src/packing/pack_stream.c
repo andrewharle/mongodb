@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -24,7 +24,7 @@ struct __wt_pack_stream {
  */
 int
 wiredtiger_pack_start(WT_SESSION *wt_session,
-	const char *format, void *buffer, size_t len, WT_PACK_STREAM **psp)
+    const char *format, void *buffer, size_t size, WT_PACK_STREAM **psp)
 {
 	WT_DECL_RET;
 	WT_PACK_STREAM *ps;
@@ -34,7 +34,7 @@ wiredtiger_pack_start(WT_SESSION *wt_session,
 	WT_RET(__wt_calloc_one(session, &ps));
 	WT_ERR(__pack_init(session, &ps->pack, format));
 	ps->p = ps->start = buffer;
-	ps->end = ps->p + len;
+	ps->end = ps->p + size;
 	*psp = ps;
 
 	if (0) {
@@ -48,8 +48,8 @@ err:		(void)wiredtiger_pack_close(ps, NULL);
  *	Open a stream for unpacking.
  */
 int
-wiredtiger_unpack_start(WT_SESSION *wt_session, const char *format,
-	const void *buffer, size_t size, WT_PACK_STREAM **psp)
+wiredtiger_unpack_start(WT_SESSION *wt_session,
+    const char *format, const void *buffer, size_t size, WT_PACK_STREAM **psp)
 {
 	return (wiredtiger_pack_start(
 	    wt_session, format, (void *)buffer, size, psp));
@@ -95,7 +95,7 @@ wiredtiger_pack_item(WT_PACK_STREAM *ps, WT_ITEM *item)
 		WT_RET(__pack_write(
 		    session, &pv, &ps->p, (size_t)(ps->end - ps->p)));
 		break;
-	WT_ILLEGAL_VALUE(session);
+	WT_ILLEGAL_VALUE(session, pv.type);
 	}
 
 	return (0);
@@ -128,7 +128,7 @@ wiredtiger_pack_int(WT_PACK_STREAM *ps, int64_t i)
 		WT_RET(__pack_write(
 		    session, &pv, &ps->p, (size_t)(ps->end - ps->p)));
 		break;
-	WT_ILLEGAL_VALUE(session);
+	WT_ILLEGAL_VALUE(session, pv.type);
 	}
 
 	return (0);
@@ -158,7 +158,7 @@ wiredtiger_pack_str(WT_PACK_STREAM *ps, const char *s)
 		WT_RET(__pack_write(
 		    session, &pv, &ps->p, (size_t)(ps->end - ps->p)));
 		break;
-	WT_ILLEGAL_VALUE(session);
+	WT_ILLEGAL_VALUE(session, pv.type);
 	}
 
 	return (0);
@@ -194,7 +194,7 @@ wiredtiger_pack_uint(WT_PACK_STREAM *ps, uint64_t u)
 		WT_RET(__pack_write(
 		    session, &pv, &ps->p, (size_t)(ps->end - ps->p)));
 		break;
-	WT_ILLEGAL_VALUE(session);
+	WT_ILLEGAL_VALUE(session, pv.type);
 	}
 
 	return (0);
@@ -225,7 +225,7 @@ wiredtiger_unpack_item(WT_PACK_STREAM *ps, WT_ITEM *item)
 		item->data = pv.u.item.data;
 		item->size = pv.u.item.size;
 		break;
-	WT_ILLEGAL_VALUE(session);
+	WT_ILLEGAL_VALUE(session, pv.type);
 	}
 
 	return (0);
@@ -258,7 +258,7 @@ wiredtiger_unpack_int(WT_PACK_STREAM *ps, int64_t *ip)
 		    &pv, (const uint8_t **)&ps->p, (size_t)(ps->end - ps->p)));
 		*ip = pv.u.i;
 		break;
-	WT_ILLEGAL_VALUE(session);
+	WT_ILLEGAL_VALUE(session, pv.type);
 	}
 	return (0);
 }
@@ -287,7 +287,7 @@ wiredtiger_unpack_str(WT_PACK_STREAM *ps, const char **sp)
 		    &pv, (const uint8_t **)&ps->p, (size_t)(ps->end - ps->p)));
 		*sp = pv.u.s;
 		break;
-	WT_ILLEGAL_VALUE(session);
+	WT_ILLEGAL_VALUE(session, pv.type);
 	}
 	return (0);
 }
@@ -322,7 +322,7 @@ wiredtiger_unpack_uint(WT_PACK_STREAM *ps, uint64_t *up)
 		    &pv, (const uint8_t **)&ps->p, (size_t)(ps->end - ps->p)));
 		*up = pv.u.u;
 		break;
-	WT_ILLEGAL_VALUE(session);
+	WT_ILLEGAL_VALUE(session, pv.type);
 	}
 	return (0);
 }

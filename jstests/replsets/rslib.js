@@ -1,10 +1,19 @@
 var syncFrom;
-var wait, occasionally, reconnect, getLatestOp, waitForAllMembers, reconfig, awaitOpTime;
+var wait;
+var occasionally;
+var reconnect;
+var getLatestOp;
+var getLeastRecentOp;
+var waitForAllMembers;
+var reconfig;
+var awaitOpTime;
+var startSetIfSupportsReadMajority;
 var waitUntilAllNodesCaughtUp;
 var waitForState;
+var reInitiateWithoutThrowingOnAbortedMember;
 var awaitRSClientHosts;
 var getLastOpTime;
-var startSetIfSupportsReadMajority;
+var setLogVerbosity;
 
 (function() {
     "use strict";
@@ -45,19 +54,32 @@ var startSetIfSupportsReadMajority;
         rst.awaitSyncSource(syncingNode, desiredSyncSource);
     };
 
-    wait = function(f, msg) {
+    /**
+     * Calls a function 'f' once a second until it returns true. Throws an exception once 'f' has
+     * been called more than 'retries' times without returning true. If 'retries' is not given,
+     * it defaults to 200. 'retries' must be an integer greater than or equal to zero.
+     */
+    wait = function(f, msg, retries) {
         w++;
         var n = 0;
+        var default_retries = 200;
+        var delay_interval_ms = 1000;
+
+        // Set default value if 'retries' was not given.
+        if (retries === undefined) {
+            retries = default_retries;
+        }
         while (!f()) {
-            if (n % 4 == 0)
-                print("waiting " + w);
+            if (n % 4 == 0) {
+                print("Waiting " + w);
+            }
             if (++n == 4) {
                 print("" + f);
             }
-            if (n >= 200) {
-                throw new Error('tried 200 times, giving up on ' + msg);
+            if (n >= retries) {
+                throw new Error('Tried ' + retries + ' times, giving up on ' + msg);
             }
-            sleep(1000);
+            sleep(delay_interval_ms);
         }
     };
 
@@ -78,19 +100,32 @@ var startSetIfSupportsReadMajority;
         count++;
     };
 
-    reconnect = function(a) {
+    /**
+     * Attempt to re-establish and re-authenticate a Mongo connection if it was dropped, with
+     * multiple retries.
+     *
+     * Returns upon successful re-connnection. If connection cannot be established after 200
+     * retries, throws an exception.
+     *
+     * @param conn - a Mongo connection object or DB object.
+     */
+    reconnect = function(conn) {
+        var retries = 200;
         wait(function() {
             var db;
             try {
-                // make this work with either dbs or connections
-                if (typeof(a.getDB) == "function") {
-                    db = a.getDB('foo');
+                // Make this work with either dbs or connections.
+                if (typeof(conn.getDB) == "function") {
+                    db = conn.getDB('foo');
                 } else {
-                    db = a;
+                    db = conn;
                 }
+
+                // Run a simple command to re-establish connection.
                 db.bar.stats();
-                if (jsTest.options().keyFile) {  // SERVER-4241: Shell connections don't
-                                                 // re-authenticate on reconnect
+
+                // SERVER-4241: Shell connections don't re-authenticate on reconnect.
+                if (jsTest.options().keyFile) {
                     return jsTest.authenticate(db.getMongo());
                 }
                 return true;
@@ -98,13 +133,23 @@ var startSetIfSupportsReadMajority;
                 print(e);
                 return false;
             }
-        });
+        }, retries);
     };
 
     getLatestOp = function(server) {
         server.getDB("admin").getMongo().setSlaveOk();
         var log = server.getDB("local")['oplog.rs'];
         var cursor = log.find({}).sort({'$natural': -1}).limit(1);
+        if (cursor.hasNext()) {
+            return cursor.next();
+        }
+        return null;
+    };
+
+    getLeastRecentOp = function({server, readConcern}) {
+        server.getDB("admin").getMongo().setSlaveOk();
+        const oplog = server.getDB("local").oplog.rs;
+        const cursor = oplog.find().sort({$natural: 1}).limit(1).readConcern(readConcern);
         if (cursor.hasNext()) {
             return cursor.next();
         }
@@ -149,11 +194,25 @@ var startSetIfSupportsReadMajority;
         var e;
         var master;
         try {
-            assert.commandWorked(admin.runCommand({replSetReconfig: config, force: force}));
+            var reconfigCommand = {
+                replSetReconfig: rs._updateConfigIfNotDurable(config),
+                force: force
+            };
+            var res = admin.runCommand(reconfigCommand);
+
+            // Retry reconfig if quorum check failed because not enough voting nodes responded.
+            if (!res.ok && res.code === ErrorCodes.NodeNotFound) {
+                print("Replset reconfig failed because quorum check failed. Retry reconfig once. " +
+                      "Error: " + tojson(res));
+                res = admin.runCommand(reconfigCommand);
+            }
+
+            assert.commandWorked(res);
         } catch (e) {
-            if (tojson(e).indexOf("error doing query: failed") < 0) {
+            if (!isNetworkError(e)) {
                 throw e;
             }
+            print("Calling replSetReconfig failed. " + tojson(e));
         }
 
         var master = rs.getPrimary().getDB("admin");
@@ -162,20 +221,16 @@ var startSetIfSupportsReadMajority;
         return master;
     };
 
-    awaitOpTime = function(node, opTime) {
-        var ts, ex;
+    awaitOpTime = function(catchingUpNode, latestOpTimeNode) {
+        var ts, ex, opTime;
         assert.soon(
             function() {
                 try {
                     // The following statement extracts the timestamp field from the most recent
                     // element of
                     // the oplog, and stores it in "ts".
-                    ts = node.getDB("local")['oplog.rs']
-                             .find({})
-                             .sort({'$natural': -1})
-                             .limit(1)
-                             .next()
-                             .ts;
+                    ts = getLatestOp(catchingUpNode).ts;
+                    opTime = getLatestOp(latestOpTimeNode).ts;
                     if ((ts.t == opTime.t) && (ts.i == opTime.i)) {
                         return true;
                     }
@@ -186,8 +241,8 @@ var startSetIfSupportsReadMajority;
                 }
             },
             function() {
-                var message = "Node " + node + " only reached optime " + tojson(ts) + " not " +
-                    tojson(opTime);
+                var message = "Node " + catchingUpNode + " only reached optime " + tojson(ts) +
+                    " not " + tojson(opTime);
                 if (ex) {
                     message += "; last attempt failed with exception " + tojson(ex);
                 }
@@ -215,9 +270,17 @@ var startSetIfSupportsReadMajority;
                 assert.eq(rs.length, rsStatus.members.length, tojson(rsStatus));
                 ot = rsStatus.members[0].optime;
                 for (var i = 1; i < rsStatus.members.length; ++i) {
-                    otherOt = rsStatus.members[i].optime;
-                    if (bsonWoCompare({ts: otherOt.ts}, {ts: ot.ts}) ||
-                        bsonWoCompare({t: otherOt.t}, {t: ot.t})) {
+                    var otherNode = rsStatus.members[i];
+
+                    // Must be in PRIMARY or SECONDARY state.
+                    if (otherNode.state != ReplSetTest.State.PRIMARY &&
+                        otherNode.state != ReplSetTest.State.SECONDARY) {
+                        return false;
+                    }
+
+                    // Fail if optimes are not equal.
+                    otherOt = otherNode.optime;
+                    if (!friendlyEqual(otherOt, ot)) {
                         firstConflictingIndex = i;
                         return false;
                     }
@@ -232,7 +295,8 @@ var startSetIfSupportsReadMajority;
     };
 
     /**
-     * Waits for the given node to reach the given state, ignoring network errors.
+     * Waits for the given node to reach the given state, ignoring network errors.  Ensures that the
+     * connection is re-connected and usable when the function returns.
      */
     waitForState = function(node, state) {
         assert.soonNoExcept(function() {
@@ -240,6 +304,10 @@ var startSetIfSupportsReadMajority;
                 {replSetTest: 1, waitForMemberState: state, timeoutMillis: 60 * 1000 * 5}));
             return true;
         });
+        // Some state transitions cause connections to be closed, but whether the connection close
+        // happens before or after the replSetTest command above returns is racy, so to ensure that
+        // the connection to 'node' is usable after this function returns, reconnect it first.
+        reconnect(node);
     };
 
     /**
@@ -251,17 +319,29 @@ var startSetIfSupportsReadMajority;
      * @param options - The options passed to {@link ReplSetTest.startSet}
      */
     startSetIfSupportsReadMajority = function(replSetTest, options) {
+        replSetTest.startSet(options);
+        return replSetTest.nodes[0]
+            .adminCommand("serverStatus")
+            .storageEngine.supportsCommittedReads;
+    };
+
+    /**
+     * Performs a reInitiate() call on 'replSetTest', ignoring errors that are related to an aborted
+     * secondary member. All other errors are rethrown.
+     */
+    reInitiateWithoutThrowingOnAbortedMember = function(replSetTest) {
         try {
-            replSetTest.startSet(options);
+            replSetTest.reInitiate();
         } catch (e) {
-            var conn = MongoRunner.runMongod();
-            if (!conn.getDB("admin").serverStatus().storageEngine.supportsCommittedReads) {
-                MongoRunner.stopMongod(conn);
-                return false;
+            // reInitiate can throw because it tries to run an ismaster command on
+            // all secondaries, including the new one that may have already aborted
+            const errMsg = tojson(e);
+            if (isNetworkError(e)) {
+                // Ignore these exceptions, which are indicative of an aborted node
+            } else {
+                throw e;
             }
-            throw e;
         }
-        return true;
     };
 
     /**
@@ -280,9 +360,7 @@ var startSetIfSupportsReadMajority;
         timeout = timeout || 5 * 60 * 1000;
 
         if (hostOk == undefined)
-            hostOk = {
-                ok: true
-            };
+            hostOk = {ok: true};
         if (host.host)
             host = host.host;
         if (rs)
@@ -368,4 +446,19 @@ var startSetIfSupportsReadMajority;
         var connStatus = replSetStatus.members.filter(m => m.self)[0];
         return connStatus.optime;
     };
+
+    /**
+     * Set log verbosity on all given nodes.
+     * e.g. setLogVerbosity(replTest.nodes, { "replication": {"verbosity": 3} });
+     */
+    setLogVerbosity = function(nodes, logVerbosity) {
+        var verbosity = {
+            "setParameter": 1,
+            "logComponentVerbosity": logVerbosity,
+        };
+        nodes.forEach(function(node) {
+            assert.commandWorked(node.adminCommand(verbosity));
+        });
+    };
+
 }());

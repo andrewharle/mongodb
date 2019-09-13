@@ -1,33 +1,35 @@
+
 /**
- *    Copyright (C) 2012 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
-#include "mongo/db/jsobj.h"
 #include "mongo/scripting/bson_template_evaluator.h"
+#include "mongo/db/jsobj.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo {
@@ -94,7 +96,8 @@ TEST(BSONTemplateEvaluatorTest, RAND_INT) {
     ASSERT_EQUALS(BsonTemplateEvaluator::StatusSuccess,
                   t.evaluate(BSON("randField" << randObj << "hello"
                                               << "world"
-                                              << "id" << 1),
+                                              << "id"
+                                              << 1),
                              builder8));
     BSONObj obj8 = builder8.obj();
     ASSERT_EQUALS(obj8.nFields(), 3);
@@ -121,7 +124,8 @@ TEST(BSONTemplateEvaluatorTest, RAND_INT) {
     ASSERT_EQUALS(BsonTemplateEvaluator::StatusSuccess,
                   t.evaluate(BSON("randField1" << randObj << "hello"
                                                << "world"
-                                               << "randField2" << randObj),
+                                               << "randField2"
+                                               << randObj),
                              builder10));
     BSONObj obj10 = builder10.obj();
     ASSERT_EQUALS(obj10.nFields(), 3);
@@ -138,7 +142,8 @@ TEST(BSONTemplateEvaluatorTest, RAND_INT) {
     ASSERT_EQUALS(BsonTemplateEvaluator::StatusSuccess,
                   t.evaluate(BSON("testArray" << BSON_ARRAY(0 << 5 << 10 << 20) << "hello"
                                               << "world"
-                                              << "randField" << randObj),
+                                              << "randField"
+                                              << randObj),
                              builder11));
     BSONObj obj11 = builder11.obj();
     ASSERT_EQUALS(obj11.nFields(), 3);
@@ -188,7 +193,8 @@ TEST(BSONTemplateEvaluatorTest, RAND_INT_PLUS_THREAD) {
     ASSERT_EQUALS(BsonTemplateEvaluator::StatusSuccess,
                   t.evaluate(BSON("randField" << randObj << "hello"
                                               << "world"
-                                              << "id" << 1),
+                                              << "id"
+                                              << 1),
                              builder8));
     BSONObj obj8 = builder8.obj();
     ASSERT_EQUALS(obj8.nFields(), 3);
@@ -215,7 +221,8 @@ TEST(BSONTemplateEvaluatorTest, RAND_INT_PLUS_THREAD) {
     ASSERT_EQUALS(BsonTemplateEvaluator::StatusSuccess,
                   t.evaluate(BSON("randField1" << randObj << "hello"
                                                << "world"
-                                               << "randField2" << randObj),
+                                               << "randField2"
+                                               << randObj),
                              builder10));
     BSONObj obj10 = builder10.obj();
     ASSERT_EQUALS(obj10.nFields(), 3);
@@ -234,7 +241,8 @@ TEST(BSONTemplateEvaluatorTest, RAND_INT_PLUS_THREAD) {
     ASSERT_EQUALS(BsonTemplateEvaluator::StatusSuccess,
                   t.evaluate(BSON("testArray" << BSON_ARRAY(0 << 5 << 10 << 20) << "hello"
                                               << "world"
-                                              << "randField" << randObj),
+                                              << "randField"
+                                              << randObj),
                              builder11));
     BSONObj obj11 = builder11.obj();
     ASSERT_EQUALS(obj11.nFields(), 3);
@@ -438,7 +446,8 @@ TEST(BSONTemplateEvaluatorTest, RAND_STRING) {
     ASSERT_EQUALS(BsonTemplateEvaluator::StatusSuccess,
                   t.evaluate(BSON("id" << 1 << "hello"
                                        << "world"
-                                       << "randField" << randObj),
+                                       << "randField"
+                                       << randObj),
                              builder6));
     BSONObj obj6 = builder6.obj();
     ASSERT_EQUALS(obj6.nFields(), 3);
@@ -452,7 +461,8 @@ TEST(BSONTemplateEvaluatorTest, RAND_STRING) {
     ASSERT_EQUALS(BsonTemplateEvaluator::StatusSuccess,
                   t.evaluate(BSON("randField" << randObj << "hello"
                                               << "world"
-                                              << "id" << 1),
+                                              << "id"
+                                              << 1),
                              builder7));
     BSONObj obj7 = builder7.obj();
     ASSERT_EQUALS(obj7.nFields(), 3);
@@ -477,7 +487,8 @@ TEST(BSONTemplateEvaluatorTest, RAND_STRING) {
     ASSERT_EQUALS(BsonTemplateEvaluator::StatusSuccess,
                   t.evaluate(BSON("randField1" << randObj << "hello"
                                                << "world"
-                                               << "randField2" << randObj),
+                                               << "randField2"
+                                               << randObj),
                              builder10));
     BSONObj obj10 = builder10.obj();
     ASSERT_EQUALS(obj10.nFields(), 3);
@@ -493,7 +504,8 @@ TEST(BSONTemplateEvaluatorTest, RAND_STRING) {
     ASSERT_EQUALS(BsonTemplateEvaluator::StatusSuccess,
                   t.evaluate(BSON("testArray" << BSON_ARRAY(0 << 5 << 10 << 20) << "hello"
                                               << "world"
-                                              << "randField" << randObj),
+                                              << "randField"
+                                              << randObj),
                              builder11));
     BSONObj obj11 = builder11.obj();
     ASSERT_EQUALS(obj11.nFields(), 3);
@@ -522,7 +534,7 @@ TEST(BSONTemplateEvaluatorTest, CONCAT) {
     ASSERT_EQUALS(obj2.nFields(), 1);
     BSONObj expectedObj = BSON("concatField"
                                << "hello world");
-    ASSERT_EQUALS(obj2.equal(expectedObj), true);
+    ASSERT_BSONOBJ_EQ(obj2, expectedObj);
 
     // Test success when some arguments to #CONCAT are integers
     BSONObjBuilder builder3;
@@ -533,7 +545,7 @@ TEST(BSONTemplateEvaluatorTest, CONCAT) {
     ASSERT_EQUALS(obj3.nFields(), 1);
     expectedObj = BSON("concatField"
                        << "F1racing");
-    ASSERT_EQUALS(obj3.equal(expectedObj), true);
+    ASSERT_BSONOBJ_EQ(obj3, expectedObj);
 
     // Test success with #CONCAT as first element and last element
     BSONObjBuilder builder4;
@@ -548,9 +560,11 @@ TEST(BSONTemplateEvaluatorTest, CONCAT) {
     ASSERT_EQUALS(obj4.nFields(), 3);
     expectedObj = BSON("concatField1"
                        << "hello world"
-                       << "middleKey" << 1 << "concatField2"
+                       << "middleKey"
+                       << 1
+                       << "concatField2"
                        << "hello world");
-    ASSERT_EQUALS(obj4.equal(expectedObj), true);
+    ASSERT_BSONOBJ_EQ(obj4, expectedObj);
 
     // Test success when one of the arguments to #CONCAT is an array
     BSONObjBuilder builder5;
@@ -561,7 +575,7 @@ TEST(BSONTemplateEvaluatorTest, CONCAT) {
     ASSERT_EQUALS(obj5.nFields(), 1);
     expectedObj = BSON("concatField"
                        << "hello[ 1, 10 ]world");
-    ASSERT_EQUALS(obj5.equal(expectedObj), true);
+    ASSERT_BSONOBJ_EQ(obj5, expectedObj);
 }
 
 TEST(BSONTemplateEvaluatorTest, OID) {
@@ -670,7 +684,8 @@ TEST(BSONTemplateEvaluatorTest, NESTING) {
     BSONObj bazObj = BSON("baz" << innerObj);
     outerObj = BSON("foo"
                     << "hi"
-                    << "bar" << bazObj);
+                    << "bar"
+                    << bazObj);
     ASSERT_EQUALS(BsonTemplateEvaluator::StatusSuccess,
                   t.evaluate(BSON("id" << outerObj), builder3));
     BSONObj obj3 = builder3.obj();
@@ -691,7 +706,10 @@ TEST(BSONTemplateEvaluatorTest, NESTING) {
                                    << "bye");
     outerObj = BSON("foo"
                     << "hi"
-                    << "bar" << barObj4 << "baz" << bazObj4);
+                    << "bar"
+                    << barObj4
+                    << "baz"
+                    << bazObj4);
     ASSERT_EQUALS(BsonTemplateEvaluator::StatusSuccess,
                   t.evaluate(BSON("id" << outerObj), builder4));
     BSONObj obj4 = builder4.obj();
@@ -715,7 +733,8 @@ TEST(BSONTemplateEvaluatorTest, NESTING) {
                     << "let"
                     << "target"
                     << "x"
-                    << "value" << innerObj);
+                    << "value"
+                    << innerObj);
     ASSERT_EQUALS(BsonTemplateEvaluator::StatusBadOperator, t.evaluate(outerObj, builder5));
 
     // Test success for elements in an array that need evaluation
@@ -726,7 +745,8 @@ TEST(BSONTemplateEvaluatorTest, NESTING) {
     BSONObj elem3 = BSON("baz" << 42);
     outerObj = BSON("foo"
                     << "hi"
-                    << "bar" << BSON_ARRAY(elem1 << elem2 << elem3 << 7));
+                    << "bar"
+                    << BSON_ARRAY(elem1 << elem2 << elem3 << 7));
     ASSERT_EQUALS(BsonTemplateEvaluator::StatusSuccess, t.evaluate(outerObj, builder6));
     BSONObj obj6 = builder6.obj();
     BSONElement obj6_bar = obj6["bar"];

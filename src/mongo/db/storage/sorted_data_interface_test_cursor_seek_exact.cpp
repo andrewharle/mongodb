@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -34,14 +36,16 @@
 #include "mongo/unittest/unittest.h"
 
 namespace mongo {
+namespace {
 // Tests seekExact when it hits something.
 void testSeekExact_Hit(bool unique, bool forward) {
-    auto harnessHelper = newHarnessHelper();
+    const auto harnessHelper = newSortedDataInterfaceHarnessHelper();
     auto opCtx = harnessHelper->newOperationContext();
-    auto sorted = harnessHelper->newSortedDataInterface(unique,
-                                                        {
-                                                         {key1, loc1}, {key2, loc1}, {key3, loc1},
-                                                        });
+    auto sorted =
+        harnessHelper->newSortedDataInterface(unique,
+                                              {
+                                                  {key1, loc1}, {key2, loc1}, {key3, loc1},
+                                              });
 
     auto cursor = sorted->newCursor(opCtx.get(), forward);
 
@@ -67,13 +71,13 @@ TEST(SortedDataInterface, SeekExact_Hit_Standard_Reverse) {
 
 // Tests seekExact when it doesn't hit the query.
 void testSeekExact_Miss(bool unique, bool forward) {
-    auto harnessHelper = newHarnessHelper();
+    const auto harnessHelper = newSortedDataInterfaceHarnessHelper();
     auto opCtx = harnessHelper->newOperationContext();
     auto sorted = harnessHelper->newSortedDataInterface(unique,
                                                         {
-                                                         {key1, loc1},
-                                                         // No key2.
-                                                         {key3, loc1},
+                                                            {key1, loc1},
+                                                            // No key2.
+                                                            {key3, loc1},
                                                         });
 
     auto cursor = sorted->newCursor(opCtx.get(), forward);
@@ -100,12 +104,12 @@ TEST(SortedDataInterface, SeekExact_Miss_Standard_Reverse) {
 // Tests seekExact on forward cursor when it hits something with dup keys. Doesn't make sense
 // for unique indexes.
 TEST(SortedDataInterface, SeekExact_HitWithDups_Forward) {
-    auto harnessHelper = newHarnessHelper();
+    const auto harnessHelper = newSortedDataInterfaceHarnessHelper();
     auto opCtx = harnessHelper->newOperationContext();
     auto sorted = harnessHelper->newSortedDataInterface(
         false,
         {
-         {key1, loc1}, {key2, loc1}, {key2, loc2}, {key3, loc1},
+            {key1, loc1}, {key2, loc1}, {key2, loc2}, {key3, loc1},
         });
 
     auto cursor = sorted->newCursor(opCtx.get());
@@ -119,12 +123,12 @@ TEST(SortedDataInterface, SeekExact_HitWithDups_Forward) {
 // Tests seekExact on reverse cursor when it hits something with dup keys. Doesn't make sense
 // for unique indexes.
 TEST(SortedDataInterface, SeekExact_HitWithDups_Reverse) {
-    auto harnessHelper = newHarnessHelper();
+    const auto harnessHelper = newSortedDataInterfaceHarnessHelper();
     auto opCtx = harnessHelper->newOperationContext();
     auto sorted = harnessHelper->newSortedDataInterface(
         false,
         {
-         {key1, loc1}, {key2, loc1}, {key2, loc2}, {key3, loc1},
+            {key1, loc1}, {key2, loc1}, {key2, loc2}, {key3, loc1},
         });
 
     auto cursor = sorted->newCursor(opCtx.get(), false);
@@ -134,4 +138,5 @@ TEST(SortedDataInterface, SeekExact_HitWithDups_Reverse) {
     ASSERT_EQ(cursor->next(), IndexKeyEntry(key1, loc1));
     ASSERT_EQ(cursor->next(), boost::none);
 }
+}  // namespace
 }  // namespace mongo

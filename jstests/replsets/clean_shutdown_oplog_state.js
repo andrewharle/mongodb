@@ -1,17 +1,19 @@
-// SERVER-24933 3.2 clean shutdown left entries in the oplog that hadn't been applied. This could
-// lead to data loss following a downgrade to 3.0. This tests that following a clean shutdown all
-// ops in the oplog have been applied. This only applies to 3.2 and is not a requirement for 3.4.
-// WARNING: this test does not always fail deterministically. It is possible for the bug to be
+// SERVER-25071 We now require secondaries to finish clean shutdown with a completely clean state.
+// WARNING: this test does not always fail deterministically. It is possible for a bug to be
 // present without this test failing. In particular if the rst.stop(1) doesn't execute mid-batch,
-// it isn't actually testing this bug. However, if the test fails there is definitely a bug.
+// it isn't fully exercising the code. However, if the test fails there is definitely a bug.
 //
-// @tags: [requires_persistence]
+// @tags: [requires_persistence, requires_majority_read_concern]
 (function() {
     "use strict";
+
+    // Skip db hash check because secondary restarted as standalone.
+    TestData.skipCheckDBHashes = true;
 
     var rst = new ReplSetTest({
         name: "name",
         nodes: 2,
+        oplogSize: 500,
     });
 
     rst.startSet();
@@ -33,12 +35,13 @@
 
     // Start a w:2 write that will block until replication is resumed.
     var waitForReplStart = startParallelShell(function() {
-        printjson(assert.writeOK(db.getCollection('side').insert({}, {writeConcern: {w: 2}})));
+        printjson(assert.writeOK(
+            db.getCollection('side').insert({}, {writeConcern: {w: 2, wtimeout: 30 * 60 * 1000}})));
     }, primary.host.split(':')[1]);
 
     // Insert a lot of data in increasing order to test.coll.
     var op = primary.getCollection("test.coll").initializeUnorderedBulkOp();
-    for (var i = 0; i < 100 * 1000; i++) {
+    for (var i = 0; i < 1000 * 1000; i++) {
         op.insert({_id: i});
     }
     assert.writeOK(op.execute());
@@ -54,13 +57,20 @@
     var options = slave.savedOptions;
     options.noCleanData = true;
     delete options.replSet;
+
+    var storageEngine = jsTest.options().storageEngine || "wiredTiger";
+    if (storageEngine === "wiredTiger") {
+        options.setParameter = options.setParameter || {};
+        options.setParameter.recoverFromOplogAsStandalone = true;
+    }
+
     var conn = MongoRunner.runMongod(options);
     assert.neq(null, conn, "secondary failed to start");
 
     // Following clean shutdown of a node, the oplog must exactly match the applied operations.
     // Additionally, the begin field must not be in the minValid document, the ts must match the
-    // top of the oplog (SERVER-25353), and the oplogDeleteFromPoint must be null (SERVER-7200 and
-    // SERVER-25071).
+    // top of the oplog (SERVER-25353), and the oplogTruncateAfterPoint must be null (SERVER-7200
+    // and SERVER-25071).
     var oplogDoc = conn.getCollection('local.oplog.rs')
                        .find({ns: 'test.coll'})
                        .sort({$natural: -1})
@@ -68,16 +78,23 @@
     var collDoc = conn.getCollection('test.coll').find().sort({_id: -1}).limit(1)[0];
     var minValidDoc =
         conn.getCollection('local.replset.minvalid').find().sort({$natural: -1}).limit(1)[0];
-    printjson({oplogDoc: oplogDoc, collDoc: collDoc, minValidDoc: minValidDoc});
+    var oplogTruncateAfterPointDoc =
+        conn.getCollection('local.replset.oplogTruncateAfterPoint').find().limit(1)[0];
+    printjson({
+        oplogDoc: oplogDoc,
+        collDoc: collDoc,
+        minValidDoc: minValidDoc,
+        oplogTruncateAfterPointDoc: oplogTruncateAfterPointDoc
+    });
     try {
         assert.eq(collDoc._id, oplogDoc.o._id);
         assert(!('begin' in minValidDoc), 'begin in minValidDoc');
-        assert.eq(minValidDoc.ts, oplogDoc.ts);
-        if ('oplogDeleteFromPoint' in minValidDoc) {
-            // If present it must be the null timestamp.
-            assert.eq(minValidDoc.oplogDeleteFromPoint, Timestamp());
+        if (storageEngine !== "wiredTiger") {
+            assert.eq(minValidDoc.ts, oplogDoc.ts);
         }
+        assert.eq(oplogTruncateAfterPointDoc.oplogTruncateAfterPoint, Timestamp());
     } catch (e) {
+        // TODO remove once SERVER-25777 is resolved.
         jsTest.log(
             "Look above and make sure clean shutdown finished without resorting to SIGKILL." +
             "\nUnfortunately that currently doesn't fail the test.");

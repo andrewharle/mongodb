@@ -1,3 +1,6 @@
+// Cannot implicitly shard accessed collections because single updates are not targeted.
+// @tags: [assumes_unsharded_collection, requires_non_retryable_writes]
+
 // Test that updates with geo queries which match
 // the same document multiple times only apply
 // the update once
@@ -9,9 +12,7 @@ t.drop();
 t.ensureIndex({locs: "2d"});
 t.save({locs: [[49.999, 49.999], [50.0, 50.0], [50.001, 50.001]]});
 
-var q = {
-    locs: {$near: [50.0, 50.0]}
-};
+var q = {locs: {$near: [50.0, 50.0]}};
 assert.eq(1, t.find(q).itcount(), 'duplicates returned from query');
 
 var res = t.update({locs: {$near: [50.0, 50.0]}}, {$inc: {touchCount: 1}}, false, true);

@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -30,35 +32,26 @@
 
 #include "mongo/s/chunk_version.h"
 
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/base/status_with.h"
-#include "mongo/bson/util/bson_extract.h"
 #include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
-namespace {
 
-const char kVersion[] = "version";
-const char kShardVersion[] = "shardVersion";
+constexpr StringData ChunkVersion::kShardVersionField;
 
-}  // namespace
+StatusWith<ChunkVersion> ChunkVersion::parseWithField(const BSONObj& obj, StringData field) {
+    BSONElement versionElem = obj[field];
+    if (versionElem.eoo())
+        return {ErrorCodes::NoSuchKey,
+                str::stream() << "Expected field " << field << " not found."};
 
-StatusWith<ChunkVersion> ChunkVersion::parseFromBSONForCommands(const BSONObj& obj) {
-    BSONElement versionElem;
-    Status status = bsonExtractField(obj, kShardVersion, &versionElem);
-    if (!status.isOK())
-        return status;
-
-    if (versionElem.type() != Array) {
+    if (versionElem.type() != Array)
         return {ErrorCodes::TypeMismatch,
                 str::stream() << "Invalid type " << versionElem.type()
                               << " for shardVersion element. Expected an array"};
-    }
 
     BSONObjIterator it(versionElem.Obj());
     if (!it.more())
-        return {ErrorCodes::BadValue, "Unexpected empty version"};
+        return {ErrorCodes::BadValue, "Unexpected empty version array"};
 
     ChunkVersion version;
 
@@ -87,21 +80,45 @@ StatusWith<ChunkVersion> ChunkVersion::parseFromBSONForCommands(const BSONObj& o
     return version;
 }
 
-StatusWith<ChunkVersion> ChunkVersion::parseFromBSONForSetShardVersion(const BSONObj& obj) {
-    bool canParse;
-    const ChunkVersion chunkVersion = ChunkVersion::fromBSON(obj, kVersion, &canParse);
-    if (!canParse)
-        return {ErrorCodes::BadValue, "Unable to parse shard version"};
+StatusWith<ChunkVersion> ChunkVersion::parseLegacyWithField(const BSONObj& obj, StringData field) {
+    // Expect the timestamp
+    auto versionElem = obj[field];
+    if (versionElem.eoo())
+        return {ErrorCodes::NoSuchKey,
+                str::stream() << "Expected field " << field << " not found."};
 
-    return chunkVersion;
+    ChunkVersion version;
+
+    if (versionElem.type() == bsonTimestamp || versionElem.type() == Date) {
+        version._combined = versionElem._numberLong();
+    } else {
+        return {ErrorCodes::TypeMismatch,
+                str::stream() << "Invalid type " << versionElem.type()
+                              << " for version timestamp part."};
+    }
+
+    // Expect the optional epoch OID
+    const auto epochField = field + "Epoch";
+    auto epochElem = obj[epochField];
+    if (epochElem.type() == jstOID) {
+        version._epoch = epochElem.OID();
+    } else if (!epochElem.eoo()) {
+        return {ErrorCodes::TypeMismatch,
+                str::stream() << "Invalid type " << epochElem.type() << " for version epoch part."};
+    }
+
+    return version;
 }
 
-void ChunkVersion::appendForSetShardVersion(BSONObjBuilder* builder) const {
-    addToBSON(*builder, kVersion);
+void ChunkVersion::appendWithField(BSONObjBuilder* out, StringData field) const {
+    BSONArrayBuilder arr(out->subarrayStart(field));
+    arr.appendTimestamp(_combined);
+    arr.append(_epoch);
 }
 
-void ChunkVersion::appendForCommands(BSONObjBuilder* builder) const {
-    builder->appendArray(kShardVersion, toBSON());
+void ChunkVersion::appendLegacyWithField(BSONObjBuilder* out, StringData field) const {
+    out->appendTimestamp(field, _combined);
+    out->append(field + "Epoch", _epoch);
 }
 
 BSONObj ChunkVersion::toBSON() const {
@@ -109,6 +126,10 @@ BSONObj ChunkVersion::toBSON() const {
     b.appendTimestamp(_combined);
     b.append(_epoch);
     return b.arr();
+}
+
+std::string ChunkVersion::toString() const {
+    return str::stream() << majorVersion() << "|" << minorVersion() << "||" << _epoch;
 }
 
 }  // namespace mongo

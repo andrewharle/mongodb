@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -54,12 +56,7 @@ bool LimitStage::isEOF() {
     return (0 == _numToReturn) || child()->isEOF();
 }
 
-PlanStage::StageState LimitStage::work(WorkingSetID* out) {
-    ++_commonStats.works;
-
-    // Adds the amount of time taken by work() to executionTimeMillis.
-    ScopedTimer timer(&_commonStats.executionTimeMillis);
-
+PlanStage::StageState LimitStage::doWork(WorkingSetID* out) {
     if (0 == _numToReturn) {
         // We've returned as many results as we're limited to.
         return PlanStage::IS_EOF;
@@ -71,24 +68,12 @@ PlanStage::StageState LimitStage::work(WorkingSetID* out) {
     if (PlanStage::ADVANCED == status) {
         *out = id;
         --_numToReturn;
-        ++_commonStats.advanced;
-        return PlanStage::ADVANCED;
     } else if (PlanStage::FAILURE == status || PlanStage::DEAD == status) {
+        // The stage which produces a failure is responsible for allocating a working set member
+        // with error details.
+        invariant(WorkingSet::INVALID_ID != id);
         *out = id;
-        // If a stage fails, it may create a status WSM to indicate why it
-        // failed, in which case 'id' is valid.  If ID is invalid, we
-        // create our own error message.
-        if (WorkingSet::INVALID_ID == id) {
-            mongoutils::str::stream ss;
-            ss << "limit stage failed to read in results from child";
-            Status status(ErrorCodes::InternalError, ss);
-            *out = WorkingSetCommon::allocateStatusMember(_ws, status);
-        }
-        return status;
-    } else if (PlanStage::NEED_TIME == status) {
-        ++_commonStats.needTime;
     } else if (PlanStage::NEED_YIELD == status) {
-        ++_commonStats.needYield;
         *out = id;
     }
 

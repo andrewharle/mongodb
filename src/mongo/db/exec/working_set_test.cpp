@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -32,8 +34,8 @@
 
 
 #include "mongo/db/exec/working_set.h"
-#include "mongo/db/json.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/db/json.h"
 #include "mongo/db/storage/snapshot.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
@@ -71,12 +73,12 @@ TEST_F(WorkingSetFixture, noFieldToGet) {
     ASSERT_EQUALS(WorkingSetMember::INVALID, member->getState());
     ASSERT_FALSE(member->getFieldDotted("foo", &elt));
 
-    ws->transitionToLocAndIdx(id);
+    ws->transitionToRecordIdAndIdx(id);
     ASSERT_FALSE(member->getFieldDotted("foo", &elt));
 
     // Our state is that of a valid object.  The getFieldDotted shouldn't throw; there's
     // something to call getFieldDotted on, but there's no field there.
-    ws->transitionToLocAndObj(id);
+    ws->transitionToRecordIdAndObj(id);
     ASSERT_TRUE(member->getFieldDotted("foo", &elt));
 
     WorkingSetMember* member = ws->get(id);
@@ -91,8 +93,8 @@ TEST_F(WorkingSetFixture, getFieldUnowned) {
     string fieldName = "x";
 
     BSONObj obj = BSON(fieldName << 5);
-    // Not truthful since the loc is bogus, but the loc isn't accessed anyway...
-    ws->transitionToLocAndObj(id);
+    // Not truthful since the RecordId is bogus, but the RecordId isn't accessed anyway...
+    ws->transitionToRecordIdAndObj(id);
     member->obj = Snapshotted<BSONObj>(SnapshotId(), BSONObj(obj.objdata()));
     ASSERT_TRUE(obj.isOwned());
     ASSERT_FALSE(member->obj.value().isOwned());
@@ -123,8 +125,8 @@ TEST_F(WorkingSetFixture, getFieldFromIndex) {
     int secondValue = 10;
 
     member->keyData.push_back(IndexKeyDatum(BSON(firstName << 1), BSON("" << firstValue), NULL));
-    // Also a minor lie as loc is bogus.
-    ws->transitionToLocAndIdx(id);
+    // Also a minor lie as RecordId is bogus.
+    ws->transitionToRecordIdAndIdx(id);
     BSONElement elt;
     ASSERT_TRUE(member->getFieldDotted(firstName, &elt));
     ASSERT_EQUALS(elt.numberInt(), firstValue);
@@ -146,7 +148,7 @@ TEST_F(WorkingSetFixture, getDottedFieldFromIndex) {
     int firstValue = 5;
 
     member->keyData.push_back(IndexKeyDatum(BSON(firstName << 1), BSON("" << firstValue), NULL));
-    ws->transitionToLocAndIdx(id);
+    ws->transitionToRecordIdAndIdx(id);
     BSONElement elt;
     ASSERT_TRUE(member->getFieldDotted(firstName, &elt));
     ASSERT_EQUALS(elt.numberInt(), firstValue);

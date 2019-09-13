@@ -1,29 +1,31 @@
+
 /**
- * Copyright (c) 2011 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- * This program is free software: you can redistribute it and/or  modify
- * it under the terms of the GNU Affero General Public License, version 3,
- * as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
- * As a special exception, the copyright holders give permission to link the
- * code of portions of this program with the OpenSSL library under certain
- * conditions as described in each individual source file and distribute
- * linked combinations including the program with the OpenSSL library. You
- * must comply with the GNU Affero General Public License in all respects for
- * all of the code used other than as permitted herein. If you modify file(s)
- * with this exception, you may extend this exception to your version of the
- * file(s), but you are not obligated to do so. If you do not wish to do so,
- * delete this exception statement from your version. If you delete this
- * exception statement from all source files in the program, then also delete
- * it in the license file.
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/platform/basic.h"
@@ -32,6 +34,7 @@
 
 #include <boost/functional/hash.hpp>
 
+#include "mongo/bson/bson_depth.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/pipeline/field_path.h"
 #include "mongo/util/mongoutils/str.h"
@@ -41,6 +44,11 @@ using namespace mongoutils;
 using boost::intrusive_ptr;
 using std::string;
 using std::vector;
+
+const DocumentStorage DocumentStorage::kEmptyDoc;
+
+const std::vector<StringData> Document::allMetadataFieldNames = {
+    Document::metaFieldTextScore, Document::metaFieldRandVal, Document::metaFieldSortKey};
 
 Position DocumentStorage::findField(StringData requested) const {
     int reqSize = requested.size();  // get size calculation out of the way if needed
@@ -184,10 +192,12 @@ intrusive_ptr<DocumentStorage> DocumentStorage::clone() const {
 
     // Make a copy of the buffer.
     // It is very important that the positions of each field are the same after cloning.
-    const size_t bufferBytes = (_bufferEnd + hashTabBytes()) - _buffer;
+    const size_t bufferBytes = allocatedBytes();
     out->_buffer = new char[bufferBytes];
     out->_bufferEnd = out->_buffer + (_bufferEnd - _buffer);
-    memcpy(out->_buffer, _buffer, bufferBytes);
+    if (bufferBytes > 0) {
+        memcpy(out->_buffer, _buffer, bufferBytes);
+    }
 
     // Copy remaining fields
     out->_usedBytes = _usedBytes;
@@ -196,6 +206,7 @@ intrusive_ptr<DocumentStorage> DocumentStorage::clone() const {
     out->_metaFields = _metaFields;
     out->_textScore = _textScore;
     out->_randVal = _randVal;
+    out->_sortKey = _sortKey.getOwned();
 
     // Tell values that they have been memcpyed (updates ref counts)
     for (DocumentStorageIterator it = out->iteratorAll(); !it.atEnd(); it.advance()) {
@@ -225,6 +236,16 @@ Document::Document(const BSONObj& bson) {
     *this = md.freeze();
 }
 
+Document::Document(std::initializer_list<std::pair<StringData, ImplicitValue>> initializerList) {
+    MutableDocument mutableDoc(initializerList.size());
+
+    for (auto&& pair : initializerList) {
+        mutableDoc.addField(pair.first, pair.second);
+    }
+
+    *this = mutableDoc.freeze();
+}
+
 BSONObjBuilder& operator<<(BSONObjBuilderValueStream& builder, const Document& doc) {
     BSONObjBuilder subobj(builder.subobjStart());
     doc.toBson(&subobj);
@@ -232,9 +253,15 @@ BSONObjBuilder& operator<<(BSONObjBuilderValueStream& builder, const Document& d
     return builder.builder();
 }
 
-void Document::toBson(BSONObjBuilder* pBuilder) const {
+void Document::toBson(BSONObjBuilder* builder, size_t recursionLevel) const {
+    uassert(ErrorCodes::Overflow,
+            str::stream() << "cannot convert document to BSON because it exceeds the limit of "
+                          << BSONDepth::getMaxAllowableDepth()
+                          << " levels of nesting",
+            recursionLevel <= BSONDepth::getMaxAllowableDepth());
+
     for (DocumentStorageIterator it = storage().iterator(); !it.atEnd(); it.advance()) {
-        *pBuilder << it->nameSD() << it->val;
+        it->val.addToBsonObj(builder, it->nameSD(), recursionLevel);
     }
 }
 
@@ -244,8 +271,9 @@ BSONObj Document::toBson() const {
     return bb.obj();
 }
 
-const StringData Document::metaFieldTextScore("$textScore", StringData::LiteralTag());
-const StringData Document::metaFieldRandVal("$randVal", StringData::LiteralTag());
+constexpr StringData Document::metaFieldTextScore;
+constexpr StringData Document::metaFieldRandVal;
+constexpr StringData Document::metaFieldSortKey;
 
 BSONObj Document::toBsonWithMetaData() const {
     BSONObjBuilder bb;
@@ -254,6 +282,8 @@ BSONObj Document::toBsonWithMetaData() const {
         bb.append(metaFieldTextScore, getTextScore());
     if (hasRandMetaField())
         bb.append(metaFieldRandVal, getRandMetaField());
+    if (hasSortKeyMetaField())
+        bb.append(metaFieldSortKey, getSortKeyMetaField());
     return bb.obj();
 }
 
@@ -270,6 +300,9 @@ Document Document::fromBsonWithMetaData(const BSONObj& bson) {
                 continue;
             } else if (fieldName == metaFieldRandVal) {
                 md.setRandMetaField(elem.Double());
+                continue;
+            } else if (fieldName == metaFieldSortKey) {
+                md.setSortKeyMetaField(elem.Obj());
                 continue;
             }
         }
@@ -321,7 +354,7 @@ static Value getNestedFieldHelper(const Document& doc,
                                   const FieldPath& fieldNames,
                                   vector<Position>* positions,
                                   size_t level) {
-    const string& fieldName = fieldNames.getFieldName(level);
+    const auto fieldName = fieldNames.getFieldName(level);
     const Position pos = doc.positionOf(fieldName);
 
     if (!pos.found())
@@ -340,10 +373,9 @@ static Value getNestedFieldHelper(const Document& doc,
     return getNestedFieldHelper(val.getDocument(), fieldNames, positions, level + 1);
 }
 
-const Value Document::getNestedField(const FieldPath& fieldNames,
-                                     vector<Position>* positions) const {
-    fassert(16489, fieldNames.getPathLength());
-    return getNestedFieldHelper(*this, fieldNames, positions, 0);
+const Value Document::getNestedField(const FieldPath& path, vector<Position>* positions) const {
+    fassert(16489, path.getPathLength());
+    return getNestedFieldHelper(*this, path, positions, 0);
 }
 
 size_t Document::getApproximateSize() const {
@@ -361,15 +393,18 @@ size_t Document::getApproximateSize() const {
     return size;
 }
 
-void Document::hash_combine(size_t& seed) const {
+void Document::hash_combine(size_t& seed,
+                            const StringData::ComparatorInterface* stringComparator) const {
     for (DocumentStorageIterator it = storage().iterator(); !it.atEnd(); it.advance()) {
         StringData name = it->nameSD();
         boost::hash_range(seed, name.rawData(), name.rawData() + name.size());
-        it->val.hash_combine(seed);
+        it->val.hash_combine(seed, stringComparator);
     }
 }
 
-int Document::compare(const Document& rL, const Document& rR) {
+int Document::compare(const Document& rL,
+                      const Document& rR,
+                      const StringData::ComparatorInterface* stringComparator) {
     DocumentStorageIterator lIt = rL.storage().iterator();
     DocumentStorageIterator rIt = rR.storage().iterator();
 
@@ -389,16 +424,18 @@ int Document::compare(const Document& rL, const Document& rR) {
 
         // For compatibility with BSONObj::woCompare() consider the canonical type of values
         // before considerting their names.
-        const int rCType = canonicalizeBSONType(rField.val.getType());
-        const int lCType = canonicalizeBSONType(lField.val.getType());
-        if (lCType != rCType)
-            return lCType < rCType ? -1 : 1;
+        if (lField.val.getType() != rField.val.getType()) {
+            const int rCType = canonicalizeBSONType(rField.val.getType());
+            const int lCType = canonicalizeBSONType(lField.val.getType());
+            if (lCType != rCType)
+                return lCType < rCType ? -1 : 1;
+        }
 
         const int nameCmp = lField.nameSD().compare(rField.nameSD());
         if (nameCmp)
             return nameCmp;  // field names are unequal
 
-        const int valueCmp = Value::compare(lField.val, rField.val);
+        const int valueCmp = Value::compare(lField.val, rField.val, stringComparator);
         if (valueCmp)
             return valueCmp;  // fields are unequal
 
@@ -440,11 +477,15 @@ void Document::serializeForSorter(BufBuilder& buf) const {
         buf.appendNum(char(DocumentStorage::MetaType::RAND_VAL + 1));
         buf.appendNum(getRandMetaField());
     }
+    if (hasSortKeyMetaField()) {
+        buf.appendNum(char(DocumentStorage::MetaType::SORT_KEY + 1));
+        getSortKeyMetaField().appendSelfToBufBuilder(buf);
+    }
     buf.appendNum(char(0));
 }
 
 Document Document::deserializeForSorter(BufReader& buf, const SorterDeserializeSettings&) {
-    const int numElems = buf.read<int>();
+    const int numElems = buf.read<LittleEndian<int>>();
     MutableDocument doc(numElems);
     for (int i = 0; i < numElems; i++) {
         StringData name = buf.readCStr();
@@ -453,9 +494,12 @@ Document Document::deserializeForSorter(BufReader& buf, const SorterDeserializeS
 
     while (char marker = buf.read<char>()) {
         if (marker == char(DocumentStorage::MetaType::TEXT_SCORE) + 1) {
-            doc.setTextScore(buf.read<double>());
+            doc.setTextScore(buf.read<LittleEndian<double>>());
         } else if (marker == char(DocumentStorage::MetaType::RAND_VAL) + 1) {
-            doc.setRandMetaField(buf.read<double>());
+            doc.setRandMetaField(buf.read<LittleEndian<double>>());
+        } else if (marker == char(DocumentStorage::MetaType::SORT_KEY) + 1) {
+            doc.setSortKeyMetaField(
+                BSONObj::deserializeForSorter(buf, BSONObj::SorterDeserializeSettings()));
         } else {
             uasserted(28744, "Unrecognized marker, unable to deserialize buffer");
         }

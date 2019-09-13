@@ -1,5 +1,13 @@
 // Certain commands should be run-able from arbiters under localhost, but not from
 // any other nodes in the replset.
+// @tags: [requires_replication]
+
+// Arbiters don't replicate the admin.system.keys collection, so they can never validate or sign
+// clusterTime. Gossiping a clusterTime to an arbiter as a user other than __system will fail, so we
+// skip gossiping for this test.
+//
+// TODO SERVER-32639: remove this flag.
+TestData.skipGossipingClusterTime = true;
 
 var name = "arbiter_localhost_test";
 var key = "jstests/libs/key1";
@@ -19,16 +27,9 @@ replTest.initiate({
 var primaryAdmin = replTest.nodes[0].getDB("admin");
 var arbiterAdmin = replTest.nodes[2].getDB("admin");
 
-var cmd0 = {
-    getCmdLineOpts: 1
-};
-var cmd1 = {
-    getParameter: 1,
-    logLevel: 1
-};
-var cmd2 = {
-    serverStatus: 1
-};
+var cmd0 = {getCmdLineOpts: 1};
+var cmd1 = {getParameter: 1, logLevel: 1};
+var cmd2 = {serverStatus: 1};
 
 assert.commandFailedWithCode(primaryAdmin.runCommand(cmd0), 13);
 assert.commandFailedWithCode(primaryAdmin.runCommand(cmd1), 13);
@@ -37,3 +38,5 @@ assert.commandFailedWithCode(primaryAdmin.runCommand(cmd2), 13);
 assert.commandWorked(arbiterAdmin.runCommand(cmd0));
 assert.commandWorked(arbiterAdmin.runCommand(cmd1));
 assert.commandWorked(arbiterAdmin.runCommand(cmd2));
+
+replTest.stopSet();

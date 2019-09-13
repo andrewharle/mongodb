@@ -6,9 +6,14 @@
  * Bulk inserts 1000 documents and builds indexes. Then alternates between compacting the
  * collection and verifying the number of documents and indexes. Operates on a separate collection
  * for each thread.
+ *
+ * There is a known hang during concurrent FSM workloads with the compact command used
+ * with wiredTiger LSM variants. Bypass this command for the wiredTiger LSM variant
+ * until a fix is available for WT-2523.
+ *
+ * @tags: [does_not_support_wiredtiger_lsm, requires_compact]
  */
 
-load('jstests/concurrency/fsm_workload_helpers/drop_utils.js');    // for dropCollections
 load('jstests/concurrency/fsm_workload_helpers/server_types.js');  // for isEphemeral
 
 var $config = (function() {
@@ -72,12 +77,7 @@ var $config = (function() {
             assertWhenOwnColl.eq(indexesCount, this.nIndexes);
         }
 
-        return {
-            init: init,
-            collectionSetup: collectionSetup,
-            compact: compact,
-            query: query
-        };
+        return {init: init, collectionSetup: collectionSetup, compact: compact, query: query};
     })();
 
     var transitions = {
@@ -87,17 +87,11 @@ var $config = (function() {
         query: {compact: 0.5, query: 0.5}
     };
 
-    var teardown = function teardown(db, collName, cluster) {
-        var pattern = new RegExp('^' + this.prefix + '_\\d+$');
-        dropCollections(db, pattern);
-    };
-
     return {
         threadCount: 15,
         iterations: 10,
         states: states,
         transitions: transitions,
-        teardown: teardown,
-        data: data
+        data: data,
     };
 })();

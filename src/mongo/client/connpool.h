@@ -1,30 +1,33 @@
 /** @file connpool.h */
 
-/*    Copyright 2009 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
@@ -33,9 +36,11 @@
 #include <stack>
 
 #include "mongo/client/dbclientinterface.h"
+#include "mongo/client/mongo_uri.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/background.h"
 #include "mongo/util/concurrency/mutex.h"
+#include "mongo/util/time_support.h"
 
 namespace mongo {
 
@@ -47,8 +52,24 @@ struct ConnectionPoolStats;
 }  // namespace executor
 
 /**
- * not thread safe
- * thread safety is handled by DBConnectionPool
+ * The PoolForHost is responsible for storing a maximum of _maxPoolSize connections to a particular
+ * host. It is not responsible for creating new connections; instead, when DBConnectionPool is asked
+ * for a connection to a particular host, DBConnectionPool will check if any connections are
+ * available in the PoolForHost for that host. If so, DBConnectionPool will check out a connection
+ * from PoolForHost, and if not, DBConnectionPool will create a new connection itself, if we are
+ * below the maximum allowed number of connections. If we have already created _maxPoolSize
+ * connections, the calling thread will block until a new connection can be made for it.
+ *
+ * Once the connection is released back to DBConnectionPool, DBConnectionPool will attempt to
+ * release the connection to PoolForHost. This is how connections enter PoolForHost for the first
+ * time. If PoolForHost is below the _maxPoolSize limit, PoolForHost will take ownership of the
+ * connection, otherwise PoolForHost will clean up and destroy the connection.
+ *
+ * Additionally, PoolForHost knows how to purge itself of stale connections (since a connection can
+ * go stale while it is just sitting in the pool), but does not decide when to do so. Instead,
+ * DBConnectionPool tells PoolForHost to purge stale connections periodically.
+ *
+ * PoolForHost is not thread-safe; thread safety is handled by DBConnectionPool.
  */
 class PoolForHost {
     MONGO_DISALLOW_COPYING(PoolForHost);
@@ -59,20 +80,20 @@ public:
 
     friend class DBConnectionPool;
 
-    PoolForHost()
-        : _created(0),
-          _minValidCreationTimeMicroSec(0),
-          _type(ConnectionString::INVALID),
-          _maxPoolSize(kPoolSizeUnlimited),
-          _checkedOut(0),
-          _parentDestroyed(false) {}
-
+    PoolForHost();
     ~PoolForHost();
+
+    /**
+     * Returns the number of connections in this pool that went bad.
+     */
+    int getNumBadConns() const {
+        return _badConns;
+    }
 
     /**
      * Returns the maximum number of connections stored in the pool
      */
-    int getMaxPoolSize() {
+    int getMaxPoolSize() const {
         return _maxPoolSize;
     }
 
@@ -84,10 +105,17 @@ public:
     }
 
     /**
-     * Sets the socket timeout on this host, for reporting purposes only.
+     * Sets the maximum number of in-use connections for this pool.
+     */
+    void setMaxInUse(int maxInUse) {
+        _maxInUse = maxInUse;
+    }
+
+    /**
+     * Sets the socket timeout on this host, in seconds, for reporting purposes only.
      */
     void setSocketTimeout(double socketTimeout) {
-        _socketTimeout = socketTimeout;
+        _socketTimeoutSecs = socketTimeout;
     }
 
     int numAvailable() const {
@@ -102,7 +130,7 @@ public:
      * Returns the number of open connections in this pool.
      */
     int openConnections() const {
-        return _checkedOut + (int)_pool.size();
+        return numInUse() + numAvailable();
     }
 
     void createdOne(DBClientBase* base);
@@ -127,7 +155,7 @@ public:
 
     void flush();
 
-    void getStaleConnections(std::vector<DBClientBase*>& stale);
+    void getStaleConnections(Date_t idleThreshold, std::vector<DBClientBase*>& stale);
 
     /**
      * Sets the lower bound for creation times that can be considered as
@@ -146,18 +174,45 @@ public:
      */
     void initializeHostName(const std::string& hostName);
 
+    /**
+     * If this pool has more than _maxPoolSize connections in use, blocks
+     * the calling thread until a connection is returned to the pool or
+     * is destroyed. If a non-zero timeout is given, this method will
+     * throw if a free connection cannot be acquired within that amount of
+     * time. Timeout is in seconds.
+     */
+    void waitForFreeConnection(int timeout, stdx::unique_lock<stdx::mutex>& lk);
+
+    /**
+     * Notifies any waiters that there are new connections available.
+     */
+    void notifyWaiters();
+
+    /**
+     * Shuts down this pool, notifying all waiters.
+     */
+    void shutdown();
+
 private:
     struct StoredConnection {
-        StoredConnection(DBClientBase* c);
+        StoredConnection(std::unique_ptr<DBClientBase> c);
 
-        bool ok(time_t now);
+        bool ok();
 
-        DBClientBase* conn;
-        time_t when;
+        /**
+         * Returns true if this connection was added before the given time.
+         */
+        bool addedBefore(Date_t time);
+
+        std::unique_ptr<DBClientBase> conn;
+
+        // The time when this connection was added to the pool. Will
+        // be reset if the connection is checked out and re-added.
+        Date_t added;
     };
 
     std::string _hostName;
-    double _socketTimeout;
+    double _socketTimeoutSecs;
     std::stack<StoredConnection> _pool;
 
     int64_t _created;
@@ -167,11 +222,21 @@ private:
     // The maximum number of connections we'll save in the pool
     int _maxPoolSize;
 
+    // The maximum number of connections allowed to be in-use in this pool
+    int _maxInUse;
+
     // The number of currently active connections from this pool
     int _checkedOut;
 
+    // The number of connections that we did not reuse because they went bad.
+    int _badConns;
+
     // Whether our parent DBConnectionPool object is in destruction
     bool _parentDestroyed;
+
+    stdx::condition_variable _cv;
+
+    AtomicWord<bool> _inShutdown;
 };
 
 class DBConnectionHook {
@@ -214,7 +279,7 @@ public:
      * This setting only applies to new host connection pools, previously-pooled host pools are
      * unaffected.
      */
-    int getMaxPoolSize() {
+    int getMaxPoolSize() const {
         return _maxPoolSize;
     }
 
@@ -233,6 +298,21 @@ public:
         _maxPoolSize = maxPoolSize;
     }
 
+    /**
+     * Sets the maximum number of in-use connections per host.
+     */
+    void setMaxInUse(int maxInUse) {
+        _maxInUse = maxInUse;
+    }
+
+    /**
+     * Sets the timeout value for idle connections, after which we will remove them
+     * from the pool. This value is in minutes.
+     */
+    void setIdleTimeout(int timeout) {
+        _idleTimeout = Minutes(timeout);
+    }
+
     void onCreate(DBClientBase* conn);
     void onHandedOut(DBClientBase* conn);
     void onDestroy(DBClientBase* conn);
@@ -240,10 +320,21 @@ public:
 
     void flush();
 
+    /**
+     * Gets a connection to the given host with the given timeout, in seconds.
+     */
     DBClientBase* get(const std::string& host, double socketTimeout = 0);
     DBClientBase* get(const ConnectionString& host, double socketTimeout = 0);
+    DBClientBase* get(const MongoURI& uri, double socketTimeout = 0);
+
+    /**
+     * Gets the number of connections available in the pool.
+     */
+    int getNumAvailableConns(const std::string& host, double socketTimeout = 0) const;
+    int getNumBadConns(const std::string& host, double socketTimeout = 0) const;
 
     void release(const std::string& host, DBClientBase* c);
+    void decrementEgress(const std::string& host, DBClientBase* c);
 
     void addHook(DBConnectionHook* hook);  // we take ownership
     void appendConnectionStats(executor::ConnectionPoolStats* stats) const;
@@ -277,7 +368,14 @@ public:
     }
     virtual void taskDoWork();
 
+    /**
+     * Shuts down the connection pool, unblocking any waiters on connections.
+     */
+    void shutdown();
+
 private:
+    class Detail;
+
     DBConnectionPool(DBConnectionPool& p);
 
     DBClientBase* _get(const std::string& ident, double socketTimeout);
@@ -304,7 +402,12 @@ private:
     // 0 effectively disables the pool
     int _maxPoolSize;
 
+    int _maxInUse;
+    Minutes _idleTimeout;
+
     PoolMap _pools;
+
+    AtomicWord<bool> _inShutdown;
 
     // pointers owned by me, right now they leak on shutdown
     // _hooks itself also leaks because it creates a shutdown race condition
@@ -349,16 +452,17 @@ private:
 class ScopedDbConnection : public AScopedConnection {
 public:
     /** the main constructor you want to use
-        throws UserException if can't connect
+        throws AssertionException if can't connect
         */
     explicit ScopedDbConnection(const std::string& host, double socketTimeout = 0);
     explicit ScopedDbConnection(const ConnectionString& host, double socketTimeout = 0);
+    explicit ScopedDbConnection(const MongoURI& host, double socketTimeout = 0);
 
-    ScopedDbConnection() : _host(""), _conn(0), _socketTimeout(0) {}
+    ScopedDbConnection() : _host(""), _conn(0), _socketTimeoutSecs(0) {}
 
     /* @param conn - bind to an existing connection */
     ScopedDbConnection(const std::string& host, DBClientBase* conn, double socketTimeout = 0)
-        : _host(host), _conn(conn), _socketTimeout(socketTimeout) {
+        : _host(host), _conn(conn), _socketTimeoutSecs(socketTimeout) {
         _setSocketTimeout();
     }
 
@@ -395,10 +499,7 @@ public:
     /** Force closure of the connection.  You should call this if you leave it in
         a bad state.  Destructor will do this too, but it is verbose.
     */
-    void kill() {
-        delete _conn;
-        _conn = 0;
-    }
+    void kill();
 
     /** Call this when you are done with the connection.
 
@@ -413,7 +514,7 @@ private:
 
     const std::string _host;
     DBClientBase* _conn;
-    const double _socketTimeout;
+    const double _socketTimeoutSecs;
 };
 
 }  // namespace mongo

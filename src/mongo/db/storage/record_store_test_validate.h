@@ -1,25 +1,27 @@
 // record_store_test_validate.h
 
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -37,7 +39,6 @@
 #include "mongo/unittest/unittest.h"
 
 namespace mongo {
-namespace {
 
 class ValidateAdaptorSpy : public ValidateAdaptor {
 public:
@@ -47,7 +48,7 @@ public:
 
     ~ValidateAdaptorSpy() {}
 
-    Status validate(const RecordData& recordData, size_t* dataSize) {
+    Status validate(const RecordId& recordId, const RecordData& recordData, size_t* dataSize) {
         std::string s(recordData.data());
         ASSERT(1 == _remain.erase(s));
 
@@ -66,9 +67,10 @@ private:
 class ValidateTest : public mongo::unittest::Test {
 public:
     ValidateTest()
-        : _harnessHelper(newHarnessHelper()), _rs(_harnessHelper->newNonCappedRecordStore()) {}
+        : _harnessHelper(newRecordStoreHarnessHelper()),
+          _rs(_harnessHelper->newNonCappedRecordStore()) {}
 
-    std::unique_ptr<OperationContext> newOperationContext() {
+    ServiceContext::UniqueOperationContext newOperationContext() {
         return _harnessHelper->newOperationContext();
     }
 
@@ -82,13 +84,13 @@ public:
 
     void setUp() {
         {
-            std::unique_ptr<OperationContext> opCtx(newOperationContext());
+            ServiceContext::UniqueOperationContext opCtx(newOperationContext());
             ASSERT_EQUALS(0, _rs->numRecords(opCtx.get()));
         }
 
         int nToInsert = 10;
         for (int i = 0; i < nToInsert; i++) {
-            std::unique_ptr<OperationContext> opCtx(newOperationContext());
+            ServiceContext::UniqueOperationContext opCtx(newOperationContext());
             {
                 std::stringstream ss;
                 ss << "record " << i;
@@ -96,24 +98,23 @@ public:
                 ASSERT(_remain.insert(data).second);
 
                 WriteUnitOfWork uow(opCtx.get());
-                StatusWith<RecordId> res =
-                    _rs->insertRecord(opCtx.get(), data.c_str(), data.size() + 1, false);
+                StatusWith<RecordId> res = _rs->insertRecord(
+                    opCtx.get(), data.c_str(), data.size() + 1, Timestamp(), false);
                 ASSERT_OK(res.getStatus());
                 uow.commit();
             }
         }
 
         {
-            std::unique_ptr<OperationContext> opCtx(newOperationContext());
+            ServiceContext::UniqueOperationContext opCtx(newOperationContext());
             ASSERT_EQUALS(nToInsert, _rs->numRecords(opCtx.get()));
         }
     }
 
 private:
-    std::unique_ptr<HarnessHelper> _harnessHelper;
+    std::unique_ptr<RecordStoreHarnessHelper> _harnessHelper;
     std::unique_ptr<RecordStore> _rs;
     std::set<std::string> _remain;
 };
 
-}  // namespace
 }  // namespace mongo

@@ -11,11 +11,7 @@
     var dbpath = MongoRunner.dataPath + 'sync_write';
     resetDbpath(dbpath);
 
-    var mongodArgs = {
-        dbpath: dbpath,
-        noCleanData: true,
-        journal: ''
-    };
+    var mongodArgs = {dbpath: dbpath, noCleanData: true, journal: ''};
 
     // Start a mongod.
     var conn = MongoRunner.runMongod(mongodArgs);
@@ -24,7 +20,7 @@
     // Now connect to the mongod, do a journaled write and abruptly stop the server.
     var testDB = conn.getDB('test');
     assert.writeOK(testDB.synced.insert({synced: true}, {writeConcern: {j: true}}));
-    MongoRunner.stopMongod(conn, 9);
+    MongoRunner.stopMongod(conn, 9, {allowedExitCode: MongoRunner.EXIT_SIGKILL});
 
     // Restart the mongod.
     conn = MongoRunner.runMongod(mongodArgs);

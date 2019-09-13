@@ -1,3 +1,8 @@
+// Cannot implicitly shard accessed collections because queries on a sharded collection are not
+// able to be covered when they aren't on the shard key since the document needs to be fetched in
+// order to apply the SHARDING_FILTER stage.
+// @tags: [assumes_unsharded_collection]
+
 // Simple covered index query test with unique index
 
 // Include helpers for analyzing explain output.
@@ -15,7 +20,7 @@ coll.ensureIndex({foo: 1}, {unique: true});
 
 // Test equality with int value
 var plan = coll.find({foo: 1}, {foo: 1, _id: 0}).hint({foo: 1}).explain("executionStats");
-assert(isIndexOnly(plan.queryPlanner.winningPlan),
+assert(isIndexOnly(db, plan.queryPlanner.winningPlan),
        "simple.2.1 - indexOnly should be true on covered query");
 assert.eq(0,
           plan.executionStats.totalDocsExamined,
@@ -23,7 +28,7 @@ assert.eq(0,
 
 // Test equality with string value
 var plan = coll.find({foo: "string"}, {foo: 1, _id: 0}).hint({foo: 1}).explain("executionStats");
-assert(isIndexOnly(plan.queryPlanner.winningPlan),
+assert(isIndexOnly(db, plan.queryPlanner.winningPlan),
        "simple.2.2 - indexOnly should be true on covered query");
 assert.eq(0,
           plan.executionStats.totalDocsExamined,
@@ -31,7 +36,7 @@ assert.eq(0,
 
 // Test equality with int value on a dotted field
 var plan = coll.find({foo: {bar: 1}}, {foo: 1, _id: 0}).hint({foo: 1}).explain("executionStats");
-assert(isIndexOnly(plan.queryPlanner.winningPlan),
+assert(isIndexOnly(db, plan.queryPlanner.winningPlan),
        "simple.2.3 - indexOnly should be true on covered query");
 assert.eq(0,
           plan.executionStats.totalDocsExamined,
@@ -39,7 +44,7 @@ assert.eq(0,
 
 // Test no query
 var plan = coll.find({}, {foo: 1, _id: 0}).hint({foo: 1}).explain("executionStats");
-assert(isIndexOnly(plan.queryPlanner.winningPlan),
+assert(isIndexOnly(db, plan.queryPlanner.winningPlan),
        "simple.2.4 - indexOnly should be true on covered query");
 assert.eq(0,
           plan.executionStats.totalDocsExamined,
@@ -48,7 +53,7 @@ assert.eq(0,
 // Test range query
 var plan =
     coll.find({foo: {$gt: 2, $lt: 6}}, {foo: 1, _id: 0}).hint({foo: 1}).explain("executionStats");
-assert(isIndexOnly(plan.queryPlanner.winningPlan),
+assert(isIndexOnly(db, plan.queryPlanner.winningPlan),
        "simple.2.5 - indexOnly should be true on covered query");
 assert.eq(0,
           plan.executionStats.totalDocsExamined,
@@ -57,7 +62,7 @@ assert.eq(0,
 // Test in query
 var plan =
     coll.find({foo: {$in: [5, 8]}}, {foo: 1, _id: 0}).hint({foo: 1}).explain("executionStats");
-assert(isIndexOnly(plan.queryPlanner.winningPlan),
+assert(isIndexOnly(db, plan.queryPlanner.winningPlan),
        "simple.2.6 - indexOnly should be true on covered query");
 assert.eq(0,
           plan.executionStats.totalDocsExamined,

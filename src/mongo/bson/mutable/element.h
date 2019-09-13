@@ -1,28 +1,31 @@
-/* Copyright 2013 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
@@ -210,8 +213,9 @@ public:
     inline Element operator[](size_t n) const;
 
     /** Returns the first child, if any, of this Element named 'name'. If no such Element
-     *  exists, a non-ok Element is returned. This is not a constant time operation. This
-     *  method is also available as operator[] taking a StringData for convenience.
+     *  exists, a non-ok Element is returned. This is not a constant time operation. It is illegal
+     *  to call this on an Array. This method is also available as operator[] taking a StringData
+     *  for convenience.
      */
     Element findFirstChildNamed(StringData name) const;
     inline Element operator[](StringData name) const;
@@ -350,7 +354,9 @@ public:
      *   Returns 0 if this == other either tautologically, or according to woCompare.
      *   Returns 1 if this > other according to BSONElement::woCompare
      */
-    int compareWithElement(const ConstElement& other, bool considerFieldName = true) const;
+    int compareWithElement(const ConstElement& other,
+                           const StringData::ComparatorInterface* comparator,
+                           bool considerFieldName = true) const;
 
     /** Compare this Element with BSONElement 'other'. You should not call this on the root
      *  Element of the Document because the root Element does not have a field name. Use
@@ -360,7 +366,9 @@ public:
      *   Returns 0 if this == other either tautologically, or according to woCompare.
      *   Returns 1 if this > other according to BSONElement::woCompare
      */
-    int compareWithBSONElement(const BSONElement& other, bool considerFieldName = true) const;
+    int compareWithBSONElement(const BSONElement& other,
+                               const StringData::ComparatorInterface* comparator,
+                               bool considerFieldName = true) const;
 
     /** Compare this Element, which must be an Object or an Array, with 'other'.
      *
@@ -368,7 +376,9 @@ public:
      *   Returns 0 if this object == other either tautologically, or according to woCompare.
      *   Returns 1 if this object > other according to BSONElement::woCompare
      */
-    int compareWithBSONObj(const BSONObj& other, bool considerFieldName = true) const;
+    int compareWithBSONObj(const BSONObj& other,
+                           const StringData::ComparatorInterface* comparator,
+                           bool considerFieldName = true) const;
 
 
     //

@@ -5,6 +5,7 @@
 # This means that the integer value assigned to each ActionType and used internally in ActionSet
 # also may change between versions.
 ["addShard",
+"advanceClusterTime",
 "anyAction", # Special ActionType that represents *all* actions
 "appendOplogNote",
 "applicationMessage",
@@ -17,6 +18,8 @@
 "changePassword",
 "changeOwnPassword",
 "changeOwnCustomData",
+"changeStream",
+"checkFreeMonitoringStatus",
 "cleanupOrphaned",
 "closeAllDatabases",  # Deprecated, needs to stay around for backwards compatibility
 "collMod",
@@ -33,7 +36,6 @@
 "createUser",
 "dbHash",
 "dbStats",
-"diagLogging",
 "dropAllRolesFromDatabase",  # Not used for permissions checks, but to id the event in logs.
 "dropAllUsersFromDatabase",  # Not used for permissions checks, but to id the event in logs.
 "dropCollection",
@@ -46,7 +48,9 @@
 "enableSharding",
 "find",
 "flushRouterConfig",
+"forceUUID",
 "fsync",
+"getDatabaseVersion",
 "getCmdLineOpts",
 "getLog",
 "getParameter",
@@ -63,11 +67,15 @@
 "insert",
 "internal", # Special action type that represents internal actions
 "invalidateUserCache",
+"killAnyCursor",
+"killAnySession",
 "killCursors",
 "killop",
 "listCollections",
+"listCursors",
 "listDatabases",
 "listIndexes",
+"listSessions",
 "listShards",
 "logRotate",
 "moveChunk",
@@ -86,6 +94,7 @@
 "replSetGetStatus",
 "replSetHeartbeat",
 "replSetReconfig",  # Not used for permissions checks, but to id the event in logs.
+"replSetResizeOplog",
 "replSetStateChange",
 "resync",
 "revokeRole",
@@ -93,6 +102,9 @@
 "revokeRolesFromRole",  # Not used for permissions checks, but to id the event in logs.
 "revokeRolesFromUser",  # Not used for permissions checks, but to id the event in logs.
 "serverStatus",
+"setAuthenticationRestriction",
+"setFeatureCompatibilityVersion",
+"setFreeMonitoring",
 "setParameter",
 "shardCollection",  # Not used for permissions checks, but to id the event in logs.
 "shardingState",
@@ -103,6 +115,7 @@
 "top",
 "touch",
 "unlock",
+"useUUID",
 "update",
 "updateRole",  # Not used for permissions checks, but to id the event in logs.
 "updateUser",  # Not used for permissions checks, but to id the event in logs.

@@ -1,30 +1,32 @@
+
 /**
-*    Copyright (C) 2008 10gen Inc.
-*
-*    This program is free software: you can redistribute it and/or  modify
-*    it under the terms of the GNU Affero General Public License, version 3,
-*    as published by the Free Software Foundation.
-*
-*    This program is distributed in the hope that it will be useful,
-*    but WITHOUT ANY WARRANTY; without even the implied warranty of
-*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*    GNU Affero General Public License for more details.
-*
-*    You should have received a copy of the GNU Affero General Public License
-*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*
-*    As a special exception, the copyright holders give permission to link the
-*    code of portions of this program with the OpenSSL library under certain
-*    conditions as described in each individual source file and distribute
-*    linked combinations including the program with the OpenSSL library. You
-*    must comply with the GNU Affero General Public License in all respects
-*    for all of the code used other than as permitted herein. If you modify
-*    file(s) with this exception, you may extend this exception to your
-*    version of the file(s), but you are not obligated to do so. If you do not
-*    wish to do so, delete this exception statement from your version. If you
-*    delete this exception statement from all source files in the program,
-*    then also delete it in the license file.
-*/
+ *    Copyright (C) 2018-present MongoDB, Inc.
+ *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
+ *
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
+ */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kDefault
 
@@ -37,6 +39,7 @@
 
 #include "mongo/base/checked_cast.h"
 #include "mongo/base/init.h"
+#include "mongo/db/server_options.h"
 #include "mongo/logger/console_appender.h"
 #include "mongo/logger/log_manager.h"
 #include "mongo/logger/logger.h"
@@ -47,13 +50,10 @@
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/log.h"
+#include "mongo/util/stacktrace.h"
 #include "mongo/util/timer.h"
 
 namespace mongo {
-
-using std::shared_ptr;
-using std::string;
-
 namespace unittest {
 
 namespace {
@@ -77,11 +77,15 @@ logger::LogstreamBuilder log() {
     return LogstreamBuilder(unittestOutput, getThreadName(), logger::LogSeverity::Log());
 }
 
-MONGO_INITIALIZER_WITH_PREREQUISITES(UnitTestOutput,
-                                     ("GlobalLogManager", "default"))(InitializerContext*) {
-    unittestOutput->attachAppender(logger::MessageLogDomain::AppenderAutoPtr(
-        new logger::ConsoleAppender<logger::MessageLogDomain::Event>(
-            new logger::MessageEventDetailsEncoder)));
+void setupTestLogger() {
+    unittestOutput->attachAppender(
+        std::make_unique<logger::ConsoleAppender<logger::MessageLogDomain::Event>>(
+            std::make_unique<logger::MessageEventDetailsEncoder>()));
+}
+
+MONGO_INITIALIZER_WITH_PREREQUISITES(UnitTestOutput, ("GlobalLogManager", "default"))
+(InitializerContext*) {
+    setupTestLogger();
     return Status::OK();
 }
 
@@ -103,8 +107,8 @@ public:
                 _millis / 1000.0);
         ss << result;
 
-        for (std::vector<std::string>::iterator i = _messages.begin(); i != _messages.end(); i++) {
-            ss << "\t" << *i << '\n';
+        for (const auto& i : _messages) {
+            ss << "\t" << i << '\n';
         }
 
         return ss.str();
@@ -114,7 +118,7 @@ public:
         return _rc;
     }
 
-    string _name;
+    std::string _name;
 
     int _rc;
     int _tests;
@@ -128,6 +132,33 @@ public:
 
 Result* Result::cur = 0;
 
+namespace {
+
+/**
+ * This unsafe scope guard allows exceptions in its destructor. Thus, if it goes out of scope when
+ * an exception is active and the guard function also throws an exception, the program will call
+ * std::terminate. This should only be used in unittests where termination on exception is okay.
+ */
+template <typename F>
+class UnsafeScopeGuard {
+public:
+    UnsafeScopeGuard(F fun) : _fun(fun) {}
+
+    ~UnsafeScopeGuard() noexcept(false) {
+        _fun();
+    }
+
+private:
+    F _fun;
+};
+
+template <typename F>
+inline UnsafeScopeGuard<F> MakeUnsafeScopeGuard(F fun) {
+    return UnsafeScopeGuard<F>(std::move(fun));
+}
+
+}  // namespace
+
 Test::Test() : _isCapturingLogMessages(false) {}
 
 Test::~Test() {
@@ -138,6 +169,7 @@ Test::~Test() {
 
 void Test::run() {
     setUp();
+    auto guard = MakeUnsafeScopeGuard([this] { tearDown(); });
 
     // An uncaught exception does not prevent the tear down from running. But
     // such an event still constitutes an error. To test this behavior we use a
@@ -146,18 +178,19 @@ void Test::run() {
     try {
         _doTest();
     } catch (FixtureExceptionForTesting&) {
-        tearDown();
         return;
-    } catch (TestAssertionFailureException&) {
-        tearDown();
-        throw;
     }
-
-    tearDown();
 }
 
-void Test::setUp() {}
-void Test::tearDown() {}
+// Attempting to read the featureCompatibilityVersion parameter before it is explicitly initialized
+// with a meaningful value will trigger failures as of SERVER-32630.
+void Test::setUp() {
+    serverGlobalParams.featureCompatibility.setVersion(
+        ServerGlobalParams::FeatureCompatibility::Version::kFullyUpgradedTo40);
+}
+void Test::tearDown() {
+    serverGlobalParams.featureCompatibility.reset();
+}
 
 namespace {
 class StringVectorAppender : public logger::MessageLogDomain::EventAppender {
@@ -200,7 +233,7 @@ void Test::startCapturingLogMessages() {
     invariant(!_isCapturingLogMessages);
     _capturedLogMessages.clear();
     if (!_captureAppender) {
-        _captureAppender = stdx::make_unique<StringVectorAppender>(&_capturedLogMessages);
+        _captureAppender = std::make_unique<StringVectorAppender>(&_capturedLogMessages);
     }
     checked_cast<StringVectorAppender*>(_captureAppender.get())->enable();
     _captureAppenderHandle = logger::globalLogDomain()->attachAppender(std::move(_captureAppender));
@@ -216,16 +249,16 @@ void Test::stopCapturingLogMessages() {
 }
 void Test::printCapturedLogLines() const {
     log() << "****************************** Captured Lines (start) *****************************";
-    std::for_each(getCapturedLogMessages().begin(),
-                  getCapturedLogMessages().end(),
-                  [](std::string line) { log() << line; });
+    for (const auto& line : getCapturedLogMessages()) {
+        log() << line;
+    }
     log() << "****************************** Captured Lines (end) ******************************";
 }
 
 int64_t Test::countLogLinesContaining(const std::string& needle) {
-    return std::count_if(getCapturedLogMessages().begin(),
-                         getCapturedLogMessages().end(),
-                         stdx::bind(stringContains, stdx::placeholders::_1, needle));
+    const auto& msgs = getCapturedLogMessages();
+    return std::count_if(
+        msgs.begin(), msgs.end(), [&](const std::string& s) { return stringContains(s, needle); });
 }
 
 Suite::Suite(const std::string& name) : _name(name) {
@@ -235,7 +268,7 @@ Suite::Suite(const std::string& name) : _name(name) {
 Suite::~Suite() {}
 
 void Suite::add(const std::string& name, const TestFunction& testFn) {
-    _tests.push_back(std::shared_ptr<TestHolder>(new TestHolder(name, testFn)));
+    _tests.push_back(std::make_unique<TestHolder>(name, testFn));
 }
 
 Result* Suite::run(const std::string& filter, int runsPerTest) {
@@ -247,9 +280,7 @@ Result* Suite::run(const std::string& filter, int runsPerTest) {
     Result* r = new Result(_name);
     Result::cur = r;
 
-    for (std::vector<std::shared_ptr<TestHolder>>::iterator i = _tests.begin(); i != _tests.end();
-         i++) {
-        std::shared_ptr<TestHolder>& tc = *i;
+    for (const auto& tc : _tests) {
         if (filter.size() && tc->getName().find(filter) == std::string::npos) {
             LOG(1) << "\t skipping test: " << tc->getName() << " because doesn't match filter"
                    << std::endl;
@@ -260,26 +291,32 @@ Result* Suite::run(const std::string& filter, int runsPerTest) {
 
         bool passes = false;
 
-        log() << "\t going to run test: " << tc->getName() << std::endl;
-
         std::stringstream err;
         err << tc->getName() << "\t";
 
         try {
-            for (int x = 0; x < runsPerTest; x++)
+            for (int x = 0; x < runsPerTest; x++) {
+                std::stringstream runTimes;
+                if (runsPerTest > 1) {
+                    runTimes << "  (" << x + 1 << "/" << runsPerTest << ")";
+                }
+                log() << "\t going to run test: " << tc->getName() << runTimes.str();
                 tc->run();
+            }
             passes = true;
         } catch (const TestAssertionFailureException& ae) {
-            err << ae.toString();
+            err << ae.toString() << " in test " << tc->getName() << '\n' << ae.getStacktrace();
+        } catch (const DBException& e) {
+            err << "DBException: " << e.toString() << " in test " << tc->getName();
         } catch (const std::exception& e) {
-            err << " std::exception: " << e.what() << " in test " << tc->getName();
+            err << "std::exception: " << e.what() << " in test " << tc->getName();
         } catch (int x) {
-            err << " caught int " << x << " in test " << tc->getName();
+            err << "caught int " << x << " in test " << tc->getName();
         }
 
         if (!passes) {
             std::string s = err.str();
-            log() << "FAIL: " << s << std::endl;
+            log() << "FAIL: " << s;
             r->_fails.push_back(tc->getName());
             r->_messages.push_back(s);
         }
@@ -312,20 +349,19 @@ int Suite::run(const std::vector<std::string>& suites, const std::string& filter
     std::vector<std::string> torun(suites);
 
     if (torun.empty()) {
-        for (SuiteMap::const_iterator i = _allSuites().begin(); i != _allSuites().end(); ++i) {
-            torun.push_back(i->first);
+        for (const auto& kv : _allSuites()) {
+            torun.push_back(kv.first);
         }
     }
 
-    std::vector<Result*> results;
+    std::vector<std::unique_ptr<Result>> results;
 
-    for (std::vector<std::string>::iterator i = torun.begin(); i != torun.end(); i++) {
-        std::string name = *i;
+    for (std::string name : torun) {
         std::shared_ptr<Suite>& s = _allSuites()[name];
         fassert(16145, s != NULL);
 
         log() << "going to run suite: " << name << std::endl;
-        results.push_back(s->run(filter, runsPerTest));
+        results.emplace_back(s->run(filter, runsPerTest));
     }
 
     log() << "**************************************************" << std::endl;
@@ -340,8 +376,7 @@ int Suite::run(const std::vector<std::string>& suites, const std::string& filter
     std::vector<std::string> failedSuites;
 
     Result::cur = NULL;
-    for (std::vector<Result*>::iterator i = results.begin(); i != results.end(); i++) {
-        Result* r = *i;
+    for (const auto& r : results) {
         log() << r->toString();
         if (abs(r->rc()) > abs(rc))
             rc = r->rc();
@@ -349,18 +384,14 @@ int Suite::run(const std::vector<std::string>& suites, const std::string& filter
         tests += r->_tests;
         if (!r->_fails.empty()) {
             failedSuites.push_back(r->toString());
-            for (std::vector<std::string>::const_iterator j = r->_fails.begin();
-                 j != r->_fails.end();
-                 j++) {
-                const std::string& s = (*j);
+            for (const std::string& s : r->_fails) {
                 totals._fails.push_back(r->_name + "/" + s);
             }
         }
         asserts += r->_asserts;
         millis += r->_millis;
-
-        delete r;
     }
+    results.clear();
 
     totals._tests = tests;
     totals._asserts = asserts;
@@ -371,10 +402,7 @@ int Suite::run(const std::vector<std::string>& suites, const std::string& filter
     // summary
     if (!totals._fails.empty()) {
         log() << "Failing tests:" << std::endl;
-        for (std::vector<std::string>::const_iterator i = totals._fails.begin();
-             i != totals._fails.end();
-             i++) {
-            const std::string& s = (*i);
+        for (const std::string& s : totals._fails) {
             log() << "\t " << s << " Failed";
         }
         log() << "FAILURE - " << totals._fails.size() << " tests in " << failedSuites.size()
@@ -406,7 +434,11 @@ void Suite::setupTests() {}
 
 TestAssertionFailureException::TestAssertionFailureException(
     const std::string& theFile, unsigned theLine, const std::string& theFailingExpression)
-    : _file(theFile), _line(theLine), _message(theFailingExpression) {}
+    : _file(theFile), _line(theLine), _message(theFailingExpression) {
+    std::ostringstream ostream;
+    printStackTrace(ostream);
+    _stacktrace = ostream.str();
+}
 
 std::string TestAssertionFailureException::toString() const {
     std::ostringstream os;
@@ -431,7 +463,7 @@ TestAssertionFailure& TestAssertionFailure::operator=(const TestAssertionFailure
     return *this;
 }
 
-TestAssertionFailure::~TestAssertionFailure() BOOST_NOEXCEPT_IF(false) {
+TestAssertionFailure::~TestAssertionFailure() noexcept(false) {
     if (!_enabled) {
         invariant(_stream.str().empty());
         return;
@@ -439,6 +471,7 @@ TestAssertionFailure::~TestAssertionFailure() BOOST_NOEXCEPT_IF(false) {
     if (!_stream.str().empty()) {
         _exception.setMessage(_exception.getMessage() + " " + _stream.str());
     }
+    error() << "Throwing exception: " << _exception;
     throw _exception;
 }
 
@@ -450,8 +483,8 @@ std::ostream& TestAssertionFailure::stream() {
 
 std::vector<std::string> getAllSuiteNames() {
     std::vector<std::string> result;
-    for (SuiteMap::const_iterator i = _allSuites().begin(); i != _allSuites().end(); ++i) {
-        result.push_back(i->first);
+    for (const auto& kv : _allSuites()) {
+        result.push_back(kv.first);
     }
     return result;
 }

@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -34,13 +36,16 @@
 
 #include <boost/optional.hpp>
 #include <iterator>
+#include <utility>
 
 #include "mongo/base/checked_cast.h"
 #include "mongo/base/disallow_copying.h"
 #include "mongo/base/status_with.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/executor/connection_pool_stats.h"
 #include "mongo/executor/network_interface.h"
 #include "mongo/platform/atomic_word.h"
+#include "mongo/transport/baton.h"
 #include "mongo/util/concurrency/thread_pool_interface.h"
 #include "mongo/util/fail_point_service.h"
 #include "mongo/util/log.h"
@@ -49,23 +54,28 @@
 namespace mongo {
 namespace executor {
 
+MONGO_FAIL_POINT_DEFINE(initialSyncFuzzerSynchronizationPoint1);
+MONGO_FAIL_POINT_DEFINE(initialSyncFuzzerSynchronizationPoint2);
+
 namespace {
-MONGO_FP_DECLARE(scheduleIntoPoolSpinsUntilThreadPoolShutsDown);
+MONGO_FAIL_POINT_DEFINE(scheduleIntoPoolSpinsUntilThreadPoolShutsDown);
 }
 
 class ThreadPoolTaskExecutor::CallbackState : public TaskExecutor::CallbackState {
     MONGO_DISALLOW_COPYING(CallbackState);
 
 public:
-    static std::shared_ptr<CallbackState> make(CallbackFn&& cb, Date_t readyDate) {
-        return std::make_shared<CallbackState>(std::move(cb), readyDate);
+    static std::shared_ptr<CallbackState> make(CallbackFn&& cb,
+                                               Date_t readyDate,
+                                               const transport::BatonHandle& baton) {
+        return std::make_shared<CallbackState>(std::move(cb), readyDate, baton);
     }
 
     /**
      * Do not call directly. Use make.
      */
-    CallbackState(CallbackFn&& cb, Date_t theReadyDate)
-        : callback(std::move(cb)), readyDate(theReadyDate) {}
+    CallbackState(CallbackFn&& cb, Date_t theReadyDate, const transport::BatonHandle& baton)
+        : callback(std::move(cb)), readyDate(theReadyDate), baton(baton) {}
 
     virtual ~CallbackState() = default;
 
@@ -92,6 +102,7 @@ public:
     bool isNetworkOperation = false;
     AtomicWord<bool> isFinished{false};
     boost::optional<stdx::condition_variable> finishedCondition;
+    transport::BatonHandle baton;
 };
 
 class ThreadPoolTaskExecutor::EventState : public TaskExecutor::EventState {
@@ -123,23 +134,34 @@ public:
 };
 
 ThreadPoolTaskExecutor::ThreadPoolTaskExecutor(std::unique_ptr<ThreadPoolInterface> pool,
-                                               std::unique_ptr<NetworkInterface> net)
+                                               std::shared_ptr<NetworkInterface> net)
     : _net(std::move(net)), _pool(std::move(pool)) {}
 
-ThreadPoolTaskExecutor::~ThreadPoolTaskExecutor() {}
+ThreadPoolTaskExecutor::~ThreadPoolTaskExecutor() {
+    shutdown();
+    auto lk = _join(stdx::unique_lock<stdx::mutex>(_mutex));
+    invariant(_state == shutdownComplete);
+}
 
 void ThreadPoolTaskExecutor::startup() {
     _net->startup();
     stdx::lock_guard<stdx::mutex> lk(_mutex);
-    if (_inShutdown) {
+    if (_inShutdown_inlock()) {
         return;
     }
+    invariant(_state == preStart);
+    _setState_inlock(running);
     _pool->startup();
 }
 
 void ThreadPoolTaskExecutor::shutdown() {
     stdx::unique_lock<stdx::mutex> lk(_mutex);
-    _inShutdown = true;
+    if (_inShutdown_inlock()) {
+        invariant(_networkInProgressQueue.empty());
+        invariant(_sleepersQueue.empty());
+        return;
+    }
+    _setState_inlock(joinRequired);
     WorkQueue pending;
     pending.splice(pending.end(), _networkInProgressQueue);
     pending.splice(pending.end(), _sleepersQueue);
@@ -157,21 +179,45 @@ void ThreadPoolTaskExecutor::shutdown() {
 }
 
 void ThreadPoolTaskExecutor::join() {
-    _pool->join();
-    {
-        stdx::unique_lock<stdx::mutex> lk(_mutex);
-        while (!_unsignaledEvents.empty()) {
-            auto eventState = _unsignaledEvents.front();
-            invariant(eventState->waiters.empty());
-            EventHandle event;
-            setEventForHandle(&event, std::move(eventState));
-            signalEvent_inlock(event, std::move(lk));
-            lk = stdx::unique_lock<stdx::mutex>(_mutex);
+    _join(stdx::unique_lock<stdx::mutex>(_mutex));
+}
+
+stdx::unique_lock<stdx::mutex> ThreadPoolTaskExecutor::_join(stdx::unique_lock<stdx::mutex> lk) {
+    _stateChange.wait(lk, [this] {
+        switch (_state) {
+            case preStart:
+                return false;
+            case running:
+                return false;
+            case joinRequired:
+                return true;
+            case joining:
+                return false;
+            case shutdownComplete:
+                return true;
         }
+        MONGO_UNREACHABLE;
+    });
+    if (_state == shutdownComplete) {
+        return lk;
     }
+    invariant(_state == joinRequired);
+    _setState_inlock(joining);
+    lk.unlock();
+    _pool->join();
+    lk.lock();
+    while (!_unsignaledEvents.empty()) {
+        auto eventState = _unsignaledEvents.front();
+        invariant(eventState->waiters.empty());
+        EventHandle event;
+        setEventForHandle(&event, std::move(eventState));
+        signalEvent_inlock(event, std::move(lk));
+        lk = stdx::unique_lock<stdx::mutex>(_mutex);
+    }
+    lk.unlock();
     _net->shutdown();
 
-    stdx::unique_lock<stdx::mutex> lk(_mutex);
+    lk.lock();
     // The _poolInProgressQueue may not be empty if the network interface attempted to schedule work
     // into _pool after _pool->shutdown(). Because _pool->join() has returned, we know that any
     // items left in _poolInProgressQueue will never be processed by another thread, so we process
@@ -185,10 +231,28 @@ void ThreadPoolTaskExecutor::join() {
     invariant(_networkInProgressQueue.empty());
     invariant(_sleepersQueue.empty());
     invariant(_unsignaledEvents.empty());
+    _setState_inlock(shutdownComplete);
+    return lk;
 }
 
-std::string ThreadPoolTaskExecutor::getDiagnosticString() {
-    return {};
+void ThreadPoolTaskExecutor::appendDiagnosticBSON(BSONObjBuilder* b) const {
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
+
+    // ThreadPool details
+    // TODO: fill in
+    BSONObjBuilder poolCounters(b->subobjStart("pool"));
+    poolCounters.appendIntOrLL("inProgressCount", _poolInProgressQueue.size());
+    poolCounters.done();
+
+    // Queues
+    BSONObjBuilder queues(b->subobjStart("queues"));
+    queues.appendIntOrLL("networkInProgress", _networkInProgressQueue.size());
+    queues.appendIntOrLL("sleepers", _sleepersQueue.size());
+    queues.done();
+
+    b->appendIntOrLL("unsignaledEvents", _unsignaledEvents.size());
+    b->append("shuttingDown", _inShutdown_inlock());
+    b->append("networkInterface", _net->getDiagnosticString());
 }
 
 Date_t ThreadPoolTaskExecutor::now() {
@@ -200,7 +264,7 @@ StatusWith<TaskExecutor::EventHandle> ThreadPoolTaskExecutor::makeEvent() {
     EventHandle event;
     setEventForHandle(&event, el.front());
     stdx::lock_guard<stdx::mutex> lk(_mutex);
-    if (_inShutdown) {
+    if (_inShutdown_inlock()) {
         return {ErrorCodes::ShutdownInProgress, "Shutdown in progress"};
     }
     _unsignaledEvents.splice(_unsignaledEvents.end(), el);
@@ -217,7 +281,7 @@ StatusWith<TaskExecutor::CallbackHandle> ThreadPoolTaskExecutor::onEvent(const E
     if (!event.isValid()) {
         return {ErrorCodes::BadValue, "Passed invalid event handle to onEvent"};
     }
-    auto wq = makeSingletonWorkQueue(work);
+    auto wq = makeSingletonWorkQueue(work, nullptr);
     stdx::unique_lock<stdx::mutex> lk(_mutex);
     auto eventState = checked_cast<EventState*>(getEventFromHandle(event));
     auto cbHandle = enqueueCallbackState_inlock(&eventState->waiters, &wq);
@@ -230,10 +294,33 @@ StatusWith<TaskExecutor::CallbackHandle> ThreadPoolTaskExecutor::onEvent(const E
     return cbHandle;
 }
 
+StatusWith<stdx::cv_status> ThreadPoolTaskExecutor::waitForEvent(OperationContext* opCtx,
+                                                                 const EventHandle& event,
+                                                                 Date_t deadline) {
+    invariant(opCtx);
+    invariant(event.isValid());
+    auto eventState = checked_cast<EventState*>(getEventFromHandle(event));
+    stdx::unique_lock<stdx::mutex> lk(_mutex);
+
+    // std::condition_variable::wait() can wake up spuriously, so we have to loop until the event
+    // is signalled or we time out.
+    while (!eventState->isSignaledFlag) {
+        auto status = opCtx->waitForConditionOrInterruptNoAssertUntil(
+            eventState->isSignaledCondition, lk, deadline);
+
+        if (!status.isOK() || stdx::cv_status::timeout == status) {
+            return status;
+        }
+    }
+
+    return stdx::cv_status::no_timeout;
+}
+
 void ThreadPoolTaskExecutor::waitForEvent(const EventHandle& event) {
     invariant(event.isValid());
     auto eventState = checked_cast<EventState*>(getEventFromHandle(event));
     stdx::unique_lock<stdx::mutex> lk(_mutex);
+
     while (!eventState->isSignaledFlag) {
         eventState->isSignaledCondition.wait(lk);
     }
@@ -241,7 +328,7 @@ void ThreadPoolTaskExecutor::waitForEvent(const EventHandle& event) {
 
 StatusWith<TaskExecutor::CallbackHandle> ThreadPoolTaskExecutor::scheduleWork(
     const CallbackFn& work) {
-    auto wq = makeSingletonWorkQueue(work);
+    auto wq = makeSingletonWorkQueue(work, nullptr);
     WorkQueue temp;
     stdx::unique_lock<stdx::mutex> lk(_mutex);
     auto cbHandle = enqueueCallbackState_inlock(&temp, &wq);
@@ -257,7 +344,7 @@ StatusWith<TaskExecutor::CallbackHandle> ThreadPoolTaskExecutor::scheduleWorkAt(
     if (when <= now()) {
         return scheduleWork(work);
     }
-    auto wq = makeSingletonWorkQueue(work, when);
+    auto wq = makeSingletonWorkQueue(work, nullptr, when);
     stdx::unique_lock<stdx::mutex> lk(_mutex);
     auto cbHandle = enqueueCallbackState_inlock(&_sleepersQueue, &wq);
     if (!cbHandle.isOK()) {
@@ -265,85 +352,125 @@ StatusWith<TaskExecutor::CallbackHandle> ThreadPoolTaskExecutor::scheduleWorkAt(
     }
     lk.unlock();
     _net->setAlarm(when,
-                   [this, when, cbHandle] {
+                   [this, cbHandle] {
                        auto cbState =
                            checked_cast<CallbackState*>(getCallbackFromHandle(cbHandle.getValue()));
                        if (cbState->canceled.load()) {
                            return;
                        }
-                       invariant(now() >= when);
                        stdx::unique_lock<stdx::mutex> lk(_mutex);
                        if (cbState->canceled.load()) {
                            return;
                        }
                        scheduleIntoPool_inlock(&_sleepersQueue, cbState->iter, std::move(lk));
-                   });
+                   },
+                   nullptr)
+        .transitional_ignore();
 
     return cbHandle;
 }
 
 namespace {
+
+using ResponseStatus = TaskExecutor::ResponseStatus;
+
+// If the request received a connection from the pool but failed in its execution,
+// convert the raw Status in cbData to a RemoteCommandResponse so that the callback,
+// which expects a RemoteCommandResponse as part of RemoteCommandCallbackArgs,
+// can be run despite a RemoteCommandResponse never having been created.
 void remoteCommandFinished(const TaskExecutor::CallbackArgs& cbData,
                            const TaskExecutor::RemoteCommandCallbackFn& cb,
                            const RemoteCommandRequest& request,
-                           const TaskExecutor::ResponseStatus& response) {
-    using ResponseStatus = TaskExecutor::ResponseStatus;
-    if (cbData.status.isOK()) {
-        cb(TaskExecutor::RemoteCommandCallbackArgs(
-            cbData.executor, cbData.myHandle, request, response));
-    } else {
-        cb(TaskExecutor::RemoteCommandCallbackArgs(
-            cbData.executor, cbData.myHandle, request, ResponseStatus(cbData.status)));
-    }
+                           const ResponseStatus& rs) {
+    cb(TaskExecutor::RemoteCommandCallbackArgs(cbData.executor, cbData.myHandle, request, rs));
 }
 
+// If the request failed to receive a connection from the pool,
+// convert the raw Status in cbData to a RemoteCommandResponse so that the callback,
+// which expects a RemoteCommandResponse as part of RemoteCommandCallbackArgs,
+// can be run despite a RemoteCommandResponse never having been created.
 void remoteCommandFailedEarly(const TaskExecutor::CallbackArgs& cbData,
                               const TaskExecutor::RemoteCommandCallbackFn& cb,
                               const RemoteCommandRequest& request) {
-    using ResponseStatus = TaskExecutor::ResponseStatus;
     invariant(!cbData.status.isOK());
     cb(TaskExecutor::RemoteCommandCallbackArgs(
-        cbData.executor, cbData.myHandle, request, ResponseStatus(cbData.status)));
+        cbData.executor, cbData.myHandle, request, {cbData.status}));
 }
+
+// The command names that the initial sync test fixture pauses on during the collection cloning
+// stage of initial sync.
+const auto initialSyncPauseCmds =
+    std::vector<std::string>{"listCollections", "listIndexes", "listDatabases"};
+
 }  // namespace
 
 StatusWith<TaskExecutor::CallbackHandle> ThreadPoolTaskExecutor::scheduleRemoteCommand(
-    const RemoteCommandRequest& request, const RemoteCommandCallbackFn& cb) {
+    const RemoteCommandRequest& request,
+    const RemoteCommandCallbackFn& cb,
+    const transport::BatonHandle& baton) {
+
+    if (MONGO_FAIL_POINT(initialSyncFuzzerSynchronizationPoint1)) {
+        // We are only going to pause on these failpoints if the command issued is for the
+        // collection cloning part of initial sync.
+        const auto cmdName = request.cmdObj.firstElementFieldName();
+        if (std::find(initialSyncPauseCmds.begin(), initialSyncPauseCmds.end(), cmdName) !=
+            initialSyncPauseCmds.end()) {
+            // These failpoints are set and unset by the InitialSyncTest fixture to cause initial
+            // sync to pause so that the Initial Sync Fuzzer can run commands on the sync source.
+            log() << "Collection Cloner scheduled a remote command on the " << request.dbname
+                  << " db: " << request.cmdObj;
+            log() << "initialSyncFuzzerSynchronizationPoint1 fail point enabled.";
+            MONGO_FAIL_POINT_PAUSE_WHILE_SET(initialSyncFuzzerSynchronizationPoint1);
+
+            if (MONGO_FAIL_POINT(initialSyncFuzzerSynchronizationPoint2)) {
+                log() << "initialSyncFuzzerSynchronizationPoint2 fail point enabled.";
+                MONGO_FAIL_POINT_PAUSE_WHILE_SET(initialSyncFuzzerSynchronizationPoint2);
+            }
+        }
+    }
+
     RemoteCommandRequest scheduledRequest = request;
     if (request.timeout == RemoteCommandRequest::kNoTimeout) {
         scheduledRequest.expirationDate = RemoteCommandRequest::kNoExpirationDate;
     } else {
         scheduledRequest.expirationDate = _net->now() + scheduledRequest.timeout;
     }
-    auto wq = makeSingletonWorkQueue([scheduledRequest, cb](const CallbackArgs& cbData) {
-        remoteCommandFailedEarly(cbData, cb, scheduledRequest);
-    });
+
+    // In case the request fails to even get a connection from the pool,
+    // we wrap the callback in a method that prepares its input parameters.
+    auto wq = makeSingletonWorkQueue(
+        [scheduledRequest, cb](const CallbackArgs& cbData) {
+            remoteCommandFailedEarly(cbData, cb, scheduledRequest);
+        },
+        baton);
     wq.front()->isNetworkOperation = true;
     stdx::unique_lock<stdx::mutex> lk(_mutex);
     auto cbHandle = enqueueCallbackState_inlock(&_networkInProgressQueue, &wq);
     if (!cbHandle.isOK())
         return cbHandle;
     const auto cbState = _networkInProgressQueue.back();
-    LOG(3) << "Scheduling remote command request: " << scheduledRequest.toString();
+    LOG(3) << "Scheduling remote command request: " << redact(scheduledRequest.toString());
     lk.unlock();
     _net->startCommand(
-        cbHandle.getValue(),
-        scheduledRequest,
-        [this, scheduledRequest, cbState, cb](const ResponseStatus& response) {
-            using std::swap;
-            CallbackFn newCb = [cb, scheduledRequest, response](const CallbackArgs& cbData) {
-                remoteCommandFinished(cbData, cb, scheduledRequest, response);
-            };
-            stdx::unique_lock<stdx::mutex> lk(_mutex);
-            if (_inShutdown) {
-                return;
-            }
-            LOG(3) << "Received remote response: " << (response.isOK()
-                                                           ? response.getValue().toString()
-                                                           : response.getStatus().toString());
-            swap(cbState->callback, newCb);
-            scheduleIntoPool_inlock(&_networkInProgressQueue, cbState->iter, std::move(lk));
-        });
+            cbHandle.getValue(),
+            scheduledRequest,
+            [this, scheduledRequest, cbState, cb](const ResponseStatus& response) {
+                using std::swap;
+                CallbackFn newCb = [cb, scheduledRequest, response](const CallbackArgs& cbData) {
+                    remoteCommandFinished(cbData, cb, scheduledRequest, response);
+                };
+                stdx::unique_lock<stdx::mutex> lk(_mutex);
+                if (_inShutdown_inlock()) {
+                    return;
+                }
+                LOG(3) << "Received remote response: "
+                       << redact(response.isOK() ? response.toString()
+                                                 : response.status.toString());
+                swap(cbState->callback, newCb);
+                scheduleIntoPool_inlock(&_networkInProgressQueue, cbState->iter, std::move(lk));
+            },
+            baton)
+        .transitional_ignore();
     return cbHandle;
 }
 
@@ -351,10 +478,13 @@ void ThreadPoolTaskExecutor::cancel(const CallbackHandle& cbHandle) {
     invariant(cbHandle.isValid());
     auto cbState = checked_cast<CallbackState*>(getCallbackFromHandle(cbHandle));
     stdx::unique_lock<stdx::mutex> lk(_mutex);
+    if (_inShutdown_inlock()) {
+        return;
+    }
     cbState->canceled.store(1);
     if (cbState->isNetworkOperation) {
         lk.unlock();
-        _net->cancelCommand(cbHandle);
+        _net->cancelCommand(cbHandle, cbState->baton);
         return;
     }
     if (cbState->readyDate != Date_t{}) {
@@ -391,13 +521,9 @@ void ThreadPoolTaskExecutor::appendConnectionStats(ConnectionPoolStats* stats) c
     _net->appendConnectionStats(stats);
 }
 
-void ThreadPoolTaskExecutor::cancelAllCommands() {
-    _net->cancelAllCommands();
-}
-
 StatusWith<TaskExecutor::CallbackHandle> ThreadPoolTaskExecutor::enqueueCallbackState_inlock(
     WorkQueue* queue, WorkQueue* wq) {
-    if (_inShutdown) {
+    if (_inShutdown_inlock()) {
         return {ErrorCodes::ShutdownInProgress, "Shutdown in progress"};
     }
     invariant(!wq->empty());
@@ -408,10 +534,10 @@ StatusWith<TaskExecutor::CallbackHandle> ThreadPoolTaskExecutor::enqueueCallback
     return cbHandle;
 }
 
-ThreadPoolTaskExecutor::WorkQueue ThreadPoolTaskExecutor::makeSingletonWorkQueue(CallbackFn work,
-                                                                                 Date_t when) {
+ThreadPoolTaskExecutor::WorkQueue ThreadPoolTaskExecutor::makeSingletonWorkQueue(
+    CallbackFn work, const transport::BatonHandle& baton, Date_t when) {
     WorkQueue result;
-    result.emplace_front(CallbackState::make(std::move(work), when));
+    result.emplace_front(CallbackState::make(std::move(work), when, baton));
     result.front()->iter = result.begin();
     return result;
 }
@@ -463,10 +589,15 @@ void ThreadPoolTaskExecutor::scheduleIntoPool_inlock(WorkQueue* fromQueue,
     }
 
     for (const auto& cbState : todo) {
-        const auto status = _pool->schedule([this, cbState] { runCallback(std::move(cbState)); });
-        if (status == ErrorCodes::ShutdownInProgress)
-            break;
-        fassert(28735, status);
+        if (cbState->baton) {
+            cbState->baton->schedule([this, cbState] { runCallback(std::move(cbState)); });
+        } else {
+            const auto status =
+                _pool->schedule([this, cbState] { runCallback(std::move(cbState)); });
+            if (status == ErrorCodes::ShutdownInProgress)
+                break;
+            fassert(28735, status);
+        }
     }
     _net->signalWorkAvailable();
 }
@@ -480,13 +611,33 @@ void ThreadPoolTaskExecutor::runCallback(std::shared_ptr<CallbackState> cbStateA
                           ? Status({ErrorCodes::CallbackCanceled, "Callback canceled"})
                           : Status::OK());
     invariant(!cbStateArg->isFinished.load());
-    cbStateArg->callback(std::move(args));
+    {
+        // After running callback function, clear 'cbStateArg->callback' to release any resources
+        // that might be held by this function object.
+        // Swap 'cbStateArg->callback' with temporary copy before running callback for exception
+        // safety.
+        TaskExecutor::CallbackFn callback;
+        std::swap(cbStateArg->callback, callback);
+        callback(std::move(args));
+    }
     cbStateArg->isFinished.store(true);
     stdx::lock_guard<stdx::mutex> lk(_mutex);
     _poolInProgressQueue.erase(cbStateArg->iter);
     if (cbStateArg->finishedCondition) {
         cbStateArg->finishedCondition->notify_all();
     }
+}
+
+bool ThreadPoolTaskExecutor::_inShutdown_inlock() const {
+    return _state >= joinRequired;
+}
+
+void ThreadPoolTaskExecutor::_setState_inlock(State newState) {
+    if (newState == _state) {
+        return;
+    }
+    _state = newState;
+    _stateChange.notify_all();
 }
 
 void ThreadPoolTaskExecutor::dropConnections(const HostAndPort& hostAndPort) {

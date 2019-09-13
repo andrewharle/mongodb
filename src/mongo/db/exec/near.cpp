@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2014 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -41,12 +43,12 @@ using std::unique_ptr;
 using std::vector;
 using stdx::make_unique;
 
-NearStage::NearStage(OperationContext* txn,
+NearStage::NearStage(OperationContext* opCtx,
                      const char* typeName,
                      StageType type,
                      WorkingSet* workingSet,
                      Collection* collection)
-    : PlanStage(typeName, txn),
+    : PlanStage(typeName, opCtx),
       _workingSet(workingSet),
       _collection(collection),
       _searchState(SearchState_Initializing),
@@ -81,12 +83,7 @@ PlanStage::StageState NearStage::initNext(WorkingSetID* out) {
     return state;
 }
 
-PlanStage::StageState NearStage::work(WorkingSetID* out) {
-    ++_commonStats.works;
-
-    // Adds the amount of time taken by work() to executionTimeMillis.
-    ScopedTimer timer(&_commonStats.executionTimeMillis);
-
+PlanStage::StageState NearStage::doWork(WorkingSetID* out) {
     WorkingSetID toReturn = WorkingSet::INVALID_ID;
     Status error = Status::OK();
     PlanStage::StageState nextState = PlanStage::NEED_TIME;
@@ -114,12 +111,8 @@ PlanStage::StageState NearStage::work(WorkingSetID* out) {
         *out = WorkingSetCommon::allocateStatusMember(_workingSet, error);
     } else if (PlanStage::ADVANCED == nextState) {
         *out = toReturn;
-        ++_commonStats.advanced;
     } else if (PlanStage::NEED_YIELD == nextState) {
         *out = toReturn;
-        ++_commonStats.needYield;
-    } else if (PlanStage::NEED_TIME == nextState) {
-        ++_commonStats.needTime;
     } else if (PlanStage::IS_EOF == nextState) {
         _commonStats.isEOF = true;
     }
@@ -163,8 +156,9 @@ PlanStage::StageState NearStage::bufferNext(WorkingSetID* toReturn, Status* erro
         }
 
         // CoveredInterval and its child stage are owned by _childrenIntervals
-        _childrenIntervals.push_back(intervalStatus.getValue());
-        _nextInterval = _childrenIntervals.back();
+        _childrenIntervals.push_back(
+            std::unique_ptr<NearStage::CoveredInterval>{intervalStatus.getValue()});
+        _nextInterval = _childrenIntervals.back().get();
         _specificStats.intervalStats.emplace_back();
         _nextIntervalStats = &_specificStats.intervalStats.back();
         _nextIntervalStats->minDistanceAllowed = _nextInterval->minDistance;
@@ -195,8 +189,8 @@ PlanStage::StageState NearStage::bufferNext(WorkingSetID* toReturn, Status* erro
     WorkingSetMember* nextMember = _workingSet->get(nextMemberID);
 
     // The child stage may not dedup so we must dedup them ourselves.
-    if (_nextInterval->dedupCovering && nextMember->hasLoc()) {
-        if (_seenDocuments.end() != _seenDocuments.find(nextMember->loc)) {
+    if (_nextInterval->dedupCovering && nextMember->hasRecordId()) {
+        if (_seenDocuments.end() != _seenDocuments.find(nextMember->recordId)) {
             _workingSet->free(nextMemberID);
             return PlanStage::NEED_TIME;
         }
@@ -221,8 +215,8 @@ PlanStage::StageState NearStage::bufferNext(WorkingSetID* toReturn, Status* erro
     _resultBuffer.push(SearchResult(nextMemberID, memberDistance));
 
     // Store the member's RecordId, if available, for quick invalidation
-    if (nextMember->hasLoc()) {
-        _seenDocuments.insert(std::make_pair(nextMember->loc, nextMemberID));
+    if (nextMember->hasRecordId()) {
+        _seenDocuments.insert(std::make_pair(nextMember->recordId, nextMemberID));
     }
 
     return PlanStage::NEED_TIME;
@@ -244,8 +238,8 @@ PlanStage::StageState NearStage::advanceNext(WorkingSetID* toReturn) {
         // Throw out all documents with memberDistance < minDistance
         if (memberDistance < _nextInterval->minDistance) {
             WorkingSetMember* member = _workingSet->get(result.resultID);
-            if (member->hasLoc()) {
-                _seenDocuments.erase(member->loc);
+            if (member->hasRecordId()) {
+                _seenDocuments.erase(member->recordId);
             }
             _resultBuffer.pop();
             _workingSet->free(result.resultID);
@@ -278,8 +272,8 @@ PlanStage::StageState NearStage::advanceNext(WorkingSetID* toReturn) {
     // calls to invalidate don't cause us to take action for a RecordId we're done with.
     *toReturn = resultID;
     WorkingSetMember* member = _workingSet->get(*toReturn);
-    if (member->hasLoc()) {
-        _seenDocuments.erase(member->loc);
+    if (member->hasRecordId()) {
+        _seenDocuments.erase(member->recordId);
     }
 
     // This value is used by nextInterval() to determine the size of the next interval.
@@ -292,17 +286,17 @@ bool NearStage::isEOF() {
     return SearchState_Finished == _searchState;
 }
 
-void NearStage::doInvalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) {
+void NearStage::doInvalidate(OperationContext* opCtx, const RecordId& dl, InvalidationType type) {
     // If a result is in _resultBuffer and has a RecordId it will be in _seenDocuments as
     // well. It's safe to return the result w/o the RecordId, so just fetch the result.
-    unordered_map<RecordId, WorkingSetID, RecordId::Hasher>::iterator seenIt =
+    stdx::unordered_map<RecordId, WorkingSetID, RecordId::Hasher>::iterator seenIt =
         _seenDocuments.find(dl);
 
     if (seenIt != _seenDocuments.end()) {
         WorkingSetMember* member = _workingSet->get(seenIt->second);
-        verify(member->hasLoc());
-        WorkingSetCommon::fetchAndInvalidateLoc(txn, member, _collection);
-        verify(!member->hasLoc());
+        verify(member->hasRecordId());
+        WorkingSetCommon::fetchAndInvalidateRecordId(opCtx, member, _collection);
+        verify(!member->hasRecordId());
 
         // Don't keep it around in the seen map since there's no valid RecordId anymore
         _seenDocuments.erase(seenIt);

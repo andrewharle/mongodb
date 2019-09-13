@@ -1,19 +1,21 @@
 // Write ops tests for partial indexes.
+// @tags: [cannot_create_unique_index_when_using_hashed_shard_key, requires_non_retryable_writes]
 
 (function() {
     "use strict";
-    var isMongos = (db.runCommand("isMaster").msg === "isdbgrid");
     var coll = db.index_partial_write_ops;
 
     var getNumKeys = function(idxName) {
         var res = assert.commandWorked(coll.validate(true));
         var kpi;
-        if (isMongos) {
+
+        var isShardedNS = res.hasOwnProperty('raw');
+        if (isShardedNS) {
             kpi = res.raw[Object.getOwnPropertyNames(res.raw)[0]].keysPerIndex;
         } else {
             kpi = res.keysPerIndex;
         }
-        return kpi[coll.getFullName() + ".$" + idxName];
+        return kpi[idxName];
     };
 
     coll.drop();

@@ -1,28 +1,31 @@
-/*    Copyright 2013 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
@@ -64,6 +67,7 @@ class LogDomain {
 public:
     typedef E Event;
     typedef Appender<Event> EventAppender;
+    typedef std::unique_ptr<EventAppender> AppenderAutoPtr;
 
     /**
      * Opaque handle returned by attachAppender(), which can be subsequently passed to
@@ -72,17 +76,24 @@ public:
     class AppenderHandle {
         friend class LogDomain;
 
+        static const size_t invalid_handle = (size_t)-1;
+
     public:
-        AppenderHandle() {}
+        AppenderHandle() : _index(invalid_handle) {}
+
+        explicit operator bool() const noexcept {
+            return _index != invalid_handle;
+        }
+
+        void reset() {
+            _index = invalid_handle;
+        }
 
     private:
         explicit AppenderHandle(size_t index) : _index(index) {}
 
         size_t _index;
     };
-
-    // TODO(schwerin): Replace with unique_ptr in C++11.
-    typedef std::unique_ptr<EventAppender> AppenderAutoPtr;
 
     LogDomain();
     ~LogDomain();
@@ -119,14 +130,19 @@ public:
      * Attaches "appender" to this domain, taking ownership of it.  Returns a handle that may be
      * used later to detach this appender.
      */
-    AppenderHandle attachAppender(AppenderAutoPtr appender);
+    AppenderHandle attachAppender(std::unique_ptr<EventAppender> appender);
+
+    template <typename Ptr>
+    AppenderHandle attachAppender(Ptr appender) {
+        return attachAppender(std::unique_ptr<EventAppender>(std::move(appender)));
+    }
 
     /**
      * Detaches the appender referenced by "handle" from this domain, releasing ownership of it.
      * Returns an unique_ptr to the handler to the caller, who is now responsible for its
      * deletion. Caller should consider "handle" is invalid after this call.
      */
-    AppenderAutoPtr detachAppender(AppenderHandle handle);
+    std::unique_ptr<EventAppender> detachAppender(AppenderHandle handle);
 
     /**
      * Destroy all attached appenders, invalidating all handles.
@@ -134,9 +150,7 @@ public:
     void clearAppenders();
 
 private:
-    typedef std::vector<EventAppender*> AppenderVector;
-
-    AppenderVector _appenders;
+    std::vector<std::unique_ptr<EventAppender>> _appenders;
     bool _abortOnFailure;
 };
 

@@ -1,25 +1,27 @@
 // record_data.h
 
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -38,9 +40,7 @@ namespace mongo {
 // TODO: Does this need to have move support?
 /**
  * A replacement for the Record class. This class represents data in a record store.
- * The _dataPtr attribute is used to manage memory ownership. If _dataPtr is NULL, then
- * the memory pointed to by _data is owned by the RecordStore. If _dataPtr is not NULL, then
- * it must point to the same array as _data.
+ * The _ownedData attribute is used to manage memory ownership.
  */
 class RecordData {
 public:
@@ -69,7 +69,7 @@ public:
         return std::move(_ownedData);
     }
 
-    BSONObj toBson() const {
+    BSONObj toBson() const& {
         return isOwned() ? BSONObj(_ownedData) : BSONObj(_data);
     }
 
@@ -77,8 +77,9 @@ public:
         return isOwned() ? BSONObj(releaseBuffer()) : BSONObj(_data);
     }
 
-    // TODO uncomment once we require compilers that support overloading for rvalue this.
-    // BSONObj toBson() && { return releaseToBson(); }
+    BSONObj toBson() && {
+        return releaseToBson();
+    }
 
     RecordData getOwned() const {
         if (isOwned())

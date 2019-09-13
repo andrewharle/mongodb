@@ -1,39 +1,43 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 /**
  * This file tests db/exec/keep_mutations.cpp.
  */
 
+#include "mongo/platform/basic.h"
 
 #include "mongo/client/dbclientcursor.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/database.h"
+#include "mongo/db/client.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/exec/collection_scan.h"
@@ -43,12 +47,11 @@
 #include "mongo/db/exec/working_set.h"
 #include "mongo/db/json.h"
 #include "mongo/db/matcher/expression_parser.h"
-#include "mongo/db/operation_context_impl.h"
 #include "mongo/dbtests/dbtests.h"
+#include "mongo/stdx/memory.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/fail_point_registry.h"
 #include "mongo/util/fail_point_service.h"
-#include "mongo/stdx/memory.h"
 
 namespace QueryStageKeep {
 
@@ -59,14 +62,14 @@ using stdx::make_unique;
 
 class QueryStageKeepBase {
 public:
-    QueryStageKeepBase() : _client(&_txn) {}
+    QueryStageKeepBase() : _client(&_opCtx) {}
 
     virtual ~QueryStageKeepBase() {
         _client.dropCollection(ns());
     }
 
     void getLocs(set<RecordId>* out, Collection* coll) {
-        auto cursor = coll->getCursor(&_txn);
+        auto cursor = coll->getCursor(&_opCtx);
         while (auto record = cursor->next()) {
             out->insert(record->id);
         }
@@ -96,7 +99,8 @@ public:
     }
 
 protected:
-    OperationContextImpl _txn;
+    const ServiceContext::UniqueOperationContext _txnPtr = cc().makeOperationContext();
+    OperationContext& _opCtx = *_txnPtr;
     DBDirectClient _client;
 };
 
@@ -109,12 +113,12 @@ protected:
 class KeepStageBasic : public QueryStageKeepBase {
 public:
     void run() {
-        OldClientWriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_opCtx, ns());
         Database* db = ctx.db();
-        Collection* coll = db->getCollection(ns());
+        Collection* coll = db->getCollection(&_opCtx, ns());
         if (!coll) {
-            WriteUnitOfWork wuow(&_txn);
-            coll = db->createCollection(&_txn, ns());
+            WriteUnitOfWork wuow(&_opCtx);
+            coll = db->createCollection(&_opCtx, ns());
             wuow.commit();
         }
 
@@ -140,12 +144,12 @@ public:
         params.direction = CollectionScanParams::FORWARD;
         params.tailable = false;
         params.start = RecordId();
-        CollectionScan* cs = new CollectionScan(&_txn, params, &ws, NULL);
+        CollectionScan* cs = new CollectionScan(&_opCtx, params, &ws, NULL);
 
         // Create a KeepMutations stage to merge in the 10 flagged objects.
         // Takes ownership of 'cs'
         MatchExpression* nullFilter = NULL;
-        auto keep = make_unique<KeepMutationsStage>(&_txn, nullFilter, &ws, cs);
+        auto keep = make_unique<KeepMutationsStage>(&_opCtx, nullFilter, &ws, cs);
 
         for (size_t i = 0; i < 10; ++i) {
             WorkingSetID id = getNextResult(keep.get());
@@ -176,13 +180,13 @@ public:
 class KeepStageFlagAdditionalAfterStreamingStarts : public QueryStageKeepBase {
 public:
     void run() {
-        OldClientWriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_opCtx, ns());
 
         Database* db = ctx.db();
-        Collection* coll = db->getCollection(ns());
+        Collection* coll = db->getCollection(&_opCtx, ns());
         if (!coll) {
-            WriteUnitOfWork wuow(&_txn);
-            coll = db->createCollection(&_txn, ns());
+            WriteUnitOfWork wuow(&_opCtx);
+            coll = db->createCollection(&_opCtx, ns());
             wuow.commit();
         }
         WorkingSet ws;
@@ -193,7 +197,8 @@ public:
         // Create a KeepMutationsStage with an EOF child, and flag 50 objects.  We expect these
         // objects to be returned by the KeepMutationsStage.
         MatchExpression* nullFilter = NULL;
-        auto keep = make_unique<KeepMutationsStage>(&_txn, nullFilter, &ws, new EOFStage(&_txn));
+        auto keep =
+            make_unique<KeepMutationsStage>(&_opCtx, nullFilter, &ws, new EOFStage(&_opCtx));
         for (size_t i = 0; i < 50; ++i) {
             WorkingSetID id = ws.allocate();
             WorkingSetMember* member = ws.get(id);
@@ -215,7 +220,7 @@ public:
         // This condition triggers SERVER-15580 (the new flagging causes a rehash of the
         // unordered_set "WorkingSet::_flagged", which invalidates all iterators, which were
         // previously being dereferenced in KeepMutationsStage::work()).
-        // Note that std::unordered_set<>::insert() triggers a rehash if the new number of
+        // Note that stdx::unordered_set<>::insert() triggers a rehash if the new number of
         // elements is greater than or equal to max_load_factor()*bucket_count().
         size_t rehashSize =
             static_cast<size_t>(ws.getFlagged().max_load_factor() * ws.getFlagged().bucket_count());

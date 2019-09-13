@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -38,8 +40,8 @@
 #include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
-
 namespace {
+
 Status kBadRetValue(ErrorCodes::InternalError, "no return value");
 StatusWith<LocksType> kLocksTypeBadRetValue(kBadRetValue);
 StatusWith<LockpingsType> kLockpingsTypeBadRetValue(kBadRetValue);
@@ -52,8 +54,14 @@ void noGrabLockFuncSet(StringData lockID,
                        Date_t time,
                        StringData why) {
     FAIL(str::stream() << "grabLock not expected to be called. "
-                       << "lockID: " << lockID << ", who: " << who << ", processId: " << processId
-                       << ", why: " << why);
+                       << "lockID: "
+                       << lockID
+                       << ", who: "
+                       << who
+                       << ", processId: "
+                       << processId
+                       << ", why: "
+                       << why);
 }
 
 void noOvertakeLockFuncSet(StringData lockID,
@@ -64,13 +72,22 @@ void noOvertakeLockFuncSet(StringData lockID,
                            Date_t time,
                            StringData why) {
     FAIL(str::stream() << "overtakeLock not expected to be called. "
-                       << "lockID: " << lockID << ", currentHolderTS: " << currentHolderTS
-                       << ", who: " << who << ", processId: " << processId << ", why: " << why);
+                       << "lockID: "
+                       << lockID
+                       << ", currentHolderTS: "
+                       << currentHolderTS
+                       << ", who: "
+                       << who
+                       << ", processId: "
+                       << processId
+                       << ", why: "
+                       << why);
 }
 
 void noUnLockFuncSet(const OID& lockSessionID) {
     FAIL(str::stream() << "unlock not expected to be called. "
-                       << "lockSessionID: " << lockSessionID);
+                       << "lockSessionID: "
+                       << lockSessionID);
 }
 
 void noPingFuncSet(StringData processID, Date_t ping) {
@@ -79,29 +96,33 @@ void noPingFuncSet(StringData processID, Date_t ping) {
 
 void noStopPingFuncSet(StringData processID) {
     FAIL(str::stream() << "stopPing not expected to be called. "
-                       << "processID: " << processID);
+                       << "processID: "
+                       << processID);
 }
 
 void noGetLockByTSSet(const OID& lockSessionID) {
     FAIL(str::stream() << "getLockByTS not expected to be called. "
-                       << "lockSessionID: " << lockSessionID);
+                       << "lockSessionID: "
+                       << lockSessionID);
 }
 
 void noGetLockByNameSet(StringData name) {
     FAIL(str::stream() << "getLockByName not expected to be called. "
-                       << "lockName: " << name);
+                       << "lockName: "
+                       << name);
 }
 
 void noGetPingSet(StringData processId) {
     FAIL(str::stream() << "getPing not expected to be called. "
-                       << "lockName: " << processId);
+                       << "lockName: "
+                       << processId);
 }
 
 void noGetServerInfoSet() {
     FAIL("getServerInfo not expected to be called");
 }
 
-}  // unnamed namespace
+}  // namespace
 
 DistLockCatalogMock::DistLockCatalogMock()
     : _grabLockChecker(noGrabLockFuncSet),
@@ -125,7 +146,7 @@ DistLockCatalogMock::DistLockCatalogMock()
 
 DistLockCatalogMock::~DistLockCatalogMock() {}
 
-StatusWith<LockpingsType> DistLockCatalogMock::getPing(OperationContext* txn,
+StatusWith<LockpingsType> DistLockCatalogMock::getPing(OperationContext* opCtx,
                                                        StringData processID) {
     auto ret = kLockpingsTypeBadRetValue;
     GetPingFunc checkerFunc = noGetPingSet;
@@ -140,7 +161,7 @@ StatusWith<LockpingsType> DistLockCatalogMock::getPing(OperationContext* txn,
     return ret;
 }
 
-Status DistLockCatalogMock::ping(OperationContext* txn, StringData processID, Date_t ping) {
+Status DistLockCatalogMock::ping(OperationContext* opCtx, StringData processID, Date_t ping) {
     auto ret = kBadRetValue;
     PingFunc checkerFunc = noPingFuncSet;
 
@@ -154,13 +175,14 @@ Status DistLockCatalogMock::ping(OperationContext* txn, StringData processID, Da
     return ret;
 }
 
-StatusWith<LocksType> DistLockCatalogMock::grabLock(OperationContext* txn,
+StatusWith<LocksType> DistLockCatalogMock::grabLock(OperationContext* opCtx,
                                                     StringData lockID,
                                                     const OID& lockSessionID,
                                                     StringData who,
                                                     StringData processId,
                                                     Date_t time,
-                                                    StringData why) {
+                                                    StringData why,
+                                                    const WriteConcernOptions& writeConcern) {
     auto ret = kLocksTypeBadRetValue;
     GrabLockFunc checkerFunc = noGrabLockFuncSet;
 
@@ -174,7 +196,7 @@ StatusWith<LocksType> DistLockCatalogMock::grabLock(OperationContext* txn,
     return ret;
 }
 
-StatusWith<LocksType> DistLockCatalogMock::overtakeLock(OperationContext* txn,
+StatusWith<LocksType> DistLockCatalogMock::overtakeLock(OperationContext* opCtx,
                                                         StringData lockID,
                                                         const OID& lockSessionID,
                                                         const OID& currentHolderTS,
@@ -195,7 +217,7 @@ StatusWith<LocksType> DistLockCatalogMock::overtakeLock(OperationContext* txn,
     return ret;
 }
 
-Status DistLockCatalogMock::unlock(OperationContext* txn, const OID& lockSessionID) {
+Status DistLockCatalogMock::unlock(OperationContext* opCtx, const OID& lockSessionID) {
     auto ret = kBadRetValue;
     UnlockFunc checkerFunc = noUnLockFuncSet;
 
@@ -209,7 +231,25 @@ Status DistLockCatalogMock::unlock(OperationContext* txn, const OID& lockSession
     return ret;
 }
 
-StatusWith<DistLockCatalog::ServerInfo> DistLockCatalogMock::getServerInfo(OperationContext* txn) {
+Status DistLockCatalogMock::unlock(OperationContext* opCtx,
+                                   const OID& lockSessionID,
+                                   StringData name) {
+    auto ret = kBadRetValue;
+    UnlockFunc checkerFunc = noUnLockFuncSet;
+
+    {
+        stdx::lock_guard<stdx::mutex> lk(_mutex);
+        ret = _unlockReturnValue;
+        checkerFunc = _unlockChecker;
+    }
+
+    checkerFunc(lockSessionID);
+
+    return ret;
+}
+
+StatusWith<DistLockCatalog::ServerInfo> DistLockCatalogMock::getServerInfo(
+    OperationContext* opCtx) {
     auto ret = kServerInfoBadRetValue;
     GetServerInfoFunc checkerFunc = noGetServerInfoSet;
 
@@ -223,7 +263,7 @@ StatusWith<DistLockCatalog::ServerInfo> DistLockCatalogMock::getServerInfo(Opera
     return ret;
 }
 
-StatusWith<LocksType> DistLockCatalogMock::getLockByTS(OperationContext* txn,
+StatusWith<LocksType> DistLockCatalogMock::getLockByTS(OperationContext* opCtx,
                                                        const OID& lockSessionID) {
     auto ret = kLocksTypeBadRetValue;
     GetLockByTSFunc checkerFunc = noGetLockByTSSet;
@@ -238,7 +278,7 @@ StatusWith<LocksType> DistLockCatalogMock::getLockByTS(OperationContext* txn,
     return ret;
 }
 
-StatusWith<LocksType> DistLockCatalogMock::getLockByName(OperationContext* txn, StringData name) {
+StatusWith<LocksType> DistLockCatalogMock::getLockByName(OperationContext* opCtx, StringData name) {
     auto ret = kLocksTypeBadRetValue;
     GetLockByNameFunc checkerFunc = noGetLockByNameSet;
 
@@ -252,7 +292,7 @@ StatusWith<LocksType> DistLockCatalogMock::getLockByName(OperationContext* txn, 
     return ret;
 }
 
-Status DistLockCatalogMock::stopPing(OperationContext* txn, StringData processId) {
+Status DistLockCatalogMock::stopPing(OperationContext* opCtx, StringData processId) {
     auto ret = kBadRetValue;
     StopPingFunc checkerFunc = noStopPingFuncSet;
 
@@ -333,8 +373,9 @@ void DistLockCatalogMock::expectGetServerInfo(GetServerInfoFunc checkerFunc,
     _getServerInfoReturnValue = returnThis;
 }
 
-Status DistLockCatalogMock::unlockAll(OperationContext* txn, const std::string& processID) {
+Status DistLockCatalogMock::unlockAll(OperationContext* opCtx, const std::string& processID) {
     return Status(ErrorCodes::IllegalOperation,
                   str::stream() << "unlockAll not expected to be called; processID: " << processID);
 }
-}
+
+}  // namespace mongo

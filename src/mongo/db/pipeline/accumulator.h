@@ -1,29 +1,31 @@
+
 /**
- * Copyright (c) 2011 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- * This program is free software: you can redistribute it and/or  modify
- * it under the terms of the GNU Affero General Public License, version 3,
- * as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
- * As a special exception, the copyright holders give permission to link the
- * code of portions of this program with the OpenSSL library under certain
- * conditions as described in each individual source file and distribute
- * linked combinations including the program with the OpenSSL library. You
- * must comply with the GNU Affero General Public License in all respects for
- * all of the code used other than as permitted herein. If you modify file(s)
- * with this exception, you may extend this exception to your version of the
- * file(s), but you are not obligated to do so. If you do not wish to do so,
- * delete this exception statement from your version. If you delete this
- * exception statement from all source files in the program, then also delete
- * it in the license file.
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
@@ -31,34 +33,27 @@
 #include "mongo/platform/basic.h"
 
 #include <boost/intrusive_ptr.hpp>
-#include <unordered_set>
+#include <boost/optional.hpp>
 #include <vector>
 
 #include "mongo/base/init.h"
 #include "mongo/bson/bsontypes.h"
+#include "mongo/db/pipeline/expression.h"
+#include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/value.h"
+#include "mongo/db/pipeline/value_comparator.h"
 #include "mongo/stdx/functional.h"
+#include "mongo/stdx/unordered_set.h"
+#include "mongo/util/summation.h"
 
 namespace mongo {
-/**
- * Registers an Accumulator to have the name 'key'. When an accumulator with name '$key' is found
- * during parsing of a $group stage, 'factory' will be called to construct the Accumulator.
- *
- * As an example, if your accumulator looks like {"$foo": <args>}, with a factory method 'create',
- * you would add this line:
- * REGISTER_EXPRESSION(foo, AccumulatorFoo::create);
- */
-#define REGISTER_ACCUMULATOR(key, factory)                                     \
-    MONGO_INITIALIZER(addToAccumulatorFactoryMap_##key)(InitializerContext*) { \
-        Accumulator::registerAccumulator("$" #key, (factory));                 \
-        return Status::OK();                                                   \
-    }
 
 class Accumulator : public RefCountable {
 public:
-    using Factory = boost::intrusive_ptr<Accumulator>(*)();
+    using Factory = boost::intrusive_ptr<Accumulator> (*)(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx);
 
-    Accumulator() = default;
+    Accumulator(const boost::intrusive_ptr<ExpressionContext>& expCtx) : _expCtx(expCtx) {}
 
     /** Process input and update internal state.
      *  merging should be true when processing outputs from getValue(true).
@@ -70,7 +65,7 @@ public:
     /** Marks the end of the evaluate() phase and return accumulated result.
      *  toBeMerged should be true when the outputs will be merged by process().
      */
-    virtual Value getValue(bool toBeMerged) const = 0;
+    virtual Value getValue(bool toBeMerged) = 0;
 
     /// The name of the op as used in a serialization of the pipeline.
     virtual const char* getOpName() const = 0;
@@ -83,23 +78,12 @@ public:
     /// Reset this accumulator to a fresh state ready to receive input.
     virtual void reset() = 0;
 
-    /**
-     * Registers an Accumulator with a parsing function, so that when an accumulator with the given
-     * name is encountered during parsing of the $group stage, it will call 'factory' to construct
-     * that Accumulator.
-     *
-     * DO NOT call this method directly. Instead, use the REGISTER_ACCUMULATOR macro defined in this
-     * file.
-     */
-    static void registerAccumulator(std::string name, Factory factory);
 
-    /**
-     * Retrieves the Factory for the accumulator specified by the given name, and raises an error if
-     * there is no such Accumulator registered.
-     */
-    static Factory getFactory(StringData name);
+    virtual bool isAssociative() const {
+        return false;
+    }
 
-    virtual bool isAssociativeAndCommutative() const {
+    virtual bool isCommutative() const {
         return false;
     }
 
@@ -107,42 +91,54 @@ protected:
     /// Update subclass's internal state based on input
     virtual void processInternal(const Value& input, bool merging) = 0;
 
+    const boost::intrusive_ptr<ExpressionContext>& getExpressionContext() const {
+        return _expCtx;
+    }
+
     /// subclasses are expected to update this as necessary
     int _memUsageBytes = 0;
+
+private:
+    boost::intrusive_ptr<ExpressionContext> _expCtx;
 };
 
 
 class AccumulatorAddToSet final : public Accumulator {
 public:
-    AccumulatorAddToSet();
+    explicit AccumulatorAddToSet(const boost::intrusive_ptr<ExpressionContext>& expCtx);
 
     void processInternal(const Value& input, bool merging) final;
-    Value getValue(bool toBeMerged) const final;
+    Value getValue(bool toBeMerged) final;
     const char* getOpName() const final;
     void reset() final;
 
-    static boost::intrusive_ptr<Accumulator> create();
+    static boost::intrusive_ptr<Accumulator> create(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx);
 
-    bool isAssociativeAndCommutative() const final {
+    bool isAssociative() const final {
+        return true;
+    }
+
+    bool isCommutative() const final {
         return true;
     }
 
 private:
-    typedef std::unordered_set<Value, Value::Hash> SetType;
-    SetType set;
+    ValueUnorderedSet _set;
 };
 
 
 class AccumulatorFirst final : public Accumulator {
 public:
-    AccumulatorFirst();
+    explicit AccumulatorFirst(const boost::intrusive_ptr<ExpressionContext>& expCtx);
 
     void processInternal(const Value& input, bool merging) final;
-    Value getValue(bool toBeMerged) const final;
+    Value getValue(bool toBeMerged) final;
     const char* getOpName() const final;
     void reset() final;
 
-    static boost::intrusive_ptr<Accumulator> create();
+    static boost::intrusive_ptr<Accumulator> create(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx);
 
 private:
     bool _haveFirst;
@@ -152,14 +148,15 @@ private:
 
 class AccumulatorLast final : public Accumulator {
 public:
-    AccumulatorLast();
+    explicit AccumulatorLast(const boost::intrusive_ptr<ExpressionContext>& expCtx);
 
     void processInternal(const Value& input, bool merging) final;
-    Value getValue(bool toBeMerged) const final;
+    Value getValue(bool toBeMerged) final;
     const char* getOpName() const final;
     void reset() final;
 
-    static boost::intrusive_ptr<Accumulator> create();
+    static boost::intrusive_ptr<Accumulator> create(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx);
 
 private:
     Value _last;
@@ -168,23 +165,28 @@ private:
 
 class AccumulatorSum final : public Accumulator {
 public:
-    AccumulatorSum();
+    explicit AccumulatorSum(const boost::intrusive_ptr<ExpressionContext>& expCtx);
 
     void processInternal(const Value& input, bool merging) final;
-    Value getValue(bool toBeMerged) const final;
+    Value getValue(bool toBeMerged) final;
     const char* getOpName() const final;
     void reset() final;
 
-    static boost::intrusive_ptr<Accumulator> create();
+    static boost::intrusive_ptr<Accumulator> create(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx);
 
-    bool isAssociativeAndCommutative() const final {
+    bool isAssociative() const final {
+        return true;
+    }
+
+    bool isCommutative() const final {
         return true;
     }
 
 private:
-    BSONType totalType;
-    long long longTotal;
-    double doubleTotal;
+    BSONType totalType = NumberInt;
+    DoubleDoubleSummation nonDecimalTotal;
+    Decimal128 decimalTotal;
 };
 
 
@@ -195,14 +197,18 @@ public:
         MAX = -1,  // Used to "scale" comparison.
     };
 
-    explicit AccumulatorMinMax(Sense sense);
+    AccumulatorMinMax(const boost::intrusive_ptr<ExpressionContext>& expCtx, Sense sense);
 
     void processInternal(const Value& input, bool merging) final;
-    Value getValue(bool toBeMerged) const final;
+    Value getValue(bool toBeMerged) final;
     const char* getOpName() const final;
     void reset() final;
 
-    bool isAssociativeAndCommutative() const final {
+    bool isAssociative() const final {
+        return true;
+    }
+
+    bool isCommutative() const final {
         return true;
     }
 
@@ -213,27 +219,32 @@ private:
 
 class AccumulatorMax final : public AccumulatorMinMax {
 public:
-    AccumulatorMax() : AccumulatorMinMax(MAX) {}
-    static boost::intrusive_ptr<Accumulator> create();
+    explicit AccumulatorMax(const boost::intrusive_ptr<ExpressionContext>& expCtx)
+        : AccumulatorMinMax(expCtx, MAX) {}
+    static boost::intrusive_ptr<Accumulator> create(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx);
 };
 
 class AccumulatorMin final : public AccumulatorMinMax {
 public:
-    AccumulatorMin() : AccumulatorMinMax(MIN) {}
-    static boost::intrusive_ptr<Accumulator> create();
+    explicit AccumulatorMin(const boost::intrusive_ptr<ExpressionContext>& expCtx)
+        : AccumulatorMinMax(expCtx, MIN) {}
+    static boost::intrusive_ptr<Accumulator> create(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx);
 };
 
 
 class AccumulatorPush final : public Accumulator {
 public:
-    AccumulatorPush();
+    explicit AccumulatorPush(const boost::intrusive_ptr<ExpressionContext>& expCtx);
 
     void processInternal(const Value& input, bool merging) final;
-    Value getValue(bool toBeMerged) const final;
+    Value getValue(bool toBeMerged) final;
     const char* getOpName() const final;
     void reset() final;
 
-    static boost::intrusive_ptr<Accumulator> create();
+    static boost::intrusive_ptr<Accumulator> create(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx);
 
 private:
     std::vector<Value> vpValue;
@@ -242,27 +253,36 @@ private:
 
 class AccumulatorAvg final : public Accumulator {
 public:
-    AccumulatorAvg();
+    explicit AccumulatorAvg(const boost::intrusive_ptr<ExpressionContext>& expCtx);
 
     void processInternal(const Value& input, bool merging) final;
-    Value getValue(bool toBeMerged) const final;
+    Value getValue(bool toBeMerged) final;
     const char* getOpName() const final;
     void reset() final;
 
-    static boost::intrusive_ptr<Accumulator> create();
+    static boost::intrusive_ptr<Accumulator> create(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx);
 
 private:
-    double _total;
+    /**
+     * The total of all values is partitioned between those that are decimals, and those that are
+     * not decimals, so the decimal total needs to add the non-decimal.
+     */
+    Decimal128 _getDecimalTotal() const;
+
+    bool _isDecimal;
+    DoubleDoubleSummation _nonDecimalTotal;
+    Decimal128 _decimalTotal;
     long long _count;
 };
 
 
 class AccumulatorStdDev : public Accumulator {
 public:
-    explicit AccumulatorStdDev(bool isSamp);
+    AccumulatorStdDev(const boost::intrusive_ptr<ExpressionContext>& expCtx, bool isSamp);
 
     void processInternal(const Value& input, bool merging) final;
-    Value getValue(bool toBeMerged) const final;
+    Value getValue(bool toBeMerged) final;
     const char* getOpName() const final;
     void reset() final;
 
@@ -275,13 +295,33 @@ private:
 
 class AccumulatorStdDevPop final : public AccumulatorStdDev {
 public:
-    AccumulatorStdDevPop() : AccumulatorStdDev(false) {}
-    static boost::intrusive_ptr<Accumulator> create();
+    explicit AccumulatorStdDevPop(const boost::intrusive_ptr<ExpressionContext>& expCtx)
+        : AccumulatorStdDev(expCtx, false) {}
+    static boost::intrusive_ptr<Accumulator> create(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx);
 };
 
 class AccumulatorStdDevSamp final : public AccumulatorStdDev {
 public:
-    AccumulatorStdDevSamp() : AccumulatorStdDev(true) {}
-    static boost::intrusive_ptr<Accumulator> create();
+    explicit AccumulatorStdDevSamp(const boost::intrusive_ptr<ExpressionContext>& expCtx)
+        : AccumulatorStdDev(expCtx, true) {}
+    static boost::intrusive_ptr<Accumulator> create(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx);
+};
+
+class AccumulatorMergeObjects : public Accumulator {
+public:
+    AccumulatorMergeObjects(const boost::intrusive_ptr<ExpressionContext>& expCtx);
+
+    void processInternal(const Value& input, bool merging) final;
+    Value getValue(bool toBeMerged) final;
+    const char* getOpName() const final;
+    void reset() final;
+
+    static boost::intrusive_ptr<Accumulator> create(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx);
+
+private:
+    MutableDocument _output;
 };
 }

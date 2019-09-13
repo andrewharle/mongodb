@@ -1,25 +1,27 @@
 // wiredtiger_util.h
 
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -37,6 +39,7 @@
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/util/assert_util.h"
 
 namespace mongo {
@@ -89,6 +92,37 @@ struct WiredTigerItem : public WT_ITEM {
     }
 };
 
+/**
+ * Returns a WT_EVENT_HANDLER with MongoDB's default handlers.
+ * The default handlers just log so it is recommended that you consider calling them even if
+ * you are capturing the output.
+ *
+ * There is no default "close" handler. You only need to provide one if you need to call a
+ * destructor.
+ */
+class WiredTigerEventHandler : private WT_EVENT_HANDLER {
+public:
+    WiredTigerEventHandler();
+
+    WT_EVENT_HANDLER* getWtEventHandler();
+
+    bool wasStartupSuccessful() {
+        return _startupSuccessful;
+    }
+
+    void setStartupSuccessful() {
+        _startupSuccessful = true;
+    }
+
+private:
+    int suppressibleStartupErrorLog(WT_EVENT_HANDLER* handler,
+                                    WT_SESSION* sesion,
+                                    int errorCode,
+                                    const char* message);
+
+    bool _startupSuccessful = false;
+};
+
 class WiredTigerUtil {
     MONGO_DISALLOW_COPYING(WiredTigerUtil);
 
@@ -115,6 +149,11 @@ public:
                                     BSONObjBuilder* bob);
 
     /**
+     * Gets entire metadata string for collection/index at URI with the provided session.
+     */
+    static StatusWith<std::string> getMetadataRaw(WT_SESSION* session, StringData uri);
+
+    /**
      * Gets entire metadata string for collection/index at URI.
      */
     static StatusWith<std::string> getMetadata(OperationContext* opCtx, StringData uri);
@@ -131,12 +170,12 @@ public:
     /**
      * Validates formatVersion in application metadata for 'uri'.
      * Version must be numeric and be in the range [minimumVersion, maximumVersion].
-     * URI is used in error messages only.
+     * URI is used in error messages only. Returns actual version.
      */
-    static Status checkApplicationMetadataFormatVersion(OperationContext* opCtx,
-                                                        StringData uri,
-                                                        int64_t minimumVersion,
-                                                        int64_t maximumVersion);
+    static StatusWith<int64_t> checkApplicationMetadataFormatVersion(OperationContext* opCtx,
+                                                                     StringData uri,
+                                                                     int64_t minimumVersion,
+                                                                     int64_t maximumVersion);
 
     /**
      * Validates the 'configString' specified as a collection or index creation option.
@@ -175,15 +214,12 @@ public:
 
     static int64_t getIdentSize(WT_SESSION* s, const std::string& uri);
 
+
     /**
-     * Returns a WT_EVENT_HANDER with MongoDB's default handlers.
-     * The default handlers just log so it is recommended that you consider calling them even if
-     * you are capturing the output.
-     *
-     * There is no default "close" handler. You only need to provide one if you need to call a
-     * destructor.
+     * Return amount of memory to use for the WiredTiger cache based on either the startup
+     * option chosen or the amount of available memory on the host.
      */
-    static WT_EVENT_HANDLER defaultEventHandlers();
+    static size_t getCacheSizeMB(double requestedCacheSizeGB);
 
     class ErrorAccumulator : public WT_EVENT_HANDLER {
     public:
@@ -207,18 +243,24 @@ public:
      *
      * If errors is non-NULL, all error messages will be appended to the array.
      */
-    static int verifyTable(OperationContext* txn,
+    static int verifyTable(OperationContext* opCtx,
                            const std::string& uri,
                            std::vector<std::string>* errors = NULL);
 
-private:
+    static bool useTableLogging(NamespaceString ns, bool replEnabled);
+
+    static Status setTableLogging(OperationContext* opCtx, const std::string& uri, bool on);
+
+    static Status setTableLogging(WT_SESSION* session, const std::string& uri, bool on);
+
     /**
      * Casts unsigned 64-bit statistics value to T.
      * If original value exceeds maximum value of T, return max(T).
      */
     template <typename T>
-    static T _castStatisticsValue(uint64_t statisticsValue);
+    static T castStatisticsValue(uint64_t statisticsValue);
 
+private:
     /**
      * Casts unsigned 64-bit statistics value to T.
      * If original value exceeds 'maximumResultType', return 'maximumResultType'.
@@ -284,7 +326,7 @@ StatusWith<ResultType> WiredTigerUtil::getStatisticsValueAs(WT_SESSION* session,
 
 // static
 template <typename ResultType>
-ResultType WiredTigerUtil::_castStatisticsValue(uint64_t statisticsValue) {
+ResultType WiredTigerUtil::castStatisticsValue(uint64_t statisticsValue) {
     return _castStatisticsValue<ResultType>(statisticsValue,
                                             std::numeric_limits<ResultType>::max());
 }

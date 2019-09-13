@@ -1,40 +1,42 @@
 // server_status.h
 
+
 /**
-*    Copyright (C) 2012 10gen Inc.
-*
-*    This program is free software: you can redistribute it and/or  modify
-*    it under the terms of the GNU Affero General Public License, version 3,
-*    as published by the Free Software Foundation.
-*
-*    This program is distributed in the hope that it will be useful,
-*    but WITHOUT ANY WARRANTY; without even the implied warranty of
-*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*    GNU Affero General Public License for more details.
-*
-*    You should have received a copy of the GNU Affero General Public License
-*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*
-*    As a special exception, the copyright holders give permission to link the
-*    code of portions of this program with the OpenSSL library under certain
-*    conditions as described in each individual source file and distribute
-*    linked combinations including the program with the OpenSSL library. You
-*    must comply with the GNU Affero General Public License in all respects for
-*    all of the code used other than as permitted herein. If you modify file(s)
-*    with this exception, you may extend this exception to your version of the
-*    file(s), but you are not obligated to do so. If you do not wish to do so,
-*    delete this exception statement from your version. If you delete this
-*    exception statement from all source files in the program, then also delete
-*    it in the license file.
-*/
+ *    Copyright (C) 2018-present MongoDB, Inc.
+ *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
+ *
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
+ */
 
 #pragma once
 
-#include <string>
 #include "mongo/db/commands.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/platform/atomic_word.h"
+#include <string>
 
 namespace mongo {
 
@@ -73,11 +75,36 @@ public:
 
     /**
      * actually generate the result
+     *
+     * You should either implement this function or appendSection below, but not both. In
+     * most cases you should just implement this function.
+     *
      * @param configElement the element from the actual command related to this section
      *                      so if the section is 'foo', this is cmdObj['foo']
      */
-    virtual BSONObj generateSection(OperationContext* txn,
-                                    const BSONElement& configElement) const = 0;
+    virtual BSONObj generateSection(OperationContext* opCtx,
+                                    const BSONElement& configElement) const {
+        return BSONObj{};
+    };
+
+    /**
+     * This is what gets called by the serverStatus command to append the section to the
+     * command result.
+     *
+     * If you are just implementing a normal ServerStatusSection, then you don't need to
+     * implement this.
+     *
+     * If you are doing something a bit more complicated, you can implement this and have
+     * full control over what gets included in the command result.
+     */
+    virtual void appendSection(OperationContext* opCtx,
+                               const BSONElement& configElement,
+                               BSONObjBuilder* result) const {
+        const auto ret = generateSection(opCtx, configElement);
+        if (ret.isEmpty())
+            return;
+        result->append(getSectionName(), ret);
+    }
 
 private:
     const std::string _sectionName;
@@ -90,7 +117,8 @@ public:
         return true;
     }
 
-    virtual BSONObj generateSection(OperationContext* txn, const BSONElement& configElement) const;
+    virtual BSONObj generateSection(OperationContext* opCtx,
+                                    const BSONElement& configElement) const;
 
 private:
     const OpCounters* _counters;

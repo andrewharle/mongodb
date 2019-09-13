@@ -1,29 +1,31 @@
+
 /**
- * Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- * This program is free software: you can redistribute it and/or  modify
- * it under the terms of the GNU Affero General Public License, version 3,
- * as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
- * As a special exception, the copyright holders give permission to link the
- * code of portions of this program with the OpenSSL library under certain
- * conditions as described in each individual source file and distribute
- * linked combinations including the program with the OpenSSL library. You
- * must comply with the GNU Affero General Public License in all respects
- * for all of the code used other than as permitted herein. If you modify
- * file(s) with this exception, you may extend this exception to your
- * version of the file(s), but you are not obligated to do so. If you do not
- * wish to do so, delete this exception statement from your version. If you
- * delete this exception statement from all source files in the program,
- * then also delete it in the license file.
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/platform/basic.h"
@@ -47,8 +49,10 @@ namespace mongo {
 const char* kTestFile = "metrics.test";
 const char* kTestFileCopy = "metrics.test.copy";
 
+class FTDCFileTest : public ServiceContextTest {};
+
 // File Sanity check
-TEST(FTDCFileTest, TestFileBasicMetadata) {
+TEST_F(FTDCFileTest, TestFileBasicMetadata) {
     unittest::TempDir tempdir("metrics_testpath");
     boost::filesystem::path p(tempdir.path());
     p /= kTestFile;
@@ -57,10 +61,16 @@ TEST(FTDCFileTest, TestFileBasicMetadata) {
 
     BSONObj doc1 = BSON("name"
                         << "joe"
-                        << "key1" << 34 << "key2" << 45);
+                        << "key1"
+                        << 34
+                        << "key2"
+                        << 45);
     BSONObj doc2 = BSON("name"
                         << "joe"
-                        << "key3" << 34 << "key5" << 45);
+                        << "key3"
+                        << 34
+                        << "key5"
+                        << 45);
 
     FTDCConfig config;
     FTDCFileWriter writer(&config);
@@ -70,7 +80,7 @@ TEST(FTDCFileTest, TestFileBasicMetadata) {
     ASSERT_OK(writer.writeMetadata(doc1, Date_t()));
     ASSERT_OK(writer.writeMetadata(doc2, Date_t()));
 
-    writer.close();
+    writer.close().transitional_ignore();
 
     FTDCFileReader reader;
     ASSERT_OK(reader.open(p));
@@ -79,13 +89,13 @@ TEST(FTDCFileTest, TestFileBasicMetadata) {
 
     BSONObj doc1a = std::get<1>(reader.next());
 
-    ASSERT_TRUE(doc1 == doc1a);
+    ASSERT_BSONOBJ_EQ(doc1, doc1a);
 
     ASSERT_OK(reader.hasNext());
 
     BSONObj doc2a = std::get<1>(reader.next());
 
-    ASSERT_TRUE(doc2 == doc2a);
+    ASSERT_BSONOBJ_EQ(doc2, doc2a);
 
     auto sw = reader.hasNext();
     ASSERT_OK(sw);
@@ -93,7 +103,7 @@ TEST(FTDCFileTest, TestFileBasicMetadata) {
 }
 
 // File Sanity check
-TEST(FTDCFileTest, TestFileBasicCompress) {
+TEST_F(FTDCFileTest, TestFileBasicCompress) {
     unittest::TempDir tempdir("metrics_testpath");
     boost::filesystem::path p(tempdir.path());
     p /= kTestFile;
@@ -102,10 +112,16 @@ TEST(FTDCFileTest, TestFileBasicCompress) {
 
     BSONObj doc1 = BSON("name"
                         << "joe"
-                        << "key1" << 34 << "key2" << 45);
+                        << "key1"
+                        << 34
+                        << "key2"
+                        << 45);
     BSONObj doc2 = BSON("name"
                         << "joe"
-                        << "key3" << 34 << "key5" << 45);
+                        << "key3"
+                        << 34
+                        << "key5"
+                        << 45);
 
     FTDCConfig config;
     FTDCFileWriter writer(&config);
@@ -115,7 +131,7 @@ TEST(FTDCFileTest, TestFileBasicCompress) {
     ASSERT_OK(writer.writeSample(doc1, Date_t()));
     ASSERT_OK(writer.writeSample(doc2, Date_t()));
 
-    writer.close();
+    writer.close().transitional_ignore();
 
     FTDCFileReader reader;
     ASSERT_OK(reader.open(p));
@@ -124,13 +140,13 @@ TEST(FTDCFileTest, TestFileBasicCompress) {
 
     BSONObj doc1a = std::get<1>(reader.next());
 
-    ASSERT_TRUE(doc1 == doc1a);
+    ASSERT_BSONOBJ_EQ(doc1, doc1a);
 
     ASSERT_OK(reader.hasNext());
 
     BSONObj doc2a = std::get<1>(reader.next());
 
-    ASSERT_TRUE(doc2 == doc2a);
+    ASSERT_BSONOBJ_EQ(doc2, doc2a);
 
     auto sw = reader.hasNext();
     ASSERT_OK(sw);
@@ -182,9 +198,9 @@ private:
             ASSERT_OK(sw);
         }
 
-        _writer.close();
+        _writer.close().transitional_ignore();
 
-        ValidateDocumentList(_path, _docs);
+        ValidateDocumentList(_path, _docs, FTDCValidationMode::kStrict);
     }
 
 private:
@@ -196,77 +212,117 @@ private:
 };
 
 // Test various schema changes
-TEST(FTDCFileTest, TestSchemaChanges) {
+TEST_F(FTDCFileTest, TestSchemaChanges) {
     FileTestTie c;
 
     c.addSample(BSON("name"
                      << "joe"
-                     << "key1" << 33 << "key2" << 42));
+                     << "key1"
+                     << 33
+                     << "key2"
+                     << 42));
     c.addSample(BSON("name"
                      << "joe"
-                     << "key1" << 34 << "key2" << 45));
+                     << "key1"
+                     << 34
+                     << "key2"
+                     << 45));
     c.addSample(BSON("name"
                      << "joe"
-                     << "key1" << 34 << "key2" << 45));
+                     << "key1"
+                     << 34
+                     << "key2"
+                     << 45));
 
     // Add Value
     c.addSample(BSON("name"
                      << "joe"
-                     << "key1" << 34 << "key2" << 45 << "key3" << 47));
+                     << "key1"
+                     << 34
+                     << "key2"
+                     << 45
+                     << "key3"
+                     << 47));
 
     c.addSample(BSON("name"
                      << "joe"
-                     << "key1" << 34 << "key2" << 45 << "key3" << 47));
+                     << "key1"
+                     << 34
+                     << "key2"
+                     << 45
+                     << "key3"
+                     << 47));
 
     // Rename field
     c.addSample(BSON("name"
                      << "joe"
-                     << "key1" << 34 << "key5" << 45 << "key3" << 47));
+                     << "key1"
+                     << 34
+                     << "key5"
+                     << 45
+                     << "key3"
+                     << 47));
 
     // Change type
     c.addSample(BSON("name"
                      << "joe"
-                     << "key1" << 34 << "key5"
+                     << "key1"
+                     << 34
+                     << "key5"
                      << "45"
-                     << "key3" << 47));
+                     << "key3"
+                     << 47));
 
     // RemoveField
     c.addSample(BSON("name"
                      << "joe"
                      << "key5"
                      << "45"
-                     << "key3" << 47));
+                     << "key3"
+                     << 47));
 }
 
 // Test a full buffer
-TEST(FTDCFileTest, TestFull) {
+TEST_F(FTDCFileTest, TestFull) {
     // Test a large numbers of zeros, and incremental numbers in a full buffer
     for (int j = 0; j < 2; j++) {
         FileTestTie c;
 
         c.addSample(BSON("name"
                          << "joe"
-                         << "key1" << 33 << "key2" << 42));
+                         << "key1"
+                         << 33
+                         << "key2"
+                         << 42));
 
         for (size_t i = 0; i <= FTDCConfig::kMaxSamplesPerArchiveMetricChunkDefault - 2; i++) {
             c.addSample(BSON("name"
                              << "joe"
-                             << "key1" << static_cast<long long int>(i * j) << "key2" << 45));
+                             << "key1"
+                             << static_cast<long long int>(i * j)
+                             << "key2"
+                             << 45));
         }
 
         c.addSample(BSON("name"
                          << "joe"
-                         << "key1" << 34 << "key2" << 45));
+                         << "key1"
+                         << 34
+                         << "key2"
+                         << 45));
 
         // Add Value
         c.addSample(BSON("name"
                          << "joe"
-                         << "key1" << 34 << "key2" << 45));
+                         << "key1"
+                         << 34
+                         << "key2"
+                         << 45));
     }
 }
 
 // Test a large documents so that we cause multiple 4kb buffers to flush on Windows.
-TEST(FTDCFileTest, TestLargeDocuments) {
+TEST_F(FTDCFileTest, TestLargeDocuments) {
     FileTestTie c;
 
     for (int j = 0; j < 5; j++) {
@@ -285,7 +341,7 @@ TEST(FTDCFileTest, TestLargeDocuments) {
 }
 
 // Test a bad file
-TEST(FTDCFileTest, TestBadFile) {
+TEST_F(FTDCFileTest, TestBadFile) {
     unittest::TempDir tempdir("metrics_testpath");
     boost::filesystem::path p(tempdir.path());
     p /= kTestFile;

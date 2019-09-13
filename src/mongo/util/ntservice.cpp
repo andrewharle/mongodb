@@ -1,30 +1,33 @@
 // ntservice.cpp
 
-/*    Copyright 2009 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kControl
@@ -37,8 +40,6 @@
 
 #include "mongo/util/ntservice.h"
 
-#include "mongo/db/client.h"
-#include "mongo/db/instance.h"
 #include "mongo/stdx/chrono.h"
 #include "mongo/stdx/future.h"
 #include "mongo/stdx/thread.h"
@@ -78,8 +79,10 @@ bool shouldStartService() {
     return _startService;
 }
 
-static DWORD WINAPI
-serviceCtrl(DWORD dwControl, DWORD dwEventType, LPVOID lpEventData, LPVOID lpContext);
+static DWORD WINAPI serviceCtrl(DWORD dwControl,
+                                DWORD dwEventType,
+                                LPVOID lpEventData,
+                                LPVOID lpContext);
 
 void configureService(ServiceCallback serviceCallback,
                       const moe::Environment& params,
@@ -287,7 +290,7 @@ void installServiceOrDie(const wstring& serviceName,
     SC_HANDLE schSCManager = ::OpenSCManager(NULL, NULL, SC_MANAGER_ALL_ACCESS);
     if (schSCManager == NULL) {
         DWORD err = ::GetLastError();
-        log() << "Error connecting to the Service Control Manager: " << GetWinErrMsg(err);
+        log() << "Error connecting to the Service Control Manager: " << windows::GetErrMsg(err);
         quickExit(EXIT_NTSERVICE_ERROR);
     }
 
@@ -336,7 +339,7 @@ void installServiceOrDie(const wstring& serviceName,
                                   NULL);                      // user account password
     if (schService == NULL) {
         DWORD err = ::GetLastError();
-        log() << "Error creating service: " << GetWinErrMsg(err);
+        log() << "Error creating service: " << windows::GetErrMsg(err);
         ::CloseServiceHandle(schSCManager);
         quickExit(EXIT_NTSERVICE_ERROR);
     }
@@ -441,7 +444,7 @@ void removeServiceOrDie(const wstring& serviceName) {
     SC_HANDLE schSCManager = ::OpenSCManager(NULL, NULL, SC_MANAGER_ALL_ACCESS);
     if (schSCManager == NULL) {
         DWORD err = ::GetLastError();
-        log() << "Error connecting to the Service Control Manager: " << GetWinErrMsg(err);
+        log() << "Error connecting to the Service Control Manager: " << windows::GetErrMsg(err);
         quickExit(EXIT_NTSERVICE_ERROR);
     }
 
@@ -524,30 +527,27 @@ bool reportStatus(DWORD reportState, DWORD waitHint, DWORD exitCode) {
 // Minimum of time we tell Windows to wait before we are guilty of a hung shutdown
 const int kStopWaitHintMillis = 30000;
 
-// Run exitCleanly on a separate thread so we can report progress to Windows
+// Run shutdownNoTerminate on a separate thread so we can report progress to Windows
 // Note: Windows may still kill us for taking too long,
 // On client OSes, SERVICE_CONTROL_SHUTDOWN has a 5 second timeout configured in
 // HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control
 static void serviceStop() {
-    // VS2013 Doesn't support future<void>, so fake it with a bool.
-    stdx::packaged_task<bool()> exitCleanlyTask([] {
-        Client::initThread("serviceStopWorker");
+    stdx::packaged_task<void()> shutdownNoTerminateTask([] {
+        setThreadName("serviceStopWorker");
         // Stop the process
-        // TODO: SERVER-5703, separate the "cleanup for shutdown" functionality from
-        // the "terminate process" functionality in exitCleanly.
-        exitCleanly(EXIT_WINDOWS_SERVICE_STOP);
+        shutdownNoTerminate();
         return true;
     });
-    stdx::future<bool> exitedCleanly = exitCleanlyTask.get_future();
+    stdx::future<void> exitedCleanly = shutdownNoTerminateTask.get_future();
 
     // Launch the packaged task in a thread. We needn't ever join it,
     // so it doesn't even need a name.
-    stdx::thread(std::move(exitCleanlyTask)).detach();
+    stdx::thread(std::move(shutdownNoTerminateTask)).detach();
 
-    const auto timeout = stdx::chrono::milliseconds(kStopWaitHintMillis / 2);
+    const auto timeout = Milliseconds(kStopWaitHintMillis / 2);
 
     // We periodically check if we are done exiting by polling at half of each wait interval
-    while (exitedCleanly.wait_for(timeout) != stdx::future_status::ready) {
+    while (exitedCleanly.wait_for(timeout.toSystemDuration()) != stdx::future_status::ready) {
         reportStatus(SERVICE_STOP_PENDING, kStopWaitHintMillis);
         log() << "Service Stop is waiting for storage engine to finish shutdown";
     }
@@ -572,26 +572,25 @@ static void WINAPI initService(DWORD argc, LPTSTR* argv) {
 }
 
 static void serviceShutdown(const char* controlCodeName) {
-    // We spawn a detached thread here because signalShudown may block and it is illegal to block in
-    // anything called from serviceCtrl(). We are required to return ASAP.
-    stdx::thread([controlCodeName] {
-        Client::initThread("serviceShutdown");
+    setThreadName("serviceShutdown");
 
-        log() << "got " << controlCodeName << " request from Windows Service Control Manager, "
-              << (inShutdown() ? "already in shutdown" : "will terminate after current cmd ends");
+    log() << "got " << controlCodeName << " request from Windows Service Control Manager, "
+          << (globalInShutdownDeprecated() ? "already in shutdown"
+                                           : "will terminate after current cmd ends");
 
-        reportStatus(SERVICE_STOP_PENDING, kStopWaitHintMillis);
+    reportStatus(SERVICE_STOP_PENDING, kStopWaitHintMillis);
 
-        // Note: This triggers _serviceCallback, ie  ServiceMain,
-        // to stop by setting inShutdown() == true
-        signalShutdown();
+    // Note: This triggers _serviceCallback, ie  ServiceMain,
+    // to stop by setting globalInShutdownDeprecated() == true
+    shutdownNoTerminate();
 
-        // Note: we will report exit status in initService
-    }).detach();
+    // Note: we will report exit status in initService
 }
 
-static DWORD WINAPI
-serviceCtrl(DWORD dwControl, DWORD dwEventType, LPVOID lpEventData, LPVOID lpContext) {
+static DWORD WINAPI serviceCtrl(DWORD dwControl,
+                                DWORD dwEventType,
+                                LPVOID lpEventData,
+                                LPVOID lpContext) {
     switch (dwControl) {
         case SERVICE_CONTROL_INTERROGATE:
             // Return NO_ERROR per MSDN even though we do nothing for this control code.

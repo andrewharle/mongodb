@@ -1,35 +1,40 @@
 // unordered_fast_key_table.h
 
-/*    Copyright 2012 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
 
+#include <iterator>
 #include <memory>
+#include <type_traits>
 
 #include "mongo/base/disallow_copying.h"
 #include "mongo/util/assert_util.h"
@@ -61,20 +66,96 @@ template <typename K_L,  // key lookup
 class UnorderedFastKeyTable {
 public:
     // Typedefs for compatibility with std::map.
-    using value_type = std::pair<K_S, V>;
+    using value_type = std::pair<const K_S, V>;
     using key_type = K_L;
     using mapped_type = V;
 
     using HashedKey = typename Traits::HashedKey;
 
 private:
-    struct Entry {
-        Entry() : used(false), everUsed(false) {}
+    class Entry {
+    public:
+        Entry() = default;
 
-        bool used;
-        bool everUsed;
-        uint32_t curHash;
-        value_type data;
+        Entry(const Entry& other)
+            : _used(other._used), _everUsed(other.everUsed), _curHash(other._curHash) {
+            if (other.isUsed()) {
+                new (&_data) value_type(other.getData());
+            }
+        }
+
+        Entry& operator=(const Entry& other) {
+            if (this == &other) {
+                return *this;
+            }
+
+            if (isUsed()) {
+                unUse();
+            }
+
+            _used = other._used;
+            _everUsed = other._everUsed;
+            _curHash = other._curHash;
+
+            if (other.isUsed()) {
+                new (&_data) value_type(other.getData());
+            }
+
+            return *this;
+        }
+
+        ~Entry() {
+            if (isUsed()) {
+                unUse();
+            }
+        }
+
+        template <typename... Args>
+        void emplaceData(const HashedKey& key, Args&&... args) {
+            dassert(!isUsed());
+            _used = true;
+            _everUsed = true;
+            _curHash = key.hash();
+            new (&_data) value_type(std::piecewise_construct,
+                                    std::forward_as_tuple(Traits::toStorage(key.key())),
+                                    std::forward_as_tuple(std::forward<Args>(args)...));
+        }
+
+        bool isUsed() const {
+            return _used;
+        }
+
+        bool wasEverUsed() const {
+            return _everUsed;
+        }
+
+        uint32_t getCurHash() const {
+            dassert(isUsed());
+            return _curHash;
+        }
+
+        void unUse() {
+            dassert(isUsed());
+            _used = false;
+            reinterpret_cast<value_type*>(&_data)->~value_type();
+        }
+
+        value_type& getData() {
+            dassert(isUsed());
+            return *reinterpret_cast<value_type*>(&_data);
+        }
+
+        const value_type& getData() const {
+            dassert(isUsed());
+            return *reinterpret_cast<const value_type*>(&_data);
+        }
+
+    private:
+        bool _used = false;
+        bool _everUsed = false;
+        uint32_t _curHash;
+        typename std::aligned_storage<sizeof(value_type),
+                                      std::alignment_of<value_type>::value>::type _data;
     };
 
     struct Area {
@@ -170,6 +251,10 @@ public:
         return get(HashedKey(key));
     }
 
+    void clear() {
+        *this = {};
+    }
+
     /**
      * @return number of elements removed
      */
@@ -180,34 +265,43 @@ public:
         return erase(HashedKey(key));
     }
 
-    class const_iterator {
+    template <typename AreaPtr,
+              typename reference = decltype(AreaPtr()->begin()->getData()),
+              typename pointer = typename std::add_pointer<reference>::type>
+    class iterator_impl
+        : public std::
+              iterator<std::forward_iterator_tag, value_type, std::ptrdiff_t, pointer, reference> {
         friend class UnorderedFastKeyTable;
 
     public:
-        const_iterator() {
+        iterator_impl() {
             _position = -1;
         }
-        const_iterator(const Area* area) {
+        iterator_impl(AreaPtr area) {
             _area = area;
             _position = 0;
             _max = _area->capacity() - 1;
             _skip();
         }
-        const_iterator(const Area* area, int pos) {
+        iterator_impl(AreaPtr area, int pos) {
             _area = area;
             _position = pos;
             _max = pos;
         }
 
-        const value_type* operator->() const {
-            return &_area->_entries[_position].data;
+        template <typename... Args>
+        iterator_impl(const iterator_impl<Args...>& other)
+            : _area(other._area), _position(other._position), _max(other._max) {}
+
+        pointer operator->() const {
+            return &_area->_entries[_position].getData();
         }
 
-        const value_type& operator*() const {
-            return _area->_entries[_position].data;
+        reference operator*() const {
+            return _area->_entries[_position].getData();
         }
 
-        const_iterator operator++() {
+        iterator_impl& operator++() {
             if (_position < 0)
                 return *this;
             _position++;
@@ -215,10 +309,16 @@ public:
             return *this;
         }
 
-        bool operator==(const const_iterator& other) const {
+        iterator_impl operator++(int) {
+            iterator_impl before(*this);
+            operator++();
+            return before;
+        }
+
+        bool operator==(const iterator_impl& other) const {
             return _position == other._position;
         }
-        bool operator!=(const const_iterator& other) const {
+        bool operator!=(const iterator_impl& other) const {
             return _position != other._position;
         }
 
@@ -229,16 +329,19 @@ public:
                     _position = -1;
                     break;
                 }
-                if (_area->_entries[_position].used)
+                if (_area->_entries[_position].isUsed())
                     break;
                 ++_position;
             }
         }
 
-        const Area* _area;
+        AreaPtr _area;
         int _position;
         int _max;  // inclusive
     };
+
+    using iterator = iterator_impl<Area*>;
+    using const_iterator = iterator_impl<const Area*>;
 
     void erase(const_iterator it);
 
@@ -248,7 +351,7 @@ public:
     const_iterator find(const K_L& key) const {
         if (empty())
             return end();  // Don't waste time hashing.
-        return find(HashedKey(key));
+        return const_iterator(&_area, _area.find(HashedKey(key), nullptr));
     }
 
     const_iterator find(const HashedKey& key) const {
@@ -257,12 +360,69 @@ public:
         return const_iterator(&_area, _area.find(key, nullptr));
     }
 
+    iterator find(const K_L& key) {
+        if (empty())
+            return end();  // Don't waste time hashing.
+        return iterator(&_area, _area.find(HashedKey(key), nullptr));
+    }
+
+    iterator find(const HashedKey& key) {
+        if (empty())
+            return end();
+        return iterator(&_area, _area.find(key, nullptr));
+    }
+
+    size_t count(const K_L& key) const {
+        if (empty())
+            return 0;  // Don't waste time hashing.
+        return _area.find(HashedKey(key), nullptr) != -1;
+    }
+
+    size_t count(const HashedKey& key) const {
+        if (empty())
+            return 0;
+        return _area.find(key, nullptr) != -1;
+    }
+
     const_iterator begin() const {
         return const_iterator(&_area);
     }
 
     const_iterator end() const {
         return const_iterator();
+    }
+
+    iterator begin() {
+        return iterator(&_area);
+    }
+
+    iterator end() {
+        return iterator();
+    }
+
+    const_iterator cbegin() const {
+        return const_iterator(&_area);
+    }
+
+    const_iterator cend() const {
+        return const_iterator();
+    }
+
+    template <typename... Args>
+    std::pair<iterator, bool> try_emplace(const HashedKey& key, Args&&... args);
+
+    template <typename... Args>
+    std::pair<iterator, bool> try_emplace(const K_L& key, Args&&... args) {
+        return try_emplace(HashedKey(key), std::forward<Args>(args)...);
+    }
+
+    void swap(UnorderedFastKeyTable& other) {
+        _area.swap(&(other._area));
+        std::swap(_size, other._size);
+    }
+
+    friend void swap(UnorderedFastKeyTable& lhs, UnorderedFastKeyTable& rhs) {
+        return lhs.swap(rhs);
     }
 
 private:

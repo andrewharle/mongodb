@@ -1,6 +1,6 @@
+// @tags: [requires_non_retryable_commands]
+
 // checks that operations do not create a database
-//
-// @tags: [requires_collmod_command]
 
 (function() {
     "use strict";

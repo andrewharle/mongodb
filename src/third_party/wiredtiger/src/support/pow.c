@@ -1,5 +1,5 @@
 /*-
- * Public Domain 2014-2016 MongoDB, Inc.
+ * Public Domain 2014-2019 MongoDB, Inc.
  * Public Domain 2008-2014 WiredTiger, Inc.
  *
  * This is free and unencumbered software released into the public domain.
@@ -89,8 +89,9 @@ __wt_nlpo2(uint32_t v)
 uint32_t
 __wt_log2_int(uint32_t n)
 {
-	uint32_t l = 0;
+	uint32_t l;
 
+	l = 0;
 	while (n >>= 1)
 		l++;
 	return (l);

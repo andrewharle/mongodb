@@ -1,29 +1,31 @@
+
 /**
- * Copyright 2011 (c) 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- * This program is free software: you can redistribute it and/or  modify
- * it under the terms of the GNU Affero General Public License, version 3,
- * as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
- * As a special exception, the copyright holders give permission to link the
- * code of portions of this program with the OpenSSL library under certain
- * conditions as described in each individual source file and distribute
- * linked combinations including the program with the OpenSSL library. You
- * must comply with the GNU Affero General Public License in all respects for
- * all of the code used other than as permitted herein. If you modify file(s)
- * with this exception, you may extend this exception to your version of the
- * file(s), but you are not obligated to do so. If you do not wish to do so,
- * delete this exception statement from your version. If you delete this
- * exception statement from all source files in the program, then also delete
- * it in the license file.
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
@@ -33,6 +35,8 @@
 #include <boost/functional/hash.hpp>
 #include <boost/intrusive_ptr.hpp>
 
+#include "mongo/base/string_data.h"
+#include "mongo/base/string_data_comparator_interface.h"
 #include "mongo/bson/util/builder.h"
 
 namespace mongo {
@@ -66,21 +70,46 @@ class Position;
  */
 class Document {
 public:
+    /**
+     * Operator overloads for relops return a DeferredComparison which can subsequently be evaluated
+     * by a DocumentComparator.
+     */
+    struct DeferredComparison {
+        enum class Type {
+            kLT,
+            kLTE,
+            kEQ,
+            kGT,
+            kGTE,
+            kNE,
+        };
+
+        DeferredComparison(Type type, const Document& lhs, const Document& rhs)
+            : type(type), lhs(lhs), rhs(rhs) {}
+
+        Type type;
+        const Document& lhs;
+        const Document& rhs;
+    };
+
+    static constexpr StringData metaFieldTextScore = "$textScore"_sd;
+    static constexpr StringData metaFieldRandVal = "$randVal"_sd;
+    static constexpr StringData metaFieldSortKey = "$sortKey"_sd;
+
+    static const std::vector<StringData> allMetadataFieldNames;
+
     /// Empty Document (does no allocation)
     Document() {}
 
     /// Create a new Document deep-converted from the given BSONObj.
     explicit Document(const BSONObj& bson);
 
-#if defined(_MSC_VER) && _MSC_VER < 1900  // MVSC++ <= 2013 can't generate default move operations
-    Document(const Document& other) = default;
-    Document& operator=(const Document& other) = default;
-    Document(Document&& other) : _storage(std::move(other._storage)) {}
-    Document& operator=(Document&& other) {
-        _storage = std::move(other._storage);
-        return *this;
-    }
-#endif
+    /**
+     * Create a new document from key, value pairs. Enables constructing a document using this
+     * syntax:
+     * auto document = Document{{"hello", "world"}, {"number": 1}};
+     */
+    Document(std::initializer_list<std::pair<StringData, ImplicitValue>> initializerList);
 
     void swap(Document& rhs) {
         _storage.swap(rhs._storage);
@@ -102,14 +131,13 @@ public:
         return storage().getField(pos).val;
     }
 
-    /** Similar to BSONObj::getFieldDotted, but using FieldPath rather than a dotted string.
-     *  If you pass a non-NULL positions vector, you get back a path suitable
-     *  to pass to MutableDocument::setNestedField.
-     *
-     *  TODO a version that doesn't use FieldPath
+    /**
+     * Returns the Value stored at the location given by 'path', or Value() if no such path exists.
+     * If 'positions' is non-null, it will be filled with a path suitable to pass to
+     * MutableDocument::setNestedField().
      */
-    const Value getNestedField(const FieldPath& fieldNames,
-                               std::vector<Position>* positions = NULL) const;
+    const Value getNestedField(const FieldPath& path,
+                               std::vector<Position>* positions = nullptr) const;
 
     /// Number of fields in this document. O(n)
     size_t size() const {
@@ -133,12 +161,19 @@ public:
      */
     size_t getApproximateSize() const;
 
-    /** Compare two documents.
+    /**
+     * Compare two documents. Most callers should prefer using DocumentComparator instead. See
+     * document_comparator.h for details.
      *
      *  BSON document field order is significant, so this just goes through
      *  the fields in order.  The comparison is done in roughly the same way
      *  as strings are compared, but comparing one field at a time instead
      *  of one character at a time.
+     *
+     *  Pass a non-null StringData::ComparatorInterface if special string comparison semantics are
+     *  required. If the comparator is null, then a simple binary compare is used for strings. This
+     *  comparator is only used for string *values*; field names are always compared using simple
+     *  binary compare.
      *
      *  Note: This does not consider metadata when comparing documents.
      *
@@ -146,7 +181,9 @@ public:
      *           zero, depending on whether lhs < rhs, lhs == rhs, or lhs > rhs
      *  Warning: may return values other than -1, 0, or 1
      */
-    static int compare(const Document& lhs, const Document& rhs);
+    static int compare(const Document& lhs,
+                       const Document& rhs,
+                       const StringData::ComparatorInterface* stringComparator);
 
     std::string toString() const;
 
@@ -159,13 +196,14 @@ public:
      * Meant to be used to create composite hashes suitable for
      * hashed container classes such as unordered_map.
      */
-    void hash_combine(size_t& seed) const;
+    void hash_combine(size_t& seed, const StringData::ComparatorInterface* stringComparator) const;
 
     /**
-     * Add this document to the BSONObj under construction with the given BSONObjBuilder.
-     * Does not include metadata.
+     * Serializes this document to the BSONObj under construction in 'builder'. Metadata is not
+     * included. Throws a AssertionException if 'recursionLevel' exceeds the maximum allowable
+     * depth.
      */
-    void toBson(BSONObjBuilder* pBsonObjBuilder) const;
+    void toBson(BSONObjBuilder* builder, size_t recursionLevel = 1) const;
     BSONObj toBson() const;
 
     /**
@@ -180,6 +218,12 @@ public:
      * with metaField.
      */
     static Document fromBsonWithMetaData(const BSONObj& bson);
+
+    /**
+     * Given a BSON object that may have metadata fields added as part of toBsonWithMetadata(),
+     * returns the same object without any of the metadata fields.
+     */
+    static BSONObj stripMetadataFields(const BSONObj& bsonWithMetadata);
 
     // Support BSONObjBuilder and BSONArrayBuilder "stream" API
     friend BSONObjBuilder& operator<<(BSONObjBuilderValueStream& builder, const Document& d);
@@ -203,7 +247,6 @@ public:
         return Document(storage().clone().get());
     }
 
-    static const StringData metaFieldTextScore;  // "$textScore"
     bool hasTextScore() const {
         return storage().hasTextScore();
     }
@@ -211,12 +254,18 @@ public:
         return storage().getTextScore();
     }
 
-    static const StringData metaFieldRandVal;  // "$randVal"
     bool hasRandMetaField() const {
         return storage().hasRandMetaField();
     }
     double getRandMetaField() const {
         return storage().getRandMetaField();
+    }
+
+    bool hasSortKeyMetaField() const {
+        return storage().hasSortKeyMetaField();
+    }
+    BSONObj getSortKeyMetaField() const {
+        return storage().getSortKeyMetaField();
     }
 
     /// members for Sorter
@@ -249,25 +298,38 @@ private:
     boost::intrusive_ptr<const DocumentStorage> _storage;
 };
 
-inline bool operator==(const Document& l, const Document& r) {
-    return Document::compare(l, r) == 0;
-}
-inline bool operator!=(const Document& l, const Document& r) {
-    return Document::compare(l, r) != 0;
-}
-inline bool operator<(const Document& l, const Document& r) {
-    return Document::compare(l, r) < 0;
-}
-inline bool operator<=(const Document& l, const Document& r) {
-    return Document::compare(l, r) <= 0;
-}
-inline bool operator>(const Document& l, const Document& r) {
-    return Document::compare(l, r) > 0;
-}
-inline bool operator>=(const Document& l, const Document& r) {
-    return Document::compare(l, r) >= 0;
+//
+// Comparison API.
+//
+// Document instances can be compared either using Document::compare() or via operator overloads.
+// Most callers should prefer operator overloads. Note that the operator overloads return a
+// DeferredComparison, which must be subsequently evaluated by a DocumentComparator. See
+// document_comparator.h for details.
+//
+
+inline Document::DeferredComparison operator==(const Document& lhs, const Document& rhs) {
+    return Document::DeferredComparison(Document::DeferredComparison::Type::kEQ, lhs, rhs);
 }
 
+inline Document::DeferredComparison operator!=(const Document& lhs, const Document& rhs) {
+    return Document::DeferredComparison(Document::DeferredComparison::Type::kNE, lhs, rhs);
+}
+
+inline Document::DeferredComparison operator<(const Document& lhs, const Document& rhs) {
+    return Document::DeferredComparison(Document::DeferredComparison::Type::kLT, lhs, rhs);
+}
+
+inline Document::DeferredComparison operator<=(const Document& lhs, const Document& rhs) {
+    return Document::DeferredComparison(Document::DeferredComparison::Type::kLTE, lhs, rhs);
+}
+
+inline Document::DeferredComparison operator>(const Document& lhs, const Document& rhs) {
+    return Document::DeferredComparison(Document::DeferredComparison::Type::kGT, lhs, rhs);
+}
+
+inline Document::DeferredComparison operator>=(const Document& lhs, const Document& rhs) {
+    return Document::DeferredComparison(Document::DeferredComparison::Type::kGTE, lhs, rhs);
+}
 
 /** This class is returned by MutableDocument to allow you to modify its values.
  *  You are not allowed to hold variables of this type (enforced by the type system).
@@ -399,6 +461,10 @@ public:
         return MutableValue(storage().getField(key));
     }
 
+    bool hasField(StringData key) {
+        return storage().findField(key).found();
+    }
+
     /// Update field by Position. Must already be a valid Position.
     MutableValue operator[](Position pos) {
         return getField(pos);
@@ -450,6 +516,10 @@ public:
         storage().setRandMetaField(val);
     }
 
+    void setSortKeyMetaField(BSONObj sortKey) {
+        storage().setSortKeyMetaField(sortKey);
+    }
+
     /** Convert to a read-only document and release reference.
      *
      *  Call this to indicate that you are done with this Document and will
@@ -479,6 +549,10 @@ public:
      */
     Document peek() {
         return Document(storagePtr());
+    }
+
+    size_t getApproximateSize() {
+        return peek().getApproximateSize();
     }
 
 private:

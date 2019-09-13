@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -42,13 +44,9 @@
 #include "mongo/util/timer.h"
 
 namespace mongo {
-namespace {
-const int NUM_PERF_ITERS = 1000 * 1000;  // numeber of iterations to use for lock perf
-}
-
 
 TEST(LockerImpl, LockNoConflict) {
-    const ResourceId resId(RESOURCE_COLLECTION, std::string("TestDB.collection"));
+    const ResourceId resId(RESOURCE_COLLECTION, "TestDB.collection"_sd);
 
     MMAPV1LockerImpl locker;
     locker.lockGlobal(MODE_IX);
@@ -62,11 +60,11 @@ TEST(LockerImpl, LockNoConflict) {
 
     ASSERT(locker.isLockHeldForMode(resId, MODE_NONE));
 
-    locker.unlockAll();
+    locker.unlockGlobal();
 }
 
 TEST(LockerImpl, ReLockNoConflict) {
-    const ResourceId resId(RESOURCE_COLLECTION, std::string("TestDB.collection"));
+    const ResourceId resId(RESOURCE_COLLECTION, "TestDB.collection"_sd);
 
     MMAPV1LockerImpl locker;
     locker.lockGlobal(MODE_IX);
@@ -80,11 +78,11 @@ TEST(LockerImpl, ReLockNoConflict) {
     ASSERT(locker.unlock(resId));
     ASSERT(locker.isLockHeldForMode(resId, MODE_NONE));
 
-    ASSERT(locker.unlockAll());
+    ASSERT(locker.unlockGlobal());
 }
 
 TEST(LockerImpl, ConflictWithTimeout) {
-    const ResourceId resId(RESOURCE_COLLECTION, std::string("TestDB.collection"));
+    const ResourceId resId(RESOURCE_COLLECTION, "TestDB.collection"_sd);
 
     DefaultLockerImpl locker1;
     ASSERT(LOCK_OK == locker1.lockGlobal(MODE_IX));
@@ -92,18 +90,18 @@ TEST(LockerImpl, ConflictWithTimeout) {
 
     DefaultLockerImpl locker2;
     ASSERT(LOCK_OK == locker2.lockGlobal(MODE_IX));
-    ASSERT(LOCK_TIMEOUT == locker2.lock(resId, MODE_S, 0));
+    ASSERT(LOCK_TIMEOUT == locker2.lock(resId, MODE_S, Date_t::now()));
 
     ASSERT(locker2.getLockMode(resId) == MODE_NONE);
 
     ASSERT(locker1.unlock(resId));
 
-    ASSERT(locker1.unlockAll());
-    ASSERT(locker2.unlockAll());
+    ASSERT(locker1.unlockGlobal());
+    ASSERT(locker2.unlockGlobal());
 }
 
 TEST(LockerImpl, ConflictUpgradeWithTimeout) {
-    const ResourceId resId(RESOURCE_COLLECTION, std::string("TestDB.collection"));
+    const ResourceId resId(RESOURCE_COLLECTION, "TestDB.collection"_sd);
 
     DefaultLockerImpl locker1;
     ASSERT(LOCK_OK == locker1.lockGlobal(MODE_IS));
@@ -114,10 +112,10 @@ TEST(LockerImpl, ConflictUpgradeWithTimeout) {
     ASSERT(LOCK_OK == locker2.lock(resId, MODE_S));
 
     // Try upgrading locker 1, which should block and timeout
-    ASSERT(LOCK_TIMEOUT == locker1.lock(resId, MODE_X, 1));
+    ASSERT(LOCK_TIMEOUT == locker1.lock(resId, MODE_X, Date_t::now() + Milliseconds(1)));
 
-    locker1.unlockAll();
-    locker2.unlockAll();
+    locker1.unlockGlobal();
+    locker2.unlockGlobal();
 }
 
 
@@ -125,15 +123,15 @@ TEST(LockerImpl, ReadTransaction) {
     DefaultLockerImpl locker;
 
     locker.lockGlobal(MODE_IS);
-    locker.unlockAll();
+    locker.unlockGlobal();
 
     locker.lockGlobal(MODE_IX);
-    locker.unlockAll();
+    locker.unlockGlobal();
 
     locker.lockGlobal(MODE_IX);
     locker.lockGlobal(MODE_IS);
-    locker.unlockAll();
-    locker.unlockAll();
+    locker.unlockGlobal();
+    locker.unlockGlobal();
 }
 
 /**
@@ -160,7 +158,7 @@ TEST(LockerImpl, saveAndRestoreGlobal) {
     locker.restoreLockState(lockInfo);
 
     ASSERT(locker.isLocked());
-    ASSERT(locker.unlockAll());
+    ASSERT(locker.unlockGlobal());
 }
 
 /**
@@ -184,9 +182,9 @@ TEST(LockerImpl, saveAndRestoreGlobalAcquiredTwice) {
 
     ASSERT(locker.isLocked());
 
-    // We must unlockAll twice.
-    ASSERT(!locker.unlockAll());
-    ASSERT(locker.unlockAll());
+    // We must unlockGlobal twice.
+    ASSERT(!locker.unlockGlobal());
+    ASSERT(locker.unlockGlobal());
 }
 
 /**
@@ -197,8 +195,8 @@ TEST(LockerImpl, saveAndRestoreDBAndCollection) {
 
     DefaultLockerImpl locker;
 
-    const ResourceId resIdDatabase(RESOURCE_DATABASE, std::string("TestDB"));
-    const ResourceId resIdCollection(RESOURCE_COLLECTION, std::string("TestDB.collection"));
+    const ResourceId resIdDatabase(RESOURCE_DATABASE, "TestDB"_sd);
+    const ResourceId resIdCollection(RESOURCE_COLLECTION, "TestDB.collection"_sd);
 
     // Lock some stuff.
     locker.lockGlobal(MODE_IX);
@@ -217,11 +215,11 @@ TEST(LockerImpl, saveAndRestoreDBAndCollection) {
     ASSERT_EQUALS(MODE_IX, locker.getLockMode(resIdDatabase));
     ASSERT_EQUALS(MODE_X, locker.getLockMode(resIdCollection));
 
-    ASSERT(locker.unlockAll());
+    ASSERT(locker.unlockGlobal());
 }
 
 TEST(LockerImpl, DefaultLocker) {
-    const ResourceId resId(RESOURCE_DATABASE, std::string("TestDB"));
+    const ResourceId resId(RESOURCE_DATABASE, "TestDB"_sd);
 
     DefaultLockerImpl locker;
     ASSERT_EQUALS(LOCK_OK, locker.lockGlobal(MODE_IX));
@@ -229,17 +227,17 @@ TEST(LockerImpl, DefaultLocker) {
 
     // Make sure the flush lock IS NOT held
     Locker::LockerInfo info;
-    locker.getLockerInfo(&info);
+    locker.getLockerInfo(&info, boost::none);
     ASSERT(!info.waitingResource.isValid());
     ASSERT_EQUALS(2U, info.locks.size());
     ASSERT_EQUALS(RESOURCE_GLOBAL, info.locks[0].resourceId.getType());
     ASSERT_EQUALS(resId, info.locks[1].resourceId);
 
-    ASSERT(locker.unlockAll());
+    ASSERT(locker.unlockGlobal());
 }
 
 TEST(LockerImpl, MMAPV1Locker) {
-    const ResourceId resId(RESOURCE_DATABASE, std::string("TestDB"));
+    const ResourceId resId(RESOURCE_DATABASE, "TestDB"_sd);
 
     MMAPV1LockerImpl locker;
     ASSERT_EQUALS(LOCK_OK, locker.lockGlobal(MODE_IX));
@@ -247,19 +245,19 @@ TEST(LockerImpl, MMAPV1Locker) {
 
     // Make sure the flush lock IS held
     Locker::LockerInfo info;
-    locker.getLockerInfo(&info);
+    locker.getLockerInfo(&info, boost::none);
     ASSERT(!info.waitingResource.isValid());
     ASSERT_EQUALS(3U, info.locks.size());
     ASSERT_EQUALS(RESOURCE_GLOBAL, info.locks[0].resourceId.getType());
     ASSERT_EQUALS(RESOURCE_MMAPV1_FLUSH, info.locks[1].resourceId.getType());
     ASSERT_EQUALS(resId, info.locks[2].resourceId);
 
-    ASSERT(locker.unlockAll());
+    ASSERT(locker.unlockGlobal());
 }
 
 TEST(LockerImpl, CanceledDeadlockUnblocks) {
-    const ResourceId db1(RESOURCE_DATABASE, std::string("db1"));
-    const ResourceId db2(RESOURCE_DATABASE, std::string("db2"));
+    const ResourceId db1(RESOURCE_DATABASE, "db1"_sd);
+    const ResourceId db2(RESOURCE_DATABASE, "db2"_sd);
 
     DefaultLockerImpl locker1;
     DefaultLockerImpl locker2;
@@ -272,21 +270,26 @@ TEST(LockerImpl, CanceledDeadlockUnblocks) {
     ASSERT(LOCK_OK == locker2.lock(db2, MODE_X));
 
     // Set up locker1 and locker2 for deadlock
-    ASSERT(LOCK_WAITING == locker1.lockBegin(db2, MODE_X));
-    ASSERT(LOCK_WAITING == locker2.lockBegin(db1, MODE_X));
+    ASSERT(LOCK_WAITING == locker1.lockBegin(nullptr, db2, MODE_X));
+    ASSERT(LOCK_WAITING == locker2.lockBegin(nullptr, db1, MODE_X));
 
     // Locker3 blocks behind locker 2
     ASSERT(LOCK_OK == locker3.lockGlobal(MODE_IX));
-    ASSERT(LOCK_WAITING == locker3.lockBegin(db1, MODE_S));
+    ASSERT(LOCK_WAITING == locker3.lockBegin(nullptr, db1, MODE_S));
 
     // Detect deadlock, canceling our request
-    ASSERT(LOCK_DEADLOCK == locker2.lockComplete(db1, MODE_X, 1, /*checkDeadlock*/ true));
+    ASSERT(
+        LOCK_DEADLOCK ==
+        locker2.lockComplete(db1, MODE_X, Date_t::now() + Milliseconds(1), /*checkDeadlock*/ true));
 
     // Now locker3 must be able to complete its request
-    ASSERT(LOCK_OK == locker3.lockComplete(db1, MODE_S, 1, /*checkDeadlock*/ false));
+    ASSERT(LOCK_OK ==
+           locker3.lockComplete(
+               db1, MODE_S, Date_t::now() + Milliseconds(1), /*checkDeadlock*/ false));
 
     // Locker1 still can't complete its request
-    ASSERT(LOCK_TIMEOUT == locker1.lockComplete(db2, MODE_X, 1, false));
+    ASSERT(LOCK_TIMEOUT ==
+           locker1.lockComplete(db2, MODE_X, Date_t::now() + Milliseconds(1), false));
 
     // Check ownership for db1
     ASSERT(locker1.getLockMode(db1) == MODE_S);
@@ -298,71 +301,176 @@ TEST(LockerImpl, CanceledDeadlockUnblocks) {
     ASSERT(locker2.getLockMode(db2) == MODE_X);
     ASSERT(locker3.getLockMode(db2) == MODE_NONE);
 
-    ASSERT(locker1.unlockAll());
-    ASSERT(locker2.unlockAll());
-    ASSERT(locker3.unlockAll());
+    ASSERT(locker1.unlockGlobal());
+    ASSERT(locker2.unlockGlobal());
+    ASSERT(locker3.unlockGlobal());
 }
 
+TEST(LockerImpl, SharedLocksShouldTwoPhaseLockIsTrue) {
+    // Test that when setSharedLocksShouldTwoPhaseLock is true and we are in a WUOW, unlock on IS
+    // and S locks are postponed until endWriteUnitOfWork() is called. Mode IX and X locks always
+    // participate in two-phased locking, regardless of the setting.
 
-// These two tests exercise single-threaded performance of uncontended lock acquisition. It
-// is not practical to run them on debug builds.
-#ifndef MONGO_CONFIG_DEBUG_BUILD
+    const ResourceId globalResId(RESOURCE_GLOBAL, ResourceId::SINGLETON_GLOBAL);
+    const ResourceId resId1(RESOURCE_DATABASE, "TestDB1"_sd);
+    const ResourceId resId2(RESOURCE_DATABASE, "TestDB2"_sd);
+    const ResourceId resId3(RESOURCE_COLLECTION, "TestDB.collection3"_sd);
+    const ResourceId resId4(RESOURCE_COLLECTION, "TestDB.collection4"_sd);
 
-TEST(Locker, PerformanceBoostSharedMutex) {
-    for (int numLockers = 1; numLockers <= 64; numLockers = numLockers * 2) {
-        stdx::mutex mtx;
+    DefaultLockerImpl locker;
+    locker.setSharedLocksShouldTwoPhaseLock(true);
 
-        // Do some warm-up loops
-        for (int i = 0; i < 1000; i++) {
-            mtx.lock();
-            mtx.unlock();
-        }
+    ASSERT_EQ(LOCK_OK, locker.lockGlobal(MODE_IS));
+    ASSERT_EQ(locker.getLockMode(globalResId), MODE_IS);
 
-        // Measure the number of loops
-        //
-        Timer t;
+    ASSERT_EQ(LOCK_OK, locker.lock(resId1, MODE_IS));
+    ASSERT_EQ(LOCK_OK, locker.lock(resId2, MODE_IX));
+    ASSERT_EQ(LOCK_OK, locker.lock(resId3, MODE_S));
+    ASSERT_EQ(LOCK_OK, locker.lock(resId4, MODE_X));
+    ASSERT_EQ(locker.getLockMode(resId1), MODE_IS);
+    ASSERT_EQ(locker.getLockMode(resId2), MODE_IX);
+    ASSERT_EQ(locker.getLockMode(resId3), MODE_S);
+    ASSERT_EQ(locker.getLockMode(resId4), MODE_X);
 
-        for (int i = 0; i < NUM_PERF_ITERS; i++) {
-            mtx.lock();
-            mtx.unlock();
-        }
+    locker.beginWriteUnitOfWork();
 
-        log() << numLockers << " locks took: "
-              << static_cast<double>(t.micros()) * 1000.0 / static_cast<double>(NUM_PERF_ITERS)
-              << " ns";
-    }
+    ASSERT_FALSE(locker.unlock(resId1));
+    ASSERT_FALSE(locker.unlock(resId2));
+    ASSERT_FALSE(locker.unlock(resId3));
+    ASSERT_FALSE(locker.unlock(resId4));
+    ASSERT_EQ(locker.getLockMode(resId1), MODE_IS);
+    ASSERT_EQ(locker.getLockMode(resId2), MODE_IX);
+    ASSERT_EQ(locker.getLockMode(resId3), MODE_S);
+    ASSERT_EQ(locker.getLockMode(resId4), MODE_X);
+
+    ASSERT_FALSE(locker.unlockGlobal());
+    ASSERT_EQ(locker.getLockMode(globalResId), MODE_IS);
+
+    locker.endWriteUnitOfWork();
+
+    ASSERT_EQ(locker.getLockMode(resId1), MODE_NONE);
+    ASSERT_EQ(locker.getLockMode(resId2), MODE_NONE);
+    ASSERT_EQ(locker.getLockMode(resId3), MODE_NONE);
+    ASSERT_EQ(locker.getLockMode(resId4), MODE_NONE);
+    ASSERT_EQ(locker.getLockMode(globalResId), MODE_NONE);
 }
 
-TEST(Locker, PerformanceLocker) {
-    for (int numLockers = 1; numLockers <= 64; numLockers = numLockers * 2) {
-        std::vector<std::shared_ptr<LockerForTests>> lockers(numLockers);
-        for (int i = 0; i < numLockers; i++) {
-            lockers[i].reset(new LockerForTests(MODE_S));
-        }
+TEST(LockerImpl, ModeIXAndXLockParticipatesInTwoPhaseLocking) {
+    // Unlock on mode IX and X locks during a WUOW should always be postponed until
+    // endWriteUnitOfWork() is called. Mode IS and S locks should unlock immediately.
 
-        DefaultLockerImpl locker;
+    const ResourceId globalResId(RESOURCE_GLOBAL, ResourceId::SINGLETON_GLOBAL);
+    const ResourceId resId1(RESOURCE_DATABASE, "TestDB1"_sd);
+    const ResourceId resId2(RESOURCE_DATABASE, "TestDB2"_sd);
+    const ResourceId resId3(RESOURCE_COLLECTION, "TestDB.collection3"_sd);
+    const ResourceId resId4(RESOURCE_COLLECTION, "TestDB.collection4"_sd);
 
-        // Do some warm-up loops
-        for (int i = 0; i < 1000; i++) {
-            locker.lockGlobal(MODE_IS);
-            locker.unlockAll();
-        }
+    DefaultLockerImpl locker;
 
-        // Measure the number of loops
-        Timer t;
+    ASSERT_EQ(LOCK_OK, locker.lockGlobal(MODE_IX));
+    ASSERT_EQ(locker.getLockMode(globalResId), MODE_IX);
 
-        for (int i = 0; i < NUM_PERF_ITERS; i++) {
-            locker.lockGlobal(MODE_IS);
-            locker.unlockAll();
-        }
+    ASSERT_EQ(LOCK_OK, locker.lock(resId1, MODE_IS));
+    ASSERT_EQ(LOCK_OK, locker.lock(resId2, MODE_IX));
+    ASSERT_EQ(LOCK_OK, locker.lock(resId3, MODE_S));
+    ASSERT_EQ(LOCK_OK, locker.lock(resId4, MODE_X));
+    ASSERT_EQ(locker.getLockMode(resId1), MODE_IS);
+    ASSERT_EQ(locker.getLockMode(resId2), MODE_IX);
+    ASSERT_EQ(locker.getLockMode(resId3), MODE_S);
+    ASSERT_EQ(locker.getLockMode(resId4), MODE_X);
 
-        log() << numLockers << " locks took: "
-              << static_cast<double>(t.micros()) * 1000.0 / static_cast<double>(NUM_PERF_ITERS)
-              << " ns";
-    }
+    locker.beginWriteUnitOfWork();
+
+    ASSERT_TRUE(locker.unlock(resId1));
+    ASSERT_FALSE(locker.unlock(resId2));
+    ASSERT_TRUE(locker.unlock(resId3));
+    ASSERT_FALSE(locker.unlock(resId4));
+    ASSERT_EQ(locker.getLockMode(resId1), MODE_NONE);
+    ASSERT_EQ(locker.getLockMode(resId2), MODE_IX);
+    ASSERT_EQ(locker.getLockMode(resId3), MODE_NONE);
+    ASSERT_EQ(locker.getLockMode(resId4), MODE_X);
+
+    ASSERT_FALSE(locker.unlockGlobal());
+    ASSERT_EQ(locker.getLockMode(globalResId), MODE_IX);
+
+    locker.endWriteUnitOfWork();
+
+    ASSERT_EQ(locker.getLockMode(resId2), MODE_NONE);
+    ASSERT_EQ(locker.getLockMode(resId4), MODE_NONE);
+    ASSERT_EQ(locker.getLockMode(globalResId), MODE_NONE);
 }
 
-#endif  // MONGO_CONFIG_DEBUG_BUILD
+TEST(LockerImpl, OverrideLockRequestTimeout) {
+    const ResourceId resIdFirstDB(RESOURCE_DATABASE, "FirstDB"_sd);
+    const ResourceId resIdSecondDB(RESOURCE_DATABASE, "SecondDB"_sd);
+
+    DefaultLockerImpl locker1;
+    DefaultLockerImpl locker2;
+
+    // Set up locker2 to override lock requests' provided timeout if greater than 1000 milliseconds.
+    locker2.setMaxLockTimeout(Milliseconds(1000));
+
+    ASSERT_EQ(LOCK_OK, locker1.lockGlobal(MODE_IX));
+    ASSERT_EQ(LOCK_OK, locker2.lockGlobal(MODE_IX));
+
+    // locker1 acquires FirstDB under an exclusive lock.
+    ASSERT_EQ(LOCK_OK, locker1.lock(resIdFirstDB, MODE_X));
+    ASSERT_TRUE(locker1.isLockHeldForMode(resIdFirstDB, MODE_X));
+
+    // locker2's attempt to acquire FirstDB with unlimited wait time should timeout after 1000
+    // milliseconds and throw because _maxLockRequestTimeout is set to 1000 milliseconds.
+    ASSERT_THROWS_CODE(locker2.lock(resIdFirstDB, MODE_X, Date_t::max()),
+                       AssertionException,
+                       ErrorCodes::LockTimeout);
+
+    // locker2's attempt to acquire an uncontested lock should still succeed normally.
+    ASSERT_EQ(LOCK_OK, locker2.lock(resIdSecondDB, MODE_X));
+
+    ASSERT_TRUE(locker1.unlock(resIdFirstDB));
+    ASSERT_TRUE(locker1.isLockHeldForMode(resIdFirstDB, MODE_NONE));
+    ASSERT_TRUE(locker2.unlock(resIdSecondDB));
+    ASSERT_TRUE(locker2.isLockHeldForMode(resIdSecondDB, MODE_NONE));
+
+    ASSERT(locker1.unlockGlobal());
+    ASSERT(locker2.unlockGlobal());
+}
+
+TEST(LockerImpl, DoNotWaitForLockAcquisition) {
+    const ResourceId resIdFirstDB(RESOURCE_DATABASE, "FirstDB"_sd);
+    const ResourceId resIdSecondDB(RESOURCE_DATABASE, "SecondDB"_sd);
+
+    DefaultLockerImpl locker1;
+    DefaultLockerImpl locker2;
+
+    // Set up locker2 to immediately return if a lock is unavailable, regardless of supplied
+    // deadlines in the lock request.
+    locker2.setMaxLockTimeout(Milliseconds(0));
+
+    ASSERT_EQ(LOCK_OK, locker1.lockGlobal(MODE_IX));
+    ASSERT_EQ(LOCK_OK, locker2.lockGlobal(MODE_IX));
+
+    // locker1 acquires FirstDB under an exclusive lock.
+    ASSERT_EQ(LOCK_OK, locker1.lock(resIdFirstDB, MODE_X));
+    ASSERT_TRUE(locker1.isLockHeldForMode(resIdFirstDB, MODE_X));
+
+    // locker2's attempt to acquire FirstDB with unlimited wait time should fail immediately and
+    // throw because _maxLockRequestTimeout was set to 0.
+    ASSERT_THROWS_CODE(locker2.lock(resIdFirstDB, MODE_X, Date_t::max()),
+                       AssertionException,
+                       ErrorCodes::LockTimeout);
+
+    // locker2's attempt to acquire an uncontested lock should still succeed normally.
+    ASSERT_EQ(LOCK_OK, locker2.lock(resIdSecondDB, MODE_X));
+
+    ASSERT_TRUE(locker1.unlock(resIdFirstDB));
+    ASSERT_TRUE(locker1.isLockHeldForMode(resIdFirstDB, MODE_NONE));
+    ASSERT_TRUE(locker2.unlock(resIdSecondDB));
+    ASSERT_TRUE(locker2.isLockHeldForMode(resIdSecondDB, MODE_NONE));
+
+    ASSERT(locker1.unlockGlobal());
+    ASSERT(locker2.unlockGlobal());
+}
+
 namespace {
 /**
  * Helper function to determine if 'lockerInfo' contains a lock with ResourceId 'resourceId' and
@@ -381,8 +489,8 @@ bool lockerInfoContainsLock(const Locker::LockerInfo& lockerInfo,
 
 TEST(LockerImpl, GetLockerInfoShouldReportHeldLocks) {
     const ResourceId globalId(RESOURCE_GLOBAL, ResourceId::SINGLETON_GLOBAL);
-    const ResourceId dbId(RESOURCE_DATABASE, std::string("TestDB"));
-    const ResourceId collectionId(RESOURCE_COLLECTION, std::string("TestDB.collection"));
+    const ResourceId dbId(RESOURCE_DATABASE, "TestDB"_sd);
+    const ResourceId collectionId(RESOURCE_COLLECTION, "TestDB.collection"_sd);
 
     // Take an exclusive lock on the collection.
     DefaultLockerImpl locker;
@@ -392,20 +500,22 @@ TEST(LockerImpl, GetLockerInfoShouldReportHeldLocks) {
 
     // Assert it shows up in the output of getLockerInfo().
     Locker::LockerInfo lockerInfo;
-    locker.getLockerInfo(&lockerInfo);
+    locker.getLockerInfo(&lockerInfo, boost::none);
 
     ASSERT(lockerInfoContainsLock(lockerInfo, globalId, MODE_IX));
     ASSERT(lockerInfoContainsLock(lockerInfo, dbId, MODE_IX));
     ASSERT(lockerInfoContainsLock(lockerInfo, collectionId, MODE_X));
     ASSERT_EQ(3U, lockerInfo.locks.size());
 
-    ASSERT(locker.unlockAll());
+    ASSERT(locker.unlock(collectionId));
+    ASSERT(locker.unlock(dbId));
+    ASSERT(locker.unlockGlobal());
 }
 
 TEST(LockerImpl, GetLockerInfoShouldReportPendingLocks) {
     const ResourceId globalId(RESOURCE_GLOBAL, ResourceId::SINGLETON_GLOBAL);
-    const ResourceId dbId(RESOURCE_DATABASE, std::string("TestDB"));
-    const ResourceId collectionId(RESOURCE_COLLECTION, std::string("TestDB.collection"));
+    const ResourceId dbId(RESOURCE_DATABASE, "TestDB"_sd);
+    const ResourceId collectionId(RESOURCE_COLLECTION, "TestDB.collection"_sd);
 
     // Take an exclusive lock on the collection.
     DefaultLockerImpl successfulLocker;
@@ -417,11 +527,11 @@ TEST(LockerImpl, GetLockerInfoShouldReportPendingLocks) {
     DefaultLockerImpl conflictingLocker;
     ASSERT_EQ(LOCK_OK, conflictingLocker.lockGlobal(MODE_IS));
     ASSERT_EQ(LOCK_OK, conflictingLocker.lock(dbId, MODE_IS));
-    ASSERT_EQ(LOCK_WAITING, conflictingLocker.lockBegin(collectionId, MODE_IS));
+    ASSERT_EQ(LOCK_WAITING, conflictingLocker.lockBegin(nullptr, collectionId, MODE_IS));
 
     // Assert the held locks show up in the output of getLockerInfo().
     Locker::LockerInfo lockerInfo;
-    conflictingLocker.getLockerInfo(&lockerInfo);
+    conflictingLocker.getLockerInfo(&lockerInfo, boost::none);
     ASSERT(lockerInfoContainsLock(lockerInfo, globalId, MODE_IS));
     ASSERT(lockerInfoContainsLock(lockerInfo, dbId, MODE_IS));
     ASSERT(lockerInfoContainsLock(lockerInfo, collectionId, MODE_IS));
@@ -431,17 +541,141 @@ TEST(LockerImpl, GetLockerInfoShouldReportPendingLocks) {
     ASSERT_EQ(collectionId, lockerInfo.waitingResource);
 
     // Make sure it no longer reports waiting once unlocked.
-    ASSERT(successfulLocker.unlockAll());
+    ASSERT(successfulLocker.unlock(collectionId));
+    ASSERT(successfulLocker.unlock(dbId));
+    ASSERT(successfulLocker.unlockGlobal());
 
-    const unsigned timeoutMs = 0;
     const bool checkDeadlock = false;
     ASSERT_EQ(LOCK_OK,
-              conflictingLocker.lockComplete(collectionId, MODE_IS, timeoutMs, checkDeadlock));
+              conflictingLocker.lockComplete(collectionId, MODE_IS, Date_t::now(), checkDeadlock));
 
-    conflictingLocker.getLockerInfo(&lockerInfo);
+    conflictingLocker.getLockerInfo(&lockerInfo, boost::none);
     ASSERT_FALSE(lockerInfo.waitingResource.isValid());
 
-    ASSERT(conflictingLocker.unlockAll());
+    ASSERT(conflictingLocker.unlock(collectionId));
+    ASSERT(conflictingLocker.unlock(dbId));
+    ASSERT(conflictingLocker.unlockGlobal());
+}
+
+TEST(LockerImpl, ReaquireLockPendingUnlock) {
+    const ResourceId resId(RESOURCE_COLLECTION, "TestDB.collection"_sd);
+
+    DefaultLockerImpl locker;
+    locker.lockGlobal(MODE_IS);
+
+    ASSERT_EQ(LOCK_OK, locker.lock(resId, MODE_X));
+    ASSERT_TRUE(locker.isLockHeldForMode(resId, MODE_X));
+
+    locker.beginWriteUnitOfWork();
+
+    ASSERT_FALSE(locker.unlock(resId));
+    ASSERT_TRUE(locker.isLockHeldForMode(resId, MODE_X));
+    ASSERT(locker.numResourcesToUnlockAtEndUnitOfWorkForTest() == 1);
+    ASSERT(locker.getRequestsForTest().find(resId).objAddr()->unlockPending == 1);
+
+    // Reacquire lock pending unlock.
+    ASSERT_EQ(LOCK_OK, locker.lock(resId, MODE_X));
+    ASSERT(locker.numResourcesToUnlockAtEndUnitOfWorkForTest() == 0);
+    ASSERT(locker.getRequestsForTest().find(resId).objAddr()->unlockPending == 0);
+
+    locker.endWriteUnitOfWork();
+
+    ASSERT_TRUE(locker.isLockHeldForMode(resId, MODE_X));
+
+    locker.unlockGlobal();
+}
+
+TEST(LockerImpl, AcquireLockPendingUnlockWithCoveredMode) {
+    const ResourceId resId(RESOURCE_COLLECTION, "TestDB.collection"_sd);
+
+    DefaultLockerImpl locker;
+    locker.lockGlobal(MODE_IS);
+
+    ASSERT_EQ(LOCK_OK, locker.lock(resId, MODE_X));
+    ASSERT_TRUE(locker.isLockHeldForMode(resId, MODE_X));
+
+    locker.beginWriteUnitOfWork();
+
+    ASSERT_FALSE(locker.unlock(resId));
+    ASSERT_TRUE(locker.isLockHeldForMode(resId, MODE_X));
+    ASSERT(locker.numResourcesToUnlockAtEndUnitOfWorkForTest() == 1);
+    ASSERT(locker.getRequestsForTest().find(resId).objAddr()->unlockPending == 1);
+
+    // Attempt to lock the resource with a mode that is covered by the existing mode.
+    ASSERT_EQ(LOCK_OK, locker.lock(resId, MODE_IX));
+    ASSERT(locker.numResourcesToUnlockAtEndUnitOfWorkForTest() == 0);
+    ASSERT(locker.getRequestsForTest().find(resId).objAddr()->unlockPending == 0);
+
+    locker.endWriteUnitOfWork();
+
+    ASSERT_TRUE(locker.isLockHeldForMode(resId, MODE_IX));
+
+    locker.unlockGlobal();
+}
+
+TEST(LockerImpl, ConvertLockPendingUnlock) {
+    const ResourceId resId(RESOURCE_COLLECTION, "TestDB.collection"_sd);
+
+    DefaultLockerImpl locker;
+    locker.lockGlobal(MODE_IS);
+
+    ASSERT_EQ(LOCK_OK, locker.lock(resId, MODE_IX));
+    ASSERT_TRUE(locker.isLockHeldForMode(resId, MODE_IX));
+
+    locker.beginWriteUnitOfWork();
+
+    ASSERT_FALSE(locker.unlock(resId));
+    ASSERT_TRUE(locker.isLockHeldForMode(resId, MODE_IX));
+    ASSERT(locker.numResourcesToUnlockAtEndUnitOfWorkForTest() == 1);
+    ASSERT(locker.getRequestsForTest().find(resId).objAddr()->unlockPending == 1);
+
+    // Convert lock pending unlock.
+    ASSERT_EQ(LOCK_OK, locker.lock(resId, MODE_X));
+    ASSERT(locker.numResourcesToUnlockAtEndUnitOfWorkForTest() == 1);
+    ASSERT(locker.getRequestsForTest().find(resId).objAddr()->unlockPending == 1);
+
+    locker.endWriteUnitOfWork();
+
+    ASSERT(locker.numResourcesToUnlockAtEndUnitOfWorkForTest() == 0);
+    ASSERT(locker.getRequestsForTest().find(resId).objAddr()->unlockPending == 0);
+    ASSERT_TRUE(locker.isLockHeldForMode(resId, MODE_X));
+
+    locker.unlockGlobal();
+}
+
+TEST(LockerImpl, ConvertLockPendingUnlockAndUnlock) {
+    const ResourceId resId(RESOURCE_COLLECTION, "TestDB.collection"_sd);
+
+    DefaultLockerImpl locker;
+    locker.lockGlobal(MODE_IS);
+
+    ASSERT_EQ(LOCK_OK, locker.lock(resId, MODE_IX));
+    ASSERT_TRUE(locker.isLockHeldForMode(resId, MODE_IX));
+
+    locker.beginWriteUnitOfWork();
+
+    ASSERT_FALSE(locker.unlock(resId));
+    ASSERT_TRUE(locker.isLockHeldForMode(resId, MODE_IX));
+    ASSERT(locker.numResourcesToUnlockAtEndUnitOfWorkForTest() == 1);
+    ASSERT(locker.getRequestsForTest().find(resId).objAddr()->unlockPending == 1);
+
+    // Convert lock pending unlock.
+    ASSERT_EQ(LOCK_OK, locker.lock(resId, MODE_X));
+    ASSERT(locker.numResourcesToUnlockAtEndUnitOfWorkForTest() == 1);
+    ASSERT(locker.getRequestsForTest().find(resId).objAddr()->unlockPending == 1);
+
+    // Unlock the lock conversion.
+    ASSERT_FALSE(locker.unlock(resId));
+    ASSERT(locker.numResourcesToUnlockAtEndUnitOfWorkForTest() == 1);
+    ASSERT(locker.getRequestsForTest().find(resId).objAddr()->unlockPending == 2);
+
+    locker.endWriteUnitOfWork();
+
+    ASSERT(locker.numResourcesToUnlockAtEndUnitOfWorkForTest() == 0);
+    ASSERT(locker.getRequestsForTest().find(resId).finished());
+    ASSERT_TRUE(locker.isLockHeldForMode(resId, MODE_NONE));
+
+    locker.unlockGlobal();
 }
 
 }  // namespace mongo

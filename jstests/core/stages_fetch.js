@@ -1,3 +1,8 @@
+// @tags: [
+//   does_not_support_stepdowns,
+//   uses_testing_only_commands,
+// ]
+
 // Test basic fetch functionality.
 t = db.stages_fetch;
 t.drop();
@@ -18,6 +23,7 @@ ixscan1 = {
             keyPattern: {foo: 1},
             startKey: {"": 20},
             endKey: {"": 30},
+            startKeyInclusive: true,
             endKeyInclusive: true,
             direction: 1
         },
@@ -34,6 +40,7 @@ ixscan2 = {
             keyPattern: {foo: 1},
             startKey: {"": 20},
             endKey: {"": 30},
+            startKeyInclusive: true,
             endKeyInclusive: true,
             direction: 1
         }

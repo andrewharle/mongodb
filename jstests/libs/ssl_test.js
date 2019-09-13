@@ -66,7 +66,7 @@ SSLTest.prototype.noSSLClientOptions = {
  * was successfully established.
  */
 SSLTest.prototype.connectWorked = function() {
-    var connectTimeoutMillis = 30000;
+    var connectTimeoutMillis = 600000;
 
     var serverArgv = MongoRunner.arrOptions("mongod", this.serverOpts);
     var clientArgv = MongoRunner.arrOptions("mongo", this.clientOpts);
@@ -74,7 +74,8 @@ SSLTest.prototype.connectWorked = function() {
     var serverPID = _startMongoProgram.apply(null, serverArgv);
     try {
         assert.soon(function() {
-            return checkProgram(serverPID) && (0 === _runMongoProgram.apply(null, clientArgv));
+            return checkProgram(serverPID).alive &&
+                (0 === _runMongoProgram.apply(null, clientArgv));
         }, "connect failed", connectTimeoutMillis);
     } catch (ex) {
         return false;

@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -28,6 +30,7 @@
 
 #pragma once
 
+#include "mongo/base/string_data.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/query_planner_params.h"
 #include "mongo/db/query/query_solution.h"
@@ -47,50 +50,35 @@ public:
     static const int kPlannerVersion;
 
     /**
-     * Outputs a series of possible solutions for the provided 'query' into 'out'.  Uses the
-     * indices and other data in 'params' to plan with.
-     *
-     * Caller owns pointers in *out.
+     * Returns the list of possible query solutions for the provided 'query'. Uses the indices and
+     * other data in 'params' to determine the set of available plans.
      */
-    static Status plan(const CanonicalQuery& query,
-                       const QueryPlannerParams& params,
-                       std::vector<QuerySolution*>* out);
+    static StatusWith<std::vector<std::unique_ptr<QuerySolution>>> plan(
+        const CanonicalQuery& query, const QueryPlannerParams& params);
 
     /**
-     * Attempt to generate a query solution, given data retrieved
-     * from the plan cache.
+     * Generates and returns a query solution, given data retrieved from the plan cache.
      *
      * @param query -- query for which we are generating a plan
      * @param params -- planning parameters
      * @param cachedSoln -- the CachedSolution retrieved from the plan cache.
-     * @param out -- an out-parameter which will be filled in with the solution
-     *   generated from the cache data
-     *
-     * On success, the caller is responsible for deleting *out.
      */
-    static Status planFromCache(const CanonicalQuery& query,
-                                const QueryPlannerParams& params,
-                                const CachedSolution& cachedSoln,
-                                QuerySolution** out);
+    static StatusWith<std::unique_ptr<QuerySolution>> planFromCache(
+        const CanonicalQuery& query,
+        const QueryPlannerParams& params,
+        const CachedSolution& cachedSoln);
 
     /**
-     * Used to generated the index tag tree that will be inserted
-     * into the plan cache. This data gets stashed inside a QuerySolution
-     * until it can be inserted into the cache proper.
+     * Generates and returns the index tag tree that will be inserted into the plan cache. This data
+     * gets stashed inside a QuerySolution until it can be inserted into the cache proper.
      *
      * @param taggedTree -- a MatchExpression with index tags that has been
      *   produced by the enumerator.
      * @param relevantIndices -- a list of the index entries used to tag
      *   the tree (i.e. index numbers in the tags refer to entries in this vector)
-     *
-     * On success, a new tagged tree is returned through the out-parameter 'out'.
-     * The caller has ownership of both taggedTree and *out.
-     *
-     * On failure, 'out' is set to NULL.
      */
-    static Status cacheDataFromTaggedTree(const MatchExpression* const taggedTree,
-                                          const std::vector<IndexEntry>& relevantIndices,
-                                          PlanCacheIndexTree** out);
+    static StatusWith<std::unique_ptr<PlanCacheIndexTree>> cacheDataFromTaggedTree(
+        const MatchExpression* const taggedTree, const std::vector<IndexEntry>& relevantIndices);
 
     /**
      * @param filter -- an untagged MatchExpression
@@ -111,7 +99,7 @@ public:
      */
     static Status tagAccordingToCache(MatchExpression* filter,
                                       const PlanCacheIndexTree* const indexTree,
-                                      const std::map<BSONObj, size_t>& indexMap);
+                                      const std::map<StringData, size_t>& indexMap);
 };
 
 }  // namespace mongo

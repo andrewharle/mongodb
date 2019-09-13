@@ -7,11 +7,10 @@
 
     jsTestLog("Setting up initial data set with the last stable version of mongod");
 
-    var toolTest = new ToolTest('transitioning_to_and_from_WT',
-                                {
-                                  binVersion: MongoRunner.getBinVersionFor("last-stable"),
-                                  storageEngine: "mmapv1",
-                                });
+    var toolTest = new ToolTest('transitioning_to_and_from_WT', {
+        binVersion: MongoRunner.getBinVersionFor("last-stable"),
+        storageEngine: "mmapv1",
+    });
 
     toolTest.dbpath = toolTest.root + "/original/";
     resetDbpath(toolTest.dbpath);
@@ -122,11 +121,7 @@
         assert.eq(0, ret);
 
         // stop previous mongod
-        MongoRunner.stopMongod(toolTest.port);
-
-        // clear old node configuration info
-        toolTest.m = null;
-        toolTest.db = null;
+        toolTest.stop();
 
         // set up new node configuration info
         toolTest.options.binVersion = MongoRunner.getBinVersionFor(entry.binVersion);

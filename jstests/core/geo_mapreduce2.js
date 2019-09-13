@@ -1,3 +1,5 @@
+// @tags: [does_not_support_stepdowns]
+
 // Geo mapreduce 2 from SERVER-3478
 
 var coll = db.geoMR2;
@@ -21,19 +23,15 @@ r = function(key, values) {
         total += values[i].count;
     }
 
-    return {
-        count: total
-    };
+    return {count: total};
 };
 
 try {
-    coll.mapReduce(m,
-                   r,
-                   {
-                     out: coll.getName() + "_mr",
-                     sort: {_id: 1},
-                     query: {'location': {$within: {$centerSphere: [[10, 20], 0.01]}}}
-                   });
+    coll.mapReduce(m, r, {
+        out: coll.getName() + "_mr",
+        sort: {_id: 1},
+        query: {'location': {$within: {$centerSphere: [[10, 20], 0.01]}}}
+    });
 
 } catch (e) {
     // This should occur, since we can't in-mem sort for mreduce

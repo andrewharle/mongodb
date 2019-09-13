@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2011 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -32,6 +34,9 @@
 
 #include <cmath>
 
+#include "mongo/base/data_type_endian.h"
+#include "mongo/base/data_view.h"
+#include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/util/log.h"
 #include "mongo/util/startup_test.h"
@@ -268,7 +273,7 @@ KeyV1Owned::KeyV1Owned(const KeyV1& rhs) {
 
 // fromBSON to Key format
 KeyV1Owned::KeyV1Owned(const BSONObj& obj) {
-    BSONObj::iterator i(obj);
+    BSONObjIterator i(obj);
     unsigned char bits = 0;
     while (1) {
         BSONElement e = i.next();
@@ -315,7 +320,7 @@ KeyV1Owned::KeyV1Owned(const BSONObj& obj) {
             }
             case Date:
                 b.appendUChar(cdate | bits);
-                b.appendStruct(e.date());
+                b.appendNum(e.date().toMillisSinceEpoch());
                 break;
             case String: {
                 b.appendUChar(cstring | bits);
@@ -428,19 +433,28 @@ BSONObj KeyV1::toBson() const {
                 break;
             }
             case cdate:
-                b.appendDate("", (Date_t&)*p);
+                b.appendDate(
+                    "",
+                    Date_t::fromMillisSinceEpoch(ConstDataView(reinterpret_cast<const char*>(p))
+                                                     .read<LittleEndian<long long>>()));
                 p += 8;
                 break;
             case cdouble:
-                b.append("", (double&)*p);
+                b.append(
+                    "",
+                    ConstDataView(reinterpret_cast<const char*>(p)).read<LittleEndian<double>>());
                 p += sizeof(double);
                 break;
             case cint:
-                b.append("", static_cast<int>((reinterpret_cast<const PackedDouble&>(*p)).d));
+                b.append("",
+                         static_cast<int>(ConstDataView(reinterpret_cast<const char*>(p))
+                                              .read<LittleEndian<double>>()));
                 p += sizeof(double);
                 break;
             case clong:
-                b.append("", static_cast<long long>((reinterpret_cast<const PackedDouble&>(*p)).d));
+                b.append("",
+                         static_cast<long long>(ConstDataView(reinterpret_cast<const char*>(p))
+                                                    .read<LittleEndian<double>>()));
                 p += sizeof(double);
                 break;
             default:
@@ -466,8 +480,8 @@ static int compare(const unsigned char*& l, const unsigned char*& r) {
     // same type
     switch (lt) {
         case cdouble: {
-            double L = (reinterpret_cast<const PackedDouble*>(l))->d;
-            double R = (reinterpret_cast<const PackedDouble*>(r))->d;
+            double L = ConstDataView(reinterpret_cast<const char*>(l)).read<LittleEndian<double>>();
+            double R = ConstDataView(reinterpret_cast<const char*>(r)).read<LittleEndian<double>>();
             if (L < R)
                 return -1;
             if (L != R)
@@ -518,8 +532,10 @@ static int compare(const unsigned char*& l, const unsigned char*& r) {
             break;
         }
         case cdate: {
-            long long L = *((long long*)l);
-            long long R = *((long long*)r);
+            long long L =
+                ConstDataView(reinterpret_cast<const char*>(l)).read<LittleEndian<long long>>();
+            long long R =
+                ConstDataView(reinterpret_cast<const char*>(r)).read<LittleEndian<long long>>();
             if (L < R)
                 return -1;
             if (L > R)
@@ -636,7 +652,7 @@ bool KeyV1::woEqual(const KeyV1& right) const {
     const unsigned char* r = right._keyData;
 
     if ((*l | *r) == IsBSON) {
-        return toBson().equal(right.toBson());
+        return SimpleBSONObjComparator::kInstance.evaluate(toBson() == right.toBson());
     }
 
     while (1) {
@@ -648,19 +664,24 @@ bool KeyV1::woEqual(const KeyV1& right) const {
         r++;
         switch (lval & cCANONTYPEMASK) {
             case coid:
-                if (*((unsigned*)l) != *((unsigned*)r))
+                if (ConstDataView(reinterpret_cast<const char*>(l))
+                        .read<LittleEndian<uint32_t>>() !=
+                    ConstDataView(reinterpret_cast<const char*>(r)).read<LittleEndian<uint32_t>>())
                     return false;
                 l += 4;
                 r += 4;
             case cdate:
-                if (*((unsigned long long*)l) != *((unsigned long long*)r))
+                if (ConstDataView(reinterpret_cast<const char*>(l))
+                        .read<LittleEndian<unsigned long long>>() !=
+                    ConstDataView(reinterpret_cast<const char*>(r))
+                        .read<LittleEndian<unsigned long long>>())
                     return false;
                 l += 8;
                 r += 8;
                 break;
             case cdouble:
-                if ((reinterpret_cast<const PackedDouble*>(l))->d !=
-                    (reinterpret_cast<const PackedDouble*>(r))->d)
+                if (ConstDataView(reinterpret_cast<const char*>(l)).read<LittleEndian<double>>() !=
+                    ConstDataView(reinterpret_cast<const char*>(r)).read<LittleEndian<double>>())
                     return false;
                 l += 8;
                 r += 8;

@@ -2,6 +2,7 @@
  * Tests that logged users will not show up in the log.
  *
  * @param mongo {Mongo} connection object.
+ * @tags: [requires_sharding]
  */
 var doTest = function(mongo, callSetParam) {
     var TEST_USER = 'foo';
@@ -32,7 +33,7 @@ var doTest = function(mongo, callSetParam) {
 
 var mongo = MongoRunner.runMongod({verbose: 5});
 doTest(mongo);
-MongoRunner.stopMongod(mongo.port);
+MongoRunner.stopMongod(mongo);
 
 var st = new ShardingTest({shards: 1, verbose: 5});
 doTest(st.s);

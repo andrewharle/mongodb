@@ -1,32 +1,34 @@
 // client.cpp
 
+
 /**
-*    Copyright (C) 2009 10gen Inc.
-*
-*    This program is free software: you can redistribute it and/or  modify
-*    it under the terms of the GNU Affero General Public License, version 3,
-*    as published by the Free Software Foundation.
-*
-*    This program is distributed in the hope that it will be useful,
-*    but WITHOUT ANY WARRANTY; without even the implied warranty of
-*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*    GNU Affero General Public License for more details.
-*
-*    You should have received a copy of the GNU Affero General Public License
-*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*
-*    As a special exception, the copyright holders give permission to link the
-*    code of portions of this program with the OpenSSL library under certain
-*    conditions as described in each individual source file and distribute
-*    linked combinations including the program with the OpenSSL library. You
-*    must comply with the GNU Affero General Public License in all respects for
-*    all of the code used other than as permitted herein. If you modify file(s)
-*    with this exception, you may extend this exception to your version of the
-*    file(s), but you are not obligated to do so. If you do not wish to do so,
-*    delete this exception statement from your version. If you delete this
-*    exception statement from all source files in the program, then also delete
-*    it in the license file.
-*/
+ *    Copyright (C) 2018-present MongoDB, Inc.
+ *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
+ *
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
+ */
 
 /* Client represents a connection to the database (the server-side) and corresponds
    to an open socket (or logical connection if pooling on sockets) from a client.
@@ -50,44 +52,44 @@
 
 namespace mongo {
 
-using logger::LogComponent;
+namespace {
+thread_local ServiceContext::UniqueClient currentClient;
+}  // namespace
 
-TSP_DECLARE(ServiceContext::UniqueClient, currentClient)
-TSP_DEFINE(ServiceContext::UniqueClient, currentClient)
-
-void Client::initThreadIfNotAlready(const char* desc) {
-    if (currentClient.getMake()->get())
+void Client::initThreadIfNotAlready(StringData desc) {
+    if (currentClient)
         return;
     initThread(desc);
 }
 
 void Client::initThreadIfNotAlready() {
-    initThreadIfNotAlready(getThreadName().c_str());
+    initThreadIfNotAlready(getThreadName());
 }
 
-void Client::initThread(const char* desc, AbstractMessagingPort* mp) {
-    initThread(desc, getGlobalServiceContext(), mp);
+void Client::initThread(StringData desc, transport::SessionHandle session) {
+    initThread(desc, getGlobalServiceContext(), std::move(session));
 }
 
-void Client::initThread(const char* desc, ServiceContext* service, AbstractMessagingPort* mp) {
-    invariant(currentClient.getMake()->get() == nullptr);
+void Client::initThread(StringData desc,
+                        ServiceContext* service,
+                        transport::SessionHandle session) {
+    invariant(!haveClient());
 
     std::string fullDesc;
-    if (mp != NULL) {
-        fullDesc = str::stream() << desc << mp->connectionId();
+    if (session) {
+        fullDesc = str::stream() << desc << session->id();
     } else {
-        fullDesc = desc;
+        fullDesc = desc.toString();
     }
 
-    setThreadName(fullDesc.c_str());
+    setThreadName(fullDesc);
 
     // Create the client obj, attach to thread
-    *currentClient.get() = service->makeClient(fullDesc, mp);
+    currentClient = service->makeClient(fullDesc, std::move(session));
 }
 
 void Client::destroy() {
-    invariant(currentClient.get());
-    invariant(currentClient.get()->get());
+    invariant(haveClient());
     currentClient.reset(nullptr);
 }
 
@@ -100,19 +102,15 @@ int64_t generateSeed(const std::string& desc) {
 }
 }  // namespace
 
-Client::Client(std::string desc, ServiceContext* serviceContext, AbstractMessagingPort* p)
-    : ClientBasic(serviceContext, p),
+Client::Client(std::string desc, ServiceContext* serviceContext, transport::SessionHandle session)
+    : _serviceContext(serviceContext),
+      _session(std::move(session)),
       _desc(std::move(desc)),
-      _threadId(stdx::this_thread::get_id()),
-      _connectionId(p ? p->connectionId() : 0),
+      _connectionId(_session ? _session->id() : 0),
       _prng(generateSeed(_desc)) {}
 
 void Client::reportState(BSONObjBuilder& builder) {
     builder.append("desc", desc());
-
-    std::stringstream ss;
-    ss << _threadId;
-    builder.append("threadId", ss.str());
 
     if (_connectionId) {
         builder.appendNumber("connectionId", _connectionId);
@@ -127,15 +125,15 @@ ServiceContext::UniqueOperationContext Client::makeOperationContext() {
     return getServiceContext()->makeOperationContext(this);
 }
 
-void Client::setOperationContext(OperationContext* txn) {
+void Client::setOperationContext(OperationContext* opCtx) {
     // We can only set the OperationContext once before resetting it.
-    invariant(txn != NULL && _txn == NULL);
-    _txn = txn;
+    invariant(opCtx != NULL && _opCtx == NULL);
+    _opCtx = opCtx;
 }
 
 void Client::resetOperationContext() {
-    invariant(_txn != NULL);
-    _txn = NULL;
+    invariant(_opCtx != NULL);
+    _opCtx = NULL;
 }
 
 std::string Client::clientAddress(bool includePort) const {
@@ -148,18 +146,27 @@ std::string Client::clientAddress(bool includePort) const {
     return getRemote().host();
 }
 
-ClientBasic* ClientBasic::getCurrent() {
-    return currentClient.getMake()->get();
+Client* Client::getCurrent() {
+    return currentClient.get();
 }
 
 Client& cc() {
-    Client* c = currentClient.getMake()->get();
-    verify(c);
-    return *c;
+    invariant(haveClient());
+    return *Client::getCurrent();
 }
 
 bool haveClient() {
-    return currentClient.getMake()->get();
+    return static_cast<bool>(currentClient);
+}
+
+ServiceContext::UniqueClient Client::releaseCurrent() {
+    invariant(haveClient());
+    return std::move(currentClient);
+}
+
+void Client::setCurrent(ServiceContext::UniqueClient client) {
+    invariant(!haveClient());
+    currentClient = std::move(client);
 }
 
 }  // namespace mongo

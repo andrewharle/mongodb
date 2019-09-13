@@ -1,9 +1,9 @@
 // Test $text with $textScore projection.
 
+load("jstests/libs/analyze_plan.js");
+
 var t = db.getSiblingDB("test").getCollection("fts_projection");
 t.drop();
-
-db.adminCommand({setParameter: 1, newQueryFrameworkEnabled: true});
 
 t.insert({_id: 0, a: "textual content"});
 t.insert({_id: 1, a: "additional content", b: -1});
@@ -11,8 +11,10 @@ t.insert({_id: 2, a: "irrelevant content"});
 t.ensureIndex({a: "text"});
 
 // Project the text score.
-var results = t.find({$text: {$search: "textual content -irrelevant"}},
-                     {_idCopy: 0, score: {$meta: "textScore"}}).toArray();
+var results = t.find({$text: {$search: "textual content -irrelevant"}}, {
+                   _idCopy: 0,
+                   score: {$meta: "textScore"}
+               }).toArray();
 // printjson(results);
 // Scores should exist.
 assert.eq(results.length, 2);
@@ -29,8 +31,10 @@ scores[results[1]._id] = results[1].score;
 //
 
 // Project text score into 2 fields.
-results = t.find({$text: {$search: "textual content -irrelevant"}},
-                 {otherScore: {$meta: "textScore"}, score: {$meta: "textScore"}}).toArray();
+results = t.find({$text: {$search: "textual content -irrelevant"}}, {
+               otherScore: {$meta: "textScore"},
+               score: {$meta: "textScore"}
+           }).toArray();
 assert.eq(2, results.length);
 for (var i = 0; i < results.length; ++i) {
     assert.close(scores[results[i]._id], results[i].score);
@@ -41,8 +45,9 @@ for (var i = 0; i < results.length; ++i) {
 
 // Project text score into "x.$" shouldn't crash
 assert.throws(function() {
-    t.find({$text: {$search: "textual content -irrelevant"}}, {'x.$': {$meta: "textScore"}})
-        .toArray();
+    t.find({$text: {$search: "textual content -irrelevant"}}, {
+         'x.$': {$meta: "textScore"}
+     }).toArray();
 });
 
 // TODO: We can't project 'x.y':1 and 'x':1 (yet).
@@ -71,8 +76,10 @@ assert.throws(function() {
 
 // SERVER-12173
 // When $text operator is in $or, should evaluate first
-results = t.find({$or: [{$text: {$search: "textual content -irrelevant"}}, {_id: 1}]},
-                 {_idCopy: 0, score: {$meta: "textScore"}}).toArray();
+results = t.find({$or: [{$text: {$search: "textual content -irrelevant"}}, {_id: 1}]}, {
+               _idCopy: 0,
+               score: {$meta: "textScore"}
+           }).toArray();
 printjson(results);
 assert.eq(2, results.length);
 for (var i = 0; i < results.length; ++i) {
@@ -93,13 +100,24 @@ assert.throws(function() {
         errorMessage = e;
         throw e;
     }
-}, null, 'Expected error from failed TEXT under OR planning');
+}, [], 'Expected error from failed TEXT under OR planning');
 assert.neq(-1,
            errorMessage.message.indexOf('TEXT'),
            'message from failed text planning does not mention TEXT: ' + errorMessage);
 assert.neq(-1,
            errorMessage.message.indexOf('OR'),
            'message from failed text planning does not mention OR: ' + errorMessage);
+
+// SERVER-26833
+// We should use the blocking "TEXT_OR" stage only if the projection calls for the "textScore"
+// value.
+let explainOutput = t.find({$text: {$search: "textual content -irrelevant"}}, {
+                         score: {$meta: "textScore"}
+                     }).explain();
+assert(planHasStage(db, explainOutput.queryPlanner.winningPlan, "TEXT_OR"));
+
+explainOutput = t.find({$text: {$search: "textual content -irrelevant"}}).explain();
+assert(!planHasStage(db, explainOutput.queryPlanner.winningPlan, "TEXT_OR"));
 
 // Scores should exist.
 assert.eq(results.length, 2);

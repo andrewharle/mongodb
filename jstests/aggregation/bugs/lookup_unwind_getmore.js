@@ -1,43 +1,58 @@
 /**
- * Tests that the server correctly handles when the OperationContext of the DBDirectClient used by
- * the $lookup stage changes as it unwinds the results.
+ * Tests that the server correctly handles when the OperationContext used by the $lookup stage
+ * changes as it unwinds the results.
  *
  * This test was designed to reproduce SERVER-22537.
+ * @tags: [
+ *   requires_spawning_own_processes,
+ * ]
  */
 (function() {
     'use strict';
 
-    // We use a batch size of 2 to ensure that the mongo shell issues a getMore when unwinding the
-    // results from the 'dest' collection for the same document in the 'source' collection under a
-    // different OperationContext.
-    const batchSize = 2;
+    const options = {setParameter: 'internalDocumentSourceCursorBatchSizeBytes=1'};
+    const conn = MongoRunner.runMongod(options);
+    assert.neq(null, conn, 'mongod was unable to start up with options: ' + tojson(options));
 
-    const conn =
-        MongoRunner.runMongod({setParameter: "internalAggregationLookupBatchSize=" + batchSize});
-    assert.neq(null, conn, "mongod failed to start up");
-    const testDB = conn.getDB("test");
+    const testDB = conn.getDB('test');
 
-    testDB.source.drop();
-    testDB.dest.drop();
+    /**
+     * Executes an aggregrate with 'options.pipeline' and confirms that 'options.numResults' were
+     * returned.
+     */
+    function runTest(options) {
+        // The batchSize must be smaller than the number of documents returned by the $lookup. This
+        // ensures that the mongo shell will issue a getMore when unwinding the $lookup results for
+        // the same document in the 'source' collection, under a different OperationContext.
+        const batchSize = 2;
 
-    assert.writeOK(testDB.source.insert({local: 1}));
+        testDB.source.drop();
+        assert.writeOK(testDB.source.insert({x: 1}));
 
-    // The cursor batching logic actually requests one more document than it needs to fill the
-    // first batch, so if we want to leave the $lookup stage paused with a cursor open we'll
-    // need two more matching documents than the batch size.
-    const numMatches = batchSize + 2;
-    for (var i = 0; i < numMatches; ++i) {
-        assert.writeOK(testDB.dest.insert({foreign: 1}));
+        testDB.dest.drop();
+        for (let i = 0; i < 5; ++i) {
+            assert.writeOK(testDB.dest.insert({x: 1}));
+        }
+
+        const res = assert.commandWorked(testDB.runCommand({
+            aggregate: 'source',
+            pipeline: options.pipeline,
+            cursor: {
+                batchSize: batchSize,
+            },
+        }));
+
+        const cursor = new DBCommandCursor(testDB, res, batchSize);
+        assert.eq(options.numResults, cursor.itcount());
     }
 
-    var res = testDB.runCommand({
-        aggregate: 'source',
+    runTest({
         pipeline: [
             {
               $lookup: {
                   from: 'dest',
-                  localField: 'local',
-                  foreignField: 'foreign',
+                  localField: 'x',
+                  foreignField: 'x',
                   as: 'matches',
               }
             },
@@ -47,14 +62,42 @@
               },
             },
         ],
-        cursor: {
-            batchSize: batchSize,
-        },
+        numResults: 5
     });
-    assert.commandWorked(res);
 
-    var cursor = new DBCommandCursor(conn, res, batchSize);
-    assert.eq(numMatches, cursor.itcount());
+    runTest({
+        pipeline: [
+            {
+              $lookup: {
+                  from: 'dest',
+                  let : {x1: "$x"},
+                  pipeline: [
+                      {$match: {$expr: {$eq: ["$$x1", "$x"]}}},
+                      {
+                        $lookup: {
+                            from: "dest",
+                            as: "matches2",
+                            let : {x2: "$x"},
+                            pipeline: [{$match: {$expr: {$eq: ["$$x2", "$x"]}}}]
+                        }
+                      },
+                      {
+                        $unwind: {
+                            path: '$matches2',
+                        },
+                      },
+                  ],
+                  as: 'matches1',
+              }
+            },
+            {
+              $unwind: {
+                  path: '$matches1',
+              },
+            },
+        ],
+        numResults: 25
+    });
 
-    assert.eq(0, MongoRunner.stopMongod(conn), "expected mongod to shutdown cleanly");
+    MongoRunner.stopMongod(conn);
 })();

@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2014 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -40,9 +42,9 @@ namespace mongo {
 
 using std::endl;
 
-RecordStoreV1RepairCursor::RecordStoreV1RepairCursor(OperationContext* txn,
+RecordStoreV1RepairCursor::RecordStoreV1RepairCursor(OperationContext* opCtx,
                                                      const RecordStoreV1Base* recordStore)
-    : _txn(txn), _recordStore(recordStore), _stage(FORWARD_SCAN) {
+    : _opCtx(opCtx), _recordStore(recordStore), _stage(FORWARD_SCAN) {
     // Position the iterator at the first record
     //
     advance();
@@ -53,7 +55,7 @@ boost::optional<Record> RecordStoreV1RepairCursor::next() {
         return {};
     auto out = _currRecord.toRecordId();
     advance();
-    return {{out, _recordStore->dataFor(_txn, out)}};
+    return {{out, _recordStore->dataFor(_opCtx, out)}};
 }
 
 void RecordStoreV1RepairCursor::advance() {
@@ -76,10 +78,10 @@ void RecordStoreV1RepairCursor::advance() {
         } else {
             switch (_stage) {
                 case FORWARD_SCAN:
-                    _currRecord = _recordStore->getNextRecordInExtent(_txn, _currRecord);
+                    _currRecord = _recordStore->getNextRecordInExtent(_opCtx, _currRecord);
                     break;
                 case BACKWARD_SCAN:
-                    _currRecord = _recordStore->getPrevRecordInExtent(_txn, _currRecord);
+                    _currRecord = _recordStore->getPrevRecordInExtent(_opCtx, _currRecord);
                     break;
                 default:
                     invariant(!"This should never be reached.");
@@ -116,10 +118,10 @@ bool RecordStoreV1RepairCursor::_advanceToNextValidExtent() {
         if (_currExtent.isNull()) {
             switch (_stage) {
                 case FORWARD_SCAN:
-                    _currExtent = _recordStore->details()->firstExtent(_txn);
+                    _currExtent = _recordStore->details()->firstExtent(_opCtx);
                     break;
                 case BACKWARD_SCAN:
-                    _currExtent = _recordStore->details()->lastExtent(_txn);
+                    _currExtent = _recordStore->details()->lastExtent(_opCtx);
                     break;
                 default:
                     invariant(DONE == _stage);
@@ -181,7 +183,7 @@ bool RecordStoreV1RepairCursor::_advanceToNextValidExtent() {
     return true;
 }
 
-void RecordStoreV1RepairCursor::invalidate(OperationContext* txn, const RecordId& id) {
+void RecordStoreV1RepairCursor::invalidate(OperationContext* opCtx, const RecordId& id) {
     // If we see this record again it probably means it was reinserted rather than an infinite
     // loop. If we do loop, we should quickly hit another seen record that hasn't been
     // invalidated.

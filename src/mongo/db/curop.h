@@ -1,25 +1,27 @@
 // @file curop.h
 
-/*
- *    Copyright (C) 2010 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -32,106 +34,105 @@
 #pragma once
 
 #include "mongo/base/disallow_copying.h"
+#include "mongo/db/commands.h"
+#include "mongo/db/cursor_id.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/server_options.h"
 #include "mongo/platform/atomic_word.h"
-#include "mongo/util/concurrency/spin_lock.h"
 #include "mongo/util/progress_meter.h"
-#include "mongo/util/thread_safe_string.h"
 #include "mongo/util/time_support.h"
-#include "mongo/util/net/message.h"
 
 namespace mongo {
 
 class Client;
-class Command;
 class CurOp;
 class OperationContext;
-
-/**
- * stores a copy of a bson obj in a fixed size buffer
- * if its too big for the buffer, says "too big"
- * useful for keeping a copy around indefinitely without wasting a lot of space or doing malloc
- */
-class CachedBSONObjBase {
-public:
-    static BSONObj _tooBig;  // { $msg : "query not recording (too large)" }
-};
-
-template <size_t BUFFER_SIZE>
-class CachedBSONObj : public CachedBSONObjBase {
-public:
-    enum { TOO_BIG_SENTINEL = 1 };
-
-    CachedBSONObj() {
-        _size = (int*)_buf;
-        reset();
-    }
-
-    void reset(int sz = 0) {
-        _lock.lock();
-        _reset(sz);
-        _lock.unlock();
-    }
-
-    void set(const BSONObj& o) {
-        scoped_spinlock lk(_lock);
-        size_t sz = o.objsize();
-        if (sz > sizeof(_buf)) {
-            _reset(TOO_BIG_SENTINEL);
-        } else {
-            memcpy(_buf, o.objdata(), sz);
-        }
-    }
-
-    int size() const {
-        return *_size;
-    }
-    bool have() const {
-        return size() > 0;
-    }
-    bool tooBig() const {
-        return size() == TOO_BIG_SENTINEL;
-    }
-
-    BSONObj get() const {
-        scoped_spinlock lk(_lock);
-        return _get();
-    }
-
-    void append(BSONObjBuilder& b, StringData name) const {
-        scoped_spinlock lk(_lock);
-        BSONObj temp = _get();
-        b.append(name, temp);
-    }
-
-private:
-    /** you have to be locked when you call this */
-    BSONObj _get() const {
-        int sz = size();
-        if (sz == 0)
-            return BSONObj();
-        if (sz == TOO_BIG_SENTINEL)
-            return _tooBig;
-        return BSONObj(_buf).copy();
-    }
-
-    /** you have to be locked when you call this */
-    void _reset(int sz) {
-        _size[0] = sz;
-    }
-
-    mutable SpinLock _lock;
-    int* _size;
-    char _buf[BUFFER_SIZE];
-};
+struct PlanSummaryStats;
 
 /* lifespan is different than CurOp because of recursives with DBDirectClient */
 class OpDebug {
 public:
+    /**
+     * Holds counters for execution statistics that are meaningful both for multi-statement
+     * transactions and for individual operations outside of a transaction.
+     */
+    class AdditiveMetrics {
+    public:
+        /**
+         * Adds all the fields of another AdditiveMetrics object together with the fields of this
+         * AdditiveMetrics instance.
+         */
+        void add(const AdditiveMetrics& otherMetrics);
+
+        /**
+         * Returns true if the AdditiveMetrics object we are comparing has the same field values as
+         * this AdditiveMetrics instance.
+         */
+        bool equals(const AdditiveMetrics& otherMetrics);
+
+        /**
+         * Increments writeConflicts by n.
+         */
+        void incrementWriteConflicts(long long n);
+
+        /**
+         * Increments keysInserted by n.
+         */
+        void incrementKeysInserted(long long n);
+
+        /**
+         * Increments keysDeleted by n.
+         */
+        void incrementKeysDeleted(long long n);
+
+        /**
+         * Increments nmoved by n.
+         */
+        void incrementNmoved(long long n);
+
+        /**
+         * Increments ninserted by n.
+         */
+        void incrementNinserted(long long n);
+
+        /**
+         * Increments prepareReadConflicts by n.
+         */
+        void incrementPrepareReadConflicts(long long n);
+
+        /**
+         * Generates a string showing all non-empty fields. For every non-empty field field1,
+         * field2, ..., with corresponding values value1, value2, ..., we will output a string in
+         * the format: "<field1>:<value1> <field2>:<value2> ...".
+         */
+        std::string report();
+
+        boost::optional<long long> keysExamined;
+        boost::optional<long long> docsExamined;
+
+        // Number of records that match the query.
+        boost::optional<long long> nMatched;
+        // Number of records written (no no-ops).
+        boost::optional<long long> nModified;
+        boost::optional<long long> ninserted;
+        boost::optional<long long> ndeleted;
+
+        // Updates resulted in a move (moves are expensive).
+        boost::optional<long long> nmoved;
+        // Number of index keys inserted.
+        boost::optional<long long> keysInserted;
+        // Number of index keys removed.
+        boost::optional<long long> keysDeleted;
+        // Number of read conflicts caused by a prepared transaction.
+        boost::optional<long long> prepareReadConflicts;
+        boost::optional<long long> writeConflicts;
+    };
+
     OpDebug() = default;
 
-    std::string report(const CurOp& curop, const SingleThreadedLockStats& lockStats) const;
+    std::string report(Client* client,
+                       const CurOp& curop,
+                       const SingleThreadedLockStats* lockStats) const;
 
     /**
      * Appends information about the current operation to "builder"
@@ -143,6 +144,11 @@ public:
                 const SingleThreadedLockStats& lockStats,
                 BSONObjBuilder& builder) const;
 
+    /**
+     * Copies relevant plan summary metrics to this OpDebug instance.
+     */
+    void setPlanSummaryMetrics(const PlanSummaryStats& planSummaryStats);
+
     // -------------------
 
     // basic options
@@ -153,21 +159,12 @@ public:
     // Similarly, the return value will be dbGetMore for both OP_GET_MORE and getMore command.
     LogicalOp logicalOp{LogicalOp::opInvalid};  // only set this through setNetworkOp_inlock()
     bool iscommand{false};
-    BSONObj query{};
-    BSONObj updateobj{};
 
     // detailed options
     long long cursorid{-1};
     long long ntoreturn{-1};
     long long ntoskip{-1};
     bool exhaust{false};
-
-    // debugging/profile info
-    long long keysExamined{-1};
-    long long docsExamined{-1};
-
-    // indicates short circuited code path on an update to make the update faster
-    bool idhack{false};
 
     bool hasSortStage{false};  // true if the query plan involves an in-memory sort
 
@@ -178,43 +175,29 @@ public:
     // True if a replan was triggered during the execution of this operation.
     bool replanned{false};
 
-    long long nMatched{-1};   // number of records that match the query
-    long long nModified{-1};  // number of records written (no no-ops)
-    long long nmoved{-1};     // updates resulted in a move (moves are expensive)
-    long long ninserted{-1};
-    long long ndeleted{-1};
-    bool fastmod{false};
     bool fastmodinsert{false};  // upsert of an $operation. builds a default object
     bool upsert{false};         // true if the update actually did an insert
     bool cursorExhausted{
         false};  // true if the cursor has been closed at end a find/getMore operation
-    int keyUpdates{0};
-    long long writeConflicts{0};
 
-    // New Query Framework debugging/profiling info
-    // TODO: should this really be an opaque BSONObj?  Not sure.
-    CachedBSONObj<4096> execStats;
+    BSONObj execStats;  // Owned here.
 
-    // error handling
-    ExceptionInfo exceptionInfo;
+    // Details of any error (whether from an exception or a command returning failure).
+    Status errInfo = Status::OK();
 
     // response info
-    int executionTime{0};
+    long long executionTimeMicros{0};
     long long nreturned{-1};
     int responseLength{-1};
 
-private:
-    /**
-     * Returns true if this OpDebug instance was generated by a find command. Returns false for
-     * OP_QUERY find and all other operations.
-     */
-    bool isFindCommand() const;
+    // Shard targeting info.
+    int nShards{-1};
 
-    /**
-     * Returns true if this OpDebug instance was generated by a find command. Returns false for
-     * OP_GET_MORE and all other operations.
-     */
-    bool isGetMoreCommand() const;
+    // Stores additive metrics.
+    AdditiveMetrics additiveMetrics;
+
+    // Stores storage statistics.
+    std::shared_ptr<StorageStats> storageStats;
 };
 
 /**
@@ -246,22 +229,67 @@ public:
     static CurOp* get(const OperationContext& opCtx);
 
     /**
+     * Writes a report of the operation being executed by the given client to the supplied
+     * BSONObjBuilder, in a format suitable for display in currentOp. Does not include a lockInfo
+     * report, since this may be called in either a mongoD or mongoS context and the latter does not
+     * supply lock stats. The client must be locked before calling this method.
+     */
+    static void reportCurrentOpForClient(OperationContext* opCtx,
+                                         Client* client,
+                                         bool truncateOps,
+                                         BSONObjBuilder* infoBuilder);
+
+    /**
      * Constructs a nested CurOp at the top of the given "opCtx"'s CurOp stack.
      */
     explicit CurOp(OperationContext* opCtx);
     ~CurOp();
 
-    bool haveQuery() const {
-        return _query.have();
-    }
-    BSONObj query() const {
-        return _query.get();
-    }
-    void appendQuery(BSONObjBuilder& b, StringData name) const {
-        _query.append(b, name);
+    /**
+     * Fills out CurOp and OpDebug with basic info common to all commands. We require the NetworkOp
+     * in order to distinguish which protocol delivered this request, e.g. OP_QUERY or OP_MSG. This
+     * is set early in the request processing backend and does not typically need to be called
+     * thereafter. Locks the client as needed to apply the specified settings.
+     */
+    void setGenericOpRequestDetails(OperationContext* opCtx,
+                                    const NamespaceString& nss,
+                                    const Command* command,
+                                    BSONObj cmdObj,
+                                    NetworkOp op);
+
+    /**
+     * Marks the operation end time, records the length of the client response if a valid response
+     * exists, and then - subject to the current values of slowMs and sampleRate - logs this CurOp
+     * to file under the given LogComponent. Returns 'true' if, in addition to being logged, this
+     * operation should also be profiled.
+     */
+    bool completeAndLogOperation(OperationContext* opCtx,
+                                 logger::LogComponent logComponent,
+                                 boost::optional<size_t> responseLength = boost::none,
+                                 boost::optional<long long> slowMsOverride = boost::none,
+                                 bool forceLog = false);
+
+    bool haveOpDescription() const {
+        return !_opDescription.isEmpty();
     }
 
-    void enter_inlock(const char* ns, int dbProfileLevel);
+    /**
+     * The BSONObj returned may not be owned by CurOp. Callers should call getOwned() if they plan
+     * to reference beyond the lifetime of this CurOp instance.
+     */
+    BSONObj opDescription() const {
+        return _opDescription;
+    }
+
+    /**
+     * Returns an owned BSONObj representing the original command. Used only by the getMore
+     * command.
+     */
+    BSONObj originatingCommand() const {
+        return _originatingCommand;
+    }
+
+    void enter_inlock(const char* ns, boost::optional<int> dbProfileLevel);
 
     /**
      * Sets the type of the current network operation.
@@ -301,11 +329,21 @@ public:
         return _ns;
     }
 
-    bool shouldDBProfile(int ms) const {
-        if (_dbprofile <= 0)
+    /**
+     * Returns true if the elapsed time of this operation is such that it should be profiled or
+     * profile level is set to 2. Uses total time if the operation is done, current elapsed time
+     * otherwise. The argument shouldSample prevents slow diagnostic logging at profile 1
+     * when set to false.
+     */
+    bool shouldDBProfile(bool shouldSample = true) {
+        // Profile level 2 should override any sample rate or slowms settings.
+        if (_dbprofile >= 2)
+            return true;
+
+        if (!shouldSample || _dbprofile <= 0)
             return false;
 
-        return _dbprofile >= 2 || ms >= serverGlobalParams.slowMS;
+        return elapsedTimeExcludingPauses() >= Milliseconds{serverGlobalParams.slowMS};
     }
 
     /**
@@ -333,41 +371,18 @@ public:
     }
 
     /**
+     * Returns true if this CurOp represents a non-command OP_QUERY request.
+     */
+    bool isLegacyQuery() const {
+        return _networkOp == NetworkOp::dbQuery && !isCommand();
+    }
+
+    /**
      * Returns true if the current operation is known to be a command.
      */
     bool isCommand() const {
         return _isCommand;
     }
-
-    //
-    // Methods for controlling CurOp "max time".
-    //
-
-    /**
-     * Sets the amount of time operation this should be allowed to run, units of microseconds.
-     * The special value 0 is "allow to run indefinitely".
-     */
-    void setMaxTimeMicros(uint64_t maxTimeMicros);
-
-    /**
-     * Returns true if a time limit has been set on this operation, and false otherwise.
-     */
-    bool isMaxTimeSet() const;
-
-    /**
-     * Checks whether this operation has been running longer than its time limit.  Returns
-     * false if not, or if the operation has no time limit.
-     */
-    bool maxTimeHasExpired();
-
-    /**
-     * Returns the number of microseconds remaining for this operation's time limit, or the
-     * special value 0 if the operation has no time limit.
-     *
-     * Calling this method is more expensive than calling its sibling "maxTimeHasExpired()",
-     * since an accurate measure of remaining time needs to be calculated.
-     */
-    uint64_t getRemainingMaxTimeMicros() const;
 
     //
     // Methods for getting/setting elapsed time. Note that the observed elapsed time may be
@@ -385,42 +400,109 @@ public:
     void done() {
         _end = curTimeMicros64();
     }
-
-    long long totalTimeMicros() {
-        massert(12601, "CurOp not marked done yet", _end);
-        return _end - startTime();
-    }
-    int totalTimeMillis() {
-        return (int)(totalTimeMicros() / 1000);
-    }
-    long long elapsedMicros() {
-        return curTimeMicros64() - startTime();
-    }
-    int elapsedMillis() {
-        return (int)(elapsedMicros() / 1000);
-    }
-    int elapsedSeconds() {
-        return elapsedMillis() / 1000;
+    bool isDone() const {
+        return _end > 0;
     }
 
-    void setQuery_inlock(const BSONObj& query) {
-        _query.set(query);
+    /**
+     * Stops the operation latency timer from "ticking". Time spent paused is not included in the
+     * latencies returned by elapsedTimeExcludingPauses().
+     *
+     * Illegal to call if either the CurOp has not been started, or the CurOp is already in a paused
+     * state.
+     */
+    void pauseTimer() {
+        invariant(isStarted());
+        invariant(_lastPauseTime == 0);
+        _lastPauseTime = curTimeMicros64();
     }
 
-    Command* getCommand() const {
+    /**
+     * Starts the operation latency timer "ticking" again. Illegal to call if the CurOp has not been
+     * started and then subsequently paused.
+     */
+    void resumeTimer() {
+        invariant(isStarted());
+        invariant(_lastPauseTime > 0);
+        _totalPausedDuration +=
+            Microseconds{static_cast<long long>(curTimeMicros64()) - _lastPauseTime};
+        _lastPauseTime = 0;
+    }
+
+    /**
+     * If this op has been marked as done(), returns the wall clock duration between being marked as
+     * started with ensureStarted() and the call to done().
+     *
+     * Otherwise, returns the wall clock duration between the start time and now.
+     *
+     * If this op has not yet been started, returns 0.
+     */
+    Microseconds elapsedTimeTotal() {
+        if (!isStarted()) {
+            return Microseconds{0};
+        }
+
+        if (!_end) {
+            return Microseconds{static_cast<long long>(curTimeMicros64() - startTime())};
+        } else {
+            return Microseconds{static_cast<long long>(_end - startTime())};
+        }
+    }
+
+    /**
+     * Returns the total elapsed duration minus any time spent in a paused state. See
+     * elapsedTimeTotal() for the definition of the total duration and pause/resumeTimer() for
+     * details on pausing.
+     *
+     * If this op has not yet been started, returns 0.
+     *
+     * Illegal to call while the timer is paused.
+     */
+    Microseconds elapsedTimeExcludingPauses() {
+        invariant(!_lastPauseTime);
+        if (!isStarted()) {
+            return Microseconds{0};
+        }
+
+        return elapsedTimeTotal() - _totalPausedDuration;
+    }
+
+    /**
+     * 'opDescription' must be either an owned BSONObj or guaranteed to outlive the OperationContext
+     * it is associated with.
+     */
+    void setOpDescription_inlock(const BSONObj& opDescription) {
+        _opDescription = opDescription;
+    }
+
+    /**
+     * Sets the original command object.
+     */
+    void setOriginatingCommand_inlock(const BSONObj& commandObj) {
+        _originatingCommand = commandObj.getOwned();
+    }
+
+    const Command* getCommand() const {
         return _command;
     }
-    void setCommand_inlock(Command* command) {
+    void setCommand_inlock(const Command* command) {
         _command = command;
     }
 
     /**
-     * Appends information about this CurOp to "builder".
+     * Returns whether the current operation is a read, write, or command.
+     */
+    Command::ReadWriteType getReadWriteType() const;
+
+    /**
+     * Appends information about this CurOp to "builder". If "truncateOps" is true, appends a string
+     * summary of any objects which exceed the threshold size. If truncateOps is false, append the
+     * entire object.
      *
      * If called from a thread other than the one executing the operation associated with this
      * CurOp, it is necessary to lock the associated Client object before executing this method.
      */
-    void reportState(BSONObjBuilder* builder);
+    void reportState(BSONObjBuilder* builder, bool truncateOps = false);
 
     /**
      * Sets the message and the progress meter for this CurOp.
@@ -459,17 +541,6 @@ public:
     }
 
     /**
-     * Access to _expectedLatencyMs is not synchronized, so it is illegal for threads other than the
-     * one executing the operation to call getExpectedLatencyMs() and setExpectedLatencyMs().
-     */
-    long long getExpectedLatencyMs() const {
-        return _expectedLatencyMs;
-    }
-    void setExpectedLatencyMs(long long latency) {
-        _expectedLatencyMs = latency;
-    }
-
-    /**
      * this should be used very sparingly
      * generally the Context should set this up
      * but sometimes you want to do it ahead of time
@@ -488,6 +559,10 @@ public:
         _planSummary = std::move(summary);
     }
 
+    const boost::optional<SingleThreadedLockStats> getLockStatsBase() {
+        return _lockStatsBase;
+    }
+
 private:
     class CurOpStack;
 
@@ -497,9 +572,20 @@ private:
 
     CurOpStack* _stack;
     CurOp* _parent{nullptr};
-    Command* _command{nullptr};
+    const Command* _command{nullptr};
+
+    // The time at which this CurOp instance was marked as started.
     long long _start{0};
+
+    // The time at which this CurOp instance was marked as done.
     long long _end{0};
+
+    // The time at which this CurOp instance had its timer paused, or 0 if the timer is not
+    // currently paused.
+    long long _lastPauseTime{0};
+
+    // The cumulative duration for which the timer has been paused.
+    Microseconds _totalPausedDuration{0};
 
     // _networkOp represents the network-level op code: OP_QUERY, OP_GET_MORE, OP_COMMAND, etc.
     NetworkOp _networkOp{opInvalid};  // only set this through setNetworkOp_inlock() to keep synced
@@ -511,69 +597,29 @@ private:
     bool _isCommand{false};
     int _dbprofile{0};  // 0=off, 1=slow, 2=all
     std::string _ns;
-    CachedBSONObj<512> _query;  // CachedBSONObj is thread safe
+    BSONObj _opDescription;
+    BSONObj _originatingCommand;  // Used by getMore to display original command.
     OpDebug _debug;
     std::string _message;
     ProgressMeter _progressMeter;
     int _numYields{0};
 
-    // this is how much "extra" time a query might take
-    // a writebacklisten for example will block for 30s
-    // so this should be 30000 in that case
-    long long _expectedLatencyMs{0};
-
-    // Time limit for this operation.  0 if the operation has no time limit.
-    uint64_t _maxTimeMicros{0u};
-
     std::string _planSummary;
-
-    /** Nested class that implements tracking of a time limit for a CurOp object. */
-    class MaxTimeTracker {
-        MONGO_DISALLOW_COPYING(MaxTimeTracker);
-
-    public:
-        /** Newly-constructed MaxTimeTracker objects have the time limit disabled. */
-        MaxTimeTracker() = default;
-
-        /** Returns whether or not time tracking is enabled. */
-        bool isEnabled() const {
-            return _enabled;
-        }
-
-        /**
-         * Enables time tracking.  The time limit is set to be "durationMicros" microseconds
-         * from "startEpochMicros" (units of microseconds since the epoch).
-         *
-         * "durationMicros" must be nonzero.
-         */
-        void setTimeLimit(uint64_t startEpochMicros, uint64_t durationMicros);
-
-        /**
-         * Checks whether the time limit has been hit.  Returns false if not, or if time
-         * tracking is disabled.
-         */
-        bool checkTimeLimit();
-
-        /**
-         * Returns the number of microseconds remaining for the time limit, or the special
-         * value 0 if time tracking is disabled.
-         *
-         * Calling this method is more expensive than calling its sibling "checkInterval()",
-         * since an accurate measure of remaining time needs to be calculated.
-         */
-        uint64_t getRemainingMicros() const;
-
-    private:
-        // Whether or not time tracking is enabled for this operation.
-        bool _enabled{false};
-
-        // Point in time at which the time limit is hit.  Units of microseconds since the
-        // epoch.
-        uint64_t _targetEpochMicros{0};
-
-        // Approximate point in time at which the time limit is hit.   Units of milliseconds
-        // since the server process was started.
-        int64_t _approxTargetServerMillis{0};
-    } _maxTimeTracker;
+    boost::optional<SingleThreadedLockStats>
+        _lockStatsBase;  // This is the snapshot of lock stats taken when curOp is constructed.
 };
-}
+
+/**
+ * Upconverts a legacy query object such that it matches the format of the find command.
+ */
+BSONObj upconvertQueryEntry(const BSONObj& query,
+                            const NamespaceString& nss,
+                            int ntoreturn,
+                            int ntoskip);
+
+/**
+ * Generates a getMore command object from the specified namespace, cursor ID and batchsize.
+ */
+BSONObj upconvertGetMoreEntry(const NamespaceString& nss, CursorId cursorId, int ntoreturn);
+
+}  // namespace mongo

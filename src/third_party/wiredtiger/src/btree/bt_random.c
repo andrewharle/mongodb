@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -169,27 +169,27 @@ __wt_row_random_leaf(WT_SESSION_IMPL *session, WT_CURSOR_BTREE *cbt)
  *	Find a random page in a tree for either sampling or eviction.
  */
 int
-__wt_random_descent(WT_SESSION_IMPL *session, WT_REF **refp, bool eviction)
+__wt_random_descent(WT_SESSION_IMPL *session, WT_REF **refp, uint32_t flags)
 {
 	WT_BTREE *btree;
 	WT_DECL_RET;
 	WT_PAGE *page;
 	WT_PAGE_INDEX *pindex;
 	WT_REF *current, *descent;
-	uint32_t flags, i, entries, retry;
+	uint32_t i, entries, retry;
+	bool eviction;
 
 	*refp = NULL;
 
 	btree = S2BT(session);
 	current = NULL;
 	retry = 100;
-
-	/* Eviction should not be tapped to do eviction. */
-	if (eviction)
-		flags = WT_READ_CACHE | WT_READ_NO_EVICT | WT_READ_NO_GEN |
-		    WT_READ_NO_WAIT | WT_READ_NOTFOUND_OK | WT_READ_RESTART_OK;
-	else
-		flags = WT_READ_RESTART_OK;
+	/*
+	 * This function is called by eviction to find a random page in the
+	 * cache. That case is indicated by the WT_READ_CACHE flag. Ordinary
+	 * lookups in a tree will read pages into cache as needed.
+	 */
+	eviction = LF_ISSET(WT_READ_CACHE);
 
 	if (0) {
 restart:	/*
@@ -231,15 +231,19 @@ restart:	/*
 		for (i = 0; i < entries; ++i) {
 			descent =
 			    pindex->index[__wt_random(&session->rnd) % entries];
-			if (descent->state == WT_REF_MEM ||
-			    descent->state == WT_REF_DISK)
+			if (descent->state == WT_REF_DISK ||
+			    descent->state == WT_REF_LIMBO ||
+			    descent->state == WT_REF_LOOKASIDE ||
+			    descent->state == WT_REF_MEM)
 				break;
 		}
 		if (i == entries)
 			for (i = 0; i < entries; ++i) {
 				descent = pindex->index[i];
-				if (descent->state == WT_REF_MEM ||
-				    descent->state == WT_REF_DISK)
+				if (descent->state == WT_REF_DISK ||
+				    descent->state == WT_REF_LIMBO ||
+				    descent->state == WT_REF_LOOKASIDE ||
+				    descent->state == WT_REF_MEM)
 					break;
 			}
 		if (i == entries || descent == NULL) {
@@ -257,8 +261,8 @@ restart:	/*
 		 * On other error, simply return, the swap call ensures we're
 		 * holding nothing on failure.
 		 */
-descend:	if ((ret =
-		    __wt_page_swap(session, current, descent, flags)) == 0) {
+descend:	if ((ret = __wt_page_swap(
+		    session, current, descent, flags)) == 0) {
 			current = descent;
 			continue;
 		}
@@ -298,10 +302,15 @@ __wt_btcur_next_random(WT_CURSOR_BTREE *cbt)
 	WT_UPDATE *upd;
 	wt_off_t size;
 	uint64_t n, skip;
+	uint32_t read_flags;
+	bool valid;
 
 	btree = cbt->btree;
 	cursor = &cbt->iface;
 	session = (WT_SESSION_IMPL *)cbt->iface.session;
+	read_flags = WT_READ_RESTART_OK;
+	if (F_ISSET(cbt, WT_CBT_READ_ONCE))
+		FLD_SET(read_flags, WT_READ_WONT_NEED);
 
 	/*
 	 * Only supports row-store: applications can trivially select a random
@@ -332,7 +341,7 @@ __wt_btcur_next_random(WT_CURSOR_BTREE *cbt)
 	if (cbt->ref == NULL || cbt->next_random_sample_size == 0) {
 		WT_ERR(__cursor_func_init(cbt, true));
 		WT_WITH_PAGE_INDEX(session,
-		    ret = __wt_random_descent(session, &cbt->ref, false));
+		    ret = __wt_random_descent(session, &cbt->ref, read_flags));
 		if (ret == 0)
 			goto random_page_entry;
 
@@ -417,8 +426,9 @@ random_page_entry:
 	 * the next entry, if that doesn't work, move to the previous entry.
 	 */
 	WT_ERR(__wt_row_random_leaf(session, cbt));
-	if (__wt_cursor_valid(cbt, &upd))
-		WT_ERR(__wt_kv_return(session, cbt, upd));
+	WT_ERR(__wt_cursor_valid(cbt, &upd, &valid));
+	if (valid)
+		WT_ERR(__cursor_kv_return(session, cbt, upd));
 	else {
 		if ((ret = __wt_btcur_next(cbt, false)) == WT_NOTFOUND)
 			ret = __wt_btcur_prev(cbt, false);

@@ -1,14 +1,16 @@
 /**
  * This tests that updates to user and role definitions made on one mongos propagate properly
  * to other mongoses.
+ * @tags: [requires_sharding]
  */
 
 var authzErrorCode = 13;
 var hasAuthzError = function(result) {
-    assert(result.hasWriteError());
-    assert.eq(authzErrorCode, result.getWriteError().code);
+    assert(result instanceof WriteCommandError);
+    assert.eq(authzErrorCode, result.code);
 };
 
+// TODO: Remove 'shardAsReplicaSet: false' when SERVER-32672 is fixed.
 var st = new ShardingTest({
     shards: 2,
     config: 3,
@@ -17,7 +19,8 @@ var st = new ShardingTest({
         {setParameter: "userCacheInvalidationIntervalSecs=5"},
         {setParameter: "userCacheInvalidationIntervalSecs=600"}
     ],
-    keyFile: 'jstests/libs/key1'
+    keyFile: 'jstests/libs/key1',
+    other: {shardAsReplicaSet: false}
 });
 
 st.s1.getDB('admin').createUser({user: 'root', pwd: 'pwd', roles: ['root']});
@@ -32,8 +35,8 @@ assert.commandFailed(res, "Setting the invalidation interval to an disallowed va
 res = st.s1.getDB('admin').runCommand({getParameter: 1, userCacheInvalidationIntervalSecs: 1});
 
 assert.eq(5, res.userCacheInvalidationIntervalSecs);
-st.s1.getDB('test').foo.insert({a: 1});  // initial data
-st.s1.getDB('test').bar.insert({a: 1});  // initial data
+assert.writeOK(st.s1.getDB('test').foo.insert({a: 1}));  // initial data
+assert.writeOK(st.s1.getDB('test').bar.insert({a: 1}));  // initial data
 st.s1.getDB('admin').createUser({user: 'admin', pwd: 'pwd', roles: ['userAdminAnyDatabase']});
 st.s1.getDB('admin').logout();
 
@@ -104,17 +107,14 @@ db3.auth('spencer', 'pwd');
     assert.writeOK(db1.foo.update({}, {$inc: {a: 1}}));
     assert.eq(2, db1.foo.findOne().a);
 
-    // s1/db2 should update its cache in 5 seconds.
-    assert.soon(
-        function() {
-            var res = db2.foo.update({}, {$inc: {a: 1}});
-            if (res.hasWriteError()) {
-                return false;
-            }
-            return db2.foo.findOne().a == 3;
-        },
-        "Mongos did not update its user cache after 5 seconds",
-        6 * 1000);  // Give an extra 1 second to avoid races
+    // s1/db2 should update its cache in 10 seconds.
+    assert.soon(function() {
+        var res = db2.foo.update({}, {$inc: {a: 1}});
+        if (res instanceof WriteCommandError) {
+            return false;
+        }
+        return db2.foo.findOne().a == 3;
+    }, "Mongos did not update its user cache after 10 seconds", 10 * 1000);
 
     // We manually invalidate the cache on s2/db3.
     db3.adminCommand("invalidateUserCache");
@@ -132,14 +132,12 @@ db3.auth('spencer', 'pwd');
     // s0/db1 should update its cache instantly
     hasAuthzError(db1.foo.update({}, {$inc: {a: 1}}));
 
-    // s1/db2 should update its cache in 5 seconds.
-    assert.soon(
-        function() {
-            var res = db2.foo.update({}, {$inc: {a: 1}});
-            return res.hasWriteError() && res.getWriteError().code == authzErrorCode;
-        },
-        "Mongos did not update its user cache after 5 seconds",
-        6 * 1000);  // Give an extra 1 second to avoid races
+    jsTest.log("Beginning wait for s1/db2 cache update.");
+    // s1/db2 should update its cache in 10 seconds.
+    assert.soon(function() {
+        var res = db2.foo.update({}, {$inc: {a: 1}});
+        return res instanceof WriteCommandError && res.code == authzErrorCode;
+    }, "Mongos did not update its user cache after 10 seconds", 10 * 1000);
 
     // We manually invalidate the cache on s1/db3.
     db3.adminCommand("invalidateUserCache");
@@ -158,13 +156,10 @@ db3.auth('spencer', 'pwd');
     // s0/db1 should update its cache instantly
     assert.writeOK(db1.foo.update({}, {$inc: {a: 1}}));
 
-    // s1/db2 should update its cache in 5 seconds.
-    assert.soon(
-        function() {
-            return !db2.foo.update({}, {$inc: {a: 1}}).hasWriteError();
-        },
-        "Mongos did not update its user cache after 5 seconds",
-        6 * 1000);  // Give an extra 1 second to avoid races
+    // s1/db2 should update its cache in 10 seconds.
+    assert.soon(function() {
+        return !(db2.foo.update({}, {$inc: {a: 1}}) instanceof WriteCommandError);
+    }, "Mongos did not update its user cache after 10 seconds", 10 * 1000);
 
     // We manually invalidate the cache on s1/db3.
     db3.adminCommand("invalidateUserCache");

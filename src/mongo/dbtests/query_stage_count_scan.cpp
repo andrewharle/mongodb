@@ -1,35 +1,41 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
+
+#include "mongo/platform/basic.h"
 
 #include "mongo/client/dbclientcursor.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/database.h"
+#include "mongo/db/catalog/index_catalog.h"
+#include "mongo/db/client.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/exec/collection_scan.h"
@@ -38,7 +44,6 @@
 #include "mongo/db/exec/working_set.h"
 #include "mongo/db/json.h"
 #include "mongo/db/matcher/expression_parser.h"
-#include "mongo/db/operation_context_impl.h"
 #include "mongo/dbtests/dbtests.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/fail_point_registry.h"
@@ -50,15 +55,15 @@ using std::shared_ptr;
 
 class CountBase {
 public:
-    CountBase() : _client(&_txn) {}
+    CountBase() : _client(&_opCtx) {}
 
     virtual ~CountBase() {
-        OldClientWriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_opCtx, ns());
         _client.dropCollection(ns());
     }
 
     void addIndex(const BSONObj& obj) {
-        ASSERT_OK(dbtests::createIndex(&_txn, ns(), obj));
+        ASSERT_OK(dbtests::createIndex(&_opCtx, ns(), obj));
     }
 
     void insert(const BSONObj& obj) {
@@ -89,8 +94,10 @@ public:
     }
 
     IndexDescriptor* getIndex(Database* db, const BSONObj& obj) {
-        Collection* collection = db->getCollection(ns());
-        return collection->getIndexCatalog()->findIndexByKeyPattern(&_txn, obj);
+        Collection* collection = db->getCollection(&_opCtx, ns());
+        std::vector<IndexDescriptor*> indexes;
+        collection->getIndexCatalog()->findIndexesByKeyPattern(&_opCtx, obj, false, &indexes);
+        return indexes.empty() ? nullptr : indexes[0];
     }
 
     static const char* ns() {
@@ -98,7 +105,8 @@ public:
     }
 
 protected:
-    OperationContextImpl _txn;
+    const ServiceContext::UniqueOperationContext _txnPtr = cc().makeOperationContext();
+    OperationContext& _opCtx = *_txnPtr;
 
 private:
     DBDirectClient _client;
@@ -111,7 +119,7 @@ private:
 class QueryStageCountScanDups : public CountBase {
 public:
     void run() {
-        OldClientWriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_opCtx, ns());
 
         // Insert some docs
         insert(BSON("a" << BSON_ARRAY(5 << 7)));
@@ -130,7 +138,7 @@ public:
         params.endKeyInclusive = true;
 
         WorkingSet ws;
-        CountScan count(&_txn, params, &ws);
+        CountScan count(&_opCtx, params, &ws);
 
         int numCounted = runCount(&count);
         ASSERT_EQUALS(2, numCounted);
@@ -143,7 +151,7 @@ public:
 class QueryStageCountScanInclusiveBounds : public CountBase {
 public:
     void run() {
-        OldClientWriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_opCtx, ns());
 
         // Insert some docs
         for (int i = 0; i < 10; ++i) {
@@ -162,7 +170,7 @@ public:
         params.endKeyInclusive = true;
 
         WorkingSet ws;
-        CountScan count(&_txn, params, &ws);
+        CountScan count(&_opCtx, params, &ws);
 
         int numCounted = runCount(&count);
         ASSERT_EQUALS(5, numCounted);
@@ -175,7 +183,7 @@ public:
 class QueryStageCountScanExclusiveBounds : public CountBase {
 public:
     void run() {
-        OldClientWriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_opCtx, ns());
 
         // Insert some docs
         for (int i = 0; i < 10; ++i) {
@@ -194,7 +202,7 @@ public:
         params.endKeyInclusive = false;
 
         WorkingSet ws;
-        CountScan count(&_txn, params, &ws);
+        CountScan count(&_opCtx, params, &ws);
 
         int numCounted = runCount(&count);
         ASSERT_EQUALS(3, numCounted);
@@ -207,7 +215,7 @@ public:
 class QueryStageCountScanLowerBound : public CountBase {
 public:
     void run() {
-        OldClientWriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_opCtx, ns());
 
         // Insert doc, add index
         insert(BSON("a" << 2));
@@ -222,7 +230,7 @@ public:
         params.endKeyInclusive = false;
 
         WorkingSet ws;
-        CountScan count(&_txn, params, &ws);
+        CountScan count(&_opCtx, params, &ws);
 
         int numCounted = runCount(&count);
         ASSERT_EQUALS(0, numCounted);
@@ -235,7 +243,7 @@ public:
 class QueryStageCountScanNothingInInterval : public CountBase {
 public:
     void run() {
-        OldClientWriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_opCtx, ns());
 
         // Insert documents, add index
         insert(BSON("a" << 2));
@@ -251,7 +259,7 @@ public:
         params.endKeyInclusive = false;
 
         WorkingSet ws;
-        CountScan count(&_txn, params, &ws);
+        CountScan count(&_opCtx, params, &ws);
 
         int numCounted = runCount(&count);
         ASSERT_EQUALS(0, numCounted);
@@ -265,7 +273,7 @@ public:
 class QueryStageCountScanNothingInIntervalFirstMatchTooHigh : public CountBase {
 public:
     void run() {
-        OldClientWriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_opCtx, ns());
 
         // Insert some documents, add index
         insert(BSON("a" << 2));
@@ -281,7 +289,7 @@ public:
         params.endKeyInclusive = true;
 
         WorkingSet ws;
-        CountScan count(&_txn, params, &ws);
+        CountScan count(&_opCtx, params, &ws);
 
         int numCounted = runCount(&count);
         ASSERT_EQUALS(0, numCounted);
@@ -295,7 +303,7 @@ public:
 class QueryStageCountScanNoChangeDuringYield : public CountBase {
 public:
     void run() {
-        OldClientWriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_opCtx, ns());
 
         // Insert documents, add index
         for (int i = 0; i < 10; ++i) {
@@ -312,7 +320,7 @@ public:
         params.endKeyInclusive = true;
 
         WorkingSet ws;
-        CountScan count(&_txn, params, &ws);
+        CountScan count(&_opCtx, params, &ws);
         WorkingSetID wsid;
 
         int numCounted = 0;
@@ -348,7 +356,7 @@ public:
 class QueryStageCountScanDeleteDuringYield : public CountBase {
 public:
     void run() {
-        OldClientWriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_opCtx, ns());
 
         // Insert documents, add index
         for (int i = 0; i < 10; ++i) {
@@ -365,7 +373,7 @@ public:
         params.endKeyInclusive = true;
 
         WorkingSet ws;
-        CountScan count(&_txn, params, &ws);
+        CountScan count(&_opCtx, params, &ws);
         WorkingSetID wsid;
 
         int numCounted = 0;
@@ -404,7 +412,7 @@ public:
 class QueryStageCountScanInsertNewDocsDuringYield : public CountBase {
 public:
     void run() {
-        OldClientWriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_opCtx, ns());
 
         // Insert documents, add index
         for (int i = 0; i < 10; ++i) {
@@ -421,7 +429,7 @@ public:
         params.endKeyInclusive = true;
 
         WorkingSet ws;
-        CountScan count(&_txn, params, &ws);
+        CountScan count(&_opCtx, params, &ws);
         WorkingSetID wsid;
 
         int numCounted = 0;
@@ -463,7 +471,7 @@ public:
 class QueryStageCountScanBecomesMultiKeyDuringYield : public CountBase {
 public:
     void run() {
-        OldClientWriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_opCtx, ns());
 
         // Insert documents, add index
         for (int i = 0; i < 10; ++i) {
@@ -480,7 +488,7 @@ public:
         params.endKeyInclusive = true;
 
         WorkingSet ws;
-        CountScan count(&_txn, params, &ws);
+        CountScan count(&_opCtx, params, &ws);
         WorkingSetID wsid;
 
         int numCounted = 0;
@@ -518,7 +526,7 @@ public:
 class QueryStageCountScanUnusedKeys : public CountBase {
 public:
     void run() {
-        OldClientWriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_opCtx, ns());
 
         // Insert docs, add index
         for (int i = 0; i < 10; ++i) {
@@ -540,7 +548,7 @@ public:
         params.endKeyInclusive = true;
 
         WorkingSet ws;
-        CountScan count(&_txn, params, &ws);
+        CountScan count(&_opCtx, params, &ws);
 
         int numCounted = runCount(&count);
         ASSERT_EQUALS(7, numCounted);
@@ -553,7 +561,7 @@ public:
 class QueryStageCountScanUnusedEndKey : public CountBase {
 public:
     void run() {
-        OldClientWriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_opCtx, ns());
 
         // Insert docs, add index
         for (int i = 0; i < 10; ++i) {
@@ -573,7 +581,7 @@ public:
         params.endKeyInclusive = true;  // yes?
 
         WorkingSet ws;
-        CountScan count(&_txn, params, &ws);
+        CountScan count(&_opCtx, params, &ws);
 
         int numCounted = runCount(&count);
         ASSERT_EQUALS(9, numCounted);
@@ -586,7 +594,7 @@ public:
 class QueryStageCountScanKeyBecomesUnusedDuringYield : public CountBase {
 public:
     void run() {
-        OldClientWriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_opCtx, ns());
 
         // Insert documents, add index
         for (int i = 0; i < 10; ++i) {
@@ -603,7 +611,7 @@ public:
         params.endKeyInclusive = true;
 
         WorkingSet ws;
-        CountScan count(&_txn, params, &ws);
+        CountScan count(&_opCtx, params, &ws);
         WorkingSetID wsid;
 
         int numCounted = 0;

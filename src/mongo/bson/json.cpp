@@ -1,28 +1,31 @@
-/*    Copyright 2009 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kDefault
@@ -76,9 +79,9 @@ enum {
     DATE_RESERVE_SIZE = 64
 };
 
-static const char* LBRACE = "{", * RBRACE = "}", * LBRACKET = "[", * RBRACKET = "]", * LPAREN = "(",
-                   * RPAREN = ")", * COLON = ":", * COMMA = ",", * FORWARDSLASH = "/",
-                   * SINGLEQUOTE = "'", * DOUBLEQUOTE = "\"";
+static const char *LBRACE = "{", *RBRACE = "}", *LBRACKET = "[", *RBRACKET = "]", *LPAREN = "(",
+                  *RPAREN = ")", *COLON = ":", *COMMA = ",", *FORWARDSLASH = "/",
+                  *SINGLEQUOTE = "'", *DOUBLEQUOTE = "\"";
 
 JParse::JParse(StringData str)
     : _buf(str.rawData()), _input(_buf), _input_end(_input + str.size()) {}
@@ -394,8 +397,17 @@ Status JParse::binaryObject(StringData fieldName, BSONObjBuilder& builder) {
             "Argument of $type in $bindata object must be a hex string representation of a single "
             "byte");
     }
+
+    // The fromHex function returns a signed char, but the highest
+    // BinDataType value is 128, which can only be represented as an
+    // unsigned char. If we don't coerce it to an unsigned char before
+    // wrapping it in a BinDataType (currently implicitly a signed
+    // integer), we get undefined behavior.
+    const auto binDataTypeNumeric =
+        static_cast<unsigned char>(uassertStatusOK(fromHex(binDataType)));
+
     builder.appendBinData(
-        fieldName, binData.length(), BinDataType(fromHex(binDataType)), binData.data());
+        fieldName, binData.length(), BinDataType(binDataTypeNumeric), binData.data());
     return Status::OK();
 }
 
@@ -731,7 +743,7 @@ Status JParse::array(StringData fieldName, BSONObjBuilder& builder, bool subObje
  * have the same behavior.  XXX: this may not be desired. */
 Status JParse::constructor(StringData fieldName, BSONObjBuilder& builder) {
     if (readToken("Date")) {
-        date(fieldName, builder);
+        date(fieldName, builder).transitional_ignore();
     } else {
         return parseError("\"new\" keyword not followed by Date constructor");
     }
@@ -1142,8 +1154,8 @@ Status JParse::chars(std::string* result, const char* terminalSet, const char* a
                     if (!isHexString(StringData(q, 4))) {
                         return parseError("Expecting 4 hex digits");
                     }
-                    unsigned char first = fromHex(q);
-                    unsigned char second = fromHex(q += 2);
+                    unsigned char first = uassertStatusOK(fromHex(q));
+                    unsigned char second = uassertStatusOK(fromHex(q += 2));
                     const std::string& utf8str = encodeUTF8(first, second);
                     for (unsigned int i = 0; i < utf8str.size(); i++) {
                         result->push_back(utf8str[i]);
@@ -1272,13 +1284,7 @@ bool JParse::isHexString(StringData str) const {
 
 bool JParse::isBase64String(StringData str) const {
     MONGO_JSON_DEBUG("str: " << str);
-    std::size_t i;
-    for (i = 0; i < str.size(); i++) {
-        if (!match(str[i], base64::chars)) {
-            return false;
-        }
-    }
-    return true;
+    return base64::validate(str);
 }
 
 bool JParse::isArray() {
@@ -1300,13 +1306,13 @@ BSONObj fromjson(const char* jsonString, int* len) {
     } catch (std::exception& e) {
         std::ostringstream message;
         message << "caught exception from within JSON parser: " << e.what();
-        throw MsgAssertionException(17031, message.str());
+        uasserted(17031, message.str());
     }
 
     if (ret != Status::OK()) {
         ostringstream message;
         message << "code " << ret.code() << ": " << ret.codeString() << ": " << ret.reason();
-        throw MsgAssertionException(16619, message.str());
+        uasserted(16619, message.str());
     }
     if (len)
         *len = jparse.offset();

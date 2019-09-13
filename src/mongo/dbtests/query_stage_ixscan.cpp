@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -28,45 +30,49 @@
 
 #include "mongo/platform/basic.h"
 
+#include "mongo/client/dbclientinterface.h"
+#include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/client.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/exec/index_scan.h"
 #include "mongo/db/exec/working_set.h"
+#include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/json.h"
-#include "mongo/db/operation_context_impl.h"
 #include "mongo/dbtests/dbtests.h"
 
 namespace QueryStageIxscan {
+namespace {
+const auto kIndexVersion = IndexDescriptor::IndexVersion::kV2;
+}  // namespace
 
 class IndexScanTest {
 public:
     IndexScanTest()
-        : _txn(),
-          _scopedXact(&_txn, MODE_IX),
-          _dbLock(_txn.lockState(), nsToDatabaseSubstring(ns()), MODE_X),
-          _ctx(&_txn, ns()),
-          _coll(NULL) {}
+        : _dbLock(&_opCtx, nsToDatabaseSubstring(ns()), MODE_X), _ctx(&_opCtx, ns()), _coll(NULL) {}
 
     virtual ~IndexScanTest() {}
 
     virtual void setup() {
-        WriteUnitOfWork wunit(&_txn);
+        WriteUnitOfWork wunit(&_opCtx);
 
-        _ctx.db()->dropCollection(&_txn, ns());
-        _coll = _ctx.db()->createCollection(&_txn, ns());
+        _ctx.db()->dropCollection(&_opCtx, ns()).transitional_ignore();
+        _coll = _ctx.db()->createCollection(&_opCtx, ns());
 
         ASSERT_OK(_coll->getIndexCatalog()->createIndexOnEmptyCollection(
-            &_txn,
+            &_opCtx,
             BSON("ns" << ns() << "key" << BSON("x" << 1) << "name"
-                      << DBClientBase::genIndexName(BSON("x" << 1)))));
+                      << DBClientBase::genIndexName(BSON("x" << 1))
+                      << "v"
+                      << static_cast<int>(kIndexVersion))));
 
         wunit.commit();
     }
 
     void insert(const BSONObj& doc) {
-        WriteUnitOfWork wunit(&_txn);
-        ASSERT_OK(_coll->insertDocument(&_txn, doc, false));
+        WriteUnitOfWork wunit(&_opCtx);
+        OpDebug* const nullOpDebug = nullptr;
+        ASSERT_OK(_coll->insertDocument(&_opCtx, InsertStatement(doc), nullOpDebug, false));
         wunit.commit();
     }
 
@@ -93,21 +99,22 @@ public:
 
     IndexScan* createIndexScanSimpleRange(BSONObj startKey, BSONObj endKey) {
         IndexCatalog* catalog = _coll->getIndexCatalog();
-        IndexDescriptor* descriptor = catalog->findIndexByKeyPattern(&_txn, BSON("x" << 1));
-        invariant(descriptor);
+        std::vector<IndexDescriptor*> indexes;
+        catalog->findIndexesByKeyPattern(&_opCtx, BSON("x" << 1), false, &indexes);
+        ASSERT_EQ(indexes.size(), 1U);
 
         // We are not testing indexing here so use maximal bounds
         IndexScanParams params;
-        params.descriptor = descriptor;
+        params.descriptor = indexes[0];
         params.bounds.isSimpleRange = true;
         params.bounds.startKey = startKey;
         params.bounds.endKey = endKey;
-        params.bounds.endKeyInclusive = true;
+        params.bounds.boundInclusion = BoundInclusion::kIncludeBothStartAndEndKeys;
         params.direction = 1;
 
         // This child stage gets owned and freed by the caller.
         MatchExpression* filter = NULL;
-        return new IndexScan(&_txn, params, &_ws, filter);
+        return new IndexScan(&_opCtx, params, &_ws, filter);
     }
 
     IndexScan* createIndexScan(BSONObj startKey,
@@ -116,11 +123,12 @@ public:
                                bool endInclusive,
                                int direction = 1) {
         IndexCatalog* catalog = _coll->getIndexCatalog();
-        IndexDescriptor* descriptor = catalog->findIndexByKeyPattern(&_txn, BSON("x" << 1));
-        invariant(descriptor);
+        std::vector<IndexDescriptor*> indexes;
+        catalog->findIndexesByKeyPattern(&_opCtx, BSON("x" << 1), false, &indexes);
+        ASSERT_EQ(indexes.size(), 1U);
 
         IndexScanParams params;
-        params.descriptor = descriptor;
+        params.descriptor = indexes[0];
         params.direction = direction;
 
         OrderedIntervalList oil("x");
@@ -131,7 +139,7 @@ public:
         params.bounds.fields.push_back(oil);
 
         MatchExpression* filter = NULL;
-        return new IndexScan(&_txn, params, &_ws, filter);
+        return new IndexScan(&_opCtx, params, &_ws, filter);
     }
 
     static const char* ns() {
@@ -139,9 +147,9 @@ public:
     }
 
 protected:
-    OperationContextImpl _txn;
+    const ServiceContext::UniqueOperationContext _opCtxPtr = cc().makeOperationContext();
+    OperationContext& _opCtx = *_opCtxPtr;
 
-    ScopedTransaction _scopedXact;
     Lock::DBLock _dbLock;
     OldClientContext _ctx;
     Collection* _coll;
@@ -166,7 +174,7 @@ public:
             static_cast<const IndexScanStats*>(ixscan->getSpecificStats());
         ASSERT(stats);
         ASSERT_TRUE(stats->isMultiKey);
-        ASSERT_EQUALS(stats->keyPattern, BSON("x" << 1));
+        ASSERT_BSONOBJ_EQ(stats->keyPattern, BSON("x" << 1));
     }
 };
 
@@ -185,11 +193,11 @@ public:
 
         // Expect to get key {'': 5} and then key {'': 6}.
         WorkingSetMember* member = getNext(ixscan.get());
-        ASSERT_EQ(WorkingSetMember::LOC_AND_IDX, member->getState());
-        ASSERT_EQ(member->keyData[0].keyData, BSON("" << 5));
+        ASSERT_EQ(WorkingSetMember::RID_AND_IDX, member->getState());
+        ASSERT_BSONOBJ_EQ(member->keyData[0].keyData, BSON("" << 5));
         member = getNext(ixscan.get());
-        ASSERT_EQ(WorkingSetMember::LOC_AND_IDX, member->getState());
-        ASSERT_EQ(member->keyData[0].keyData, BSON("" << 6));
+        ASSERT_EQ(WorkingSetMember::RID_AND_IDX, member->getState());
+        ASSERT_BSONOBJ_EQ(member->keyData[0].keyData, BSON("" << 6));
 
         // Save state and insert a few indexed docs.
         ixscan->saveState();
@@ -198,8 +206,8 @@ public:
         ixscan->restoreState();
 
         member = getNext(ixscan.get());
-        ASSERT_EQ(WorkingSetMember::LOC_AND_IDX, member->getState());
-        ASSERT_EQ(member->keyData[0].keyData, BSON("" << 10));
+        ASSERT_EQ(WorkingSetMember::RID_AND_IDX, member->getState());
+        ASSERT_BSONOBJ_EQ(member->keyData[0].keyData, BSON("" << 10));
 
         WorkingSetID id;
         ASSERT_EQ(PlanStage::IS_EOF, ixscan->work(&id));
@@ -222,8 +230,8 @@ public:
 
         // Expect to get key {'': 6}.
         WorkingSetMember* member = getNext(ixscan.get());
-        ASSERT_EQ(WorkingSetMember::LOC_AND_IDX, member->getState());
-        ASSERT_EQ(member->keyData[0].keyData, BSON("" << 6));
+        ASSERT_EQ(WorkingSetMember::RID_AND_IDX, member->getState());
+        ASSERT_BSONOBJ_EQ(member->keyData[0].keyData, BSON("" << 6));
 
         // Save state and insert an indexed doc.
         ixscan->saveState();
@@ -231,8 +239,8 @@ public:
         ixscan->restoreState();
 
         member = getNext(ixscan.get());
-        ASSERT_EQ(WorkingSetMember::LOC_AND_IDX, member->getState());
-        ASSERT_EQ(member->keyData[0].keyData, BSON("" << 7));
+        ASSERT_EQ(WorkingSetMember::RID_AND_IDX, member->getState());
+        ASSERT_BSONOBJ_EQ(member->keyData[0].keyData, BSON("" << 7));
 
         WorkingSetID id;
         ASSERT_EQ(PlanStage::IS_EOF, ixscan->work(&id));
@@ -255,8 +263,8 @@ public:
 
         // Expect to get key {'': 6}.
         WorkingSetMember* member = getNext(ixscan.get());
-        ASSERT_EQ(WorkingSetMember::LOC_AND_IDX, member->getState());
-        ASSERT_EQ(member->keyData[0].keyData, BSON("" << 6));
+        ASSERT_EQ(WorkingSetMember::RID_AND_IDX, member->getState());
+        ASSERT_BSONOBJ_EQ(member->keyData[0].keyData, BSON("" << 6));
 
         // Save state and insert an indexed doc.
         ixscan->saveState();
@@ -285,11 +293,11 @@ public:
 
         // Expect to get key {'': 10} and then {'': 8}.
         WorkingSetMember* member = getNext(ixscan.get());
-        ASSERT_EQ(WorkingSetMember::LOC_AND_IDX, member->getState());
-        ASSERT_EQ(member->keyData[0].keyData, BSON("" << 10));
+        ASSERT_EQ(WorkingSetMember::RID_AND_IDX, member->getState());
+        ASSERT_BSONOBJ_EQ(member->keyData[0].keyData, BSON("" << 10));
         member = getNext(ixscan.get());
-        ASSERT_EQ(WorkingSetMember::LOC_AND_IDX, member->getState());
-        ASSERT_EQ(member->keyData[0].keyData, BSON("" << 8));
+        ASSERT_EQ(WorkingSetMember::RID_AND_IDX, member->getState());
+        ASSERT_BSONOBJ_EQ(member->keyData[0].keyData, BSON("" << 8));
 
         // Save state and insert an indexed doc.
         ixscan->saveState();
@@ -299,8 +307,8 @@ public:
 
         // Ensure that we don't erroneously return {'': 9} or {'':3}.
         member = getNext(ixscan.get());
-        ASSERT_EQ(WorkingSetMember::LOC_AND_IDX, member->getState());
-        ASSERT_EQ(member->keyData[0].keyData, BSON("" << 6));
+        ASSERT_EQ(WorkingSetMember::RID_AND_IDX, member->getState());
+        ASSERT_BSONOBJ_EQ(member->keyData[0].keyData, BSON("" << 6));
 
         WorkingSetID id;
         ASSERT_EQ(PlanStage::IS_EOF, ixscan->work(&id));

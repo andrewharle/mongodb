@@ -1,0 +1,10 @@
+test_kind: benchrun_embedded_test
+
+selector:
+  roots:
+    - benchrun_embedded/testcases/**/aggregation*.json
+
+executor:
+  hooks:
+  - class: CollectEmbeddedResources
+  - class: CombineBenchrunEmbeddedResults

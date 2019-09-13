@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -104,6 +104,13 @@ __curlog_op_read(WT_SESSION_IMPL *session,
 	pp = cl->stepp;
 	end = pp + opsize;
 	switch (optype) {
+	case WT_LOGOP_COL_MODIFY:
+		WT_RET(__wt_logop_col_modify_unpack(session, &pp, end,
+		    fileid, &recno, &value));
+		WT_RET(__wt_buf_set(session, cl->opkey, &recno, sizeof(recno)));
+		WT_RET(__wt_buf_set(session,
+		    cl->opvalue, value.data, value.size));
+		break;
 	case WT_LOGOP_COL_PUT:
 		WT_RET(__wt_logop_col_put_unpack(session, &pp, end,
 		    fileid, &recno, &value));
@@ -116,6 +123,13 @@ __curlog_op_read(WT_SESSION_IMPL *session,
 		    fileid, &recno));
 		WT_RET(__wt_buf_set(session, cl->opkey, &recno, sizeof(recno)));
 		WT_RET(__wt_buf_set(session, cl->opvalue, NULL, 0));
+		break;
+	case WT_LOGOP_ROW_MODIFY:
+		WT_RET(__wt_logop_row_modify_unpack(session, &pp, end,
+		    fileid, &key, &value));
+		WT_RET(__wt_buf_set(session, cl->opkey, key.data, key.size));
+		WT_RET(__wt_buf_set(session,
+		    cl->opvalue, value.data, value.size));
 		break;
 	case WT_LOGOP_ROW_PUT:
 		WT_RET(__wt_logop_row_put_unpack(session, &pp, end,
@@ -278,13 +292,17 @@ static int
 __curlog_reset(WT_CURSOR *cursor)
 {
 	WT_CURSOR_LOG *cl;
+	WT_DECL_RET;
+	WT_SESSION_IMPL *session;
 
+	CURSOR_API_CALL_PREPARE_ALLOWED(cursor, session, reset, NULL);
 	cl = (WT_CURSOR_LOG *)cursor;
 	cl->stepp = cl->stepp_end = NULL;
 	cl->step_count = 0;
 	WT_INIT_LSN(cl->cur_lsn);
 	WT_INIT_LSN(cl->next_lsn);
-	return (0);
+
+err:	API_END_RET(session, ret);
 }
 
 /*
@@ -299,13 +317,15 @@ __curlog_close(WT_CURSOR *cursor)
 	WT_DECL_RET;
 	WT_SESSION_IMPL *session;
 
-	CURSOR_API_CALL(cursor, session, close, NULL);
 	cl = (WT_CURSOR_LOG *)cursor;
-	conn = S2C(session);
+	CURSOR_API_CALL_PREPARE_ALLOWED(cursor, session, close, NULL);
+err:
 
-	WT_ASSERT(session, FLD_ISSET(conn->log_flags, WT_CONN_LOG_ENABLED));
-	if (F_ISSET(cl, WT_CURLOG_ARCHIVE_LOCK))
+	conn = S2C(session);
+	if (F_ISSET(cl, WT_CURLOG_ARCHIVE_LOCK)) {
+		(void)__wt_atomic_sub32(&conn->log_cursors, 1);
 		__wt_readunlock(session, &conn->log->log_archive_lock);
+	}
 
 	__wt_free(session, cl->cur_lsn);
 	__wt_free(session, cl->next_lsn);
@@ -315,9 +335,9 @@ __curlog_close(WT_CURSOR *cursor)
 	__wt_free(session, cl->packed_key);
 	__wt_free(session, cl->packed_value);
 
-	WT_TRET(__wt_cursor_close(cursor));
+	__wt_cursor_close(cursor);
 
-err:	API_END_RET(session, ret);
+	API_END_RET(session, ret);
 }
 
 /*
@@ -342,9 +362,13 @@ __wt_curlog_open(WT_SESSION_IMPL *session,
 	    __curlog_search,			/* search */
 	    __wt_cursor_search_near_notsup,	/* search-near */
 	    __wt_cursor_notsup,			/* insert */
+	    __wt_cursor_modify_notsup,		/* modify */
 	    __wt_cursor_notsup,			/* update */
 	    __wt_cursor_notsup,			/* remove */
+	    __wt_cursor_notsup,			/* reserve */
 	    __wt_cursor_reconfigure_notsup,	/* reconfigure */
+	    __wt_cursor_notsup,			/* cache */
+	    __wt_cursor_reopen_notsup,		/* reopen */
 	    __curlog_close);			/* close */
 	WT_CURSOR *cursor;
 	WT_CURSOR_LOG *cl;
@@ -352,39 +376,40 @@ __wt_curlog_open(WT_SESSION_IMPL *session,
 	WT_LOG *log;
 
 	WT_STATIC_ASSERT(offsetof(WT_CURSOR_LOG, iface) == 0);
-	conn = S2C(session);
-	if (!FLD_ISSET(conn->log_flags, WT_CONN_LOG_ENABLED))
-		WT_RET_MSG(session, EINVAL,
-		    "Cannot open a log cursor without logging enabled");
 
+	conn = S2C(session);
 	log = conn->log;
-	cl = NULL;
+
 	WT_RET(__wt_calloc_one(session, &cl));
-	cursor = &cl->iface;
+	cursor = (WT_CURSOR *)cl;
 	*cursor = iface;
-	cursor->session = &session->iface;
+	cursor->session = (WT_SESSION *)session;
+	cursor->key_format = WT_LOGC_KEY_FORMAT;
+	cursor->value_format = WT_LOGC_VALUE_FORMAT;
+
 	WT_ERR(__wt_calloc_one(session, &cl->cur_lsn));
 	WT_ERR(__wt_calloc_one(session, &cl->next_lsn));
 	WT_ERR(__wt_scr_alloc(session, 0, &cl->logrec));
 	WT_ERR(__wt_scr_alloc(session, 0, &cl->opkey));
 	WT_ERR(__wt_scr_alloc(session, 0, &cl->opvalue));
-	cursor->key_format = WT_LOGC_KEY_FORMAT;
-	cursor->value_format = WT_LOGC_VALUE_FORMAT;
-
 	WT_INIT_LSN(cl->cur_lsn);
 	WT_INIT_LSN(cl->next_lsn);
 
 	WT_ERR(__wt_cursor_init(cursor, uri, NULL, cfg, cursorp));
 
-	/*
-	 * The user may be trying to read a log record they just wrote.
-	 * Log records may be buffered, so force out any now.
-	 */
-	WT_ERR(__wt_log_force_write(session, 1, NULL));
+	if (log != NULL) {
+		/*
+		 * The user may be trying to read a log record they just wrote.
+		 * Log records may be buffered, so force out any now.
+		 */
+		WT_ERR(__wt_log_force_write(session, 1, NULL));
 
-	/* Log cursors block archiving. */
-	__wt_readlock(session, &log->log_archive_lock);
-	F_SET(cl, WT_CURLOG_ARCHIVE_LOCK);
+		/* Log cursors block archiving. */
+		__wt_readlock(session, &log->log_archive_lock);
+		F_SET(cl, WT_CURLOG_ARCHIVE_LOCK);
+		(void)__wt_atomic_add32(&conn->log_cursors, 1);
+
+	}
 
 	if (0) {
 err:		WT_TRET(__curlog_close(cursor));

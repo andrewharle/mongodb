@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -30,11 +32,18 @@
 
 #include <boost/optional.hpp>
 
+#include "mongo/client/read_preference.h"
+#include "mongo/db/auth/user_name.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/db/logical_session_id.h"
+#include "mongo/s/query/cluster_client_cursor_params.h"
+#include "mongo/s/query/cluster_query_result.h"
+#include "mongo/s/query/router_exec_stage.h"
 #include "mongo/util/time_support.h"
 
 namespace mongo {
 
+class OperationContext;
 template <typename T>
 class StatusWith;
 
@@ -57,12 +66,12 @@ public:
      * Returns the next available result document (along with an ok status). May block waiting
      * for results from remote nodes.
      *
-     * If there are no further results, the end of the stream is indicated with boost::none and
-     * an ok status.
+     * If there are no further results, the end of the stream is indicated with an empty
+     * QueryResult and an ok status.
      *
      * A non-ok status is returned in case of any error.
      */
-    virtual StatusWith<boost::optional<BSONObj>> next() = 0;
+    virtual StatusWith<ClusterQueryResult> next(RouterExecStage::ExecContext) = 0;
 
     /**
      * Must be called before destruction to abandon a not-yet-exhausted cursor. If next() has
@@ -70,12 +79,49 @@ public:
      *
      * May block waiting for responses from remote hosts.
      */
-    virtual void kill() = 0;
+    virtual void kill(OperationContext* opCtx) = 0;
 
     /**
-     * Returns whether or not this cursor is tailing a capped collection on a shard.
+     * Sets the operation context for the cursor.
+     */
+    virtual void reattachToOperationContext(OperationContext* opCtx) = 0;
+
+    /**
+     * Detaches the cursor from its current OperationContext. Must be called before the
+     * OperationContext in use is deleted.
+     */
+    virtual void detachFromOperationContext() = 0;
+
+    /**
+     * Return the current context the cursor is attached to, if any.
+     */
+    virtual OperationContext* getCurrentOperationContext() const = 0;
+
+    /**
+     * Returns whether or not this cursor is tailable.
      */
     virtual bool isTailable() const = 0;
+
+    /**
+     * Returns whether or not this cursor is tailable and awaitData.
+     */
+    virtual bool isTailableAndAwaitData() const = 0;
+
+    /**
+     * Returns the original command object which created this cursor.
+     */
+    virtual BSONObj getOriginatingCommand() const = 0;
+
+    /**
+     * Returns a reference to the vector of remote hosts involved in this operation.
+     */
+    virtual std::size_t getNumRemotes() const = 0;
+
+    /**
+     * Returns the current most-recent resume token for this cursor, or an empty object if this is
+     * not a $changeStream cursor.
+     */
+    virtual BSONObj getPostBatchResumeToken() const = 0;
 
     /**
      * Returns the number of result documents returned so far by this cursor via the next() method.
@@ -83,14 +129,15 @@ public:
     virtual long long getNumReturnedSoFar() const = 0;
 
     /**
-     * Stash the BSONObj so that it gets returned from the CCC on a later call to next().
+     * Stash the ClusterQueryResult so that it gets returned from the CCC on a later call to
+     * next().
      *
      * Queued documents are returned in FIFO order. The queued results are exhausted before
      * generating further results from the underlying mongos query stages.
      *
      * 'obj' must be owned BSON.
      */
-    virtual void queueResult(const BSONObj& obj) = 0;
+    virtual void queueResult(const ClusterQueryResult& result) = 0;
 
     /**
      * Returns whether or not all the remote cursors underlying this cursor have been exhausted.
@@ -105,6 +152,49 @@ public:
      * the cursor is not tailable + awaitData).
      */
     virtual Status setAwaitDataTimeout(Milliseconds awaitDataTimeout) = 0;
+
+    /**
+     * Returns the logical session id for this cursor.
+     */
+    virtual boost::optional<LogicalSessionId> getLsid() const = 0;
+
+    /**
+     * Returns the transaction number for this cursor.
+     */
+    virtual boost::optional<TxnNumber> getTxnNumber() const = 0;
+
+    /**
+     * Returns the readPreference for this cursor.
+     */
+    virtual boost::optional<ReadPreferenceSetting> getReadPreference() const = 0;
+
+    //
+    // maxTimeMS support.
+    //
+
+    /**
+     * Returns the amount of time execution time available to this cursor. Only valid at the
+     * beginning of a getMore request, and only really for use by the maxTime tracking code.
+     *
+     * Microseconds::max() == infinity, values less than 1 mean no time left.
+     */
+    Microseconds getLeftoverMaxTimeMicros() const {
+        return _leftoverMaxTimeMicros;
+    }
+
+    /**
+     * Sets the amount of execution time available to this cursor. This is only called when an
+     * operation that uses a cursor is finishing, to update its remaining time.
+     *
+     * Microseconds::max() == infinity, values less than 1 mean no time left.
+     */
+    void setLeftoverMaxTimeMicros(Microseconds leftoverMaxTimeMicros) {
+        _leftoverMaxTimeMicros = leftoverMaxTimeMicros;
+    }
+
+private:
+    // Unused maxTime budget for this cursor.
+    Microseconds _leftoverMaxTimeMicros = Microseconds::max();
 };
 
 }  // namespace mongo

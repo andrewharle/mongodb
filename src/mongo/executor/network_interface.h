@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2014-2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -34,12 +36,18 @@
 #include "mongo/base/disallow_copying.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/stdx/functional.h"
+#include "mongo/transport/baton.h"
+#include "mongo/util/fail_point_service.h"
+#include "mongo/util/future.h"
 
 namespace mongo {
 
 class BSONObjBuilder;
 
 namespace executor {
+
+MONGO_FAIL_POINT_DECLARE(networkInterfaceDiscardCommandsBeforeAcquireConn);
+MONGO_FAIL_POINT_DECLARE(networkInterfaceDiscardCommandsAfterAcquireConn);
 
 /**
  * Interface to networking for use by TaskExecutor implementations.
@@ -86,6 +94,11 @@ public:
     virtual void shutdown() = 0;
 
     /**
+     * Returns true if shutdown has been called, false otherwise.
+     */
+    virtual bool inShutdown() const = 0;
+
+    /**
      * Blocks the current thread (presumably the executor thread) until the network interface
      * knows of work for the executor to perform.
      */
@@ -112,26 +125,63 @@ public:
      */
     virtual std::string getHostName() = 0;
 
+    struct Counters {
+        uint64_t canceled = 0;
+        uint64_t timedOut = 0;
+        uint64_t failed = 0;
+        uint64_t succeeded = 0;
+    };
+    /*
+     * Returns a copy of the operation counters (see struct Counters above). This method should
+     * only be used in tests, and will invariant if getTestCommands() returns false.
+     */
+    virtual Counters getCounters() const = 0;
+
     /**
      * Starts asynchronous execution of the command described by "request".
+     *
+     * The request mutated to append request metadata to be sent in OP_Command messages.
+     *
+     * Returns ErrorCodes::ShutdownInProgress if NetworkInterface::shutdown has already started
+     * and Status::OK() otherwise. If it returns Status::OK(), then the onFinish argument will be
+     * executed by NetworkInterface eventually; otherwise, it will not.
      */
-    virtual void startCommand(const TaskExecutor::CallbackHandle& cbHandle,
-                              const RemoteCommandRequest& request,
-                              const RemoteCommandCompletionFn& onFinish) = 0;
+    virtual Status startCommand(const TaskExecutor::CallbackHandle& cbHandle,
+                                RemoteCommandRequest& request,
+                                const RemoteCommandCompletionFn& onFinish,
+                                const transport::BatonHandle& baton = nullptr) = 0;
+
+    Future<TaskExecutor::ResponseStatus> startCommand(
+        const TaskExecutor::CallbackHandle& cbHandle,
+        RemoteCommandRequest& request,
+        const transport::BatonHandle& baton = nullptr) {
+        auto pf = makePromiseFuture<TaskExecutor::ResponseStatus>();
+
+        auto status =
+            startCommand(cbHandle,
+                         request,
+                         [sp = pf.promise.share()](const TaskExecutor::ResponseStatus& rs) mutable {
+                             sp.emplaceValue(rs);
+                         },
+                         baton);
+
+        return std::move(pf.future);
+    }
 
     /**
      * Requests cancelation of the network activity associated with "cbHandle" if it has not yet
      * completed.
      */
-    virtual void cancelCommand(const TaskExecutor::CallbackHandle& cbHandle) = 0;
-
-    /**
-     * Requests cancelation of incomplete network activity.
-     */
-    virtual void cancelAllCommands() = 0;
+    virtual void cancelCommand(const TaskExecutor::CallbackHandle& cbHandle,
+                               const transport::BatonHandle& baton = nullptr) = 0;
 
     /**
      * Sets an alarm, which schedules "action" to run no sooner than "when".
+     *
+     * Returns ErrorCodes::ShutdownInProgress if NetworkInterface::shutdown has already started
+     * and true otherwise. If it returns Status::OK(), then the action will be executed by
+     * NetworkInterface eventually if no error occurs while waiting for the alarm; otherwise,
+     * it will not.
      *
      * "action" should not do anything that requires a lot of computation, or that might block for a
      * long time, as it may execute in a network thread.
@@ -139,7 +189,9 @@ public:
      * Any callbacks invoked from setAlarm must observe onNetworkThread to
      * return true. See that method for why.
      */
-    virtual void setAlarm(Date_t when, const stdx::function<void()>& action) = 0;
+    virtual Status setAlarm(Date_t when,
+                            const stdx::function<void()>& action,
+                            const transport::BatonHandle& baton = nullptr) = 0;
 
     /**
      * Returns true if called from a thread dedicated to networking. I.e. not a

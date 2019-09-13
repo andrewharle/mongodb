@@ -1,25 +1,27 @@
 // storage_engine.h
 
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -35,6 +37,7 @@
 
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobj.h"
+#include "mongo/bson/timestamp.h"
 #include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
@@ -67,10 +70,11 @@ public:
         virtual ~Factory() {}
 
         /**
-         * Return a new instance of the StorageEngine.  Caller owns the returned pointer.
+         * Return a new instance of the StorageEngine. The lockFile parameter may be null if
+         * params.readOnly is set. Caller owns the returned pointer.
          */
         virtual StorageEngine* create(const StorageGlobalParams& params,
-                                      const StorageEngineLockFile& lockFile) const = 0;
+                                      const StorageEngineLockFile* lockFile) const = 0;
 
         /**
          * Returns the name of the storage engine.
@@ -123,7 +127,23 @@ public:
          * on restart.
          */
         virtual BSONObj createMetadataOptions(const StorageGlobalParams& params) const = 0;
+
+        /**
+         * Returns whether the engine supports read-only mode. If read-only mode is enabled, the
+         * engine may be started on a read-only filesystem (either mounted read-only or with
+         * read-only permissions). If readOnly mode is enabled, it is undefined behavior to call
+         * methods that write data (e.g. insertRecord). This method is provided on the Factory
+         * because it must be called before the storageEngine is instantiated.
+         */
+        virtual bool supportsReadOnly() const {
+            return false;
+        }
     };
+
+    /**
+    * The destructor should only be called if we are tearing down but not exiting the process.
+    */
+    virtual ~StorageEngine() {}
 
     /**
      * Called after the globalStorageEngine pointer has been set up, before any other methods
@@ -131,24 +151,6 @@ public:
      * should be done here rather than in the constructor.
      */
     virtual void finishInit() {}
-
-    /**
-     * Returns whethers the data files are compatible with previous versions of the same major
-     * release.
-     *
-     *   - Status::OK() if there aren't any features unsupported by a previous version of the same
-     *     major release still enabled on some collection or index in the data files.
-     *
-     *   - ErrorCodes::MustUpgrade if a feature that is unsupported by a previous version of the
-     *     same major release is still enabled on some collection or index in the data files and a
-     *     newer version is required to start up and ensure downgrade-compatibility.
-     *
-     * This function should be overridden by a storage engine if additional steps are needed to
-     * ensure downgrade-compatibility.
-     */
-    virtual Status requireDataFileCompatibilityWithPriorRelease(OperationContext* opCtx) {
-        return Status::OK();
-    }
 
     /**
      * Returns a new interface to the storage engine's recovery unit.  The recovery
@@ -184,6 +186,20 @@ public:
     virtual bool supportsDocLocking() const = 0;
 
     /**
+     * Returns whether the storage engine supports locking at a database level.
+     */
+    virtual bool supportsDBLocking() const {
+        return true;
+    }
+
+    /**
+     * Returns whether the storage engine supports capped collections.
+     */
+    virtual bool supportsCappedCollections() const {
+        return true;
+    }
+
+    /**
      * Returns whether the engine supports a journalling concept or not.
      */
     virtual bool isDurable() const = 0;
@@ -201,19 +217,28 @@ public:
     }
 
     /**
+     * Populates and tears down in-memory data structures, respectively. Only required for storage
+     * engines that support recoverToStableTimestamp().
+     *
+     * Must be called with the global lock acquired in exclusive mode.
+     */
+    virtual void loadCatalog(OperationContext* opCtx) {}
+    virtual void closeCatalog(OperationContext* opCtx) {}
+
+    /**
      * Closes all file handles associated with a database.
      */
-    virtual Status closeDatabase(OperationContext* txn, StringData db) = 0;
+    virtual Status closeDatabase(OperationContext* opCtx, StringData db) = 0;
 
     /**
      * Deletes all data and metadata for a database.
      */
-    virtual Status dropDatabase(OperationContext* txn, StringData db) = 0;
+    virtual Status dropDatabase(OperationContext* opCtx, StringData db) = 0;
 
     /**
      * @return number of files flushed
      */
-    virtual int flushAllFiles(bool sync) = 0;
+    virtual int flushAllFiles(OperationContext* opCtx, bool sync) = 0;
 
     /**
      * Transitions the storage engine into backup mode.
@@ -234,7 +259,7 @@ public:
      * retried, returns a non-OK status. This function may throw a WriteConflictException, which
      * should trigger a retry by the caller. All other exceptions should be treated as errors.
      */
-    virtual Status beginBackup(OperationContext* txn) {
+    virtual Status beginBackup(OperationContext* opCtx) {
         return Status(ErrorCodes::CommandNotSupported,
                       "The current storage engine doesn't support backup mode");
     }
@@ -246,7 +271,7 @@ public:
      *
      * Storage engines implementing this feature should fassert when unable to leave backup mode.
      */
-    virtual void endBackup(OperationContext* txn) {
+    virtual void endBackup(OperationContext* opCtx) {
         return;
     }
 
@@ -259,7 +284,7 @@ public:
      *
      * NOTE: MMAPv1 does not support this method and has its own repairDatabase() method.
      */
-    virtual Status repairRecordStore(OperationContext* txn, const std::string& ns) = 0;
+    virtual Status repairRecordStore(OperationContext* opCtx, const std::string& ns) = 0;
 
     /**
      * This method will be called before there is a clean shutdown.  Storage engines should
@@ -286,11 +311,131 @@ public:
      */
     virtual void setJournalListener(JournalListener* jl) = 0;
 
-protected:
     /**
-     * The destructor will never be called. See cleanShutdown instead.
+     * Returns whether the storage engine supports "recover to stable timestamp". Returns true
+     * if the storage engine supports "recover to stable timestamp" but does not currently have
+     * a stable timestamp. In that case StorageEngine::recoverToStableTimestamp() will return
+     * a bad status.
      */
-    virtual ~StorageEngine() {}
+    virtual bool supportsRecoverToStableTimestamp() const {
+        return false;
+    }
+
+    /**
+     * Returns whether the storage engine can provide a recovery timestamp.
+     */
+    virtual bool supportsRecoveryTimestamp() const {
+        return false;
+    }
+
+    /**
+     * Returns true if the storage engine supports the readConcern level "snapshot".
+     */
+    virtual bool supportsReadConcernSnapshot() const {
+        return false;
+    }
+
+    virtual bool supportsReadConcernMajority() const {
+        return false;
+    }
+
+    /**
+     * Recovers the storage engine state to the last stable timestamp. "Stable" in this case
+     * refers to a timestamp that is guaranteed to never be rolled back. The stable timestamp
+     * used should be one provided by StorageEngine::setStableTimestamp().
+     *
+     * The "local" database is exempt and should not roll back any state except for
+     * "local.replset.minvalid" which must roll back to the last stable timestamp.
+     *
+     * If successful, returns the timestamp that the storage engine recovered to.
+     *
+     * fasserts if StorageEngine::supportsRecoverToStableTimestamp() would return
+     * false. Returns a bad status if there is no stable timestamp to recover to.
+     *
+     * It is illegal to call this concurrently with `setStableTimestamp` or
+     * `setInitialDataTimestamp`.
+     */
+    virtual StatusWith<Timestamp> recoverToStableTimestamp(OperationContext* opCtx) {
+        fassertFailed(40547);
+    }
+
+    /**
+     * Returns the stable timestamp that the storage engine recovered to on startup. If the
+     * recovery point was not stable, returns "none".
+     * fasserts if StorageEngine::supportsRecoverToStableTimestamp() would return false.
+     */
+    virtual boost::optional<Timestamp> getRecoveryTimestamp() const {
+        MONGO_UNREACHABLE;
+    }
+
+    /**
+     * Returns a timestamp that is guaranteed to be persisted to disk in a checkpoint. Returns
+     * boost::none if there is no stable checkpoint. This method should return at least the value of
+     * `getRecoveryTimestamp` if the node started from a stable checkpoint. fasserts if
+     * StorageEngine::supportsRecoverToStableTimestamp() would return false.
+     */
+    virtual boost::optional<Timestamp> getLastStableCheckpointTimestamp() const {
+        MONGO_UNREACHABLE;
+    }
+
+    /**
+     * Sets the highest timestamp at which the storage engine is allowed to take a checkpoint.
+     * This timestamp can never decrease, and thus should be a timestamp that can never roll back.
+     */
+    virtual void setStableTimestamp(Timestamp timestamp) {}
+
+    /**
+     * Tells the storage engine the timestamp of the data at startup. This is necessary because
+     * timestamps are not persisted in the storage layer.
+     */
+    virtual void setInitialDataTimestamp(Timestamp timestamp) {}
+
+    /**
+     * Sets the oldest timestamp for which the storage engine must maintain snapshot history
+     * through. Additionally, all future writes must be newer or equal to this value.
+     */
+    virtual void setOldestTimestamp(Timestamp timestampa) {}
+
+    /**
+     *  Notifies the storage engine that a replication batch has completed.
+     *  This means that all the writes associated with the oplog entries in the batch are
+     *  finished and no new writes with timestamps associated with those oplog entries will show
+     *  up in the future.
+     *  This function can be used to ensure oplog visibility rules are not broken, for example.
+     */
+    virtual void replicationBatchIsComplete() const {};
+
+    // (CollectionName, IndexName)
+    typedef std::pair<std::string, std::string> CollectionIndexNamePair;
+
+    /**
+     * Drop abandoned idents. In the successful case, returns a list of collection, index name
+     * pairs to rebuild.
+     */
+    virtual StatusWith<std::vector<CollectionIndexNamePair>> reconcileCatalogAndIdents(
+        OperationContext* opCtx) {
+        return std::vector<CollectionIndexNamePair>();
+    };
+
+    /**
+     * Returns the all committed timestamp. All transactions with timestamps earlier than the
+     * all committed timestamp are committed. Only storage engines that support document level
+     * locking must provide an implementation. Other storage engines may provide a no-op
+     * implementation.
+     */
+    virtual Timestamp getAllCommittedTimestamp() const = 0;
+
+    /**
+     * Returns the oldest read timestamp in use by an open transaction. Storage engines that support
+     * the 'snapshot' ReadConcern must provide an implementation. Other storage engines may provide
+     * a no-op implementation.
+     */
+    virtual Timestamp getOldestOpenReadTimestamp() const = 0;
+
+    /**
+     * Returns the path to the directory which has the data files of database with `dbName`.
+     */
+    virtual std::string getFilesystemPathForDb(const std::string& dbName) const = 0;
 };
 
 }  // namespace mongo

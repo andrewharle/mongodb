@@ -1,32 +1,34 @@
 // jstests.cpp
 //
 
+
 /**
- *    Copyright (C) 2009-2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kDefault
@@ -37,14 +39,18 @@
 #include <limits>
 
 #include "mongo/base/parse_number.h"
+#include "mongo/db/client.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/hasher.h"
 #include "mongo/db/json.h"
-#include "mongo/db/operation_context_impl.h"
 #include "mongo/dbtests/dbtests.h"
 #include "mongo/platform/decimal128.h"
 #include "mongo/scripting/engine.h"
+#include "mongo/shell/shell_utils.h"
 #include "mongo/util/concurrency/thread_name.h"
+#include "mongo/util/future.h"
 #include "mongo/util/log.h"
+#include "mongo/util/time_support.h"
 #include "mongo/util/timer.h"
 
 using std::cout;
@@ -60,7 +66,7 @@ class BuiltinTests {
 public:
     void run() {
         // Run any tests included with the scripting engine
-        globalScriptEngine->runTest();
+        getGlobalScriptEngine()->runTest();
     }
 };
 
@@ -68,7 +74,7 @@ class BasicScope {
 public:
     void run() {
         unique_ptr<Scope> s;
-        s.reset(globalScriptEngine->newScope());
+        s.reset(getGlobalScriptEngine()->newScope());
 
         s->setNumber("x", 5);
         ASSERT(5 == s->getNumber("x"));
@@ -92,7 +98,7 @@ public:
     void run() {
         /* Currently reset does not clear data in v8 or spidermonkey scopes.  See SECURITY-10
         unique_ptr<Scope> s;
-        s.reset( globalScriptEngine->newScope() );
+        s.reset( getGlobalScriptEngine()->newScope() );
 
         s->setBoolean( "x" , true );
         ASSERT( s->getBoolean( "x" ) );
@@ -108,7 +114,7 @@ public:
     void run() {
         // Test falsy javascript values
         unique_ptr<Scope> s;
-        s.reset(globalScriptEngine->newScope());
+        s.reset(getGlobalScriptEngine()->newScope());
 
         ASSERT(!s->getBoolean("notSet"));
 
@@ -130,7 +136,7 @@ public:
 class SimpleFunctions {
 public:
     void run() {
-        unique_ptr<Scope> s(globalScriptEngine->newScope());
+        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
 
         s->invoke("x=5;", 0, 0);
         ASSERT(5 == s->getNumber("x"));
@@ -160,9 +166,8 @@ class LogRecordingScope {
 public:
     LogRecordingScope()
         : _logged(false),
-          _threadName(mongo::getThreadName()),
-          _handle(mongo::logger::globalLogDomain()->attachAppender(
-              mongo::logger::MessageLogDomain::AppenderAutoPtr(new Tee(this)))) {}
+          _threadName(mongo::getThreadName().toString()),
+          _handle(mongo::logger::globalLogDomain()->attachAppender(std::make_unique<Tee>(this))) {}
     ~LogRecordingScope() {
         mongo::logger::globalLogDomain()->detachAppender(_handle);
     }
@@ -196,7 +201,7 @@ private:
 class ExecLogError {
 public:
     void run() {
-        unique_ptr<Scope> scope(globalScriptEngine->newScope());
+        unique_ptr<Scope> scope(getGlobalScriptEngine()->newScope());
 
         // No error is logged when reportError == false.
         ASSERT(!scope->exec("notAFunction()", "foo", false, false, false));
@@ -212,7 +217,7 @@ public:
         // Don't check if we're using SpiderMonkey. Our threading model breaks
         // this test
         // TODO: figure out a way to check for SpiderMonkey
-        auto ivs = globalScriptEngine->getInterpreterVersionString();
+        auto ivs = getGlobalScriptEngine()->getInterpreterVersionString();
         std::string prefix("MozJS");
         if (ivs.compare(0, prefix.length(), prefix) != 0) {
             ASSERT(_logger.logged());
@@ -227,7 +232,7 @@ private:
 class InvokeLogError {
 public:
     void run() {
-        unique_ptr<Scope> scope(globalScriptEngine->newScope());
+        unique_ptr<Scope> scope(getGlobalScriptEngine()->newScope());
 
         // No error is logged for a valid statement.
         ASSERT_EQUALS(0, scope->invoke("validStatement = true", 0, 0));
@@ -243,7 +248,7 @@ public:
         // Don't check if we're using SpiderMonkey. Our threading model breaks
         // this test
         // TODO: figure out a way to check for SpiderMonkey
-        auto ivs = globalScriptEngine->getInterpreterVersionString();
+        auto ivs = getGlobalScriptEngine()->getInterpreterVersionString();
         std::string prefix("MozJS");
         if (ivs.compare(0, prefix.length(), prefix) != 0) {
             ASSERT(_logger.logged());
@@ -257,7 +262,7 @@ private:
 class ObjectMapping {
 public:
     void run() {
-        unique_ptr<Scope> s(globalScriptEngine->newScope());
+        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
 
         BSONObj o = BSON("x" << 17.0 << "y"
                              << "eliot"
@@ -314,7 +319,7 @@ public:
 class ObjectDecoding {
 public:
     void run() {
-        unique_ptr<Scope> s(globalScriptEngine->newScope());
+        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
 
         s->invoke("z = { num : 1 };", 0, 0);
         BSONObj out = s->getObject("z");
@@ -337,7 +342,7 @@ class JSOIDTests {
 public:
     void run() {
 #ifdef MOZJS
-        unique_ptr<Scope> s(globalScriptEngine->newScope());
+        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
 
         s->localConnect("blah");
 
@@ -368,7 +373,7 @@ public:
 class SetImplicit {
 public:
     void run() {
-        unique_ptr<Scope> s(globalScriptEngine->newScope());
+        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
 
         BSONObj o = BSON("foo"
                          << "bar");
@@ -390,22 +395,23 @@ public:
 class ObjectModReadonlyTests {
 public:
     void run() {
-        unique_ptr<Scope> s(globalScriptEngine->newScope());
+        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
 
         BSONObj o = BSON("x" << 17 << "y"
                              << "eliot"
                              << "z"
                              << "sara"
-                             << "zz" << BSONObj());
+                             << "zz"
+                             << BSONObj());
         s->setObject("blah", o, true);
 
         BSONObj out;
 
-        ASSERT_THROWS(s->invoke("blah.y = 'e'", 0, 0), mongo::UserException);
-        ASSERT_THROWS(s->invoke("blah.a = 19;", 0, 0), mongo::UserException);
-        ASSERT_THROWS(s->invoke("blah.zz.a = 19;", 0, 0), mongo::UserException);
-        ASSERT_THROWS(s->invoke("blah.zz = { a : 19 };", 0, 0), mongo::UserException);
-        ASSERT_THROWS(s->invoke("delete blah['x']", 0, 0), mongo::UserException);
+        ASSERT_THROWS(s->invoke("blah.y = 'e'", 0, 0), mongo::AssertionException);
+        ASSERT_THROWS(s->invoke("blah.a = 19;", 0, 0), mongo::AssertionException);
+        ASSERT_THROWS(s->invoke("blah.zz.a = 19;", 0, 0), mongo::AssertionException);
+        ASSERT_THROWS(s->invoke("blah.zz = { a : 19 };", 0, 0), mongo::AssertionException);
+        ASSERT_THROWS(s->invoke("delete blah['x']", 0, 0), mongo::AssertionException);
 
         // read-only object itself can be overwritten
         s->invoke("blah = {}", 0, 0);
@@ -427,7 +433,7 @@ public:
 class OtherJSTypes {
 public:
     void run() {
-        unique_ptr<Scope> s(globalScriptEngine->newScope());
+        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
 
         {
             // date
@@ -524,7 +530,7 @@ public:
 class SpecialDBTypes {
 public:
     void run() {
-        unique_ptr<Scope> s(globalScriptEngine->newScope());
+        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
 
         BSONObjBuilder b;
         b.appendTimestamp("a", 123456789);
@@ -558,7 +564,7 @@ public:
 class TypeConservation {
 public:
     void run() {
-        unique_ptr<Scope> s(globalScriptEngine->newScope());
+        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
 
         //  --  A  --
 
@@ -656,7 +662,7 @@ public:
 class NumberLong {
 public:
     void run() {
-        unique_ptr<Scope> s(globalScriptEngine->newScope());
+        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
         BSONObjBuilder b;
         long long val = (long long)(0xbabadeadbeefbaddULL);
         b.append("a", val);
@@ -698,7 +704,7 @@ public:
         s->setObject("z", BSON("z" << (long long)(4)));
         ASSERT(s->exec("y = {y:z.z.top}", "foo", false, true, false));
         out = s->getObject("y");
-        ASSERT_EQUALS(Undefined, out.firstElement().type());
+        ASSERT_EQUALS(NumberDouble, out.firstElement().type());
 
         ASSERT(s->exec("x = {x:z.z.floatApprox}", "foo", false, true, false));
         out = s->getObject("x");
@@ -715,7 +721,7 @@ public:
 class NumberLong2 {
 public:
     void run() {
-        unique_ptr<Scope> s(globalScriptEngine->newScope());
+        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
 
         BSONObj in;
         {
@@ -735,14 +741,14 @@ public:
 
         ASSERT(s->exec((string) "y = " + outString, "foo2", false, true, false));
         BSONObj out = s->getObject("y");
-        ASSERT_EQUALS(in, out);
+        ASSERT_BSONOBJ_EQ(in, out);
     }
 };
 
 class NumberLongUnderLimit {
 public:
     void run() {
-        unique_ptr<Scope> s(globalScriptEngine->newScope());
+        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
 
         BSONObjBuilder b;
         // limit is 2^53
@@ -788,7 +794,7 @@ public:
 class NumberDecimal {
 public:
     void run() {
-        unique_ptr<Scope> s(globalScriptEngine->newScope());
+        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
         BSONObjBuilder b;
         Decimal128 val = Decimal128("2.010");
         b.append("a", val);
@@ -817,7 +823,7 @@ public:
 class NumberDecimalGetFromScope {
 public:
     void run() {
-        unique_ptr<Scope> s(globalScriptEngine->newScope());
+        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
         ASSERT(s->exec("a = 5;", "a", false, true, false));
         ASSERT_TRUE(Decimal128(5).isEqual(s->getNumberDecimal("a")));
     }
@@ -826,7 +832,7 @@ public:
 class NumberDecimalBigObject {
 public:
     void run() {
-        unique_ptr<Scope> s(globalScriptEngine->newScope());
+        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
 
         BSONObj in;
         {
@@ -846,14 +852,14 @@ public:
 
         ASSERT(s->exec((string) "y = " + outString, "foo2", false, true, false));
         BSONObj out = s->getObject("y");
-        ASSERT_EQUALS(in, out);
+        ASSERT_BSONOBJ_EQ(in, out);
     }
 };
 
 class MaxTimestamp {
 public:
     void run() {
-        unique_ptr<Scope> s(globalScriptEngine->newScope());
+        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
 
         // Timestamp 't' component can exceed max for int32_t.
         BSONObj in;
@@ -882,7 +888,7 @@ public:
     }
 
     void run() {
-        unique_ptr<Scope> s(globalScriptEngine->newScope());
+        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
 
         for (int i = 5; i < 100; i += 10) {
             s->setObject("a", build(i), false);
@@ -900,7 +906,7 @@ public:
 class ExecTimeout {
 public:
     void run() {
-        unique_ptr<Scope> scope(globalScriptEngine->newScope());
+        unique_ptr<Scope> scope(getGlobalScriptEngine()->newScope());
 
         // assert timeout occurred
         ASSERT(!scope->exec("var a = 1; while (true) { ; }", "ExecTimeout", false, true, false, 1));
@@ -913,7 +919,7 @@ public:
 class ExecNoTimeout {
 public:
     void run() {
-        unique_ptr<Scope> scope(globalScriptEngine->newScope());
+        unique_ptr<Scope> scope(getGlobalScriptEngine()->newScope());
 
         // assert no timeout occurred
         ASSERT(scope->exec("var a = function() { return 1; }",
@@ -931,7 +937,7 @@ public:
 class InvokeTimeout {
 public:
     void run() {
-        unique_ptr<Scope> scope(globalScriptEngine->newScope());
+        unique_ptr<Scope> scope(getGlobalScriptEngine()->newScope());
 
         // scope timeout after 500ms
         bool caught = false;
@@ -950,13 +956,61 @@ public:
     }
 };
 
+class SleepInterruption {
+public:
+    void run() {
+        std::shared_ptr<Scope> scope(getGlobalScriptEngine()->newScope());
+
+        auto sleep = makePromiseFuture<void>();
+        auto awakened = makePromiseFuture<void>();
+
+        // Spawn a thread which attempts to sleep indefinitely.
+        stdx::thread([
+            preSleep = std::move(sleep.promise),
+            onAwake = std::move(awakened.promise),
+            scope
+        ]() mutable {
+            preSleep.emplaceValue();
+            onAwake.setWith([&] {
+                scope->exec(
+                    ""
+                    "  try {"
+                    "    sleep(99999999999);"
+                    "  } finally {"
+                    "    throw \"FAILURE\";"
+                    "  }"
+                    "",
+                    "test",
+                    false,
+                    false,
+                    true);
+            });
+        }).detach();
+
+        // Wait until just before the sleep begins.
+        sleep.future.get();
+
+        // Attempt to wait until Javascript enters the sleep.
+        // It's OK if we kill the function prematurely, before it begins sleeping. Either cause of
+        // death will emit an error with the Interrupted code.
+        sleepsecs(1);
+
+        // Send the operation a kill signal.
+        scope->kill();
+
+        // Wait for the error.
+        auto result = awakened.future.getNoThrow();
+        ASSERT_EQ(ErrorCodes::Interrupted, result);
+    }
+};
+
 /**
  * Test invoke() timeout value does not terminate execution (SERVER-8053)
  */
 class InvokeNoTimeout {
 public:
     void run() {
-        unique_ptr<Scope> scope(globalScriptEngine->newScope());
+        unique_ptr<Scope> scope(getGlobalScriptEngine()->newScope());
 
         // invoke completes before timeout
         scope->invokeSafe(
@@ -979,15 +1033,16 @@ public:
         reset();
     }
     void run() {
-        if (!globalScriptEngine->utf8Ok()) {
+        if (!getGlobalScriptEngine()->utf8Ok()) {
             mongo::unittest::log() << "warning: utf8 not supported" << endl;
             return;
         }
         string utf8ObjSpec = "{'_id':'\\u0001\\u007f\\u07ff\\uffff'}";
         BSONObj utf8Obj = fromjson(utf8ObjSpec);
 
-        OperationContextImpl txn;
-        DBDirectClient client(&txn);
+        const ServiceContext::UniqueOperationContext opCtxPtr = cc().makeOperationContext();
+        OperationContext& opCtx = *opCtxPtr;
+        DBDirectClient client(&opCtx);
 
         client.insert(ns(), utf8Obj);
         client.eval("unittest",
@@ -1006,8 +1061,9 @@ private:
     }
 
     void reset() {
-        OperationContextImpl txn;
-        DBDirectClient client(&txn);
+        const ServiceContext::UniqueOperationContext opCtxPtr = cc().makeOperationContext();
+        OperationContext& opCtx = *opCtxPtr;
+        DBDirectClient client(&opCtx);
 
         client.dropCollection(ns());
     }
@@ -1026,11 +1082,12 @@ public:
         reset();
     }
     void run() {
-        if (!globalScriptEngine->utf8Ok())
+        if (!getGlobalScriptEngine()->utf8Ok())
             return;
 
-        OperationContextImpl txn;
-        DBDirectClient client(&txn);
+        const ServiceContext::UniqueOperationContext opCtxPtr = cc().makeOperationContext();
+        OperationContext& opCtx = *opCtxPtr;
+        DBDirectClient client(&opCtx);
 
         client.eval("unittest",
                     "db.jstests.longutf8string.save( {_id:'\\uffff\\uffff\\uffff\\uffff'} )");
@@ -1038,8 +1095,9 @@ public:
 
 private:
     void reset() {
-        OperationContextImpl txn;
-        DBDirectClient client(&txn);
+        const ServiceContext::UniqueOperationContext opCtxPtr = cc().makeOperationContext();
+        OperationContext& opCtx = *opCtxPtr;
+        DBDirectClient client(&opCtx);
 
         client.dropCollection(ns());
     }
@@ -1052,11 +1110,11 @@ private:
 class InvalidUTF8Check {
 public:
     void run() {
-        if (!globalScriptEngine->utf8Ok())
+        if (!getGlobalScriptEngine()->utf8Ok())
             return;
 
         unique_ptr<Scope> s;
-        s.reset(globalScriptEngine->newScope());
+        s.reset(getGlobalScriptEngine()->newScope());
 
         BSONObj b;
         {
@@ -1082,7 +1140,7 @@ public:
 class CodeTests {
 public:
     void run() {
-        unique_ptr<Scope> s(globalScriptEngine->newScope());
+        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
 
         {
             BSONObjBuilder b;
@@ -1114,38 +1172,46 @@ class TestRoundTrip {
 public:
     virtual ~TestRoundTrip() {}
     void run() {
-        // Insert in Javascript -> Find using DBDirectClient
+        {
+            // Insert in Javascript -> Find using DBDirectClient
 
-        // Drop the collection
-        OperationContextImpl txn;
-        DBDirectClient client(&txn);
+            // Drop the collection
+            const ServiceContext::UniqueOperationContext opCtxPtr = cc().makeOperationContext();
+            OperationContext& opCtx = *opCtxPtr;
+            DBDirectClient client(&opCtx);
 
-        client.dropCollection("unittest.testroundtrip");
+            client.dropCollection("unittest.testroundtrip");
 
-        // Insert in Javascript
-        stringstream jsInsert;
-        jsInsert << "db.testroundtrip.insert(" << jsonIn() << ")";
-        ASSERT_TRUE(client.eval("unittest", jsInsert.str()));
+            // Insert in Javascript
+            stringstream jsInsert;
+            jsInsert << "db.testroundtrip.insert(" << jsonIn() << ")";
+            ASSERT_TRUE(client.eval("unittest", jsInsert.str()));
 
-        // Find using DBDirectClient
-        BSONObj excludeIdProjection = BSON("_id" << 0);
-        BSONObj directFind = client.findOne("unittest.testroundtrip", "", &excludeIdProjection);
-        bsonEquals(bson(), directFind);
+            // Find using DBDirectClient
+            BSONObj excludeIdProjection = BSON("_id" << 0);
+            BSONObj directFind = client.findOne("unittest.testroundtrip", "", &excludeIdProjection);
+            bsonEquals(bson(), directFind);
+        }
 
+        {
+            // Insert using DBDirectClient -> Find in Javascript
 
-        // Insert using DBDirectClient -> Find in Javascript
+            const ServiceContext::UniqueOperationContext opCtxPtr = cc().makeOperationContext();
+            OperationContext& opCtx = *opCtxPtr;
+            DBDirectClient client(&opCtx);
 
-        // Drop the collection
-        client.dropCollection("unittest.testroundtrip");
+            // Drop the collection
+            client.dropCollection("unittest.testroundtrip");
 
-        // Insert using DBDirectClient
-        client.insert("unittest.testroundtrip", bson());
+            // Insert using DBDirectClient
+            client.insert("unittest.testroundtrip", bson());
 
-        // Find in Javascript
-        stringstream jsFind;
-        jsFind << "dbref = db.testroundtrip.findOne( { } , { _id : 0 } )\n"
-               << "assert.eq(dbref, " << jsonOut() << ")";
-        ASSERT_TRUE(client.eval("unittest", jsFind.str()));
+            // Find in Javascript
+            stringstream jsFind;
+            jsFind << "dbref = db.testroundtrip.findOne( { } , { _id : 0 } )\n"
+                   << "assert.eq(dbref, " << jsonOut() << ")";
+            ASSERT_TRUE(client.eval("unittest", jsFind.str()));
+        }
     }
 
 protected:
@@ -2086,7 +2152,7 @@ public:
     }
 
     void run() {
-        unique_ptr<Scope> s(globalScriptEngine->newScope());
+        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
 
         const char* foo = "asdas\0asdasd";
         const char* base64 = "YXNkYXMAYXNkYXNk";
@@ -2136,7 +2202,7 @@ public:
 class VarTests {
 public:
     void run() {
-        unique_ptr<Scope> s(globalScriptEngine->newScope());
+        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
 
         ASSERT(s->exec("a = 5;", "a", false, true, false));
         ASSERT_EQUALS(5, s->getNumber("a"));
@@ -2153,7 +2219,7 @@ public:
         BSONObj empty;
 
         unique_ptr<Scope> s;
-        s.reset(globalScriptEngine->newScope());
+        s.reset(getGlobalScriptEngine()->newScope());
 
         ScriptingFunction f = s->createFunction("return this.x + 6;");
 
@@ -2171,13 +2237,13 @@ class ScopeOut {
 public:
     void run() {
         unique_ptr<Scope> s;
-        s.reset(globalScriptEngine->newScope());
+        s.reset(getGlobalScriptEngine()->newScope());
 
         s->invokeSafe("x = 5;", 0, 0);
         {
             BSONObjBuilder b;
             s->append(b, "z", "x");
-            ASSERT_EQUALS(BSON("z" << 5), b.obj());
+            ASSERT_BSONOBJ_EQ(BSON("z" << 5), b.obj());
         }
 
         s->invokeSafe("x = function(){ return 17; }", 0, 0);
@@ -2197,7 +2263,7 @@ class RenameTest {
 public:
     void run() {
         unique_ptr<Scope> s;
-        s.reset(globalScriptEngine->newScope());
+        s.reset(getGlobalScriptEngine()->newScope());
 
         s->setNumber("x", 5);
         ASSERT_EQUALS(5, s->getNumber("x"));
@@ -2224,17 +2290,29 @@ public:
         update.append("_id", "invalidstoredjs1");
         update.appendCode("value",
                           "function () { db.test.find().forEach(function(obj) { continue; }); }");
+        {
+            const ServiceContext::UniqueOperationContext opCtxPtr = cc().makeOperationContext();
+            OperationContext& opCtx = *opCtxPtr;
+            DBDirectClient client(&opCtx);
+            client.update("test.system.js", query.obj(), update.obj(), true /* upsert */);
+        }
 
-        OperationContextImpl txn;
-        DBDirectClient client(&txn);
-        client.update("test.system.js", query.obj(), update.obj(), true /* upsert */);
-
-        unique_ptr<Scope> s(globalScriptEngine->newScope());
-        client.eval("test", "invalidstoredjs1()");
+        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
+        {
+            const ServiceContext::UniqueOperationContext opCtxPtr = cc().makeOperationContext();
+            OperationContext& opCtx = *opCtxPtr;
+            DBDirectClient client(&opCtx);
+            client.eval("test", "invalidstoredjs1()");
+        }
 
         BSONObj info;
         BSONElement ret;
-        ASSERT(client.eval("test", "return 5 + 12", info, ret));
+        {
+            const ServiceContext::UniqueOperationContext opCtxPtr = cc().makeOperationContext();
+            OperationContext& opCtx = *opCtxPtr;
+            DBDirectClient client(&opCtx);
+            ASSERT(client.eval("test", "return 5 + 12", info, ret));
+        }
         ASSERT_EQUALS(17, ret.number());
     }
 };
@@ -2250,7 +2328,7 @@ public:
         uint8_t bits[] = {
             16, 0, 0, 0, 0x01, 'a', '\0', 0x61, 0x79, 0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0,
         };
-        unique_ptr<Scope> s(globalScriptEngine->newScope());
+        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
 
         s->setObject("val", BSONObj(reinterpret_cast<char*>(bits)).getOwned());
 
@@ -2262,7 +2340,7 @@ public:
 class NoReturnSpecified {
 public:
     void run() {
-        unique_ptr<Scope> s(globalScriptEngine->newScope());
+        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
 
         s->invoke("x=5;", 0, 0);
         ASSERT_EQUALS(5, s->getNumber("__returnValue"));
@@ -2316,7 +2394,7 @@ public:
     }
 
     void run() {
-        unique_ptr<Scope> s(globalScriptEngine->newScope());
+        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
 
         s->injectNative("foo", callback, s.get());
         s->invoke("var x = 1; foo();", 0, 0);
@@ -2327,7 +2405,7 @@ public:
 class ErrorCodeFromInvoke {
 public:
     void run() {
-        unique_ptr<Scope> s(globalScriptEngine->newScope());
+        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
 
         {
             bool threwException = false;
@@ -2361,6 +2439,25 @@ public:
     }
 };
 
+class ErrorWithSidecarFromInvoke {
+public:
+    void run() {
+        auto sidecarThrowingFunc = [](const BSONObj& args, void* data) -> BSONObj {
+            uassertStatusOK(Status(ErrorExtraInfoExample(123), "foo"));
+            return {};
+        };
+
+        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
+
+        s->injectNative("foo", sidecarThrowingFunc);
+
+        ASSERT_THROWS_WITH_CHECK(
+            s->invoke("try { foo(); } catch (e) { throw e; } throw new Error(\"bar\");", 0, 0),
+            ExceptionFor<ErrorCodes::ForTestingErrorExtraInfo>,
+            [](const auto& ex) { ASSERT_EQ(ex->data, 123); });
+    }
+};
+
 class RequiresOwnedObjects {
 public:
     void run() {
@@ -2373,14 +2470,14 @@ public:
 
         // Ensure that by default we can bind owned and unowned
         {
-            unique_ptr<Scope> s(globalScriptEngine->newScope());
+            unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
             s->setObject("unowned", unowned, true);
             s->setObject("owned", owned, true);
         }
 
         // After we set the flag, we should only be able to set owned
         {
-            unique_ptr<Scope> s(globalScriptEngine->newScope());
+            unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
             s->requireOwnedObjects();
             s->setObject("owned", owned, true);
 
@@ -2404,12 +2501,92 @@ public:
     }
 };
 
+class ConvertShardKeyToHashed {
+public:
+    void check(shared_ptr<Scope> s, const mongo::BSONObj& o) {
+        s->setObject("o", o, true);
+        s->invoke("return convertShardKeyToHashed(o);", 0, 0);
+        const auto scopeShardKey = s->getNumber("__returnValue");
+
+        // Wrapping to form a proper element
+        const auto wrapO = BSON("" << o);
+        const auto e = wrapO[""];
+        const auto trueShardKey =
+            mongo::BSONElementHasher::hash64(e, mongo::BSONElementHasher::DEFAULT_HASH_SEED);
+
+        ASSERT_EQUALS(scopeShardKey, trueShardKey);
+    }
+
+    void checkWithSeed(shared_ptr<Scope> s, const mongo::BSONObj& o, int seed) {
+        s->setObject("o", o, true);
+        s->setNumber("seed", seed);
+        s->invoke("return convertShardKeyToHashed(o, seed);", 0, 0);
+        const auto scopeShardKey = s->getNumber("__returnValue");
+
+        // Wrapping to form a proper element
+        const auto wrapO = BSON("" << o);
+        const auto e = wrapO[""];
+        const auto trueShardKey = mongo::BSONElementHasher::hash64(e, seed);
+
+        ASSERT_EQUALS(scopeShardKey, trueShardKey);
+    }
+
+    void checkNoArgs(shared_ptr<Scope> s) {
+        s->invoke("return convertShardKeyToHashed();", 0, 0);
+    }
+
+    void checkWithExtraArg(shared_ptr<Scope> s, const mongo::BSONObj& o, int seed) {
+        s->setObject("o", o, true);
+        s->setNumber("seed", seed);
+        s->invoke("return convertShardKeyToHashed(o, seed, 1);", 0, 0);
+    }
+
+    void checkWithBadSeed(shared_ptr<Scope> s, const mongo::BSONObj& o) {
+        s->setObject("o", o, true);
+        s->setString("seed", "sunflower");
+        s->invoke("return convertShardKeyToHashed(o, seed);", 0, 0);
+    }
+
+    void run() {
+        shared_ptr<Scope> s(getGlobalScriptEngine()->newScope());
+        shell_utils::installShellUtils(*s);
+
+        // Check a few elementary objects
+        check(s, BSON("" << 1));
+        check(s, BSON("" << 10.0));
+        check(s,
+              BSON(""
+                   << "Shardy"));
+        check(s, BSON("" << BSON_ARRAY(1 << 2 << 3)));
+        check(s, BSON("" << mongo::jstNULL));
+        check(s, BSON("" << mongo::BSONObj()));
+        check(s,
+              BSON("A" << 1 << "B"
+                       << "Shardy"));
+
+        // Check a few different seeds
+        checkWithSeed(s,
+                      BSON(""
+                           << "Shardy"),
+                      mongo::BSONElementHasher::DEFAULT_HASH_SEED);
+        checkWithSeed(s,
+                      BSON(""
+                           << "Shardy"),
+                      0);
+        checkWithSeed(s,
+                      BSON(""
+                           << "Shardy"),
+                      -1);
+
+        ASSERT_THROWS(checkNoArgs(s), mongo::DBException);
+        ASSERT_THROWS(checkWithExtraArg(s, BSON("" << 10.0), 0), mongo::DBException);
+        ASSERT_THROWS(checkWithBadSeed(s, BSON("" << 1)), mongo::DBException);
+    }
+};
+
 class All : public Suite {
 public:
-    All() : Suite("js") {
-        // Initialize the Javascript interpreter
-        ScriptEngine::setup();
-    }
+    All() : Suite("js") {}
 
     void setupTests() {
         add<BuiltinTests>();
@@ -2422,6 +2599,7 @@ public:
         add<ExecTimeout>();
         add<ExecNoTimeout>();
         add<InvokeTimeout>();
+        add<SleepInterruption>();
         add<InvokeNoTimeout>();
 
         add<ObjectMapping>();
@@ -2435,11 +2613,9 @@ public:
         add<NumberLong>();
         add<NumberLong2>();
 
-        if (Decimal128::enabled) {
-            add<NumberDecimal>();
-            add<NumberDecimalGetFromScope>();
-            add<NumberDecimalBigObject>();
-        }
+        add<NumberDecimal>();
+        add<NumberDecimalGetFromScope>();
+        add<NumberDecimalBigObject>();
 
         add<MaxTimestamp>();
         add<RenameTest>();
@@ -2465,7 +2641,9 @@ public:
 
         add<RecursiveInvoke>();
         add<ErrorCodeFromInvoke>();
+        add<ErrorWithSidecarFromInvoke>();
         add<RequiresOwnedObjects>();
+        add<ConvertShardKeyToHashed>();
 
         add<RoundTripTests::DBRefTest>();
         add<RoundTripTests::DBPointerTest>();
@@ -2514,19 +2692,17 @@ public:
         add<RoundTripTests::NumberInt>();
         add<RoundTripTests::Number>();
 
-        if (Decimal128::enabled) {
-            add<RoundTripTests::NumberDecimal>();
-            add<RoundTripTests::NumberDecimalNegative>();
-            add<RoundTripTests::NumberDecimalMax>();
-            add<RoundTripTests::NumberDecimalMin>();
-            add<RoundTripTests::NumberDecimalPositiveZero>();
-            add<RoundTripTests::NumberDecimalNegativeZero>();
-            add<RoundTripTests::NumberDecimalPositiveNaN>();
-            add<RoundTripTests::NumberDecimalNegativeNaN>();
-            add<RoundTripTests::NumberDecimalPositiveInfinity>();
-            add<RoundTripTests::NumberDecimalNegativeInfinity>();
-            add<RoundTripTests::NumberDecimalPrecision>();
-        }
+        add<RoundTripTests::NumberDecimal>();
+        add<RoundTripTests::NumberDecimalNegative>();
+        add<RoundTripTests::NumberDecimalMax>();
+        add<RoundTripTests::NumberDecimalMin>();
+        add<RoundTripTests::NumberDecimalPositiveZero>();
+        add<RoundTripTests::NumberDecimalNegativeZero>();
+        add<RoundTripTests::NumberDecimalPositiveNaN>();
+        add<RoundTripTests::NumberDecimalNegativeNaN>();
+        add<RoundTripTests::NumberDecimalPositiveInfinity>();
+        add<RoundTripTests::NumberDecimalNegativeInfinity>();
+        add<RoundTripTests::NumberDecimalPrecision>();
 
         add<RoundTripTests::UUID>();
         add<RoundTripTests::HexData>();
@@ -2537,4 +2713,4 @@ public:
 
 SuiteInstance<All> myall;
 
-}  // namespace JavaJSTests
+}  // namespace JSTests

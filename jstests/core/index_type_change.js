@@ -1,3 +1,8 @@
+// Cannot implicitly shard accessed collections because of following errmsg: A single
+// update/delete on a sharded collection must contain an exact match on _id or contain the shard
+// key.
+// @tags: [assumes_unsharded_collection]
+
 /**
  * Tests that replacing a document with an equivalent document with different types for the fields
  * will update the index entries associated with that document.
@@ -29,7 +34,7 @@ load("jstests/libs/analyze_plan.js");  // For 'isIndexOnly'.
 
     // First make sure it's actually using a covered index scan.
     var explain = coll.explain().find({a: 2}, {_id: 0, a: 1});
-    assert(isIndexOnly(explain));
+    assert(isIndexOnly(db, explain));
 
     var updated = coll.findOne({a: 2}, {_id: 0, a: 1});
 

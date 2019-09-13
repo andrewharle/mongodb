@@ -1,32 +1,36 @@
 // ephemeral_for_test_engine.cpp
 
+
 /**
-*    Copyright (C) 2014 MongoDB Inc.
-*
-*    This program is free software: you can redistribute it and/or  modify
-*    it under the terms of the GNU Affero General Public License, version 3,
-*    as published by the Free Software Foundation.
-*
-*    This program is distributed in the hope that it will be useful,
-*    but WITHOUT ANY WARRANTY; without even the implied warranty of
-*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*    GNU Affero General Public License for more details.
-*
-*    You should have received a copy of the GNU Affero General Public License
-*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*
-*    As a special exception, the copyright holders give permission to link the
-*    code of portions of this program with the OpenSSL library under certain
-*    conditions as described in each individual source file and distribute
-*    linked combinations including the program with the OpenSSL library. You
-*    must comply with the GNU Affero General Public License in all respects for
-*    all of the code used other than as permitted herein. If you modify file(s)
-*    with this exception, you may extend this exception to your version of the
-*    file(s), but you are not obligated to do so. If you do not wish to do so,
-*    delete this exception statement from your version. If you delete this
-*    exception statement from all source files in the program, then also delete
-*    it in the license file.
-*/
+ *    Copyright (C) 2018-present MongoDB, Inc.
+ *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
+ *
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
+ */
+
+#include <memory>
 
 #include "mongo/db/storage/ephemeral_for_test/ephemeral_for_test_engine.h"
 
@@ -35,6 +39,7 @@
 #include "mongo/db/storage/ephemeral_for_test/ephemeral_for_test_record_store.h"
 #include "mongo/db/storage/ephemeral_for_test/ephemeral_for_test_recovery_unit.h"
 #include "mongo/db/storage/journal_listener.h"
+#include "mongo/stdx/memory.h"
 
 namespace mongo {
 
@@ -50,30 +55,35 @@ Status EphemeralForTestEngine::createRecordStore(OperationContext* opCtx,
                                                  StringData ns,
                                                  StringData ident,
                                                  const CollectionOptions& options) {
-    // All work done in getRecordStore
+    // Register the ident in the `_dataMap` (for `getAllIdents`). Remainder of work done in
+    // `getRecordStore`.
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
+    _dataMap[ident] = {};
     return Status::OK();
 }
 
-RecordStore* EphemeralForTestEngine::getRecordStore(OperationContext* opCtx,
-                                                    StringData ns,
-                                                    StringData ident,
-                                                    const CollectionOptions& options) {
+std::unique_ptr<RecordStore> EphemeralForTestEngine::getRecordStore(
+    OperationContext* opCtx, StringData ns, StringData ident, const CollectionOptions& options) {
     stdx::lock_guard<stdx::mutex> lk(_mutex);
     if (options.capped) {
-        return new EphemeralForTestRecordStore(ns,
-                                               &_dataMap[ident],
-                                               true,
-                                               options.cappedSize ? options.cappedSize : 4096,
-                                               options.cappedMaxDocs ? options.cappedMaxDocs : -1);
+        return stdx::make_unique<EphemeralForTestRecordStore>(
+            ns,
+            &_dataMap[ident],
+            true,
+            options.cappedSize ? options.cappedSize : 4096,
+            options.cappedMaxDocs ? options.cappedMaxDocs : -1);
     } else {
-        return new EphemeralForTestRecordStore(ns, &_dataMap[ident]);
+        return stdx::make_unique<EphemeralForTestRecordStore>(ns, &_dataMap[ident]);
     }
 }
 
 Status EphemeralForTestEngine::createSortedDataInterface(OperationContext* opCtx,
                                                          StringData ident,
                                                          const IndexDescriptor* desc) {
-    // All work done in getSortedDataInterface
+    // Register the ident in `_dataMap` (for `getAllIdents`). Remainder of work done in
+    // `getSortedDataInterface`.
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
+    _dataMap[ident] = {};
     return Status::OK();
 }
 

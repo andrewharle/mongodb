@@ -1,30 +1,32 @@
+
 /**
-*    Copyright (C) 2012 10gen Inc.
-*
-*    This program is free software: you can redistribute it and/or modify
-*    it under the terms of the GNU Affero General Public License, version 3,
-*    as published by the Free Software Foundation.
-*
-*    This program is distributed in the hope that it will be useful,
-*    but WITHOUT ANY WARRANTY; without even the implied warranty of
-*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*    GNU Affero General Public License for more details.
-*
-*    You should have received a copy of the GNU Affero General Public License
-*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*
-*    As a special exception, the copyright holders give permission to link the
-*    code of portions of this program with the OpenSSL library under certain
-*    conditions as described in each individual source file and distribute
-*    linked combinations including the program with the OpenSSL library. You
-*    must comply with the GNU Affero General Public License in all respects
-*    for all of the code used other than as permitted herein. If you modify
-*    file(s) with this exception, you may extend this exception to your
-*    version of the file(s), but you are not obligated to do so. If you do not
-*    wish to do so, delete this exception statement from your version. If you
-*    delete this exception statement from all source files in the program,
-*    then also delete it in the license file.
-*/
+ *    Copyright (C) 2018-present MongoDB, Inc.
+ *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
+ *
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
+ */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kControl
 
@@ -32,8 +34,13 @@
 
 #include "mongo/platform/basic.h"
 
-#include <ostream>
+#pragma warning(push)
+// C4091: 'typedef ': ignored on left of '' when no variable is declared
+#pragma warning(disable : 4091)
 #include <DbgHelp.h>
+#pragma warning(pop)
+
+#include <ostream>
 
 #include "mongo/config.h"
 #include "mongo/util/assert_util.h"
@@ -83,7 +90,7 @@ void doMinidumpWithException(struct _EXCEPTION_POINTERS* exceptionInfo) {
     if (INVALID_HANDLE_VALUE == hFile) {
         DWORD lasterr = GetLastError();
         log() << "failed to open minidump file " << toUtf8String(dumpName.c_str()) << " : "
-              << errnoWithDescription(lasterr) << std::endl;
+              << errnoWithDescription(lasterr);
         return;
     }
 
@@ -99,7 +106,7 @@ void doMinidumpWithException(struct _EXCEPTION_POINTERS* exceptionInfo) {
         static_cast<MINIDUMP_TYPE>(MiniDumpNormal | MiniDumpWithIndirectlyReferencedMemory |
                                    MiniDumpWithProcessThreadData);
 #endif
-    log() << "writing minidump diagnostic file " << toUtf8String(dumpName.c_str()) << std::endl;
+    log() << "writing minidump diagnostic file " << toUtf8String(dumpName.c_str());
 
     BOOL bstatus = MiniDumpWriteDump(GetCurrentProcess(),
                                      GetCurrentProcessId(),
@@ -110,7 +117,7 @@ void doMinidumpWithException(struct _EXCEPTION_POINTERS* exceptionInfo) {
                                      NULL);
     if (FALSE == bstatus) {
         DWORD lasterr = GetLastError();
-        log() << "failed to create minidump : " << errnoWithDescription(lasterr) << std::endl;
+        log() << "failed to create minidump : " << errnoWithDescription(lasterr);
     }
 
     CloseHandle(hFile);
@@ -130,7 +137,7 @@ LONG WINAPI exceptionFilter(struct _EXCEPTION_POINTERS* excPointers) {
               "0x%p",
               excPointers->ExceptionRecord->ExceptionAddress);
     severe() << "*** unhandled exception " << exceptionString << " at " << addressString
-             << ", terminating" << std::endl;
+             << ", terminating";
     if (excPointers->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
         ULONG acType = excPointers->ExceptionRecord->ExceptionInformation[0];
         const char* acTypeString;
@@ -150,12 +157,12 @@ LONG WINAPI exceptionFilter(struct _EXCEPTION_POINTERS* excPointers) {
         }
         sprintf_s(addressString,
                   sizeof(addressString),
-                  " 0x%p",
+                  " 0x%llx",
                   excPointers->ExceptionRecord->ExceptionInformation[1]);
-        severe() << "*** access violation was a " << acTypeString << addressString << std::endl;
+        severe() << "*** access violation was a " << acTypeString << addressString;
     }
 
-    severe() << "*** stack trace for unhandled exception:" << std::endl;
+    severe() << "*** stack trace for unhandled exception:";
 
     // Create a copy of context record because printWindowsStackTrace will mutate it.
     CONTEXT contextCopy(*(excPointers->ContextRecord));
@@ -165,16 +172,13 @@ LONG WINAPI exceptionFilter(struct _EXCEPTION_POINTERS* excPointers) {
     doMinidumpWithException(excPointers);
 
     // Don't go through normal shutdown procedure. It may make things worse.
-    severe() << "*** immediate exit due to unhandled exception" << std::endl;
-    quickExit(EXIT_ABRUPT);
+    // Do not go through _exit or ExitProcess(), terminate immediately
+    severe() << "*** immediate exit due to unhandled exception";
+    TerminateProcess(GetCurrentProcess(), EXIT_ABRUPT);
 
     // We won't reach here
     return EXCEPTION_EXECUTE_HANDLER;
 }
-}
-
-void doMinidump() {
-    doMinidumpWithException(NULL);
 }
 
 LPTOP_LEVEL_EXCEPTION_FILTER filtLast = 0;

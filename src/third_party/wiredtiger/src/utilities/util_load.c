@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -94,8 +94,8 @@ load_dump(WT_SESSION *session)
 	WT_CURSOR *cursor;
 	WT_DECL_RET;
 	int tret;
-	bool hex;
 	char **list, **tlist, *uri, config[64];
+	bool hex;
 
 	cursor = NULL;
 	list = NULL;		/* -Wuninitialized */
@@ -124,8 +124,10 @@ load_dump(WT_SESSION *session)
 	    "dump=%s%s%s",
 	    hex ? "hex" : "print",
 	    append ? ",append" : "",
-	    no_overwrite ? ",overwrite=false" : "")) != 0)
-		return (util_err(session, ret, NULL));
+	    no_overwrite ? ",overwrite=false" : "")) != 0) {
+		ret = util_err(session, ret, NULL);
+		goto err;
+	}
 	if ((ret = session->open_cursor(
 	    session, uri, NULL, config, &cursor)) != 0) {
 		ret = util_err(session, ret, "%s: session.open_cursor", uri);
@@ -136,7 +138,7 @@ load_dump(WT_SESSION *session)
 	 * Check the append flag (it only applies to objects where the primary
 	 * key is a record number).
 	 */
-	if (append && strcmp(cursor->key_format, "r") != 0) {
+	if (append && !WT_STREQ(cursor->key_format, "r")) {
 		fprintf(stderr,
 		    "%s: %s: -a option illegal unless the primary key is a "
 		    "record number\n",
@@ -235,27 +237,33 @@ config_read(WT_SESSION *session, char ***listp, bool *hexp)
 	memset(&l, 0, sizeof(l));
 
 	/* Header line #1: "WiredTiger Dump" and a WiredTiger version. */
-	if (util_read_line(session, &l, false, &eof))
-		return (1);
+	if ((ret = util_read_line(session, &l, false, &eof)) != 0)
+		goto err;
 	s = "WiredTiger Dump ";
-	if (strncmp(l.mem, s, strlen(s)) != 0)
-		return (format(session));
+	if (strncmp(l.mem, s, strlen(s)) != 0) {
+		ret = format(session);
+		goto err;
+	}
 
 	/* Header line #2: "Format={hex,print}". */
-	if (util_read_line(session, &l, false, &eof))
-		return (1);
+	if ((ret = util_read_line(session, &l, false, &eof)) != 0)
+		goto err;
 	if (strcmp(l.mem, "Format=print") == 0)
 		*hexp = false;
 	else if (strcmp(l.mem, "Format=hex") == 0)
 		*hexp = true;
-	else
-		return (format(session));
+	else {
+		ret = format(session);
+		goto err;
+	}
 
 	/* Header line #3: "Header". */
-	if (util_read_line(session, &l, false, &eof))
-		return (1);
-	if (strcmp(l.mem, "Header") != 0)
-		return (format(session));
+	if ((ret = util_read_line(session, &l, false, &eof)) != 0)
+		goto err;
+	if (strcmp(l.mem, "Header") != 0) {
+		ret = format(session);
+		goto err;
+	}
 
 	/* Now, read in lines until we get to the end of the headers. */
 	for (entry = max_entry = 0, list = NULL;; ++entry) {
@@ -295,6 +303,8 @@ config_read(WT_SESSION *session, char ***listp, bool *hexp)
 		goto err;
 	}
 	*listp = list;
+
+	free(l.mem);
 	return (0);
 
 err:	if (list != NULL) {
@@ -302,6 +312,7 @@ err:	if (list != NULL) {
 			free(*tlist);
 		free(list);
 	}
+	free(l.mem);
 	return (ret);
 }
 
@@ -358,8 +369,8 @@ config_update(WT_SESSION *session, char **list)
 	WT_DECL_RET;
 	size_t cnt;
 	int found;
-	const char *p, **cfg;
 	char **configp, **listp;
+	const char *p, **cfg;
 
 	/*
 	 * If the object has been renamed, replace all of the column group,
@@ -484,7 +495,7 @@ config_rename(WT_SESSION *session, char **urip, const char *name)
 		return (util_err(session, errno, NULL));
 
 	/*
-	 * Find the separating colon characters, but not the trailing one may
+	 * Find the separating colon characters, but note the trailing one may
 	 * not be there.
 	 */
 	if ((p = strchr(*urip, ':')) == NULL) {
@@ -494,8 +505,10 @@ config_rename(WT_SESSION *session, char **urip, const char *name)
 	*p = '\0';
 	p = strchr(p + 1, ':');
 	if ((ret = __wt_snprintf(
-	    buf, len, "%s:%s%s", *urip, name, p == NULL ? "" : p)) != 0)
+	    buf, len, "%s:%s%s", *urip, name, p == NULL ? "" : p)) != 0) {
+		free(buf);
 		return (util_err(session, ret, NULL));
+	}
 	*urip = buf;
 
 	return (0);
@@ -538,20 +551,21 @@ insert(WT_CURSOR *cursor, const char *name)
 		 * and ignore it (a dump with "append" set), or not read it at
 		 * all (flat-text load).
 		 */
-		if (util_read_line(session, &key, true, &eof))
-			return (1);
+		if ((ret = util_read_line(session, &key, true, &eof)) != 0)
+			goto err;
 		if (eof)
 			break;
 		if (!append)
 			cursor->set_key(cursor, key.mem);
 
-		if (util_read_line(session, &value, false, &eof))
-			return (1);
+		if ((ret = util_read_line(session, &value, false, &eof)) != 0)
+			goto err;
 		cursor->set_value(cursor, value.mem);
 
-		if ((ret = cursor->insert(cursor)) != 0)
-			return (
-			    util_err(session, ret, "%s: cursor.insert", name));
+		if ((ret = cursor->insert(cursor)) != 0) {
+			ret = util_err(session, ret, "%s: cursor.insert", name);
+			goto err;
+		}
 
 		/* Report on progress every 100 inserts. */
 		if (verbose && ++insert_count % 100 == 0) {
@@ -563,7 +577,10 @@ insert(WT_CURSOR *cursor, const char *name)
 	if (verbose)
 		printf("\r\t%s: %" PRIu64 "\n", name, insert_count);
 
-	return (0);
+err:	free(key.mem);
+	free(value.mem);
+
+	return (ret);
 }
 
 static int

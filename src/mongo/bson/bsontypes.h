@@ -1,52 +1,63 @@
 // bsontypes.h
 
-/*    Copyright 2009 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
 
+#include <iosfwd>
+
+#include "mongo/config.h"
 #include "mongo/platform/decimal128.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/config.h"
+#include "mongo/util/string_map.h"
 
 namespace mongo {
 
 class BSONArrayBuilder;
 class BSONElement;
+class BSONElementCmpWithoutField;
 class BSONObj;
 class BSONObjBuilder;
 class BSONObjBuilderValueStream;
 class BSONObjIterator;
 class Ordering;
 struct BSONArray;  // empty subclass of BSONObj useful for overloading
-struct BSONElementCmpWithoutField;
 
 extern const BSONObj kMaxBSONKey;
 extern const BSONObj kMinBSONKey;
+
+/**
+    determines BSON types considered valid by validate
+*/
+enum class BSONVersion { kV1_0, kV1_1, kLatest = kV1_1 };
 
 /**
     the complete list of valid BSON types
@@ -96,10 +107,16 @@ enum BSONType {
     /** 128 bit decimal */
     NumberDecimal = 19,
     /** max type that is not MaxKey */
-    JSTypeMax = Decimal128::enabled ? 19 : 18,
+    JSTypeMax = 19,
     /** larger than all other types */
     MaxKey = 127
 };
+
+/**
+ * Maps from the set of type aliases accepted by the $type query operator to the corresponding BSON
+ * types. Excludes "number", since this alias maps to a set of BSON types.
+ */
+extern const StringMap<BSONType> kTypeAliasMap;
 
 /**
  * returns the name of the argument's type
@@ -107,9 +124,32 @@ enum BSONType {
 const char* typeName(BSONType type);
 
 /**
+ * Reverse mapping of typeName(). Throws an exception with error code BadValue when passed in
+ * invalid type name.
+ */
+BSONType typeFromName(StringData name);
+
+/**
+ * Prints the name of the argument's type to the given stream.
+ */
+std::ostream& operator<<(std::ostream& stream, BSONType type);
+
+/**
  * Returns whether or not 'type' can be converted to a valid BSONType.
  */
 bool isValidBSONType(int type);
+
+inline bool isNumericBSONType(BSONType type) {
+    switch (type) {
+        case NumberDouble:
+        case NumberInt:
+        case NumberLong:
+        case NumberDecimal:
+            return true;
+        default:
+            return false;
+    }
+}
 
 /* subtypes of BinData.
    bdtCustom and above are ones that the JS compiler understands, but are
@@ -124,6 +164,11 @@ enum BinDataType {
     MD5Type = 5,
     bdtCustom = 128
 };
+
+/**
+ * Return the name of the BinData Type.
+ */
+const char* typeName(BinDataType type);
 
 /** Returns a number for where a given type falls in the sort order.
  *  Elements with the same return value should be compared for value equality.

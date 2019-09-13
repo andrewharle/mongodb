@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -42,8 +42,8 @@ err:		__wt_free(session, modify);
  */
 int
 __wt_row_modify(WT_SESSION_IMPL *session, WT_CURSOR_BTREE *cbt,
-    WT_ITEM *key, WT_ITEM *value,
-    WT_UPDATE *upd_arg, bool is_remove, bool exclusive)
+    const WT_ITEM *key, const WT_ITEM *value,
+    WT_UPDATE *upd_arg, u_int modify_type, bool exclusive)
 {
 	WT_DECL_RET;
 	WT_INSERT *ins;
@@ -61,9 +61,8 @@ __wt_row_modify(WT_SESSION_IMPL *session, WT_CURSOR_BTREE *cbt,
 	upd = upd_arg;
 	logged = false;
 
-	/* This code expects a remove to have a NULL value. */
-	if (is_remove)
-		value = NULL;
+	/* We're going to modify the page, we should have loaded history. */
+	WT_ASSERT(session, cbt->ref->state != WT_REF_LIMBO);
 
 	/* If we don't yet have a modify structure, we'll need one. */
 	WT_RET(__wt_page_modify_init(session, page));
@@ -95,8 +94,8 @@ __wt_row_modify(WT_SESSION_IMPL *session, WT_CURSOR_BTREE *cbt,
 			    session, old_upd = *upd_entry));
 
 			/* Allocate a WT_UPDATE structure and transaction ID. */
-			WT_ERR(
-			    __wt_update_alloc(session, value, &upd, &upd_size));
+			WT_ERR(__wt_update_alloc(session,
+			    value, &upd, &upd_size, modify_type));
 			WT_ERR(__wt_txn_modify(session, upd));
 			logged = true;
 
@@ -166,8 +165,8 @@ __wt_row_modify(WT_SESSION_IMPL *session, WT_CURSOR_BTREE *cbt,
 		cbt->ins = ins;
 
 		if (upd_arg == NULL) {
-			WT_ERR(
-			    __wt_update_alloc(session, value, &upd, &upd_size));
+			WT_ERR(__wt_update_alloc(session,
+			    value, &upd, &upd_size, modify_type));
 			WT_ERR(__wt_txn_modify(session, upd));
 			logged = true;
 
@@ -206,8 +205,15 @@ __wt_row_modify(WT_SESSION_IMPL *session, WT_CURSOR_BTREE *cbt,
 		    &ins, ins_size, skipdepth, exclusive));
 	}
 
-	if (logged)
+	if (logged && modify_type != WT_UPDATE_RESERVE) {
 		WT_ERR(__wt_txn_log_op(session, cbt));
+		/*
+		 * Set the key in the transaction operation to be used incase
+		 * this transaction is prepared to retrieve the update
+		 * corresponding to this operation.
+		 */
+		WT_ERR(__wt_txn_op_set_key(session, key));
+	}
 
 	if (0) {
 err:		/*
@@ -231,7 +237,7 @@ err:		/*
  */
 int
 __wt_row_insert_alloc(WT_SESSION_IMPL *session,
-    WT_ITEM *key, u_int skipdepth, WT_INSERT **insp, size_t *ins_sizep)
+    const WT_ITEM *key, u_int skipdepth, WT_INSERT **insp, size_t *ins_sizep)
 {
 	WT_INSERT *ins;
 	size_t ins_size;
@@ -259,27 +265,37 @@ __wt_row_insert_alloc(WT_SESSION_IMPL *session,
  *	Allocate a WT_UPDATE structure and associated value and fill it in.
  */
 int
-__wt_update_alloc(
-    WT_SESSION_IMPL *session, WT_ITEM *value, WT_UPDATE **updp, size_t *sizep)
+__wt_update_alloc(WT_SESSION_IMPL *session, const WT_ITEM *value,
+    WT_UPDATE **updp, size_t *sizep, u_int modify_type)
 {
 	WT_UPDATE *upd;
-	size_t size;
 
 	*updp = NULL;
+
+	/*
+	 * The code paths leading here are convoluted: assert we never attempt
+	 * to allocate an update structure if only intending to insert one we
+	 * already have.
+	 */
+	WT_ASSERT(session, modify_type != WT_UPDATE_INVALID);
 
 	/*
 	 * Allocate the WT_UPDATE structure and room for the value, then copy
 	 * the value into place.
 	 */
-	size = value == NULL ? 0 : value->size;
-	WT_RET(__wt_calloc(session, 1, sizeof(WT_UPDATE) + size, &upd));
-	if (value == NULL)
-		WT_UPDATE_DELETED_SET(upd);
+	if (modify_type == WT_UPDATE_BIRTHMARK ||
+	    modify_type == WT_UPDATE_RESERVE ||
+	    modify_type == WT_UPDATE_TOMBSTONE)
+		WT_RET(__wt_calloc(session, 1, WT_UPDATE_SIZE, &upd));
 	else {
-		upd->size = WT_STORE_SIZE(size);
-		if (size != 0)
-			memcpy(WT_UPDATE_DATA(upd), value->data, size);
+		WT_RET(__wt_calloc(
+		    session, 1, WT_UPDATE_SIZE + value->size, &upd));
+		if (value->size != 0) {
+			upd->size = WT_STORE_SIZE(value->size);
+			memcpy(upd->data, value->data, value->size);
+		}
 	}
+	upd->type = (uint8_t)modify_type;
 
 	*updp = upd;
 	*sizep = WT_UPDATE_MEMSIZE(upd);
@@ -294,8 +310,11 @@ WT_UPDATE *
 __wt_update_obsolete_check(
     WT_SESSION_IMPL *session, WT_PAGE *page, WT_UPDATE *upd)
 {
+	WT_TXN_GLOBAL *txn_global;
 	WT_UPDATE *first, *next;
 	u_int count;
+
+	txn_global = &S2C(session)->txn_global;
 
 	/*
 	 * This function identifies obsolete updates, and truncates them from
@@ -304,13 +323,19 @@ __wt_update_obsolete_check(
 	 * freeing the memory.
 	 *
 	 * Walk the list of updates, looking for obsolete updates at the end.
+	 *
+	 * Only updates with globally visible, self-contained data can terminate
+	 * update chains.
 	 */
-	for (first = NULL, count = 0; upd != NULL; upd = upd->next, count++)
-		if (__wt_txn_visible_all(session, upd->txnid)) {
-			if (first == NULL)
-				first = upd;
-		} else if (upd->txnid != WT_TXN_ABORTED)
+	for (first = NULL, count = 0; upd != NULL; upd = upd->next, count++) {
+		if (upd->txnid == WT_TXN_ABORTED)
+			continue;
+		if (!__wt_txn_upd_visible_all(session, upd))
 			first = NULL;
+		else if (first == NULL && (WT_UPDATE_DATA_VALUE(upd) ||
+		    upd->type == WT_UPDATE_BIRTHMARK))
+			first = upd;
+	}
 
 	/*
 	 * We cannot discard this WT_UPDATE structure, we can only discard
@@ -325,32 +350,16 @@ __wt_update_obsolete_check(
 
 	/*
 	 * If the list is long, don't retry checks on this page until the
-	 * transaction state has moved forwards.
+	 * transaction state has moved forwards. This function is used to
+	 * trim update lists independently of the page state, ensure there
+	 * is a modify structure.
 	 */
-	if (count > 20)
-		page->modify->obsolete_check_txn =
-		    S2C(session)->txn_global.last_running;
+	if (count > 20 && page->modify != NULL) {
+		page->modify->obsolete_check_txn = txn_global->last_running;
+		if (txn_global->has_pinned_timestamp)
+			page->modify->obsolete_check_timestamp =
+			    txn_global->pinned_timestamp;
+	}
 
 	return (NULL);
-}
-
-/*
- * __wt_update_obsolete_free --
- *	Free an obsolete update list.
- */
-void
-__wt_update_obsolete_free(
-    WT_SESSION_IMPL *session, WT_PAGE *page, WT_UPDATE *upd)
-{
-	WT_UPDATE *next;
-	size_t size;
-
-	/* Free a WT_UPDATE list. */
-	for (size = 0; upd != NULL; upd = next) {
-		next = upd->next;
-		size += WT_UPDATE_MEMSIZE(upd);
-		__wt_free(session, upd);
-	}
-	if (size != 0)
-		__wt_cache_page_inmem_decr(session, page, size);
 }

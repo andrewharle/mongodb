@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -28,12 +30,11 @@
 
 #include "mongo/platform/basic.h"
 
-#include "mongo/db/repl/replication_executor.h"
 #include "mongo/db/repl/scatter_gather_algorithm.h"
 #include "mongo/db/repl/scatter_gather_runner.h"
-#include "mongo/db/repl/storage_interface_mock.h"
-#include "mongo/executor/network_interface_mock.h"
+#include "mongo/executor/thread_pool_task_executor_test_fixture.h"
 #include "mongo/stdx/functional.h"
+#include "mongo/stdx/memory.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/unittest/unittest.h"
 
@@ -45,6 +46,8 @@ using executor::NetworkInterfaceMock;
 using executor::RemoteCommandRequest;
 using executor::RemoteCommandResponse;
 
+static const int kTotalRequests = 3;
+
 /**
  * Algorithm for testing the ScatterGatherRunner, which will finish running when finish() is
  * called, or upon receiving responses from two nodes. Creates a three requests algorithm
@@ -55,17 +58,17 @@ public:
     ScatterGatherTestAlgorithm(int64_t maxResponses = 2)
         : _done(false), _numResponses(0), _maxResponses(maxResponses) {}
 
-    virtual std::vector<RemoteCommandRequest> getRequests() const {
+    std::vector<RemoteCommandRequest> getRequests() const override {
         std::vector<RemoteCommandRequest> requests;
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < kTotalRequests; i++) {
             requests.push_back(RemoteCommandRequest(
-                HostAndPort("hostname", i), "admin", BSONObj(), Milliseconds(30 * 1000)));
+                HostAndPort("hostname", i), "admin", BSONObj(), nullptr, Milliseconds(30 * 1000)));
         }
         return requests;
     }
 
-    virtual void processResponse(const RemoteCommandRequest& request,
-                                 const ResponseStatus& response) {
+    void processResponse(const RemoteCommandRequest& request,
+                         const RemoteCommandResponse& response) override {
         _numResponses++;
     }
 
@@ -92,47 +95,21 @@ private:
 };
 
 /**
- * ScatterGatherTest base class which sets up the ReplicationExecutor and NetworkInterfaceMock.
+ * ScatterGatherTest base class which sets up the TaskExecutor and NetworkInterfaceMock.
  */
-class ScatterGatherTest : public mongo::unittest::Test {
+class ScatterGatherTest : public executor::ThreadPoolExecutorTest {
 protected:
-    NetworkInterfaceMock* getNet() {
-        return _net;
-    }
-    ReplicationExecutor* getExecutor() {
-        return _executor.get();
-    }
-
     int64_t countLogLinesContaining(const std::string& needle);
-
-private:
-    void setUp();
-    void tearDown();
-
-    // owned by _executor
-    NetworkInterfaceMock* _net;
-    StorageInterfaceMock* _storage;
-    std::unique_ptr<ReplicationExecutor> _executor;
-    std::unique_ptr<stdx::thread> _executorThread;
+    void setUp() {
+        executor::ThreadPoolExecutorTest::setUp();
+        launchExecutorThread();
+    }
 };
-
-void ScatterGatherTest::setUp() {
-    _net = new NetworkInterfaceMock;
-    _storage = new StorageInterfaceMock;
-    _executor.reset(new ReplicationExecutor(_net, _storage, 1 /* prng seed */));
-    _executorThread.reset(new stdx::thread(stdx::bind(&ReplicationExecutor::run, _executor.get())));
-}
-
-void ScatterGatherTest::tearDown() {
-    _executor->shutdown();
-    _executorThread->join();
-}
-
 
 // Used to run a ScatterGatherRunner in a separate thread, to avoid blocking test execution.
 class ScatterGatherRunnerRunner {
 public:
-    ScatterGatherRunnerRunner(ScatterGatherRunner* sgr, ReplicationExecutor* executor)
+    ScatterGatherRunnerRunner(ScatterGatherRunner* sgr, executor::TaskExecutor* executor)
         : _sgr(sgr),
           _executor(executor),
           _result(Status(ErrorCodes::BadValue, "failed to set status")) {}
@@ -144,26 +121,32 @@ public:
     }
 
     void run() {
-        _thread.reset(
-            new stdx::thread(stdx::bind(&ScatterGatherRunnerRunner::_run, this, _executor)));
+        _thread = stdx::make_unique<stdx::thread>([this] { _run(_executor); });
     }
 
 private:
-    void _run(ReplicationExecutor* executor) {
-        _result = _sgr->run(_executor);
+    void _run(executor::TaskExecutor* executor) {
+        _result = _sgr->run();
     }
 
     ScatterGatherRunner* _sgr;
-    ReplicationExecutor* _executor;
+    executor::TaskExecutor* _executor;
     Status _result;
     std::unique_ptr<stdx::thread> _thread;
 };
 
 // Simple onCompletion function which will toggle a bool, so that we can check the logs to
 // ensure the onCompletion function ran when expected.
-void onCompletionTestFunction(bool* ran) {
-    *ran = true;
+executor::TaskExecutor::CallbackFn getOnCompletionTestFunction(bool* ran) {
+    auto cb = [ran](const executor::TaskExecutor::CallbackArgs& cbData) {
+        if (!cbData.status.isOK()) {
+            return;
+        }
+        *ran = true;
+    };
+    return cb;
 }
+
 
 // Confirm that running via start() will finish and run the onComplete function once sufficient
 // responses have been received.
@@ -171,41 +154,40 @@ void onCompletionTestFunction(bool* ran) {
 // scheduled callbacks still exist will not be unsafe (ASAN builder) after the algorithm has
 // completed.
 TEST_F(ScatterGatherTest, DeleteAlgorithmAfterItHasCompleted) {
-    ScatterGatherTestAlgorithm* sga = new ScatterGatherTestAlgorithm();
-    ScatterGatherRunner* sgr = new ScatterGatherRunner(sga);
+    auto sga = std::make_shared<ScatterGatherTestAlgorithm>();
+    ScatterGatherRunner* sgr = new ScatterGatherRunner(sga, &getExecutor());
     bool ranCompletion = false;
-    StatusWith<ReplicationExecutor::EventHandle> status =
-        sgr->start(getExecutor(), stdx::bind(&onCompletionTestFunction, &ranCompletion));
+    StatusWith<executor::TaskExecutor::EventHandle> status = sgr->start();
+    ASSERT_OK(getExecutor()
+                  .onEvent(status.getValue(), getOnCompletionTestFunction(&ranCompletion))
+                  .getStatus());
     ASSERT_OK(status.getStatus());
     ASSERT_FALSE(ranCompletion);
 
     NetworkInterfaceMock* net = getNet();
     net->enterNetwork();
     NetworkInterfaceMock::NetworkOperationIterator noi = net->getNextReadyRequest();
-    net->scheduleResponse(
-        noi,
-        net->now() + Seconds(2),
-        ResponseStatus(RemoteCommandResponse(BSON("ok" << 1), BSONObj(), Milliseconds(10))));
+    net->scheduleResponse(noi,
+                          net->now() + Seconds(2),
+                          (RemoteCommandResponse(BSON("ok" << 1), BSONObj(), Milliseconds(10))));
     ASSERT_FALSE(ranCompletion);
 
     noi = net->getNextReadyRequest();
-    net->scheduleResponse(
-        noi,
-        net->now() + Seconds(2),
-        ResponseStatus(RemoteCommandResponse(BSON("ok" << 1), BSONObj(), Milliseconds(10))));
+    net->scheduleResponse(noi,
+                          net->now() + Seconds(2),
+                          (RemoteCommandResponse(BSON("ok" << 1), BSONObj(), Milliseconds(10))));
     ASSERT_FALSE(ranCompletion);
 
     noi = net->getNextReadyRequest();
-    net->scheduleResponse(
-        noi,
-        net->now() + Seconds(5),
-        ResponseStatus(RemoteCommandResponse(BSON("ok" << 1), BSONObj(), Milliseconds(10))));
+    net->scheduleResponse(noi,
+                          net->now() + Seconds(5),
+                          (RemoteCommandResponse(BSON("ok" << 1), BSONObj(), Milliseconds(10))));
     ASSERT_FALSE(ranCompletion);
 
     net->runUntil(net->now() + Seconds(2));
     ASSERT_TRUE(ranCompletion);
 
-    delete sga;
+    sga.reset();
     delete sgr;
 
     net->runReadyNetworkOperations();
@@ -213,94 +195,175 @@ TEST_F(ScatterGatherTest, DeleteAlgorithmAfterItHasCompleted) {
     net->exitNetwork();
 }
 
-// Confirm that shutting the ReplicationExecutor down before calling run() will cause run()
+TEST_F(ScatterGatherTest, DeleteAlgorithmBeforeItCompletes) {
+    auto sga = std::make_shared<ScatterGatherTestAlgorithm>();
+    ScatterGatherRunner* sgr = new ScatterGatherRunner(sga, &getExecutor());
+    bool ranCompletion = false;
+    StatusWith<executor::TaskExecutor::EventHandle> status = sgr->start();
+    ASSERT_OK(status.getStatus());
+    ASSERT_OK(getExecutor()
+                  .onEvent(status.getValue(), getOnCompletionTestFunction(&ranCompletion))
+                  .getStatus());
+    ASSERT_FALSE(ranCompletion);
+
+    NetworkInterfaceMock* net = getNet();
+    net->enterNetwork();
+    NetworkInterfaceMock::NetworkOperationIterator noi = net->getNextReadyRequest();
+    net->scheduleResponse(
+        noi, net->now(), (RemoteCommandResponse(BSON("ok" << 1), BSONObj(), Milliseconds(10))));
+    ASSERT_FALSE(ranCompletion);
+    // Get and process the response from the first node immediately.
+    net->runReadyNetworkOperations();
+
+    noi = net->getNextReadyRequest();
+    net->scheduleResponse(noi,
+                          net->now() + Seconds(2),
+                          (RemoteCommandResponse(BSON("ok" << 1), BSONObj(), Milliseconds(10))));
+    ASSERT_FALSE(ranCompletion);
+
+    noi = net->getNextReadyRequest();
+    net->scheduleResponse(noi,
+                          net->now() + Seconds(5),
+                          (RemoteCommandResponse(BSON("ok" << 1), BSONObj(), Milliseconds(10))));
+    ASSERT_FALSE(ranCompletion);
+
+    sga.reset();
+    delete sgr;
+
+    net->runUntil(net->now() + Seconds(2));
+    ASSERT_TRUE(ranCompletion);
+
+    net->exitNetwork();
+}
+
+TEST_F(ScatterGatherTest, DeleteAlgorithmAfterCancel) {
+    auto sga = std::make_shared<ScatterGatherTestAlgorithm>();
+    ScatterGatherRunner* sgr = new ScatterGatherRunner(sga, &getExecutor());
+    bool ranCompletion = false;
+    StatusWith<executor::TaskExecutor::EventHandle> status = sgr->start();
+    ASSERT_OK(status.getStatus());
+    ASSERT_OK(getExecutor()
+                  .onEvent(status.getValue(), getOnCompletionTestFunction(&ranCompletion))
+                  .getStatus());
+    ASSERT_FALSE(ranCompletion);
+
+    NetworkInterfaceMock* net = getNet();
+    net->enterNetwork();
+    NetworkInterfaceMock::NetworkOperationIterator noi = net->getNextReadyRequest();
+    net->scheduleResponse(noi,
+                          net->now() + Seconds(2),
+                          (RemoteCommandResponse(BSON("ok" << 1), BSONObj(), Milliseconds(10))));
+    ASSERT_FALSE(ranCompletion);
+
+    // Cancel the runner so following responses won't change the result. All pending requests
+    // are cancelled.
+    sgr->cancel();
+    ASSERT_FALSE(net->hasReadyRequests());
+    // Run the event that gets signaled by cancellation.
+    net->runReadyNetworkOperations();
+    ASSERT_TRUE(ranCompletion);
+
+    sga.reset();
+    delete sgr;
+
+    // It's safe to advance the clock to process the scheduled response.
+    auto now = net->now();
+    ASSERT_EQ(net->runUntil(net->now() + Seconds(2)), now + Seconds(2));
+    net->exitNetwork();
+}
+
+// Confirm that shutting the TaskExecutor down before calling run() will cause run()
 // to return ErrorCodes::ShutdownInProgress.
 TEST_F(ScatterGatherTest, ShutdownExecutorBeforeRun) {
-    ScatterGatherTestAlgorithm sga;
-    ScatterGatherRunner sgr(&sga);
-    getExecutor()->shutdown();
-    sga.finish();
-    Status status = sgr.run(getExecutor());
+    auto sga = std::make_shared<ScatterGatherTestAlgorithm>();
+    ScatterGatherRunner sgr(sga, &getExecutor());
+    shutdownExecutorThread();
+    sga->finish();
+    Status status = sgr.run();
     ASSERT_EQUALS(ErrorCodes::ShutdownInProgress, status);
 }
 
-// Confirm that shutting the ReplicationExecutor down after calling run(), but before run()
+// Confirm that shutting the TaskExecutor down after calling run(), but before run()
 // finishes will cause run() to return Status::OK().
 TEST_F(ScatterGatherTest, ShutdownExecutorAfterRun) {
-    ScatterGatherTestAlgorithm sga;
-    ScatterGatherRunner sgr(&sga);
-    ScatterGatherRunnerRunner sgrr(&sgr, getExecutor());
+    auto sga = std::make_shared<ScatterGatherTestAlgorithm>();
+    ScatterGatherRunner sgr(sga, &getExecutor());
+    ScatterGatherRunnerRunner sgrr(&sgr, &getExecutor());
     sgrr.run();
     // need to wait for the scatter-gather to be scheduled in the executor
     NetworkInterfaceMock* net = getNet();
     net->enterNetwork();
-    NetworkInterfaceMock::NetworkOperationIterator noi = net->getNextReadyRequest();
-    net->blackHole(noi);
+    // Black hole all requests before shutdown, so that scheduleRemoteCommand will succeed.
+    for (int i = 0; i < kTotalRequests; i++) {
+        NetworkInterfaceMock::NetworkOperationIterator noi = net->getNextReadyRequest();
+        net->blackHole(noi);
+    }
     net->exitNetwork();
-    getExecutor()->shutdown();
+    shutdownExecutorThread();
+    joinExecutorThread();
     Status status = sgrr.getResult();
     ASSERT_OK(status);
 }
 
-// Confirm that shutting the ReplicationExecutor down before calling start() will cause start()
+// Confirm that shutting the TaskExecutor down before calling start() will cause start()
 // to return ErrorCodes::ShutdownInProgress and should not run onCompletion().
 TEST_F(ScatterGatherTest, ShutdownExecutorBeforeStart) {
-    ScatterGatherTestAlgorithm sga;
-    ScatterGatherRunner sgr(&sga);
-    getExecutor()->shutdown();
+    auto sga = std::make_shared<ScatterGatherTestAlgorithm>();
+    ScatterGatherRunner sgr(sga, &getExecutor());
+    shutdownExecutorThread();
     bool ranCompletion = false;
-    StatusWith<ReplicationExecutor::EventHandle> status =
-        sgr.start(getExecutor(), stdx::bind(&onCompletionTestFunction, &ranCompletion));
-    sga.finish();
+    StatusWith<executor::TaskExecutor::EventHandle> status = sgr.start();
+    sga->finish();
     ASSERT_FALSE(ranCompletion);
     ASSERT_EQUALS(ErrorCodes::ShutdownInProgress, status.getStatus());
 }
 
-// Confirm that shutting the ReplicationExecutor down after calling start() will cause start()
+// Confirm that shutting the TaskExecutor down after calling start() will cause start()
 // to return Status::OK and should not run onCompletion().
 TEST_F(ScatterGatherTest, ShutdownExecutorAfterStart) {
-    ScatterGatherTestAlgorithm sga;
-    ScatterGatherRunner sgr(&sga);
+    auto sga = std::make_shared<ScatterGatherTestAlgorithm>();
+    ScatterGatherRunner sgr(sga, &getExecutor());
     bool ranCompletion = false;
-    StatusWith<ReplicationExecutor::EventHandle> status =
-        sgr.start(getExecutor(), stdx::bind(&onCompletionTestFunction, &ranCompletion));
-    getExecutor()->shutdown();
-    sga.finish();
+    StatusWith<executor::TaskExecutor::EventHandle> status = sgr.start();
+    ASSERT_OK(getExecutor()
+                  .onEvent(status.getValue(), getOnCompletionTestFunction(&ranCompletion))
+                  .getStatus());
+    shutdownExecutorThread();
+    sga->finish();
     ASSERT_FALSE(ranCompletion);
     ASSERT_OK(status.getStatus());
 }
 
 // Confirm that responses are not processed once sufficient responses have been received.
 TEST_F(ScatterGatherTest, DoNotProcessMoreThanSufficientResponses) {
-    ScatterGatherTestAlgorithm sga;
-    ScatterGatherRunner sgr(&sga);
+    auto sga = std::make_shared<ScatterGatherTestAlgorithm>();
+    ScatterGatherRunner sgr(sga, &getExecutor());
     bool ranCompletion = false;
-    StatusWith<ReplicationExecutor::EventHandle> status =
-        sgr.start(getExecutor(), stdx::bind(&onCompletionTestFunction, &ranCompletion));
+    StatusWith<executor::TaskExecutor::EventHandle> status = sgr.start();
+    ASSERT_OK(getExecutor()
+                  .onEvent(status.getValue(), getOnCompletionTestFunction(&ranCompletion))
+                  .getStatus());
     ASSERT_OK(status.getStatus());
     ASSERT_FALSE(ranCompletion);
 
     NetworkInterfaceMock* net = getNet();
     net->enterNetwork();
     NetworkInterfaceMock::NetworkOperationIterator noi = net->getNextReadyRequest();
-    net->scheduleResponse(
-        noi,
-        net->now() + Seconds(2),
-        ResponseStatus(RemoteCommandResponse(BSON("ok" << 1), BSONObj(), Milliseconds(10))));
+    net->scheduleResponse(noi,
+                          net->now() + Seconds(2),
+                          (RemoteCommandResponse(BSON("ok" << 1), BSONObj(), Milliseconds(10))));
     ASSERT_FALSE(ranCompletion);
 
     noi = net->getNextReadyRequest();
-    net->scheduleResponse(
-        noi,
-        net->now() + Seconds(2),
-        ResponseStatus(RemoteCommandResponse(BSON("ok" << 1), BSONObj(), Milliseconds(10))));
+    net->scheduleResponse(noi,
+                          net->now() + Seconds(2),
+                          (RemoteCommandResponse(BSON("ok" << 1), BSONObj(), Milliseconds(10))));
     ASSERT_FALSE(ranCompletion);
 
     noi = net->getNextReadyRequest();
-    net->scheduleResponse(
-        noi,
-        net->now() + Seconds(5),
-        ResponseStatus(RemoteCommandResponse(BSON("ok" << 1), BSONObj(), Milliseconds(10))));
+    net->scheduleResponse(noi,
+                          net->now() + Seconds(5),
+                          (RemoteCommandResponse(BSON("ok" << 1), BSONObj(), Milliseconds(10))));
     ASSERT_FALSE(ranCompletion);
 
     net->runUntil(net->now() + Seconds(2));
@@ -308,27 +371,72 @@ TEST_F(ScatterGatherTest, DoNotProcessMoreThanSufficientResponses) {
 
     net->runReadyNetworkOperations();
     // the third resposne should not be processed, so the count should not increment
-    ASSERT_EQUALS(2, sga.getResponseCount());
+    ASSERT_EQUALS(2, sga->getResponseCount());
+
+    net->exitNetwork();
+}
+
+// Confirm that scatter-gather runner passes CallbackCanceled error to the algorithm
+// and that the algorithm processes the response correctly.
+TEST_F(ScatterGatherTest, AlgorithmProcessesCallbackCanceledResponse) {
+    auto sga = std::make_shared<ScatterGatherTestAlgorithm>();
+    ScatterGatherRunner sgr(sga, &getExecutor());
+    bool ranCompletion = false;
+    StatusWith<executor::TaskExecutor::EventHandle> status = sgr.start();
+    ASSERT_OK(getExecutor()
+                  .onEvent(status.getValue(), getOnCompletionTestFunction(&ranCompletion))
+                  .getStatus());
+    ASSERT_OK(status.getStatus());
+    ASSERT_FALSE(ranCompletion);
+
+    NetworkInterfaceMock* net = getNet();
+    net->enterNetwork();
+    NetworkInterfaceMock::NetworkOperationIterator noi = net->getNextReadyRequest();
+    net->scheduleResponse(noi,
+                          net->now() + Seconds(2),
+                          (RemoteCommandResponse(BSON("ok" << 1), BSONObj(), Milliseconds(10))));
+    ASSERT_FALSE(ranCompletion);
+
+    noi = net->getNextReadyRequest();
+    net->scheduleResponse(
+        noi,
+        net->now() + Seconds(2),
+        (RemoteCommandResponse(ErrorCodes::CallbackCanceled, "Testing canceled callback")));
+    ASSERT_FALSE(ranCompletion);
+
+    // We don't schedule a response from one node to make sure the response with the
+    // CallbackCanceled error is needed to get the sufficient number of responses.
+    noi = net->getNextReadyRequest();
+    ASSERT_FALSE(ranCompletion);
+
+    net->runUntil(net->now() + Seconds(2));
+    ASSERT_TRUE(ranCompletion);
+
+    net->runReadyNetworkOperations();
+    // The response with the CallbackCanceled error should count as a response to the algorithm.
+    ASSERT_EQUALS(2, sga->getResponseCount());
 
     net->exitNetwork();
 }
 
 // Confirm that starting with sufficient responses received will immediate complete.
 TEST_F(ScatterGatherTest, DoNotCreateCallbacksIfHasSufficientResponsesReturnsTrueImmediately) {
-    ScatterGatherTestAlgorithm sga;
+    auto sga = std::make_shared<ScatterGatherTestAlgorithm>();
     // set hasReceivedSufficientResponses to return true before the run starts
-    sga.finish();
-    ScatterGatherRunner sgr(&sga);
+    sga->finish();
+    ScatterGatherRunner sgr(sga, &getExecutor());
     bool ranCompletion = false;
-    StatusWith<ReplicationExecutor::EventHandle> status =
-        sgr.start(getExecutor(), stdx::bind(&onCompletionTestFunction, &ranCompletion));
+    StatusWith<executor::TaskExecutor::EventHandle> status = sgr.start();
+    ASSERT_OK(getExecutor()
+                  .onEvent(status.getValue(), getOnCompletionTestFunction(&ranCompletion))
+                  .getStatus());
     ASSERT_OK(status.getStatus());
-    ASSERT_TRUE(ranCompletion);
-
+    // Wait until callback finishes.
     NetworkInterfaceMock* net = getNet();
     net->enterNetwork();
-    ASSERT_FALSE(net->hasReadyRequests());
+    net->runReadyNetworkOperations();
     net->exitNetwork();
+    ASSERT_TRUE(ranCompletion);
 }
 
 #if 0
@@ -336,11 +444,11 @@ TEST_F(ScatterGatherTest, DoNotCreateCallbacksIfHasSufficientResponsesReturnsTru
 
     // This test ensures we do not process more responses than we've scheduled callbacks for.
     TEST_F(ScatterGatherTest, NeverEnoughResponses) {
-        ScatterGatherTestAlgorithm sga(5);
-        ScatterGatherRunner sgr(&sga);
+        auto sga = std::make_shared<ScatterGatherTestAlgorithm>(5);
+        ScatterGatherRunner sgr(sga);
         bool ranCompletion = false;
-        StatusWith<ReplicationExecutor::EventHandle> status = sgr.start(getExecutor(),
-                stdx::bind(&onCompletionTestFunction, &ranCompletion));
+        StatusWith<executor::TaskExecutor::EventHandle> status = sgr.start(&getExecutor(),
+                getOnCompletionTestFunction(&ranCompletion));
         ASSERT_OK(status.getStatus());
         ASSERT_FALSE(ranCompletion);
 
@@ -349,7 +457,7 @@ TEST_F(ScatterGatherTest, DoNotCreateCallbacksIfHasSufficientResponsesReturnsTru
         NetworkInterfaceMock::NetworkOperationIterator noi = net->getNextReadyRequest();
         net->scheduleResponse(noi,
                               net->now(),
-                              ResponseStatus(RemoteCommandResponse(
+                              (RemoteCommandResponse(
                                     BSON("ok" << 1),
                                     boost::posix_time::milliseconds(10))));
         net->runReadyNetworkOperations();
@@ -358,7 +466,7 @@ TEST_F(ScatterGatherTest, DoNotCreateCallbacksIfHasSufficientResponsesReturnsTru
         noi = net->getNextReadyRequest();
         net->scheduleResponse(noi,
                               net->now(),
-                              ResponseStatus(RemoteCommandResponse(
+                              (RemoteCommandResponse(
                                     BSON("ok" << 1),
                                     boost::posix_time::milliseconds(10))));
         net->runReadyNetworkOperations();
@@ -367,7 +475,7 @@ TEST_F(ScatterGatherTest, DoNotCreateCallbacksIfHasSufficientResponsesReturnsTru
         noi = net->getNextReadyRequest();
         net->scheduleResponse(noi,
                               net->now(),
-                              ResponseStatus(RemoteCommandResponse(
+                              (RemoteCommandResponse(
                                     BSON("ok" << 1),
                                     boost::posix_time::milliseconds(10))));
         net->runReadyNetworkOperations();
@@ -378,18 +486,16 @@ TEST_F(ScatterGatherTest, DoNotCreateCallbacksIfHasSufficientResponsesReturnsTru
 
 // Confirm that running via run() will finish once sufficient responses have been received.
 TEST_F(ScatterGatherTest, SuccessfulScatterGatherViaRun) {
-    ScatterGatherTestAlgorithm sga;
-    ScatterGatherRunner sgr(&sga);
-    ScatterGatherRunnerRunner sgrr(&sgr, getExecutor());
+    auto sga = std::make_shared<ScatterGatherTestAlgorithm>();
+    ScatterGatherRunner sgr(sga, &getExecutor());
+    ScatterGatherRunnerRunner sgrr(&sgr, &getExecutor());
     sgrr.run();
 
     NetworkInterfaceMock* net = getNet();
     net->enterNetwork();
     NetworkInterfaceMock::NetworkOperationIterator noi = net->getNextReadyRequest();
     net->scheduleResponse(
-        noi,
-        net->now(),
-        ResponseStatus(RemoteCommandResponse(BSON("ok" << 1), BSONObj(), Milliseconds(10))));
+        noi, net->now(), (RemoteCommandResponse(BSON("ok" << 1), BSONObj(), Milliseconds(10))));
     net->runReadyNetworkOperations();
 
     noi = net->getNextReadyRequest();
@@ -398,9 +504,7 @@ TEST_F(ScatterGatherTest, SuccessfulScatterGatherViaRun) {
 
     noi = net->getNextReadyRequest();
     net->scheduleResponse(
-        noi,
-        net->now(),
-        ResponseStatus(RemoteCommandResponse(BSON("ok" << 1), BSONObj(), Milliseconds(10))));
+        noi, net->now(), (RemoteCommandResponse(BSON("ok" << 1), BSONObj(), Milliseconds(10))));
     net->runReadyNetworkOperations();
     net->exitNetwork();
 

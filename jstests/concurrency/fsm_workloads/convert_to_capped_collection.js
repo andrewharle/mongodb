@@ -8,14 +8,13 @@
  *
  * MongoDB raises the storage size of a capped collection
  * to an integer multiple of 256.
+ *
+ * @tags: [requires_collstats, requires_capped]
  */
-load('jstests/concurrency/fsm_workload_helpers/drop_utils.js');
 
 var $config = (function() {
     // TODO: This workload may fail if an iteration multiplier is specified.
-    var data = {
-        prefix: 'convert_to_capped_collection'
-    };
+    var data = {prefix: 'convert_to_capped_collection'};
 
     var states = (function() {
 
@@ -62,25 +61,14 @@ var $config = (function() {
             });
         }
 
-        return {
-            init: init,
-            convertToCapped: convertToCapped
-        };
+        return {init: init, convertToCapped: convertToCapped};
     })();
 
-    var transitions = {
-        init: {convertToCapped: 1},
-        convertToCapped: {convertToCapped: 1}
-    };
+    var transitions = {init: {convertToCapped: 1}, convertToCapped: {convertToCapped: 1}};
 
     function setup(db, collName, cluster) {
         // Initial size should not be a power of 256.
         this.size = Math.pow(2, this.iterations + 5) + 1;
-    }
-
-    function teardown(db, collName, cluster) {
-        var pattern = new RegExp('^' + this.prefix + '_\\d+$');
-        dropCollections(db, pattern);
     }
 
     return {
@@ -90,7 +78,6 @@ var $config = (function() {
         states: states,
         transitions: transitions,
         setup: setup,
-        teardown: teardown
     };
 
 })();

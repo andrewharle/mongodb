@@ -1,30 +1,34 @@
-/*
- *    Copyright (C) 2012 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
+
+#include "mongo/platform/basic.h"
 
 #include "mongo/dbtests/mock/mock_conn_registry.h"
 
@@ -75,31 +79,27 @@ void MockConnRegistry::clear() {
     _registry.clear();
 }
 
-MockDBClientConnection* MockConnRegistry::connect(const std::string& connStr) {
+std::unique_ptr<MockDBClientConnection> MockConnRegistry::connect(const std::string& connStr) {
     stdx::lock_guard<stdx::mutex> sl(_registryMutex);
     fassert(16534, _registry.count(connStr) == 1);
-    return new MockDBClientConnection(_registry[connStr], true);
+    return stdx::make_unique<MockDBClientConnection>(_registry[connStr], true);
 }
 
 MockConnRegistry::MockConnHook::MockConnHook(MockConnRegistry* registry) : _registry(registry) {}
 
 MockConnRegistry::MockConnHook::~MockConnHook() {}
 
-mongo::DBClientBase* MockConnRegistry::MockConnHook::connect(const ConnectionString& connString,
-                                                             std::string& errmsg,
-                                                             double socketTimeout) {
+std::unique_ptr<mongo::DBClientBase> MockConnRegistry::MockConnHook::connect(
+    const ConnectionString& connString, std::string& errmsg, double socketTimeout) {
     const string hostName(connString.toString());
-    MockDBClientConnection* conn = _registry->connect(hostName);
+    auto conn = _registry->connect(hostName);
 
-    if (!conn->connect(hostName.c_str(), errmsg)) {
-        // Assumption: connect never throws, so no leak.
-        delete conn;
-
+    if (!conn->connect(hostName.c_str(), StringData(), errmsg)) {
         // mimic ConnectionString::connect for MASTER type connection to return NULL
         // if the destination is unreachable.
-        return NULL;
+        return nullptr;
     }
 
-    return conn;
+    return std::move(conn);
 }
-}
+}  // namespace mongo

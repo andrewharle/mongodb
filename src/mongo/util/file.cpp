@@ -1,28 +1,31 @@
-/**   Copyright 2009 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kStorage
@@ -71,7 +74,7 @@ intmax_t File::freeSpace(const std::string& path) {
     }
     DWORD dosError = GetLastError();
     log() << "In File::freeSpace(), GetDiskFreeSpaceEx for '" << path << "' failed with "
-          << errnoWithDescription(dosError) << std::endl;
+          << errnoWithDescription(dosError);
     return -1;
 }
 
@@ -79,7 +82,7 @@ void File::fsync() const {
     if (FlushFileBuffers(_handle) == 0) {
         DWORD dosError = GetLastError();
         log() << "In File::fsync(), FlushFileBuffers for '" << _name << "' failed with "
-              << errnoWithDescription(dosError) << std::endl;
+              << errnoWithDescription(dosError);
     }
 }
 
@@ -95,7 +98,7 @@ fileofs File::len() {
     _bad = true;
     DWORD dosError = GetLastError();
     log() << "In File::len(), GetFileSizeEx for '" << _name << "' failed with "
-          << errnoWithDescription(dosError) << std::endl;
+          << errnoWithDescription(dosError);
     return 0;
 }
 
@@ -112,7 +115,7 @@ void File::open(const char* filename, bool readOnly, bool direct) {
     if (_bad) {
         DWORD dosError = GetLastError();
         log() << "In File::open(), CreateFileW for '" << _name << "' failed with "
-              << errnoWithDescription(dosError) << std::endl;
+              << errnoWithDescription(dosError);
     }
 }
 
@@ -124,7 +127,7 @@ void File::read(fileofs o, char* data, unsigned len) {
         DWORD dosError = GetLastError();
         log() << "In File::read(), SetFilePointerEx for '" << _name
               << "' tried to set the file pointer to " << o << " but failed with "
-              << errnoWithDescription(dosError) << std::endl;
+              << errnoWithDescription(dosError);
         return;
     }
     DWORD bytesRead;
@@ -132,14 +135,18 @@ void File::read(fileofs o, char* data, unsigned len) {
         _bad = true;
         DWORD dosError = GetLastError();
         log() << "In File::read(), ReadFile for '" << _name << "' failed with "
-              << errnoWithDescription(dosError) << std::endl;
+              << errnoWithDescription(dosError);
     } else if (bytesRead != len) {
         _bad = true;
         msgasserted(10438,
-                    mongoutils::str::stream()
-                        << "In File::read(), ReadFile for '" << _name << "' read " << bytesRead
-                        << " bytes while trying to read " << len << " bytes starting at offset "
-                        << o << ", truncated file?");
+                    mongoutils::str::stream() << "In File::read(), ReadFile for '" << _name
+                                              << "' read "
+                                              << bytesRead
+                                              << " bytes while trying to read "
+                                              << len
+                                              << " bytes starting at offset "
+                                              << o
+                                              << ", truncated file?");
     }
 }
 
@@ -154,14 +161,14 @@ void File::truncate(fileofs size) {
         DWORD dosError = GetLastError();
         log() << "In File::truncate(), SetFilePointerEx for '" << _name
               << "' tried to set the file pointer to " << size << " but failed with "
-              << errnoWithDescription(dosError) << std::endl;
+              << errnoWithDescription(dosError);
         return;
     }
     if (SetEndOfFile(_handle) == 0) {
         _bad = true;
         DWORD dosError = GetLastError();
         log() << "In File::truncate(), SetEndOfFile for '" << _name << "' failed with "
-              << errnoWithDescription(dosError) << std::endl;
+              << errnoWithDescription(dosError);
     }
 }
 
@@ -182,7 +189,7 @@ void File::write(fileofs o, const char* data, unsigned len) {
         DWORD dosError = GetLastError();
         log() << "In File::write(), WriteFile for '" << _name << "' tried to write " << len
               << " bytes but only wrote " << bytesWritten << " bytes, failing with "
-              << errnoWithDescription(dosError) << std::endl;
+              << errnoWithDescription(dosError);
     }
 }
 
@@ -203,14 +210,14 @@ intmax_t File::freeSpace(const std::string& path) {
         return static_cast<intmax_t>(info.f_bavail) * info.f_frsize;
     }
     log() << "In File::freeSpace(), statvfs for '" << path << "' failed with "
-          << errnoWithDescription() << std::endl;
+          << errnoWithDescription();
     return -1;
 }
 
 void File::fsync() const {
     if (::fsync(_fd)) {
         log() << "In File::fsync(), ::fsync for '" << _name << "' failed with "
-              << errnoWithDescription() << std::endl;
+              << errnoWithDescription();
     }
 }
 
@@ -224,8 +231,7 @@ fileofs File::len() {
         return o;
     }
     _bad = true;
-    log() << "In File::len(), lseek for '" << _name << "' failed with " << errnoWithDescription()
-          << std::endl;
+    log() << "In File::len(), lseek for '" << _name << "' failed with " << errnoWithDescription();
     return 0;
 }
 
@@ -246,7 +252,7 @@ void File::open(const char* filename, bool readOnly, bool direct) {
     _bad = !is_open();
     if (_bad) {
         log() << "In File::open(), ::open for '" << _name << "' failed with "
-              << errnoWithDescription() << std::endl;
+              << errnoWithDescription();
     }
 }
 
@@ -255,14 +261,18 @@ void File::read(fileofs o, char* data, unsigned len) {
     if (bytesRead == -1) {
         _bad = true;
         log() << "In File::read(), ::pread for '" << _name << "' failed with "
-              << errnoWithDescription() << std::endl;
+              << errnoWithDescription();
     } else if (bytesRead != static_cast<ssize_t>(len)) {
         _bad = true;
         msgasserted(16569,
-                    mongoutils::str::stream()
-                        << "In File::read(), ::pread for '" << _name << "' read " << bytesRead
-                        << " bytes while trying to read " << len << " bytes starting at offset "
-                        << o << ", truncated file?");
+                    mongoutils::str::stream() << "In File::read(), ::pread for '" << _name
+                                              << "' read "
+                                              << bytesRead
+                                              << " bytes while trying to read "
+                                              << len
+                                              << " bytes starting at offset "
+                                              << o
+                                              << ", truncated file?");
     }
 }
 
@@ -285,7 +295,7 @@ void File::write(fileofs o, const char* data, unsigned len) {
         _bad = true;
         log() << "In File::write(), ::pwrite for '" << _name << "' tried to write " << len
               << " bytes but only wrote " << bytesWritten << " bytes, failing with "
-              << errnoWithDescription() << std::endl;
+              << errnoWithDescription();
     }
 }
 

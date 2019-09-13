@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -231,8 +231,8 @@ __block_write_off(WT_SESSION_IMPL *session, WT_BLOCK *block,
 	WT_BLOCK_HEADER *blk;
 	WT_DECL_RET;
 	WT_FH *fh;
-	size_t align_size;
 	wt_off_t offset;
+	size_t align_size;
 	uint32_t checksum;
 	bool local_locked;
 
@@ -351,9 +351,9 @@ __block_write_off(WT_SESSION_IMPL *session, WT_BLOCK *block,
 	 * cache, but only if the current session can wait.
 	 */
 	if (block->os_cache_dirty_max != 0 &&
-	    (block->os_cache_dirty += align_size) > block->os_cache_dirty_max &&
+	    fh->written > block->os_cache_dirty_max &&
 	    __wt_session_can_wait(session)) {
-		block->os_cache_dirty = 0;
+		fh->written = 0;
 		if ((ret = __wt_fsync(session, fh, false)) != 0) {
 			 /*
 			  * Ignore ENOTSUP, but don't try again.

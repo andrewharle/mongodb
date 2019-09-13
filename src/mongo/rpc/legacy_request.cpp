@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -30,7 +32,8 @@
 
 #include <utility>
 
-#include "mongo/db/namespace_string.h"
+#include "mongo/client/dbclientinterface.h"
+#include "mongo/db/dbmessage.h"
 #include "mongo/rpc/legacy_request.h"
 #include "mongo/rpc/metadata.h"
 #include "mongo/util/assert_util.h"
@@ -38,45 +41,30 @@
 namespace mongo {
 namespace rpc {
 
-LegacyRequest::LegacyRequest(const Message* message)
-    : _message(std::move(message)), _dbMessage(*message), _queryMessage(_dbMessage) {
-    _database = nsToDatabaseSubstring(_queryMessage.ns);
+OpMsgRequest opMsgRequestFromLegacyRequest(const Message& message) {
+    DbMessage dbm(message);
+    QueryMessage qm(dbm);
+    NamespaceString ns(qm.ns);
 
-    uassert(ErrorCodes::InvalidNamespace,
-            str::stream() << "Invalid database name: '" << _database << "'",
-            NamespaceString::validDBName(_database));
+    if (qm.queryOptions & QueryOption_Exhaust) {
+        uasserted(18527,
+                  str::stream() << "The 'exhaust' OP_QUERY flag is invalid for commands: "
+                                << ns.ns()
+                                << " "
+                                << qm.query.toString());
+    }
 
-    std::tie(_upconvertedCommandArgs, _upconvertedMetadata) =
-        uassertStatusOK(rpc::upconvertRequestMetadata(std::move(_queryMessage.query),
-                                                      std::move(_queryMessage.queryOptions)));
-}
+    uassert(40473,
+            str::stream() << "Trying to handle namespace " << qm.ns << " as a command",
+            ns.isCommand());
 
-LegacyRequest::~LegacyRequest() = default;
+    uassert(16979,
+            str::stream() << "Bad numberToReturn (" << qm.ntoreturn
+                          << ") for $cmd type ns - can only be 1 or -1",
+            qm.ntoreturn == 1 || qm.ntoreturn == -1);
 
-StringData LegacyRequest::getDatabase() const {
-    return _database;
-}
-
-StringData LegacyRequest::getCommandName() const {
-    return _upconvertedCommandArgs.firstElement().fieldNameStringData();
-}
-
-const BSONObj& LegacyRequest::getMetadata() const {
-    // TODO SERVER-18236
-    return _upconvertedMetadata;
-}
-
-const BSONObj& LegacyRequest::getCommandArgs() const {
-    return _upconvertedCommandArgs;
-}
-
-DocumentRange LegacyRequest::getInputDocs() const {
-    // return an empty document range.
-    return DocumentRange{};
-}
-
-Protocol LegacyRequest::getProtocol() const {
-    return rpc::Protocol::kOpQuery;
+    return rpc::upconvertRequest(
+        ns.db(), qm.query.shareOwnershipWith(message.sharedBuffer()), qm.queryOptions);
 }
 
 }  // namespace rpc

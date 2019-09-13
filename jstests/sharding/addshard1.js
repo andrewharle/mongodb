@@ -5,7 +5,7 @@
 
     // Create a shard and add a database; if the database is not duplicated the mongod should accept
     // it as shard
-    var conn1 = MongoRunner.runMongod({});
+    var conn1 = MongoRunner.runMongod({'shardsvr': ""});
     var db1 = conn1.getDB("testDB");
 
     var numObjs = 3;
@@ -26,7 +26,7 @@
     assert.eq(1024, newShardDoc.maxSize);
 
     // a mongod with an existing database name should not be allowed to become a shard
-    var conn2 = MongoRunner.runMongod({});
+    var conn2 = MongoRunner.runMongod({'shardsvr': ""});
 
     var db2 = conn2.getDB("otherDB");
     assert.writeOK(db2.foo.save({a: 1}));
@@ -67,7 +67,7 @@
     s.adminCommand({shardcollection: "testDB.foo", key: {a: 1}});
     s.adminCommand({split: "testDB.foo", middle: {a: Math.floor(numObjs / 2)}});
     assert.eq(2,
-              s.config.chunks.count(),
+              s.config.chunks.count({"ns": "testDB.foo"}),
               "wrong chunk number after splitting collection that existed before");
     assert.eq(
         numObjs, sdb1.foo.count(), "wrong count after splitting collection that existed before");

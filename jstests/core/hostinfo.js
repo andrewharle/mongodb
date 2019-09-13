@@ -1,3 +1,7 @@
+// @tags: [
+//     # `hostInfo` command is not available on embedded
+//     incompatible_with_embedded,
+// ]
 // SERVER-4615:  Ensure hostInfo() command returns expected results on each platform
 
 assert.commandWorked(db.hostInfo());
@@ -34,7 +38,7 @@ if (hostinfo.os.type != "") {
 
 var buildInfo = assert.commandWorked(db.runCommand({buildInfo: 1}));
 if (buildInfo.buildEnvironment && buildInfo.buildEnvironment.target_arch) {
-    var targetArch = buildInfo.buildEnvironment.target_arch;
+    let targetArch = buildInfo.buildEnvironment.target_arch;
     if (targetArch == "i386")
         assert.eq(hostinfo.system.cpuAddrSize, 32);
     else

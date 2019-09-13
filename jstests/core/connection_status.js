@@ -1,3 +1,11 @@
+// @tags: [
+//   assumes_superuser_permissions,
+//   assumes_write_concern_unchanged,
+//   creates_and_authenticates_user,
+//   requires_auth,
+//   requires_non_retryable_commands,
+// ]
+
 // Tests the connectionStatus command
 (function() {
     "use strict";
@@ -70,14 +78,8 @@
     }
 
     function test(userName) {
-        var user = {
-            user: userName,
-            db: dbName
-        };
-        var role = {
-            role: "root",
-            db: "admin"
-        };
+        var user = {user: userName, db: dbName};
+        var role = {role: "root", db: "admin"};
         myDB.createUser({user: userName, pwd: "weak password", roles: [role]});
         myDB.auth(userName, "weak password");
 

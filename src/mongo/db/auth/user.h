@@ -1,28 +1,31 @@
-/*    Copyright 2013 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
@@ -31,13 +34,16 @@
 #include <vector>
 
 #include "mongo/base/disallow_copying.h"
+#include "mongo/crypto/sha1_block.h"
+#include "mongo/crypto/sha256_block.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/auth/resource_pattern.h"
+#include "mongo/db/auth/restriction_set.h"
 #include "mongo/db/auth/role_name.h"
 #include "mongo/db/auth/user_name.h"
 #include "mongo/platform/atomic_word.h"
-#include "mongo/platform/unordered_map.h"
-#include "mongo/platform/unordered_set.h"
+#include "mongo/stdx/unordered_map.h"
+#include "mongo/stdx/unordered_set.h"
 
 namespace mongo {
 
@@ -59,6 +65,7 @@ class User {
     MONGO_DISALLOW_COPYING(User);
 
 public:
+    template <typename HashBlock>
     struct SCRAMCredentials {
         SCRAMCredentials() : iterationCount(0), salt(""), serverKey(""), storedKey("") {}
 
@@ -68,33 +75,60 @@ public:
         std::string storedKey;
 
         bool isValid() const {
-            // 160bit -> 20octets -> * 4/3 -> 26.667 -> padded to 28
-            const size_t kEncodedSHA1Length = 28;
-            // 128bit -> 16octets -> * 4/3 -> 21.333 -> padded to 24
-            const size_t kEncodedSaltLength = 24;
+            constexpr auto kEncodedHashLength = base64::encodedLength(HashBlock::kHashLength);
+            constexpr auto kEncodedSaltLength = base64::encodedLength(HashBlock::kHashLength - 4);
 
-            return (salt.size() == kEncodedSaltLength) &&
-                (serverKey.size() == kEncodedSHA1Length) &&
-                (storedKey.size() == kEncodedSHA1Length);
+            return (iterationCount > 0) && (salt.size() == kEncodedSaltLength) &&
+                base64::validate(salt) && (serverKey.size() == kEncodedHashLength) &&
+                base64::validate(serverKey) && (storedKey.size() == kEncodedHashLength) &&
+                base64::validate(storedKey);
         }
     };
     struct CredentialData {
-        CredentialData() : password(""), scram(), isExternal(false) {}
+        CredentialData() : scram_sha1(), scram_sha256(), isExternal(false) {}
 
-        std::string password;
-        SCRAMCredentials scram;
+        SCRAMCredentials<SHA1Block> scram_sha1;
+        SCRAMCredentials<SHA256Block> scram_sha256;
         bool isExternal;
+
+        // Select the template determined version of SCRAMCredentials.
+        // For example: creds.scram<SHA1Block>().isValid()
+        // is equivalent to creds.scram_sha1.isValid()
+        template <typename HashBlock>
+        SCRAMCredentials<HashBlock>& scram();
+
+        template <typename HashBlock>
+        const SCRAMCredentials<HashBlock>& scram() const;
     };
 
-    typedef unordered_map<ResourcePattern, Privilege> ResourcePrivilegeMap;
+    typedef stdx::unordered_map<ResourcePattern, Privilege> ResourcePrivilegeMap;
 
     explicit User(const UserName& name);
     ~User();
 
+    using UserId = std::vector<std::uint8_t>;
+    const UserId& getID() const {
+        return _id;
+    }
+
+    void setID(UserId id) {
+        _id = std::move(id);
+    }
+
     /**
      * Returns the user name for this user.
      */
-    const UserName& getName() const;
+    const UserName& getName() const {
+        return _name;
+    }
+
+    /**
+     * Returns a digest of the user's identity
+     */
+    const SHA256Block& getDigest() const {
+        return _digest;
+    }
+
 
     /**
      * Returns an iterator over the names of the user's direct roles
@@ -129,6 +163,11 @@ public:
     const ActionSet getActionsForResource(const ResourcePattern& resource) const;
 
     /**
+     * Returns true if the user has is allowed to perform an action on the given resource.
+     */
+    bool hasActionsForResource(const ResourcePattern& resource) const;
+
+    /**
      * Returns true if this copy of information about this user is still valid. If this returns
      * false, this object should no longer be used and should be returned to the
      * AuthorizationManager and a new User object for this user should be requested.
@@ -140,11 +179,6 @@ public:
      * only caller of this.
      */
     uint32_t getRefCount() const;
-
-    /**
-     * Clones this user into a new, valid User object with refcount of 0.
-     */
-    User* clone() const;
 
     // Mutators below.  Mutation functions should *only* be called by the AuthorizationManager
 
@@ -190,6 +224,19 @@ public:
     void addPrivileges(const PrivilegeVector& privileges);
 
     /**
+     * Replaces any existing authentication restrictions with "restrictions".
+     */
+    void setRestrictions(RestrictionDocuments restrictions) &;
+
+    /**
+     * Gets any set authentication restrictions.
+     */
+    const RestrictionDocuments& getRestrictions() const& noexcept {
+        return _restrictions;
+    }
+    void getRestrictions() && = delete;
+
+    /**
      * Marks this instance of the User object as invalid, most likely because information about
      * the user has been updated and needs to be reloaded from the AuthorizationManager.
      *
@@ -215,19 +262,29 @@ public:
     void decrementRefCount();
 
 private:
+    // Unique ID (often UUID) for this user.
+    // May be empty for legacy users.
+    UserId _id;
+
     UserName _name;
+
+    // Digest of the full username
+    SHA256Block _digest;
 
     // Maps resource name to privilege on that resource
     ResourcePrivilegeMap _privileges;
 
     // Roles the user has privileges from
-    unordered_set<RoleName> _roles;
+    stdx::unordered_set<RoleName> _roles;
 
     // Roles that the user indirectly has privileges from, due to role inheritance.
     std::vector<RoleName> _indirectRoles;
 
     // Credential information.
     CredentialData _credentials;
+
+    // Restrictions which must be met by a Client in order to authenticate as this user.
+    RestrictionDocuments _restrictions;
 
     // _refCount and _isInvalidated are modified exclusively by the AuthorizationManager
     // _isInvalidated can be read by any consumer of User, but _refCount can only be

@@ -22,9 +22,7 @@
     var config = replTest.getReplSetConfig();
     config.members[0].priority = 5;
     config.members[2].arbiterOnly = true;
-    config.settings = {
-        electionTimeoutMillis: 2000
-    };
+    config.settings = {electionTimeoutMillis: 2000};
     replTest.initiate(config);
 
     function getTerm(node) {
@@ -41,20 +39,17 @@
     primary.disconnect(secondary);
 
     jsTestLog("Wait long enough for the secondary to call for an election.");
-    checkLog.contains(secondary, "can see a healthy primary of equal or greater priority");
+    checkLog.contains(secondary, "can see a healthy primary");
+    checkLog.contains(secondary, "not running for primary");
 
     jsTestLog("Verify the primary and secondary do not change during the partition.");
     assert.eq(primary, replTest.getPrimary());
     assert.eq(secondary, replTest.getSecondary());
 
+    checkLog.contains(secondary, "not running for primary");
+
     jsTestLog("Heal the partition.");
     primary.reconnect(secondary);
-
-    jsTestLog("Verify the primary and secondary did not change and are in the initial term.");
-    assert.eq(primary, replTest.getPrimary());
-    assert.eq(secondary, replTest.getSecondary());
-    assert.eq(initialTerm, getTerm(primary));
-    assert.eq(initialTerm, getTerm(secondary));
 
     replTest.stopSet();
 })();

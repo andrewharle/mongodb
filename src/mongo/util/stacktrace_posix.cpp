@@ -1,28 +1,31 @@
-/*    Copyright 2009 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kControl
@@ -42,6 +45,7 @@
 #include "mongo/db/jsobj.h"
 #include "mongo/util/hex.h"
 #include "mongo/util/log.h"
+#include "mongo/util/stringutils.h"
 #include "mongo/util/version.h"
 
 #if defined(MONGO_CONFIG_HAVE_EXECINFO_BACKTRACE)
@@ -180,7 +184,7 @@ void printStackTrace(std::ostream& os) {
     // Collect symbol information for each backtrace address.
     ////////////////////////////////////////////////////////////
 
-    os << std::hex << std::uppercase << '\n';
+    os << std::hex << std::uppercase;
     for (int i = 0; i < addressCount; ++i) {
         Dl_info& dlinfo(dlinfoForFrames[i]);
         if (!dladdr(addresses[i], &dlinfo)) {
@@ -255,9 +259,12 @@ void addOSComponentsToSoMap(BSONObjBuilder* soMap);
  */
 MONGO_INITIALIZER(ExtractSOMap)(InitializerContext*) {
     BSONObjBuilder soMap;
-    soMap << "mongodbVersion" << versionString;
-    soMap << "gitVersion" << gitVersion();
-    soMap << "compiledModules" << compiledModules();
+
+    auto&& vii = VersionInfoInterface::instance(VersionInfoInterface::NotEnabledAction::kFallback);
+    soMap << "mongodbVersion" << vii.version();
+    soMap << "gitVersion" << vii.gitVersion();
+    soMap << "compiledModules" << vii.modules();
+
     struct utsname unameData;
     if (!uname(&unameData)) {
         BSONObjBuilder unameBuilder(soMap.subobjStart("uname"));
@@ -319,8 +326,7 @@ void processNoteSegment(const dl_phdr_info& info, const ElfW(Phdr) & phdr, BSONO
         if (noteHeader.n_type != NT_GNU_BUILD_ID)
             continue;
         const char* const noteNameBegin = notesCurr + sizeof(noteHeader);
-        if (StringData(noteNameBegin, noteHeader.n_namesz - 1) !=
-            StringData(ELF_NOTE_GNU, StringData::LiteralTag())) {
+        if (StringData(noteNameBegin, noteHeader.n_namesz - 1) != ELF_NOTE_GNU) {
             continue;
         }
         const char* const noteDescBegin =
@@ -355,14 +361,28 @@ void processLoadSegment(const dl_phdr_info& info, const ElfW(Phdr) & phdr, BSONO
         return;
     }
 
+#if defined(__ELF_NATIVE_CLASS)
+#define ARCH_BITS __ELF_NATIVE_CLASS
+#else  //__ELF_NATIVE_CLASS
+#if defined(__x86_64__) || defined(__aarch64__)
+#define ARCH_BITS 64
+#elif defined(__arm__)
+#define ARCH_BITS 32
+#else
+#error Unknown target architecture.
+#endif  //__aarch64__
+#endif  //__ELF_NATIVE_CLASS
+
 #define MKELFCLASS(N) _MKELFCLASS(N)
 #define _MKELFCLASS(N) ELFCLASS##N
-    if (eHeader.e_ident[EI_CLASS] != MKELFCLASS(__ELF_NATIVE_CLASS)) {
+    if (eHeader.e_ident[EI_CLASS] != MKELFCLASS(ARCH_BITS)) {
         warning() << "Expected elf file class of " << quotedFileName << " to be "
-                  << MKELFCLASS(__ELF_NATIVE_CLASS) << "(" << __ELF_NATIVE_CLASS
-                  << "-bit), but found " << int(eHeader.e_ident[4]);
+                  << MKELFCLASS(ARCH_BITS) << "(" << ARCH_BITS << "-bit), but found "
+                  << int(eHeader.e_ident[4]);
         return;
     }
+
+#undef ARCH_BITS
 
     if (eHeader.e_ident[EI_VERSION] != EV_CURRENT) {
         warning() << "Wrong ELF version in " << quotedFileName << ".  Expected " << EV_CURRENT

@@ -1,28 +1,31 @@
-/*    Copyright 2012 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include <sstream>
@@ -116,7 +119,7 @@ bool SafeNum::isEquivalent(const SafeNum& rhs) const {
 
     // If none of the sides is a double, compare them as long's.
     if (_type != NumberDouble && rhs._type != NumberDouble) {
-        return getLongLong(*this) == getLongLong(rhs);
+        return getInt64(*this) == getInt64(rhs);
     }
 
     // If both sides are doubles, compare them as so.
@@ -150,7 +153,7 @@ bool SafeNum::isIdentical(const SafeNum& rhs) const {
         case NumberDouble:
             return _value.doubleVal == rhs._value.doubleVal;
         case NumberDecimal:
-            return Decimal128(_value.decimalVal).isEqual(rhs._value.decimalVal);
+            return Decimal128(_value.decimalVal).isEqual(Decimal128(rhs._value.decimalVal));
         case EOO:
         // EOO doesn't match anything, including itself.
         default:
@@ -158,7 +161,7 @@ bool SafeNum::isIdentical(const SafeNum& rhs) const {
     }
 }
 
-long long SafeNum::getLongLong(const SafeNum& snum) {
+int64_t SafeNum::getInt64(const SafeNum& snum) {
     switch (snum._type) {
         case NumberInt:
             return snum._value.int32Val;
@@ -187,21 +190,21 @@ double SafeNum::getDouble(const SafeNum& snum) {
 Decimal128 SafeNum::getDecimal(const SafeNum& snum) {
     switch (snum._type) {
         case NumberInt:
-            return snum._value.int32Val;
+            return Decimal128(snum._value.int32Val);
         case NumberLong:
-            return snum._value.int64Val;
+            return Decimal128(snum._value.int64Val);
         case NumberDouble:
-            return snum._value.doubleVal;
+            return Decimal128(snum._value.doubleVal, Decimal128::kRoundTo15Digits);
         case NumberDecimal:
-            return snum._value.decimalVal;
+            return Decimal128(snum._value.decimalVal);
         default:
-            return 0.0;
+            return Decimal128::kNormalizedZero;
     }
 }
 
 namespace {
 
-SafeNum addInt32Int32(int lInt32, int rInt32) {
+SafeNum addInt32Int32(int32_t lInt32, int32_t rInt32) {
     // NOTE: Please see "Secure Coding in C and C++", Second Edition, page 264-265 for
     // details on this algorithm (for an alternative resources, see
     //
@@ -211,29 +214,25 @@ SafeNum addInt32Int32(int lInt32, int rInt32) {
     //
     // We are using the "Downcast from a larger type" algorithm here. We always perform
     // the arithmetic in 64-bit mode, which can never overflow for 32-bit
-    // integers. Then, if we fall within the allowable range of int, we downcast,
+    // integers. Then, if we fall within the allowable range of int32_t, we downcast,
     // otherwise, we retain the 64-bit result.
+    const int64_t result = static_cast<int64_t>(lInt32) + static_cast<int64_t>(rInt32);
 
-    // This algorithm is only correct if sizeof(long long) > sizeof(int)
-    static_assert(sizeof(long long) > sizeof(int), "sizeof(long long) > sizeof(int)");
-
-    const long long int result =
-        static_cast<long long int>(lInt32) + static_cast<long long int>(rInt32);
-
-    if (result <= std::numeric_limits<int>::max() && result >= std::numeric_limits<int>::min()) {
-        return SafeNum(static_cast<int>(result));
+    if (result <= std::numeric_limits<int32_t>::max() &&
+        result >= std::numeric_limits<int32_t>::min()) {
+        return SafeNum(static_cast<int32_t>(result));
     }
 
     return SafeNum(result);
 }
 
-SafeNum addInt64Int64(long long lInt64, long long rInt64) {
+SafeNum addInt64Int64(int64_t lInt64, int64_t rInt64) {
     // NOTE: Please see notes in addInt32Int32 above for references. In this case, since we
     // have no larger integer size, if our precondition test detects overflow we must
     // return an invalid SafeNum. Otherwise, the operation is safely performed by standard
     // arithmetic.
-    if (((rInt64 > 0) && (lInt64 > (std::numeric_limits<long long>::max() - rInt64))) ||
-        ((rInt64 < 0) && (lInt64 < (std::numeric_limits<long long>::min() - rInt64)))) {
+    if (((rInt64 > 0) && (lInt64 > (std::numeric_limits<int64_t>::max() - rInt64))) ||
+        ((rInt64 < 0) && (lInt64 < (std::numeric_limits<int64_t>::min() - rInt64)))) {
         return SafeNum();
     }
 
@@ -249,7 +248,7 @@ SafeNum addDecimals(Decimal128 lDecimal, Decimal128 rDecimal) {
     return SafeNum(lDecimal.add(rDecimal));
 }
 
-SafeNum mulInt32Int32(int lInt32, int rInt32) {
+SafeNum mulInt32Int32(int32_t lInt32, int32_t rInt32) {
     // NOTE: Please see "Secure Coding in C and C++", Second Edition, page 264-265 for
     // details on this algorithm (for an alternative resources, see
     //
@@ -259,23 +258,19 @@ SafeNum mulInt32Int32(int lInt32, int rInt32) {
     //
     // We are using the "Downcast from a larger type" algorithm here. We always perform
     // the arithmetic in 64-bit mode, which can never overflow for 32-bit
-    // integers. Then, if we fall within the allowable range of int, we downcast,
+    // integers. Then, if we fall within the allowable range of int32_t, we downcast,
     // otherwise, we retain the 64-bit result.
+    const int64_t result = static_cast<int64_t>(lInt32) * static_cast<int64_t>(rInt32);
 
-    // This algorithm is only correct if sizeof(long long) >= (2 * sizeof(int))
-    static_assert(sizeof(long long) >= (2 * sizeof(int)), "sizeof(long long) >= (2 * sizeof(int))");
-
-    const long long int result =
-        static_cast<long long int>(lInt32) * static_cast<long long int>(rInt32);
-
-    if (result <= std::numeric_limits<int>::max() && result >= std::numeric_limits<int>::min()) {
-        return SafeNum(static_cast<int>(result));
+    if (result <= std::numeric_limits<int32_t>::max() &&
+        result >= std::numeric_limits<int32_t>::min()) {
+        return SafeNum(static_cast<int32_t>(result));
     }
 
     return SafeNum(result);
 }
 
-SafeNum mulInt64Int64(long long lInt64, long long rInt64) {
+SafeNum mulInt64Int64(int64_t lInt64, int64_t rInt64) {
     // NOTE: Please see notes in mulInt32Int32 above for references. In this case,
     // since we have no larger integer size, if our precondition test detects overflow
     // we must return an invalid SafeNum. Otherwise, the operation is safely performed
@@ -283,27 +278,27 @@ SafeNum mulInt64Int64(long long lInt64, long long rInt64) {
 
     if (lInt64 > 0) {
         if (rInt64 > 0) {
-            if (lInt64 > (std::numeric_limits<long long>::max() / rInt64)) {
+            if (lInt64 > (std::numeric_limits<int64_t>::max() / rInt64)) {
                 return SafeNum();
             }
         } else {
-            if (rInt64 < (std::numeric_limits<long long>::min() / lInt64)) {
+            if (rInt64 < (std::numeric_limits<int64_t>::min() / lInt64)) {
                 return SafeNum();
             }
         }
     } else {
         if (rInt64 > 0) {
-            if (lInt64 < (std::numeric_limits<long long>::min() / rInt64)) {
+            if (lInt64 < (std::numeric_limits<int64_t>::min() / rInt64)) {
                 return SafeNum();
             }
         } else {
-            if ((lInt64 != 0) && (rInt64 < (std::numeric_limits<long long>::max() / lInt64))) {
+            if ((lInt64 != 0) && (rInt64 < (std::numeric_limits<int64_t>::max() / lInt64))) {
                 return SafeNum();
             }
         }
     }
 
-    const long long result = lInt64 * rInt64;
+    const int64_t result = lInt64 * rInt64;
     return SafeNum(result);
 }
 
@@ -391,11 +386,11 @@ SafeNum SafeNum::andInternal(const SafeNum& lhs, const SafeNum& rhs) {
     }
 
     if (lType == NumberInt && rType == NumberLong) {
-        return (static_cast<long long int>(lhs._value.int32Val) & rhs._value.int64Val);
+        return (static_cast<int64_t>(lhs._value.int32Val) & rhs._value.int64Val);
     }
 
     if (lType == NumberLong && rType == NumberInt) {
-        return (lhs._value.int64Val & static_cast<long long int>(rhs._value.int32Val));
+        return (lhs._value.int64Val & static_cast<int64_t>(rhs._value.int32Val));
     }
 
     if (lType == NumberLong && rType == NumberLong) {
@@ -414,11 +409,11 @@ SafeNum SafeNum::orInternal(const SafeNum& lhs, const SafeNum& rhs) {
     }
 
     if (lType == NumberInt && rType == NumberLong) {
-        return (static_cast<long long int>(lhs._value.int32Val) | rhs._value.int64Val);
+        return (static_cast<int64_t>(lhs._value.int32Val) | rhs._value.int64Val);
     }
 
     if (lType == NumberLong && rType == NumberInt) {
-        return (lhs._value.int64Val | static_cast<long long int>(rhs._value.int32Val));
+        return (lhs._value.int64Val | static_cast<int64_t>(rhs._value.int32Val));
     }
 
     if (lType == NumberLong && rType == NumberLong) {
@@ -437,11 +432,11 @@ SafeNum SafeNum::xorInternal(const SafeNum& lhs, const SafeNum& rhs) {
     }
 
     if (lType == NumberInt && rType == NumberLong) {
-        return (static_cast<long long int>(lhs._value.int32Val) ^ rhs._value.int64Val);
+        return (static_cast<int64_t>(lhs._value.int32Val) ^ rhs._value.int64Val);
     }
 
     if (lType == NumberLong && rType == NumberInt) {
-        return (lhs._value.int64Val ^ static_cast<long long int>(rhs._value.int32Val));
+        return (lhs._value.int64Val ^ static_cast<int64_t>(rhs._value.int32Val));
     }
 
     if (lType == NumberLong && rType == NumberLong) {

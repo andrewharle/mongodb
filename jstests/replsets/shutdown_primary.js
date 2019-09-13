@@ -12,11 +12,10 @@
  *
  */
 (function() {
-    load("jstests/libs/write_concern_util.js");  // for stopReplicationOnSecondaries,
-                                                 // restartReplicationOnSecondaries
-
     "use strict";
 
+    load("jstests/libs/write_concern_util.js");  // for stopReplicationOnSecondaries,
+                                                 // restartReplicationOnSecondaries
     var name = "shutdown_primary";
 
     var replTest = new ReplSetTest({name: name, nodes: 3});
@@ -25,7 +24,7 @@
 
     var primary = replTest.getPrimary();
     var testDB = primary.getDB(name);
-    var timeout = 5 * 60 * 1000;
+    var timeout = ReplSetTest.kDefaultTimeoutMS;
     assert.writeOK(testDB.foo.insert({x: 1}, {writeConcern: {w: 3, wtimeout: timeout}}));
 
     jsTestLog("Blocking replication to secondaries.");

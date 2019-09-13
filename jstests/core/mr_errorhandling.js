@@ -1,3 +1,6 @@
+// Cannot implicitly shard accessed collections because of collection existing when none
+// expected.
+// @tags: [assumes_no_implicit_collection_creation_after_drop, does_not_support_stepdowns]
 
 t = db.mr_errorhandling;
 t.drop();
@@ -48,3 +51,9 @@ res.drop();
 assert.throws(function() {
     t.mapReduce(m_good, r, {out: "xxx", query: "foo"});
 });
+
+// Test namespace does not exist.
+db.mr_nonexistent.drop();
+assert.commandFailedWithCode(
+    db.runCommand({mapReduce: "mr_nonexistent", map: m_good, reduce: r, out: "out_nonexistent"}),
+    ErrorCodes.NamespaceNotFound);

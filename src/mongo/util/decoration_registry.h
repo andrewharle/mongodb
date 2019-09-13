@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -28,12 +30,17 @@
 
 #pragma once
 
+#include <algorithm>
+#include <functional>
+#include <iterator>
 #include <type_traits>
 #include <vector>
 
 #include "mongo/base/disallow_copying.h"
+#include "mongo/base/static_assert.h"
 #include "mongo/stdx/functional.h"
 #include "mongo/util/decoration_container.h"
+#include "mongo/util/scopeguard.h"
 
 namespace mongo {
 
@@ -45,6 +52,7 @@ namespace mongo {
  * the decorations declared on r1, and a DecorationContainer constructed from r2 has instances
  * of the decorations declared on r2.
  */
+template <typename DecoratedType>
 class DecorationRegistry {
     MONGO_DISALLOW_COPYING(DecorationRegistry);
 
@@ -58,13 +66,13 @@ public:
      * NOTE: T's destructor must not throw exceptions.
      */
     template <typename T>
-    DecorationContainer::DecorationDescriptorWithType<T> declareDecoration() {
-#if !defined(_MSC_VER) || (_MSC_VER > 1800)  // Try again with MSVC 2015
-        static_assert(std::is_nothrow_destructible<T>::value,
-                      "Decorations must be nothrow destructible");
-#endif
-        return DecorationContainer::DecorationDescriptorWithType<T>(std::move(declareDecoration(
-            sizeof(T), std::alignment_of<T>::value, &constructAt<T>, &destructAt<T>)));
+    auto declareDecoration() {
+        MONGO_STATIC_ASSERT_MSG(std::is_nothrow_destructible<T>::value,
+                                "Decorations must be nothrow destructible");
+        return
+            typename DecorationContainer<DecoratedType>::template DecorationDescriptorWithType<T>(
+                std::move(declareDecoration(
+                    sizeof(T), std::alignment_of<T>::value, &constructAt<T>, &destroyAt<T>)));
     }
 
     size_t getDecorationBufferSizeBytes() const {
@@ -77,33 +85,67 @@ public:
      *
      * Called by the DecorationContainer constructor. Do not call directly.
      */
-    void construct(DecorationContainer* decorable) const;
+    void construct(DecorationContainer<DecoratedType>* const container) const {
+        using std::cbegin;
+
+        auto iter = cbegin(_decorationInfo);
+
+        auto cleanupFunction = [&iter, container, this ]() noexcept->void {
+            using std::crend;
+            std::for_each(std::make_reverse_iterator(iter),
+                          crend(this->_decorationInfo),
+                          [&](auto&& decoration) {
+                              decoration.destructor(
+                                  container->getDecoration(decoration.descriptor));
+                          });
+        };
+
+        auto cleanup = MakeGuard(std::move(cleanupFunction));
+
+        using std::cend;
+
+        for (; iter != cend(_decorationInfo); ++iter) {
+            iter->constructor(container->getDecoration(iter->descriptor));
+        }
+
+        cleanup.Dismiss();
+    }
 
     /**
      * Destroys the decorations declared in this registry on the given instance of "decorable".
      *
      * Called by the DecorationContainer destructor.  Do not call directly.
      */
-    void destruct(DecorationContainer* decorable) const;
+    void destroy(DecorationContainer<DecoratedType>* const container) const noexcept try {
+        for (auto& decoration : _decorationInfo) {
+            decoration.destructor(container->getDecoration(decoration.descriptor));
+        }
+    } catch (...) {
+        std::terminate();
+    }
 
 private:
     /**
      * Function that constructs (initializes) a single instance of a decoration.
      */
-    using DecorationConstructorFn = stdx::function<void(void*)>;
+    using DecorationConstructorFn = void (*)(void*);
 
     /**
-     * Function that destructs (deinitializes) a single instance of a decoration.
+     * Function that destroys (deinitializes) a single instance of a decoration.
      */
-    using DecorationDestructorFn = stdx::function<void(void*)>;
+    using DecorationDestructorFn = void (*)(void*);
 
     struct DecorationInfo {
         DecorationInfo() {}
-        DecorationInfo(DecorationContainer::DecorationDescriptor descriptor,
-                       DecorationConstructorFn constructor,
-                       DecorationDestructorFn destructor);
+        DecorationInfo(
+            typename DecorationContainer<DecoratedType>::DecorationDescriptor inDescriptor,
+            DecorationConstructorFn inConstructor,
+            DecorationDestructorFn inDestructor)
+            : descriptor(std::move(inDescriptor)),
+              constructor(std::move(inConstructor)),
+              destructor(std::move(inDestructor)) {}
 
-        DecorationContainer::DecorationDescriptor descriptor;
+        typename DecorationContainer<DecoratedType>::DecorationDescriptor descriptor;
         DecorationConstructorFn constructor;
         DecorationDestructorFn destructor;
     };
@@ -116,7 +158,7 @@ private:
     }
 
     template <typename T>
-    static void destructAt(void* location) {
+    static void destroyAt(void* location) {
         static_cast<T*>(location)->~T();
     }
 
@@ -126,13 +168,23 @@ private:
      *
      * NOTE: "destructor" must not throw exceptions.
      */
-    DecorationContainer::DecorationDescriptor declareDecoration(size_t sizeBytes,
-                                                                size_t alignBytes,
-                                                                DecorationConstructorFn constructor,
-                                                                DecorationDestructorFn destructor);
+    typename DecorationContainer<DecoratedType>::DecorationDescriptor declareDecoration(
+        const size_t sizeBytes,
+        const size_t alignBytes,
+        const DecorationConstructorFn constructor,
+        const DecorationDestructorFn destructor) {
+        const size_t misalignment = _totalSizeBytes % alignBytes;
+        if (misalignment) {
+            _totalSizeBytes += alignBytes - misalignment;
+        }
+        typename DecorationContainer<DecoratedType>::DecorationDescriptor result(_totalSizeBytes);
+        _decorationInfo.push_back(DecorationInfo(result, constructor, destructor));
+        _totalSizeBytes += sizeBytes;
+        return result;
+    }
 
     DecorationInfoVector _decorationInfo;
-    size_t _totalSizeBytes{0};
+    size_t _totalSizeBytes{sizeof(void*)};
 };
 
 }  // namespace mongo

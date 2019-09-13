@@ -3,49 +3,72 @@
 
 load('./jstests/multiVersion/libs/multi_rs.js');
 load('./jstests/libs/test_background_ops.js');
+load('./jstests/libs/feature_compatibility_version.js');
 
-var newVersion = "latest";
-var oldVersion = "last-stable";
+let newVersion = "latest";
+let oldVersion = "last-stable";
 
-var name = "replsetdowngrade";
-var nodes = {
+let name = "replsetdowngrade";
+let nodes = {
     n1: {binVersion: newVersion},
     n2: {binVersion: newVersion},
     n3: {binVersion: newVersion}
 };
 
-var rst = new ReplSetTest({name: name, nodes: nodes, nodeOptions: {storageEngine: 'mmapv1'}});
-rst.startSet();
-var replSetConfig = rst.getReplSetConfig();
-replSetConfig.protocolVersion = 0;
-rst.initiate(replSetConfig);
+function runDowngradeTest() {
+    let rst = new ReplSetTest({name: name, nodes: nodes, waitForKeys: true});
+    rst.startSet();
+    rst.initiate();
 
-var primary = rst.getPrimary();
-var coll = "test.foo";
+    let primary = rst.getPrimary();
+    let coll = "test.foo";
 
-jsTest.log("Inserting documents into collection.");
-for (var i = 0; i < 10; i++) {
-    primary.getCollection(coll).insert({_id: i, str: "hello world"});
-}
+    // The default FCV is latestFCV for non-shard replica sets.
+    let primaryAdminDB = rst.getPrimary().getDB("admin");
+    checkFCV(primaryAdminDB, latestFCV);
 
-function insertDocuments(rsURL, coll) {
-    var coll = new Mongo(rsURL).getCollection(coll);
-    var count = 10;
-    while (!isFinished()) {
-        assert.writeOK(coll.insert({_id: count, str: "hello world"}));
-        count++;
+    // We wait for the feature compatibility version to be set to lastStableFCV on all nodes of the
+    // replica set in order to ensure that all nodes can be successfully downgraded. This
+    // effectively allows us to emulate upgrading to the latest version with existing data files and
+    // then trying to downgrade back to lastStableFCV.
+    assert.commandWorked(primary.adminCommand({setFeatureCompatibilityVersion: lastStableFCV}));
+    rst.awaitReplication();
+
+    jsTest.log("Inserting documents into collection.");
+    for (let i = 0; i < 10; i++) {
+        primary.getCollection(coll).insert({_id: i, str: "hello world"});
     }
+
+    function insertDocuments(rsURL, collParam) {
+        let coll = new Mongo(rsURL).getCollection(collParam);
+        let count = 10;
+        while (!isFinished()) {
+            assert.writeOK(coll.insert({_id: count, str: "hello world"}));
+            count++;
+        }
+    }
+
+    jsTest.log("Starting parallel operations during downgrade..");
+    let joinFindInsert = startParallelOps(primary, insertDocuments, [rst.getURL(), coll]);
+
+    jsTest.log("Downgrading replica set..");
+    rst.upgradeSet({binVersion: oldVersion});
+    jsTest.log("Downgrade complete.");
+
+    // We save a reference to the old primary so that we can call reconnect() on it before
+    // joinFindInsert() would attempt to send the node an update operation that signals the parallel
+    // shell running the background operations to stop.
+    let oldPrimary = primary;
+
+    primary = rst.getPrimary();
+    printjson(rst.status());
+
+    // Since the old primary was restarted as part of the downgrade process, we explicitly reconnect
+    // to it so that sending it an update operation silently fails with an unchecked NotMaster error
+    // rather than a network error.
+    reconnect(oldPrimary.getDB("admin"));
+    joinFindInsert();
+    rst.stopSet();
 }
 
-jsTest.log("Starting parallel operations during downgrade..");
-var joinFindInsert = startParallelOps(primary, insertDocuments, [rst.getURL(), coll]);
-
-jsTest.log("Downgrading replica set..");
-rst.upgradeSet({binVersion: oldVersion});
-jsTest.log("Downgrade complete.");
-
-primary = rst.getPrimary();
-printjson(rst.status());
-
-joinFindInsert();
-rst.stopSet();
+runDowngradeTest();

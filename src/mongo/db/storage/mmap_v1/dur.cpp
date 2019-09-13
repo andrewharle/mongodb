@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2009-2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -78,11 +80,13 @@
 #include <iomanip>
 #include <utility>
 
+#include "mongo/base/static_assert.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands/server_status.h"
 #include "mongo/db/concurrency/lock_state.h"
-#include "mongo/db/operation_context_impl.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/db/storage/mmap_v1/aligned_builder.h"
+#include "mongo/db/storage/mmap_v1/commit_notifier.h"
 #include "mongo/db/storage/mmap_v1/dur_commitjob.h"
 #include "mongo/db/storage/mmap_v1/dur_journal.h"
 #include "mongo/db/storage/mmap_v1/dur_journal_writer.h"
@@ -94,7 +98,7 @@
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/stdx/thread.h"
-#include "mongo/util/concurrency/synchronization.h"
+#include "mongo/util/clock_source.h"
 #include "mongo/util/exit.h"
 #include "mongo/util/log.h"
 #include "mongo/util/timer.h"
@@ -121,12 +125,12 @@ stdx::condition_variable flushRequested;
 // This is waited on for getlasterror acknowledgements. It means that data has been written to
 // the journal, but not necessarily applied to the shared view, so it is all right to
 // acknowledge the user operation, but NOT all right to delete the journal files for example.
-NotifyAll commitNotify;
+CommitNotifier commitNotify;
 
 // This is waited on for complete flush. It means that data has been both written to journal
 // and applied to the shared view, so it is allowed to delete the journal files. Used for
 // fsync:true, close DB, shutdown acknowledgements.
-NotifyAll applyToDataFilesNotify;
+CommitNotifier applyToDataFilesNotify;
 
 // When set, the flush thread will exit
 AtomicUInt32 shutdownRequested(0);
@@ -148,10 +152,8 @@ unsigned remapFileToStartAt;
 enum { DurStatsResetIntervalMillis = 3 * 1000 };
 
 // Size sanity checks
-static_assert(UncommittedBytesLimit > BSONObjMaxInternalSize * 3,
-              "UncommittedBytesLimit > BSONObjMaxInternalSize * 3");
-static_assert(sizeof(void*) == 4 || UncommittedBytesLimit > BSONObjMaxInternalSize * 6,
-              "sizeof(void*) == 4 || UncommittedBytesLimit > BSONObjMaxInternalSize * 6");
+MONGO_STATIC_ASSERT(UncommittedBytesLimit > BSONObjMaxInternalSize * 3);
+MONGO_STATIC_ASSERT(sizeof(void*) == 4 || UncommittedBytesLimit > BSONObjMaxInternalSize * 6);
 
 
 /**
@@ -165,7 +167,8 @@ public:
         return true;
     }
 
-    virtual BSONObj generateSection(OperationContext* txn, const BSONElement& configElement) const {
+    virtual BSONObj generateSection(OperationContext* opCtx,
+                                    const BSONElement& configElement) const {
         if (!getDur().isDurable()) {
             return BSONObj();
         }
@@ -193,18 +196,18 @@ public:
     virtual bool waitUntilDurable() {
         return false;
     }
-    virtual bool commitNow(OperationContext* txn) {
+    virtual bool commitNow(OperationContext* opCtx) {
         return false;
     }
     virtual bool commitIfNeeded() {
         return false;
     }
-    virtual void syncDataAndTruncateJournal(OperationContext* txn) {}
+    virtual void syncDataAndTruncateJournal(OperationContext* opCtx) {}
     virtual bool isDurable() const {
         return false;
     }
     virtual void closingFileNotification() {}
-    virtual void commitAndStopDurThread() {}
+    virtual void commitAndStopDurThread(OperationContext* opCtx) {}
 };
 
 
@@ -219,16 +222,16 @@ public:
     virtual void declareWriteIntents(const std::vector<std::pair<void*, unsigned>>& intents);
     virtual void createdFile(const std::string& filename, unsigned long long len);
     virtual bool waitUntilDurable();
-    virtual bool commitNow(OperationContext* txn);
+    virtual bool commitNow(OperationContext* opCtx);
     virtual bool commitIfNeeded();
-    virtual void syncDataAndTruncateJournal(OperationContext* txn);
+    virtual void syncDataAndTruncateJournal(OperationContext* opCtx);
     virtual bool isDurable() const {
         return true;
     }
     virtual void closingFileNotification();
-    virtual void commitAndStopDurThread();
+    virtual void commitAndStopDurThread(OperationContext* opCtx);
 
-    void start();
+    void start(ClockSource* cs, int64_t serverStartMs);
 
 private:
     stdx::thread _durThreadHandle;
@@ -310,7 +313,7 @@ void debugValidateFileMapsMatch(const DurableMappedFile* mmf) {
         log() << "priv loc: " << (void*)(p + low) << ' ' << endl;
 
         severe() << "Written data does not match in-memory view. Missing WriteIntent?";
-        invariant(false);
+        MONGO_UNREACHABLE;
     }
 }
 
@@ -318,7 +321,7 @@ void debugValidateFileMapsMatch(const DurableMappedFile* mmf) {
 /**
  * Main code of the remap private view function.
  */
-void remapPrivateViewImpl(double fraction) {
+void remapPrivateViewImpl(OperationContext* opCtx, double fraction) {
     LOG(4) << "journal REMAPPRIVATEVIEW" << endl;
 
 // There is no way that the set of files can change while we are in this method, because
@@ -335,9 +338,9 @@ void remapPrivateViewImpl(double fraction) {
 // See SERVER-5680 to see why this code is necessary on Windows.
 // See SERVER-8795 to see why this code is necessary on Solaris.
 #if defined(_WIN32) || defined(__sun)
-    LockMongoFilesExclusive lk;
+    LockMongoFilesExclusive lk(opCtx);
 #else
-    LockMongoFilesShared lk;
+    LockMongoFilesShared lk(opCtx);
 #endif
 
     std::set<MongoFile*>& files = MongoFile::getAllFiles();
@@ -381,7 +384,7 @@ void remapPrivateViewImpl(double fraction) {
             }
 
             if (mmf->willNeedRemap()) {
-                mmf->remapThePrivateView();
+                mmf->remapThePrivateView(opCtx);
             }
 
             i++;
@@ -409,14 +412,17 @@ static stdx::mutex journalListenerMutex;
 
 
 // Declared in dur_preplogbuffer.cpp
-void PREPLOGBUFFER(JSectHeader& outHeader, AlignedBuilder& outBuffer);
+void PREPLOGBUFFER(JSectHeader& outHeader,
+                   AlignedBuilder& outBuffer,
+                   ClockSource* cs,
+                   int64_t serverStartMs);
 
 // Declared in dur_journal.cpp
 boost::filesystem::path getJournalDir();
 void preallocateFiles();
 
 // Forward declaration
-static void durThread();
+static void durThread(ClockSource* cs, int64_t serverStartMs);
 
 // Durability activity statistics
 Stats stats;
@@ -484,13 +490,18 @@ void Stats::S::_asObj(BSONObjBuilder* builder) const {
       << _journaledBytes / (_uncompressedBytes + 1.0) << "commitsInWriteLock" << _commitsInWriteLock
       << "earlyCommits" << 0 << "timeMs"
       << BSON("dt" << _durationMillis << "prepLogBuffer" << (unsigned)(_prepLogBufferMicros / 1000)
-                   << "writeToJournal" << (unsigned)(_writeToJournalMicros / 1000)
-                   << "writeToDataFiles" << (unsigned)(_writeToDataFilesMicros / 1000)
-                   << "remapPrivateView" << (unsigned)(_remapPrivateViewMicros / 1000) << "commits"
-                   << (unsigned)(_commitsMicros / 1000) << "commitsInWriteLock"
+                   << "writeToJournal"
+                   << (unsigned)(_writeToJournalMicros / 1000)
+                   << "writeToDataFiles"
+                   << (unsigned)(_writeToDataFilesMicros / 1000)
+                   << "remapPrivateView"
+                   << (unsigned)(_remapPrivateViewMicros / 1000)
+                   << "commits"
+                   << (unsigned)(_commitsMicros / 1000)
+                   << "commitsInWriteLock"
                    << (unsigned)(_commitsInWriteLockMicros / 1000));
 
-    if (storageGlobalParams.journalCommitIntervalMs != 0) {
+    if (storageGlobalParams.journalCommitIntervalMs.load() != 0) {
         b << "journalCommitIntervalMs" << storageGlobalParams.journalCommitIntervalMs.load();
     }
 }
@@ -509,10 +520,10 @@ DurableInterface::~DurableInterface() {}
 // DurableImpl
 //
 
-bool DurableImpl::commitNow(OperationContext* txn) {
-    NotifyAll::When when = commitNotify.now();
+bool DurableImpl::commitNow(OperationContext* opCtx) {
+    CommitNotifier::When when = commitNotify.now();
 
-    AutoYieldFlushLockForMMAPV1Commit flushLockYield(txn->lockState());
+    AutoYieldFlushLockForMMAPV1Commit flushLockYield(opCtx->lockState());
 
     // There is always just one waiting anyways
     flushRequested.notify_one();
@@ -554,15 +565,15 @@ bool DurableImpl::commitIfNeeded() {
     return true;
 }
 
-void DurableImpl::syncDataAndTruncateJournal(OperationContext* txn) {
-    invariant(txn->lockState()->isW());
+void DurableImpl::syncDataAndTruncateJournal(OperationContext* opCtx) {
+    invariant(opCtx->lockState()->isW());
 
     // Once this returns, all the outstanding journal has been applied to the data files and
     // so it's safe to do the flushAll/journalCleanup below.
-    commitNow(txn);
+    commitNow(opCtx);
 
     // Flush the shared view to disk.
-    MongoFile::flushAll(true);
+    MongoFile::flushAll(opCtx, true);
 
     // Once the shared view has been flushed, we do not need the journal files anymore.
     journalCleanup(true);
@@ -572,16 +583,13 @@ void DurableImpl::syncDataAndTruncateJournal(OperationContext* txn) {
 }
 
 void DurableImpl::closingFileNotification() {
-    if (commitJob.hasWritten()) {
-        severe() << "journal warning files are closing outside locks with writes pending";
-
-        // File is closing while there are unwritten changes
-        invariant(false);
-    }
+    // File is closing while there are unwritten changes
+    invariant(!commitJob.hasWritten(),
+              "journal warning files are closing outside locks with writes pending");
 }
 
-void DurableImpl::commitAndStopDurThread() {
-    NotifyAll::When when = commitNotify.now();
+void DurableImpl::commitAndStopDurThread(OperationContext* opCtx) {
+    CommitNotifier::When when = commitNotify.now();
 
     // There is always just one waiting anyways
     flushRequested.notify_one();
@@ -592,7 +600,7 @@ void DurableImpl::commitAndStopDurThread() {
     applyToDataFilesNotify.waitFor(when);
 
     // Flush the shared view to disk.
-    MongoFile::flushAll(true);
+    MongoFile::flushAll(opCtx, true);
 
     // Once the shared view has been flushed, we do not need the journal files anymore.
     journalCleanup(true);
@@ -607,9 +615,9 @@ void DurableImpl::commitAndStopDurThread() {
     _durThreadHandle.join();
 }
 
-void DurableImpl::start() {
+void DurableImpl::start(ClockSource* cs, int64_t serverStartMs) {
     // Start the durability thread
-    stdx::thread t(durThread);
+    stdx::thread t(durThread, cs, serverStartMs);
     _durThreadHandle.swap(t);
 }
 
@@ -622,40 +630,41 @@ void DurableImpl::start() {
  * @param fraction Value between (0, 1] indicating what fraction of the memory to remap.
  *      Remapping too much or too frequently incurs copy-on-write page fault cost.
  */
-static void remapPrivateView(double fraction) {
+static void remapPrivateView(OperationContext* opCtx, double fraction) {
     // Remapping private views must occur after WRITETODATAFILES otherwise we wouldn't see any
     // newly written data on reads.
     invariant(!commitJob.hasWritten());
 
     try {
         Timer t;
-        remapPrivateViewImpl(fraction);
+        remapPrivateViewImpl(opCtx, fraction);
         stats.curr()->_remapPrivateViewMicros += t.micros();
 
         LOG(4) << "remapPrivateView end";
         return;
     } catch (DBException& e) {
-        severe() << "dbexception in remapPrivateView causing immediate shutdown: " << e.toString();
+        severe() << "dbexception in remapPrivateView causing immediate shutdown: " << redact(e);
     } catch (std::ios_base::failure& e) {
         severe() << "ios_base exception in remapPrivateView causing immediate shutdown: "
-                 << e.what();
+                 << redact(e.what());
     } catch (std::bad_alloc& e) {
         severe() << "bad_alloc exception in remapPrivateView causing immediate shutdown: "
-                 << e.what();
+                 << redact(e.what());
     } catch (std::exception& e) {
-        severe() << "exception in remapPrivateView causing immediate shutdown: " << e.what();
+        severe() << "exception in remapPrivateView causing immediate shutdown: "
+                 << redact(e.what());
     } catch (...) {
         severe() << "unknown exception in remapPrivateView causing immediate shutdown: ";
     }
 
-    invariant(false);
+    MONGO_UNREACHABLE;
 }
 
 
 /**
  * The main durability thread loop. There is a single instance of this function running.
  */
-static void durThread() {
+static void durThread(ClockSource* cs, int64_t serverStartMs) {
     Client::initThread("durability");
 
     log() << "Durability thread started";
@@ -677,13 +686,13 @@ static void durThread() {
     uint64_t remapLastTimestamp(0);
 
     while (shutdownRequested.loadRelaxed() == 0) {
-        unsigned ms = storageGlobalParams.journalCommitIntervalMs;
+        unsigned ms = storageGlobalParams.journalCommitIntervalMs.load();
         if (ms == 0) {
             ms = samePartition ? 100 : 30;
         }
 
         // +1 so it never goes down to zero
-        const unsigned oneThird = (ms / 3) + 1;
+        const int64_t oneThird = (ms / 3) + 1;
 
         // Reset the stats based on the reset interval
         if (stats.curr()->getCurrentDurationMillis() > DurStatsResetIntervalMillis) {
@@ -695,7 +704,7 @@ static void durThread() {
 
             for (unsigned i = 0; i <= 2; i++) {
                 if (stdx::cv_status::no_timeout ==
-                    flushRequested.wait_for(lock, Milliseconds(oneThird))) {
+                    flushRequested.wait_for(lock, Milliseconds(oneThird).toSystemDuration())) {
                     // Someone forced a flush
                     break;
                 }
@@ -716,12 +725,13 @@ static void durThread() {
 
             Timer t;
 
-            OperationContextImpl txn;
-            AutoAcquireFlushLockForMMAPV1Commit autoFlushLock(txn.lockState());
+            const ServiceContext::UniqueOperationContext opCtxPtr = cc().makeOperationContext();
+            OperationContext& opCtx = *opCtxPtr;
+            AutoAcquireFlushLockForMMAPV1Commit autoFlushLock(opCtx.lockState());
 
             // We need to snapshot the commitNumber after the flush lock has been obtained,
             // because at this point we know that we have a stable snapshot of the data.
-            const NotifyAll::When commitNumber(commitNotify.now());
+            const CommitNotifier::When commitNumber(commitNotify.now());
 
             LOG(4) << "Processing commit number " << commitNumber;
 
@@ -741,7 +751,7 @@ static void durThread() {
             } else {
                 // This copies all the in-memory changes into the journal writer's buffer.
                 JournalWriter::Buffer* const buffer = journalWriter.newBuffer();
-                PREPLOGBUFFER(buffer->getHeader(), buffer->getBuilder());
+                PREPLOGBUFFER(buffer->getHeader(), buffer->getBuilder(), cs, serverStartMs);
 
                 estimatedPrivateMapSize += commitJob.bytes();
                 commitCounter++;
@@ -818,7 +828,7 @@ static void durThread() {
                     // accessing it. Technically this step could be avoided on systems, which
                     // support atomic remap.
                     autoFlushLock.upgradeFlushLockToExclusive();
-                    remapPrivateView(remapFraction);
+                    remapPrivateView(opCtxPtr.get(), remapFraction);
 
                     autoFlushLock.release();
 
@@ -836,20 +846,22 @@ static void durThread() {
 
             LOG(4) << "groupCommit end";
         } catch (DBException& e) {
-            severe() << "dbexception in durThread causing immediate shutdown: " << e.toString();
-            invariant(false);
+            severe() << "dbexception in durThread causing immediate shutdown: " << redact(e);
+            MONGO_UNREACHABLE;
         } catch (std::ios_base::failure& e) {
-            severe() << "ios_base exception in durThread causing immediate shutdown: " << e.what();
-            invariant(false);
+            severe() << "ios_base exception in durThread causing immediate shutdown: "
+                     << redact(e.what());
+            MONGO_UNREACHABLE;
         } catch (std::bad_alloc& e) {
-            severe() << "bad_alloc exception in durThread causing immediate shutdown: " << e.what();
-            invariant(false);
+            severe() << "bad_alloc exception in durThread causing immediate shutdown: "
+                     << redact(e.what());
+            MONGO_UNREACHABLE;
         } catch (std::exception& e) {
-            severe() << "exception in durThread causing immediate shutdown: " << e.what();
-            invariant(false);
+            severe() << "exception in durThread causing immediate shutdown: " << redact(e.what());
+            MONGO_UNREACHABLE;
         } catch (...) {
             severe() << "unhandled exception in durThread causing immediate shutdown";
-            invariant(false);
+            MONGO_UNREACHABLE;
         }
     }
 
@@ -867,20 +879,20 @@ static void durThread() {
  * Invoked at server startup. Recovers the database by replaying journal files and then
  * starts the durability thread.
  */
-void startup() {
+void startup(ClockSource* cs, int64_t serverStartMs) {
     if (!storageGlobalParams.dur) {
         return;
     }
 
-    journalMakeDir();
+    journalMakeDir(cs, serverStartMs);
 
     try {
         replayJournalFilesAtStartup();
     } catch (DBException& e) {
-        severe() << "dbexception during recovery: " << e.toString();
+        severe() << "dbexception during recovery: " << redact(e);
         throw;
     } catch (std::exception& e) {
-        severe() << "std::exception during recovery: " << e.what();
+        severe() << "std::exception during recovery: " << redact(e.what());
         throw;
     } catch (...) {
         severe() << "exception during recovery";
@@ -889,7 +901,7 @@ void startup() {
 
     preallocateFiles();
 
-    durableImpl.start();
+    durableImpl.start(cs, serverStartMs);
     DurableInterface::_impl = &durableImpl;
 }
 

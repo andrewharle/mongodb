@@ -12,8 +12,15 @@
     var dbName = "wMajorityCheck";
     var collName = "stepdownAndBackUp";
 
-    var rst = new ReplSetTest(
-        {name: name, nodes: [{}, {}, {rsConfig: {priority: 0}}, ], useBridge: true});
+    var rst = new ReplSetTest({
+        name: name,
+        nodes: [
+            {},
+            {},
+            {rsConfig: {priority: 0}},
+        ],
+        useBridge: true
+    });
     var nodes = rst.startSet();
     rst.initiate();
 
@@ -23,8 +30,9 @@
         });
     }
 
+    // SERVER-20844 ReplSetTest starts up a single node replica set then reconfigures to the correct
+    // size for faster startup, so nodes[0] is always the first primary.
     jsTestLog("Make sure node 0 is primary.");
-    rst.stepUp(nodes[0]);
     var primary = rst.getPrimary();
     var secondaries = rst.getSecondaries();
     assert.eq(nodes[0], primary);
@@ -40,9 +48,16 @@
 
     jsTestLog("Do w:majority write that will block waiting for replication.");
     var doMajorityWrite = function() {
-        var res = db.getSiblingDB('wMajorityCheck')
-                      .stepdownAndBackUp.insert({a: 2}, {writeConcern: {w: 'majority'}});
-        assert.writeErrorWithCode(res, ErrorCodes.PrimarySteppedDown);
+        // Run ismaster command with 'hangUpOnStepDown' set to false to mark this connection as
+        // one that shouldn't be closed when the node steps down.  This makes it easier to detect
+        // the error returned by the write concern failure.
+        assert.commandWorked(db.adminCommand({ismaster: 1, hangUpOnStepDown: false}));
+
+        var res = db.getSiblingDB('wMajorityCheck').stepdownAndBackUp.insert({a: 2}, {
+            writeConcern: {w: 'majority', wtimeout: 600000}
+        });
+        assert.writeErrorWithCode(
+            res, [ErrorCodes.PrimarySteppedDown, ErrorCodes.InterruptedDueToReplStateChange]);
     };
 
     var joinMajorityWriter = startParallelShell(doMajorityWrite, nodes[0].port);
@@ -72,8 +87,6 @@
     nodes[1].acceptConnectionsFrom(nodes[0]);
     nodes[2].acceptConnectionsFrom(nodes[0]);
 
-    joinMajorityWriter();
-
     // Allow the old primary to finish stepping down so that shutdown can finish.
     var res = null;
     try {
@@ -86,6 +99,13 @@
     if (res) {
         assert.commandWorked(res);
     }
+
+    joinMajorityWriter();
+
+    // Node 0 will go into rollback after it steps down.  We want to wait for that to happen, and
+    // then complete, in order to get a clean shutdown.
+    jsTestLog("Waiting for node 0 to roll back the failed write.");
+    rst.awaitReplication();
 
     rst.stopSet();
 }());

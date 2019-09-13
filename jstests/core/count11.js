@@ -1,3 +1,7 @@
+// Cannot implicitly shard accessed collections because of collection existing when none
+// expected.
+// @tags: [assumes_no_implicit_collection_creation_after_drop, requires_fastcount]
+
 // SERVER-8514: Test the count command returns an error to the user when given an invalid query
 // predicate, even when the collection doesn't exist.
 
@@ -5,12 +9,8 @@ var t = db.count11;
 
 t.drop();
 
-var validQuery = {
-    a: 1
-};
-var invalidQuery = {
-    a: {$invalid: 1}
-};
+var validQuery = {a: 1};
+var invalidQuery = {a: {$invalid: 1}};
 
 // Query non-existing collection with empty query.
 assert.eq(0, t.find().count());

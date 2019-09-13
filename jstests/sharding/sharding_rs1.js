@@ -1,11 +1,17 @@
-// tests sharding with replica sets
+/**
+ * tests sharding with replica sets
+ *
+ * This test is labeled resource intensive because its total io_write is 798MB compared to a median
+ * of 135MB across all sharding tests in mmapv1.
+ * @tags: [resource_intensive]
+ */
 (function() {
     'use strict';
 
     var s = new ShardingTest({shards: 3, other: {rs: true, chunkSize: 1, enableBalancer: true}});
 
     s.adminCommand({enablesharding: "test"});
-    s.ensurePrimaryShard('test', 'test-rs0');
+    s.ensurePrimaryShard('test', s.shard0.shardName);
     s.config.settings.update({_id: "balancer"}, {$set: {_waitForDelete: true}}, true);
 
     var db = s.getDB("test");
@@ -26,7 +32,7 @@
     assert.commandWorked(s.s.adminCommand({shardcollection: "test.foo", key: {_id: 1}}));
 
     jsTest.log("Waiting for balance to complete");
-    s.awaitBalance('foo', 'test', 2 * 60 * 1000);
+    s.awaitBalance('foo', 'test', 5 * 60 * 1000);
 
     jsTest.log("Stopping balancer");
     s.stopBalancer();

@@ -1,32 +1,34 @@
 // data_file.h
 
+
 /**
-*    Copyright (C) 2013 10gen Inc.
-*
-*    This program is free software: you can redistribute it and/or  modify
-*    it under the terms of the GNU Affero General Public License, version 3,
-*    as published by the Free Software Foundation.
-*
-*    This program is distributed in the hope that it will be useful,
-*    but WITHOUT ANY WARRANTY; without even the implied warranty of
-*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*    GNU Affero General Public License for more details.
-*
-*    You should have received a copy of the GNU Affero General Public License
-*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*
-*    As a special exception, the copyright holders give permission to link the
-*    code of portions of this program with the OpenSSL library under certain
-*    conditions as described in each individual source file and distribute
-*    linked combinations including the program with the OpenSSL library. You
-*    must comply with the GNU Affero General Public License in all respects for
-*    all of the code used other than as permitted herein. If you modify file(s)
-*    with this exception, you may extend this exception to your version of the
-*    file(s), but you are not obligated to do so. If you do not wish to do so,
-*    delete this exception statement from your version. If you delete this
-*    exception statement from all source files in the program, then also delete
-*    it in the license file.
-*/
+ *    Copyright (C) 2018-present MongoDB, Inc.
+ *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
+ *
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
+ */
 
 #pragma once
 
@@ -110,9 +112,6 @@ public:
     void setMayHaveCollationMetadata() {
         _minor |= kMayHaveCollationMetadata;
     }
-    void clearMayHaveCollationMetadata() {
-        _minor &= ~kMayHaveCollationMetadata;
-    }
 
     uint32_t majorRaw() const {
         return _major;
@@ -128,9 +127,7 @@ private:
     // first 4 bits - index plugin cleanliness.
     //    see IndexCatalog::_upgradeDatabaseMinorVersionIfNeeded for details
     // 5th bit - 1 if started with 3.0-style freelist implementation (SERVER-14081)
-    // 6th bit - 1 if data files were created on a newer version that supports collation, and
-    //           indices or collections with a collation were at some point constructed on that
-    //           version.
+    // 6th bit - 1 if indexes or collections with a collation have been created.
     // 7th through 31st bit - reserved and must be set to 0.
     static const uint32_t kIndexPluginMask = 0xf;
     static const uint32_t kIndexes22AndOlder = 5;
@@ -187,9 +184,9 @@ public:
         return version.majorRaw() == 0;
     }
 
-    void init(OperationContext* txn, int fileno, int filelength, const char* filename);
+    void init(OperationContext* opCtx, int fileno, int filelength, const char* filename);
 
-    void checkUpgrade(OperationContext* txn);
+    void checkUpgrade(OperationContext* opCtx);
 
     bool isEmpty() const {
         return uninitialized() || (unusedLength == fileLength - HeaderSize - 16);
@@ -200,18 +197,26 @@ public:
 
 class DataFile {
 public:
-    DataFile(int fn) : _fileNo(fn), _mb(NULL) {}
+    DataFile(OperationContext* opCtx, int fn) : _fileNo(fn), mmf(opCtx), _mb(NULL) {}
 
     /** @return true if found and opened. if uninitialized (prealloc only) does not open. */
-    Status openExisting(const char* filename);
+    Status openExisting(OperationContext* opCtx, const char* filename);
 
     /** creates if DNE */
-    void open(OperationContext* txn,
+    void open(OperationContext* opCtx,
               const char* filename,
               int requestedDataSize = 0,
               bool preallocateOnly = false);
 
-    DiskLoc allocExtentArea(OperationContext* txn, int size);
+    /**
+     * Must be called before destruction.
+     */
+    void close(OperationContext* opCtx) {
+        LockMongoFilesExclusive lock(opCtx);
+        mmf.close(opCtx);
+    }
+
+    DiskLoc allocExtentArea(OperationContext* opCtx, int size);
 
     DataFileHeader* getHeader() {
         return header();

@@ -1,37 +1,43 @@
 // text.cpp
 
-/*    Copyright 2009 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
+
+#include "mongo/platform/basic.h"
 
 #include "mongo/util/text.h"
 
 #include <boost/integer_traits.hpp>
 #include <errno.h>
 #include <iostream>
+#include <memory>
 #include <sstream>
 
 #ifdef _WIN32
@@ -147,27 +153,6 @@ bool isValidUTF8(const char* s) {
     return true;
 }
 
-long long parseLL(const char* n) {
-    long long ret;
-    uassert(13307, "cannot convert empty string to long long", *n != 0);
-#if !defined(_WIN32)
-    char* endPtr = 0;
-    errno = 0;
-    ret = strtoll(n, &endPtr, 10);
-    uassert(13305, "could not convert string to long long", *endPtr == 0 && errno == 0);
-#else
-    size_t endLen = 0;
-    try {
-        ret = stoll(n, &endLen, 10);
-    } catch (...) {
-        endLen = 0;
-    }
-    uassert(13306, "could not convert string to long long", endLen != 0 && n[endLen] == 0);
-#endif  // !defined(_WIN32)
-    return ret;
-}
-
-
 #if defined(_WIN32)
 
 std::string toUtf8String(const std::wstring& wide) {
@@ -272,7 +257,8 @@ bool writeUtf8ToWindowsConsole(const char* utf8String, unsigned int utf8StringSi
                 if (!errorMessageShown) {
                     std::cout << "\n---\nUnicode text could not be correctly displayed.\n"
                                  "Please change your console font to a Unicode font "
-                                 "(e.g. Lucida Console).\n---\n" << std::endl;
+                                 "(e.g. Lucida Console).\n---\n"
+                              << std::endl;
                     errorMessageShown = true;
                 }
                 // we can't display the text properly using a raster font,

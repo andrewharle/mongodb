@@ -18,21 +18,20 @@ assert.eq(13, res.code);  // unauthorized
 assert.writeError(adminDB.exploit.system.indexes.insert(
     {ns: "admin.system.users", key: {haxx: 1.0}, name: "haxx_1", unique: true, dropDups: true}));
 // Make sure that no indexes were built.
-var collectionInfosCursor =
-    adminDB.runCommand("listCollections",
-                       {
-                         filter: {
-                             $and: [
-                                 {name: /^admin\.system\.users\.\$/},
-                                 {name: {$ne: "admin.system.users.$_id_"}},
-                                 {name: {$ne: "admin.system.users.$user_1_db_1"}}
-                             ]
-                         }
-                       });
+var collectionInfosCursor = adminDB.runCommand("listCollections", {
+    filter: {
+        $and: [
+            {name: /^admin\.system\.users\.\$/},
+            {name: {$ne: "admin.system.users.$_id_"}},
+            {name: {$ne: "admin.system.users.$user_1_db_1"}}
+        ]
+    }
+});
 
-assert.eq([], new DBCommandCursor(adminDB.getMongo(), collectionInfosCursor).toArray());
+assert.eq([], new DBCommandCursor(adminDB, collectionInfosCursor).toArray());
 adminDB.logout();
 
 adminDB.auth('admin', 'x');
 // Make sure that no users were actually dropped
 assert.eq(3, adminDB.system.users.count());
+MongoRunner.stopMongod(conn, null, {user: 'admin', pwd: 'x'});

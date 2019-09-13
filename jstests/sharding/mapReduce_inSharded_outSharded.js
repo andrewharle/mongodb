@@ -15,7 +15,7 @@
     var admin = st.s0.getDB('admin');
 
     assert.commandWorked(admin.runCommand({enablesharding: "mrShard"}));
-    st.ensurePrimaryShard('mrShard', 'shard0001');
+    st.ensurePrimaryShard('mrShard', st.shard1.shardName);
     assert.commandWorked(
         admin.runCommand({shardcollection: "mrShard.srcSharded", key: {"_id": 1}}));
 
@@ -39,8 +39,8 @@
     // sharded src sharded dst
     var suffix = "InShardedOutSharded";
 
-    var out = db.srcSharded.mapReduce(
-        map, reduce, {out: {replace: "mrReplace" + suffix, sharded: true}});
+    var out =
+        db.srcSharded.mapReduce(map, reduce, {out: {replace: "mrReplace" + suffix, sharded: true}});
     verifyOutput(out);
 
     out = db.srcSharded.mapReduce(map, reduce, {out: {merge: "mrMerge" + suffix, sharded: true}});

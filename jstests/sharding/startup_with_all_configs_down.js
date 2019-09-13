@@ -5,10 +5,26 @@
 // This test involves restarting a standalone shard, so cannot be run on ephemeral storage engines.
 // A restarted standalone will lose all data when using an ephemeral storage engine.
 // @tags: [requires_persistence]
+
+// The UUID consistency check uses connections to shards cached on the ShardingTest object, but this
+// test restarts a shard, so the cached connection is not usable.
+TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
+
 (function() {
     "use strict";
 
-    var st = new ShardingTest({shards: 2});
+    /**
+     * Restarts the mongod backing the specified shard instance, without restarting the mongobridge.
+     */
+    function restartShard(shard, waitForConnect) {
+        MongoRunner.stopMongod(shard);
+        shard.restart = true;
+        shard.waitForConnect = waitForConnect;
+        MongoRunner.runMongod(shard);
+    }
+
+    // TODO: SERVER-33830 remove shardAsReplicaSet: false
+    var st = new ShardingTest({shards: 2, other: {shardAsReplicaSet: false}});
 
     jsTestLog("Setting up initial data");
 
@@ -16,12 +32,13 @@
         assert.writeOK(st.s.getDB('test').foo.insert({_id: i}));
     }
 
-    st.ensurePrimaryShard('test', 'shard0000');
+    assert.commandWorked(st.s0.adminCommand({enableSharding: 'test'}));
+    st.ensurePrimaryShard('test', st.shard0.shardName);
 
-    st.adminCommand({enableSharding: 'test'});
-    st.adminCommand({shardCollection: 'test.foo', key: {_id: 1}});
-    st.adminCommand({split: 'test.foo', find: {_id: 50}});
-    st.adminCommand({moveChunk: 'test.foo', find: {_id: 75}, to: 'shard0001'});
+    assert.commandWorked(st.s0.adminCommand({shardCollection: 'test.foo', key: {_id: 1}}));
+    assert.commandWorked(st.s0.adminCommand({split: 'test.foo', find: {_id: 50}}));
+    assert.commandWorked(
+        st.s0.adminCommand({moveChunk: 'test.foo', find: {_id: 75}, to: st.shard1.shardName}));
 
     // Make sure the pre-existing mongos already has the routing information loaded into memory
     assert.eq(100, st.s.getDB('test').foo.find().itcount());
@@ -40,9 +57,7 @@
     });
 
     jsTestLog("Restarting a shard while there are no config servers up");
-    MongoRunner.stopMongod(st.shard1);
-    st.shard1.restart = true;
-    MongoRunner.runMongod(st.shard1);
+    restartShard(st.shard1, false);
 
     jsTestLog("Queries should fail because the shard can't initialize sharding state");
     var error = assert.throws(function() {
@@ -57,22 +72,31 @@
         st.restartConfigServer(i);
     }
 
+    print("Sleeping for 60 seconds to let the other shards restart their ReplicaSetMonitors");
+    sleep(60000);
+
     jsTestLog("Queries against the original mongos should work again");
     assert.eq(100, st.s.getDB('test').foo.find().itcount());
 
     jsTestLog("Should now be possible to connect to the mongos that was started while the config " +
               "servers were down");
-    var mongos2 = null;
-    assert.soon(function() {
-        try {
-            mongos2 = new Mongo(newMongosInfo.host);
-            return true;
-        } catch (e) {
-            printjson(e);
-            return false;
-        }
-    });
-    assert.eq(100, mongos2.getDB('test').foo.find().itcount());
+    var newMongosConn = null;
+    var caughtException = null;
+    assert.soon(
+        function() {
+            try {
+                newMongosConn = new Mongo(newMongosInfo.host);
+                return true;
+            } catch (e) {
+                caughtException = e;
+                return false;
+            }
+        },
+        "Failed to connect to mongos after config servers were restarted: " +
+            tojson(caughtException));
+
+    assert.eq(100, newMongosConn.getDB('test').foo.find().itcount());
 
     st.stop();
+    MongoRunner.stopMongos(newMongosInfo);
 }());

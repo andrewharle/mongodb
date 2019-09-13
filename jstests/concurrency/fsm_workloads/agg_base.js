@@ -45,9 +45,7 @@ var $config = (function() {
         }
     };
 
-    var transitions = {
-        query: {query: 1}
-    };
+    var transitions = {query: {query: 1}};
 
     function setup(db, collName, cluster) {
         // load example data
@@ -55,13 +53,12 @@ var $config = (function() {
         for (var i = 0; i < this.numDocs; ++i) {
             // note: padDoc caches the large string after allocating it once, so it's ok to call it
             // in this loop
-            bulk.insert(padDoc(
-                {
-                  flag: i % 2 ? true : false,
-                  rand: Random.rand(),
-                  randInt: Random.randInt(this.numDocs)
-                },
-                this.docSize));
+            bulk.insert(padDoc({
+                flag: i % 2 ? true : false,
+                rand: Random.rand(),
+                randInt: Random.randInt(this.numDocs)
+            },
+                               this.docSize));
         }
         var res = bulk.execute();
         assertWhenOwnColl.writeOK(res);
@@ -69,10 +66,6 @@ var $config = (function() {
         assertWhenOwnColl.eq(this.numDocs, db[collName].find().itcount());
         assertWhenOwnColl.eq(this.numDocs / 2, db[collName].find({flag: false}).itcount());
         assertWhenOwnColl.eq(this.numDocs / 2, db[collName].find({flag: true}).itcount());
-    }
-
-    function teardown(db, collName, cluster) {
-        assertWhenOwnColl(db[collName].drop());
     }
 
     return {
@@ -86,6 +79,5 @@ var $config = (function() {
         transitions: transitions,
         data: data,
         setup: setup,
-        teardown: teardown
     };
 })();

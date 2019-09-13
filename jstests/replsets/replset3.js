@@ -25,9 +25,9 @@ var doTest = function(signal) {
 
     print(phase++);
 
-    // Step down master.  Note: this may close our connection!
+    // Step down master.  Note: this will close our connection!
     try {
-        master.getDB("admin").runCommand({replSetStepDown: true, force: 1});
+        master.getDB("admin").runCommand({replSetStepDown: 0, force: 1});
     } catch (err) {
         print("caught: " + err + " on stepdown");
     }
@@ -52,7 +52,7 @@ var doTest = function(signal) {
 
     print(phase++);
 
-    var slaves = replTest.liveNodes.slaves;
+    var slaves = replTest._slaves;
     assert.soon(function() {
         try {
             var res = slaves[0].getDB("admin").runCommand({replSetGetStatus: 1});

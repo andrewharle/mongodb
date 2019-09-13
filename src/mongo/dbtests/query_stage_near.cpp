@@ -1,29 +1,31 @@
+
 /**
- *    Copyright (C) 2014 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 /**
@@ -31,8 +33,15 @@
  */
 
 
+#include "mongo/platform/basic.h"
+
+#include <memory>
+#include <vector>
+
 #include "mongo/base/owned_pointer_vector.h"
+#include "mongo/db/client.h"
 #include "mongo/db/exec/near.h"
+#include "mongo/db/exec/queued_data_stage.h"
 #include "mongo/db/exec/working_set_common.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/unittest/unittest.h"
@@ -45,59 +54,10 @@ using std::unique_ptr;
 using std::vector;
 using stdx::make_unique;
 
-/**
- * Stage which takes in an array of BSONObjs and returns them.
- * If the BSONObj is in the form of a Status, returns the Status as a FAILURE.
- */
-class MockStage final : public PlanStage {
-public:
-    MockStage(const vector<BSONObj>& data, WorkingSet* workingSet)
-        : PlanStage("MOCK_STAGE", nullptr), _data(data), _pos(0), _workingSet(workingSet) {}
-
-    StageState work(WorkingSetID* out) final {
-        ++_commonStats.works;
-
-        if (isEOF())
-            return PlanStage::IS_EOF;
-
-        BSONObj next = _data[_pos++];
-
-        if (WorkingSetCommon::isValidStatusMemberObject(next)) {
-            Status status = WorkingSetCommon::getMemberObjectStatus(next);
-            *out = WorkingSetCommon::allocateStatusMember(_workingSet, status);
-            return PlanStage::FAILURE;
-        }
-
-        *out = _workingSet->allocate();
-        WorkingSetMember* member = _workingSet->get(*out);
-        member->obj = Snapshotted<BSONObj>(SnapshotId(), next);
-        member->transitionToOwnedObj();
-
-        return PlanStage::ADVANCED;
-    }
-
-    bool isEOF() final {
-        return _pos == static_cast<int>(_data.size());
-    }
-
-    StageType stageType() const final {
-        return STAGE_UNKNOWN;
-    }
-
-    unique_ptr<PlanStageStats> getStats() final {
-        return make_unique<PlanStageStats>(_commonStats, STAGE_UNKNOWN);
-    }
-
-    const SpecificStats* getSpecificStats() const final {
-        return NULL;
-    }
-
-private:
-    vector<BSONObj> _data;
-    int _pos;
-
-    // Not owned here
-    WorkingSet* const _workingSet;
+class QueryStageNearTest : public unittest::Test {
+protected:
+    const ServiceContext::UniqueOperationContext _uniqOpCtx = cc().makeOperationContext();
+    OperationContext* const _opCtx = _uniqOpCtx.get();
 };
 
 /**
@@ -115,23 +75,36 @@ public:
         double max;
     };
 
-    MockNearStage(WorkingSet* workingSet)
-        : NearStage(NULL, "MOCK_DISTANCE_SEARCH_STAGE", STAGE_UNKNOWN, workingSet, NULL), _pos(0) {}
+    MockNearStage(OperationContext* opCtx, WorkingSet* workingSet)
+        : NearStage(opCtx, "MOCK_DISTANCE_SEARCH_STAGE", STAGE_UNKNOWN, workingSet, NULL),
+          _pos(0) {}
 
     void addInterval(vector<BSONObj> data, double min, double max) {
-        _intervals.mutableVector().push_back(new MockInterval(data, min, max));
+        _intervals.push_back(stdx::make_unique<MockInterval>(data, min, max));
     }
 
-    virtual StatusWith<CoveredInterval*> nextInterval(OperationContext* txn,
+    virtual StatusWith<CoveredInterval*> nextInterval(OperationContext* opCtx,
                                                       WorkingSet* workingSet,
                                                       Collection* collection) {
         if (_pos == static_cast<int>(_intervals.size()))
             return StatusWith<CoveredInterval*>(NULL);
 
-        const MockInterval& interval = *_intervals.vector()[_pos++];
+        const MockInterval& interval = *_intervals[_pos++];
 
-        bool lastInterval = _pos == static_cast<int>(_intervals.vector().size());
-        _children.emplace_back(new MockStage(interval.data, workingSet));
+        bool lastInterval = _pos == static_cast<int>(_intervals.size());
+
+        auto queuedStage = make_unique<QueuedDataStage>(opCtx, workingSet);
+
+        for (unsigned int i = 0; i < interval.data.size(); i++) {
+            // Add all documents from the lastInterval into the QueuedDataStage.
+            const WorkingSetID id = workingSet->allocate();
+            WorkingSetMember* member = workingSet->get(id);
+            member->obj = Snapshotted<BSONObj>(SnapshotId(), interval.data[i]);
+            workingSet->transitionToOwnedObj(id);
+            queuedStage->pushBack(id);
+        }
+
+        _children.push_back(std::move(queuedStage));
         return StatusWith<CoveredInterval*>(new CoveredInterval(
             _children.back().get(), true, interval.min, interval.max, lastInterval));
     }
@@ -141,7 +114,7 @@ public:
         return StatusWith<double>(member->obj.value()["distance"].numberDouble());
     }
 
-    virtual StageState initialize(OperationContext* txn,
+    virtual StageState initialize(OperationContext* opCtx,
                                   WorkingSet* workingSet,
                                   Collection* collection,
                                   WorkingSetID* out) {
@@ -149,7 +122,7 @@ public:
     }
 
 private:
-    OwnedPointerVector<MockInterval> _intervals;
+    std::vector<std::unique_ptr<MockInterval>> _intervals;
     int _pos;
 };
 
@@ -179,11 +152,11 @@ static void assertAscendingAndValid(const vector<BSONObj>& results) {
     }
 }
 
-TEST(query_stage_near, Basic) {
+TEST_F(QueryStageNearTest, Basic) {
     vector<BSONObj> mockData;
     WorkingSet workingSet;
 
-    MockNearStage nearStage(&workingSet);
+    MockNearStage nearStage(_opCtx, &workingSet);
 
     // First set of results
     mockData.clear();
@@ -214,11 +187,11 @@ TEST(query_stage_near, Basic) {
     assertAscendingAndValid(results);
 }
 
-TEST(query_stage_near, EmptyResults) {
+TEST_F(QueryStageNearTest, EmptyResults) {
     vector<BSONObj> mockData;
     WorkingSet workingSet;
 
-    MockNearStage nearStage(&workingSet);
+    MockNearStage nearStage(_opCtx, &workingSet);
 
     // Empty set of results
     mockData.clear();

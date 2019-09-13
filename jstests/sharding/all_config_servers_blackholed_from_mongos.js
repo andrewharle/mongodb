@@ -1,10 +1,21 @@
-// Ensures that if the config servers are blackholed from the point of view of MongoS, metadata
-// operations do not get stuck forever.
+/**
+ * Ensures that if the config servers are blackholed from the point of view of MongoS, metadata
+ * operations do not get stuck forever.
+ *
+ * Checking UUID consistency involves talking to config servers through mongos, but mongos is
+ * blackholed from the config servers in this test.
+ *
+ * This test triggers a compiler bug that causes a crash when compiling with optimizations on, see
+ * SERVER-35632.
+ * @tags: [blacklist_from_rhel_67_s390x]
+ */
+
+TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
+
 (function() {
     'use strict';
 
     var st = new ShardingTest({
-        name: 'all_config_servers_blackholed_from_mongos',
         shards: 2,
         mongos: 1,
         useBridge: true,
@@ -28,13 +39,14 @@
     // This shouldn't stall
     jsTest.log('Doing read operation on the sharded collection');
     assert.throws(function() {
-        testDB.ShardedColl.find({}).itcount();
+        testDB.ShardedColl.find({}).maxTimeMS(15000).itcount();
     });
 
     // This should fail, because the primary is not available
     jsTest.log('Doing write operation on a new database and collection');
     assert.writeError(st.s.getDB('NonExistentDB')
-                          .TestColl.insert({_id: 0, value: 'This value will never be inserted'}));
+                          .TestColl.insert({_id: 0, value: 'This value will never be inserted'},
+                                           {maxTimeMS: 15000}));
 
     st.stop();
 

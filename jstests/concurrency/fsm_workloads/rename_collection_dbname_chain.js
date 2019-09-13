@@ -7,7 +7,6 @@
  * command against it, specifying a different database name in the namespace.
  * The previous "to" namespace is used as the next "from" namespace.
  */
-load('jstests/concurrency/fsm_workload_helpers/drop_utils.js');  // for dropDatabases
 
 var $config = (function() {
 
@@ -49,22 +48,11 @@ var $config = (function() {
             this.fromDBName = toDBName;
         }
 
-        return {
-            init: init,
-            rename: rename
-        };
+        return {init: init, rename: rename};
 
     })();
 
-    var transitions = {
-        init: {rename: 1},
-        rename: {rename: 1}
-    };
-
-    function teardown(db, collName, cluster) {
-        var pattern = new RegExp('^' + db.getName() + this.prefix + '\\d+_\\d+$');
-        dropDatabases(db, pattern);
-    }
+    var transitions = {init: {rename: 1}, rename: {rename: 1}};
 
     return {
         threadCount: 10,
@@ -77,7 +65,6 @@ var $config = (function() {
         data: data,
         states: states,
         transitions: transitions,
-        teardown: teardown
     };
 
 })();

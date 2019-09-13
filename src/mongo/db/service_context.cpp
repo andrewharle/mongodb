@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -26,22 +28,38 @@
  *    it in the license file.
  */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kDefault
+
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/service_context.h"
 
+#include "mongo/base/init.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/client.h"
+#include "mongo/db/concurrency/locker_noop.h"
+#include "mongo/db/op_observer.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/storage/recovery_unit_noop.h"
+#include "mongo/stdx/list.h"
 #include "mongo/stdx/memory.h"
+#include "mongo/transport/service_entry_point.h"
+#include "mongo/transport/session.h"
+#include "mongo/transport/transport_layer.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
+#include "mongo/util/system_clock_source.h"
+#include "mongo/util/system_tick_source.h"
 
 namespace mongo {
-
 namespace {
 
-ServiceContext* globalServiceContext = NULL;
+using ConstructorActionList = stdx::list<ServiceContext::ConstructorDestructorActions>;
+
+ServiceContext* globalServiceContext = nullptr;
+
+AtomicWord<int> _numCurrentOps{0};
 
 }  // namespace
 
@@ -54,10 +72,13 @@ ServiceContext* getGlobalServiceContext() {
     return globalServiceContext;
 }
 
-void setGlobalServiceContext(std::unique_ptr<ServiceContext>&& serviceContext) {
-    fassert(17509, serviceContext.get());
-
-    delete globalServiceContext;
+void setGlobalServiceContext(ServiceContext::UniqueServiceContext&& serviceContext) {
+    if (globalServiceContext) {
+        // Make sure that calling getGlobalServiceContext() during the destructor results in
+        // nullptr. Decorations might try and do this.
+        ServiceContext::UniqueServiceContext oldServiceContext{globalServiceContext};
+        globalServiceContext = nullptr;
+    }
 
     globalServiceContext = serviceContext.release();
 }
@@ -69,73 +90,83 @@ bool supportsDocLocking() {
 }
 
 bool isMMAPV1() {
-    StorageEngine* globalStorageEngine = getGlobalServiceContext()->getGlobalStorageEngine();
+    StorageEngine* globalStorageEngine = getGlobalServiceContext()->getStorageEngine();
 
     invariant(globalStorageEngine);
     return globalStorageEngine->isMmapV1();
 }
 
-Status validateStorageOptions(
-    const BSONObj& storageEngineOptions,
-    stdx::function<Status(const StorageEngine::Factory* const, const BSONObj&)> validateFunc) {
-    BSONObjIterator storageIt(storageEngineOptions);
-    while (storageIt.more()) {
-        BSONElement storageElement = storageIt.next();
-        StringData storageEngineName = storageElement.fieldNameStringData();
-        if (storageElement.type() != mongo::Object) {
-            return Status(ErrorCodes::BadValue,
-                          str::stream() << "'storageEngine." << storageElement.fieldNameStringData()
-                                        << "' has to be an embedded document.");
-        }
-
-        std::unique_ptr<StorageFactoriesIterator> sfi(
-            getGlobalServiceContext()->makeStorageFactoriesIterator());
-        invariant(sfi);
-        bool found = false;
-        while (sfi->more()) {
-            const StorageEngine::Factory* const& factory = sfi->next();
-            if (storageEngineName != factory->getCanonicalName()) {
-                continue;
-            }
-            Status status = validateFunc(factory, storageElement.Obj());
-            if (!status.isOK()) {
-                return status;
-            }
-            found = true;
-        }
-        if (!found) {
-            return Status(ErrorCodes::InvalidOptions,
-                          str::stream() << storageEngineName
-                                        << " is not a registered storage engine for this server");
-        }
-    }
-    return Status::OK();
-}
+ServiceContext::ServiceContext()
+    : _tickSource(stdx::make_unique<SystemTickSource>()),
+      _fastClockSource(stdx::make_unique<SystemClockSource>()),
+      _preciseClockSource(stdx::make_unique<SystemClockSource>()) {}
 
 ServiceContext::~ServiceContext() {
     stdx::lock_guard<stdx::mutex> lk(_mutex);
+    for (const auto& client : _clients) {
+        severe() << "Client " << client->desc() << " still exists while destroying ServiceContext@"
+                 << static_cast<void*>(this);
+    }
     invariant(_clients.empty());
 }
 
-ServiceContext::UniqueClient ServiceContext::makeClient(std::string desc,
-                                                        AbstractMessagingPort* p) {
-    std::unique_ptr<Client> client(new Client(std::move(desc), this, p));
-    auto observer = _clientObservers.cbegin();
+namespace {
+
+//
+// These onDestroy and onCreate functions are utilities for correctly executing supplemental
+// constructor and destructor methods for the ServiceContext, Client and OperationContext types.
+//
+// Note that destructors run in reverse order of constructors, and that failed construction
+// leads to corresponding destructors to run, similarly to how member variable construction and
+// destruction behave.
+//
+
+template <typename T, typename ObserversIterator>
+void onDestroy(T* object,
+               const ObserversIterator& observerBegin,
+               const ObserversIterator& observerEnd) {
     try {
-        for (; observer != _clientObservers.cend(); ++observer) {
-            observer->get()->onCreateClient(client.get());
+        auto observer = observerEnd;
+        while (observer != observerBegin) {
+            --observer;
+            observer->onDestroy(object);
         }
     } catch (...) {
-        try {
-            while (observer != _clientObservers.cbegin()) {
-                --observer;
-                observer->get()->onDestroyClient(client.get());
-            }
-        } catch (...) {
-            std::terminate();
+        std::terminate();
+    }
+}
+template <typename T, typename ObserversContainer>
+void onDestroy(T* object, const ObserversContainer& observers) {
+    onDestroy(object, observers.cbegin(), observers.cend());
+}
+
+template <typename T, typename ObserversIterator>
+void onCreate(T* object,
+              const ObserversIterator& observerBegin,
+              const ObserversIterator& observerEnd) {
+    auto observer = observerBegin;
+    try {
+        for (; observer != observerEnd; ++observer) {
+            observer->onCreate(object);
         }
+    } catch (...) {
+        onDestroy(object, observerBegin, observer);
         throw;
     }
+}
+
+template <typename T, typename ObserversContainer>
+void onCreate(T* object, const ObserversContainer& observers) {
+    onCreate(object, observers.cbegin(), observers.cend());
+}
+
+
+}  // namespace
+
+ServiceContext::UniqueClient ServiceContext::makeClient(std::string desc,
+                                                        transport::SessionHandle session) {
+    std::unique_ptr<Client> client(new Client(std::move(desc), this, std::move(session)));
+    onCreate(client.get(), _clientObservers);
     {
         stdx::lock_guard<stdx::mutex> lk(_mutex);
         invariant(_clients.insert(client.get()).second);
@@ -143,20 +174,59 @@ ServiceContext::UniqueClient ServiceContext::makeClient(std::string desc,
     return UniqueClient(client.release());
 }
 
-TickSource* ServiceContext::getTickSource() const {
-    return _tickSource.get();
+void ServiceContext::setPeriodicRunner(std::unique_ptr<PeriodicRunner> runner) {
+    invariant(!_runner);
+    _runner = std::move(runner);
 }
 
-ClockSource* ServiceContext::getClockSource() const {
-    return _clockSource.get();
+PeriodicRunner* ServiceContext::getPeriodicRunner() const {
+    return _runner.get();
+}
+
+transport::TransportLayer* ServiceContext::getTransportLayer() const {
+    return _transportLayer.get();
+}
+
+ServiceEntryPoint* ServiceContext::getServiceEntryPoint() const {
+    return _serviceEntryPoint.get();
+}
+
+transport::ServiceExecutor* ServiceContext::getServiceExecutor() const {
+    return _serviceExecutor.get();
+}
+
+void ServiceContext::setStorageEngine(std::unique_ptr<StorageEngine> engine) {
+    invariant(engine);
+    invariant(!_storageEngine);
+    _storageEngine = std::move(engine);
+}
+
+void ServiceContext::setOpObserver(std::unique_ptr<OpObserver> opObserver) {
+    _opObserver = std::move(opObserver);
 }
 
 void ServiceContext::setTickSource(std::unique_ptr<TickSource> newSource) {
     _tickSource = std::move(newSource);
 }
 
-void ServiceContext::setClockSource(std::unique_ptr<ClockSource> newSource) {
-    _clockSource = std::move(newSource);
+void ServiceContext::setFastClockSource(std::unique_ptr<ClockSource> newSource) {
+    _fastClockSource = std::move(newSource);
+}
+
+void ServiceContext::setPreciseClockSource(std::unique_ptr<ClockSource> newSource) {
+    _preciseClockSource = std::move(newSource);
+}
+
+void ServiceContext::setServiceEntryPoint(std::unique_ptr<ServiceEntryPoint> sep) {
+    _serviceEntryPoint = std::move(sep);
+}
+
+void ServiceContext::setTransportLayer(std::unique_ptr<transport::TransportLayer> tl) {
+    _transportLayer = std::move(tl);
+}
+
+void ServiceContext::setServiceExecutor(std::unique_ptr<transport::ServiceExecutor> exec) {
+    _serviceExecutor = std::move(exec);
 }
 
 void ServiceContext::ClientDeleter::operator()(Client* client) const {
@@ -165,66 +235,47 @@ void ServiceContext::ClientDeleter::operator()(Client* client) const {
         stdx::lock_guard<stdx::mutex> lk(service->_mutex);
         invariant(service->_clients.erase(client));
     }
-    try {
-        for (const auto& observer : service->_clientObservers) {
-            observer->onDestroyClient(client);
-        }
-    } catch (...) {
-        std::terminate();
-    }
+    onDestroy(client, service->_clientObservers);
     delete client;
 }
 
 ServiceContext::UniqueOperationContext ServiceContext::makeOperationContext(Client* client) {
-    auto opCtx = _newOpCtx(client);
-    auto observer = _clientObservers.begin();
-    try {
-        for (; observer != _clientObservers.cend(); ++observer) {
-            observer->get()->onCreateOperationContext(opCtx.get());
-        }
-    } catch (...) {
-        try {
-            while (observer != _clientObservers.cbegin()) {
-                --observer;
-                observer->get()->onDestroyOperationContext(opCtx.get());
-            }
-        } catch (...) {
-            std::terminate();
-        }
-        throw;
+    auto opCtx = std::make_unique<OperationContext>(client, _nextOpId.fetchAndAdd(1));
+    if (client->session()) {
+        _numCurrentOps.addAndFetch(1);
     }
-    // // TODO(schwerin): When callers no longer construct their own OperationContexts directly,
-    // // but only through the ServiceContext, uncomment the following.  Until then, it must
-    // // be done in the operation context destructors, which introduces a potential race.
-    // {
-    //     stdx::lock_guard<Client> lk(*client);
-    //     client->setOperationContext(opCtx.get());
-    // }
+
+    onCreate(opCtx.get(), _clientObservers);
+    if (!opCtx->lockState()) {
+        opCtx->setLockState(std::make_unique<LockerNoop>());
+    }
+    if (!opCtx->recoveryUnit()) {
+        opCtx->setRecoveryUnit(new RecoveryUnitNoop(),
+                               WriteUnitOfWork::RecoveryUnitState::kNotInUnitOfWork);
+    }
+    {
+        stdx::lock_guard<Client> lk(*client);
+        client->setOperationContext(opCtx.get());
+    }
     return UniqueOperationContext(opCtx.release());
 };
 
 void ServiceContext::OperationContextDeleter::operator()(OperationContext* opCtx) const {
     auto client = opCtx->getClient();
-    auto service = client->getServiceContext();
-    // // TODO(schwerin): When callers no longer construct their own OperationContexts directly,
-    // // but only through the ServiceContext, uncomment the following.  Until then, it must
-    // // be done in the operation context destructors, which introduces a potential race.
-    // {
-    //     stdx::lock_guard<Client> lk(*client);
-    //     client->resetOperationContext();
-    // }
-    try {
-        for (const auto& observer : service->_clientObservers) {
-            observer->onDestroyOperationContext(opCtx);
-        }
-    } catch (...) {
-        std::terminate();
+    if (client->session()) {
+        _numCurrentOps.subtractAndFetch(1);
     }
+    auto service = client->getServiceContext();
+    {
+        stdx::lock_guard<Client> lk(*client);
+        client->resetOperationContext();
+    }
+    onDestroy(opCtx, service->_clientObservers);
     delete opCtx;
 }
 
 void ServiceContext::registerClientObserver(std::unique_ptr<ClientObserver> observer) {
-    _clientObservers.push_back(std::move(observer));
+    _clientObservers.emplace_back(std::move(observer));
 }
 
 ServiceContext::LockedClientsCursor::LockedClientsCursor(ServiceContext* service)
@@ -238,27 +289,135 @@ Client* ServiceContext::LockedClientsCursor::next() {
     return result;
 }
 
-BSONArray storageEngineList() {
-    if (!hasGlobalServiceContext())
-        return BSONArray();
+void ServiceContext::setKillAllOperations() {
+    stdx::lock_guard<stdx::mutex> clientLock(_mutex);
 
-    std::unique_ptr<StorageFactoriesIterator> sfi(
-        getGlobalServiceContext()->makeStorageFactoriesIterator());
+    // Ensure that all newly created operation contexts will immediately be in the interrupted state
+    _globalKill.store(true);
 
-    if (!sfi)
-        return BSONArray();
-
-    BSONArrayBuilder engineArrayBuilder;
-
-    while (sfi->more()) {
-        engineArrayBuilder.append(sfi->next()->getCanonicalName());
+    // Interrupt all active operations
+    for (auto&& client : _clients) {
+        stdx::lock_guard<Client> lk(*client);
+        auto opCtxToKill = client->getOperationContext();
+        if (opCtxToKill) {
+            killOperation(opCtxToKill, ErrorCodes::InterruptedAtShutdown);
+        }
     }
 
-    return engineArrayBuilder.arr();
+    // Notify any listeners who need to reach to the server shutting down
+    for (const auto listener : _killOpListeners) {
+        try {
+            listener->interruptAll();
+        } catch (...) {
+            std::terminate();
+        }
+    }
 }
 
-void appendStorageEngineList(BSONObjBuilder* result) {
-    result->append("storageEngines", storageEngineList());
+void ServiceContext::killOperation(OperationContext* opCtx, ErrorCodes::Error killCode) {
+    opCtx->markKilled(killCode);
+
+    for (const auto listener : _killOpListeners) {
+        try {
+            listener->interrupt(opCtx->getOpID());
+        } catch (...) {
+            std::terminate();
+        }
+    }
+}
+
+void ServiceContext::killAllUserOperations(const OperationContext* opCtx,
+                                           ErrorCodes::Error killCode) {
+    for (LockedClientsCursor cursor(this); Client* client = cursor.next();) {
+        if (!client->isFromUserConnection()) {
+            // Don't kill system operations.
+            continue;
+        }
+
+        stdx::lock_guard<Client> lk(*client);
+        OperationContext* toKill = client->getOperationContext();
+
+        // Don't kill ourself.
+        if (toKill && toKill->getOpID() != opCtx->getOpID()) {
+            killOperation(toKill, killCode);
+        }
+    }
+}
+
+void ServiceContext::unsetKillAllOperations() {
+    _globalKill.store(false);
+}
+
+void ServiceContext::registerKillOpListener(KillOpListenerInterface* listener) {
+    stdx::lock_guard<stdx::mutex> clientLock(_mutex);
+    _killOpListeners.push_back(listener);
+}
+
+void ServiceContext::waitForStartupComplete() {
+    stdx::unique_lock<stdx::mutex> lk(_mutex);
+    _startupCompleteCondVar.wait(lk, [this] { return _startupComplete; });
+}
+
+void ServiceContext::notifyStartupComplete() {
+    stdx::unique_lock<stdx::mutex> lk(_mutex);
+    _startupComplete = true;
+    lk.unlock();
+    _startupCompleteCondVar.notify_all();
+}
+
+int ServiceContext::getActiveClientOperations() {
+    return _numCurrentOps.load();
+}
+
+namespace {
+
+/**
+ * Accessor function to get the global list of ServiceContext constructor and destructor
+ * functions.
+ */
+ConstructorActionList& registeredConstructorActions() {
+    static ConstructorActionList cal;
+    return cal;
+}
+
+}  // namespace
+
+ServiceContext::ConstructorActionRegisterer::ConstructorActionRegisterer(
+    std::string name, ConstructorAction constructor, DestructorAction destructor)
+    : ConstructorActionRegisterer(
+          std::move(name), {}, std::move(constructor), std::move(destructor)) {}
+
+ServiceContext::ConstructorActionRegisterer::ConstructorActionRegisterer(
+    std::string name,
+    std::vector<std::string> prereqs,
+    ConstructorAction constructor,
+    DestructorAction destructor) {
+    if (!destructor)
+        destructor = [](ServiceContext*) {};
+    _registerer.emplace(std::move(name),
+                        std::move(prereqs),
+                        [this, constructor, destructor](InitializerContext* context) {
+                            _iter = registeredConstructorActions().emplace(
+                                registeredConstructorActions().end(),
+                                std::move(constructor),
+                                std::move(destructor));
+                            return Status::OK();
+                        },
+                        [this](DeinitializerContext* context) {
+                            registeredConstructorActions().erase(_iter);
+                            return Status::OK();
+                        });
+}
+
+ServiceContext::UniqueServiceContext ServiceContext::make() {
+    auto service = std::make_unique<ServiceContext>();
+    onCreate(service.get(), registeredConstructorActions());
+    return UniqueServiceContext{service.release()};
+}
+
+void ServiceContext::ServiceContextDeleter::operator()(ServiceContext* service) const {
+    onDestroy(service, registeredConstructorActions());
+    delete service;
 }
 
 }  // namespace mongo

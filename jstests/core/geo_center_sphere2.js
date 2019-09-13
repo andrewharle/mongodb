@@ -1,3 +1,5 @@
+// @tags: [requires_getmore]
+
 //
 // Tests the error handling of spherical queries
 // along with multi-location documents.
@@ -5,12 +7,7 @@
 // multiple documents, and so requires simultaneous testing.
 //
 
-function deg2rad(arg) {
-    return arg * Math.PI / 180.0;
-}
-function rad2deg(arg) {
-    return arg * 180.0 / Math.PI;
-}
+load("jstests/libs/geo_math.js");
 
 function computexscandist(y, maxDistDegrees) {
     return maxDistDegrees /
@@ -131,12 +128,12 @@ for (var test = 0; test < numTests; test++) {
 
     // geoNear
     results = db.runCommand({
-        geoNear: "sphere",
-        near: startPoint,
-        maxDistance: radius,
-        num: 2 * pointsIn,
-        spherical: true
-    }).results;
+                    geoNear: "sphere",
+                    near: startPoint,
+                    maxDistance: radius,
+                    num: 2 * pointsIn,
+                    spherical: true
+                }).results;
 
     /*
     printjson( results );

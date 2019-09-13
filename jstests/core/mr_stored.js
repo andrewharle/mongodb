@@ -1,3 +1,6 @@
+// This test expects a function stored in the system.js collection to be available for a map/reduce,
+// which may not be the case if it is implicitly sharded in a passthrough.
+// @tags: [does_not_support_stepdowns, requires_non_retryable_writes, assumes_unsharded_collection]
 
 t = db.mr_stored;
 t.drop();
@@ -22,10 +25,7 @@ r = function(k, v) {
             total += v[i].stats[j];
         }
     }
-    return {
-        stats: stats,
-        total: total
-    };
+    return {stats: stats, total: total};
 };
 
 // Test that map reduce works with stored javascript

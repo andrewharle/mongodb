@@ -1,35 +1,43 @@
 // stringutils.cpp
 
-/*    Copyright 2009 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/platform/basic.h"
 
+#include <cctype>
+
 #include "mongo/util/stringutils.h"
+
+#include "mongo/base/parse_number.h"
+#include "mongo/util/hex.h"
 
 namespace mongo {
 
@@ -179,6 +187,60 @@ int versionCmp(const StringData rhs, const StringData lhs) {
     }
 
     return LexNumCmp::cmp(rhs, lhs, false);
+}
+
+std::string escape(StringData sd, bool escape_slash) {
+    StringBuilder ret;
+    ret.reset(sd.size());
+    for (const auto& c : sd) {
+        switch (c) {
+            case '"':
+                ret << "\\\"";
+                break;
+            case '\\':
+                ret << "\\\\";
+                break;
+            case '/':
+                ret << (escape_slash ? "\\/" : "/");
+                break;
+            case '\b':
+                ret << "\\b";
+                break;
+            case '\f':
+                ret << "\\f";
+                break;
+            case '\n':
+                ret << "\\n";
+                break;
+            case '\r':
+                ret << "\\r";
+                break;
+            case '\t':
+                ret << "\\t";
+                break;
+            default:
+                if (c >= 0 && c <= 0x1f) {
+                    // For c < 0x7f, ASCII value == Unicode code point.
+                    ret << "\\u00" << toHexLower(&c, 1);
+                } else {
+                    ret << c;
+                }
+        }
+    }
+    return ret.str();
+}
+
+boost::optional<size_t> parseUnsignedBase10Integer(StringData fieldName) {
+    // Do not accept positions like '-4' or '+4'
+    if (!std::isdigit(fieldName[0])) {
+        return boost::none;
+    }
+    unsigned int index;
+    auto status = parseNumberFromStringWithBase<unsigned int>(fieldName, 10, &index);
+    if (status.isOK()) {
+        return static_cast<size_t>(index);
+    }
+    return boost::none;
 }
 
 }  // namespace mongo

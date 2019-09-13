@@ -4,6 +4,21 @@
 
 load("jstests/libs/check_log.js");
 
+// Shards a collection with 'numDocs' documents and creates 2 chunks, one on each of two shards.
+function shardCollectionWithChunks(st, coll, numDocs) {
+    var _db = coll.getDB();
+    var numberDoc = numDocs || 20;
+    coll.ensureIndex({x: 1}, {unique: true});
+    st.ensurePrimaryShard(_db.toString(), st.shard0.shardName);
+    st.shardColl(
+        coll.getName(), {x: 1}, {x: numberDoc / 2}, {x: numberDoc / 2}, _db.toString(), true);
+
+    for (var i = 0; i < numberDoc; i++) {
+        coll.insert({x: i});
+    }
+    assert.eq(coll.count(), numberDoc);
+}
+
 // Stops replication on the given server(s).
 function stopServerReplication(conn) {
     if (conn.length) {
@@ -20,8 +35,12 @@ function stopServerReplication(conn) {
     assert.commandWorked(
         conn.adminCommand({configureFailPoint: 'stopReplProducer', mode: 'alwaysOn'}), errMsg);
 
-    // Wait until the fail point is actually hit.
-    checkLog.contains(conn, 'bgsync - stopReplProducer fail point enabled');
+    // Wait until the fail point is actually hit. Don't wait if the node is the primary, because
+    // the fail point won't be hit until the node transitions from being the primary.
+    if (assert.commandWorked(conn.adminCommand('replSetGetStatus')).myState !=
+        ReplSetTest.State.PRIMARY) {
+        checkLog.contains(conn, 'bgsync - stopReplProducer fail point enabled');
+    }
 }
 
 // Stops replication at all replicaset secondaries.
@@ -70,4 +89,21 @@ function assertWriteConcernError(res) {
     assert(res.writeConcernError, "No writeConcernError received, got: " + tojson(res));
     assert(res.writeConcernError.code);
     assert(res.writeConcernError.errmsg);
+}
+
+// Run the specified command, on the admin database if specified.
+function runCommandCheckAdmin(db, cmd) {
+    if (cmd.admin) {
+        return db.adminCommand(cmd.req);
+    } else {
+        return db.runCommand(cmd.req);
+    }
+}
+
+// Asserts that writeConcern timed out.
+function checkWriteConcernTimedOut(res) {
+    assertWriteConcernError(res);
+    const errInfo = res.writeConcernError.errInfo;
+    assert(errInfo, "No writeConcernError errInfo, got: " + tojson(res));
+    assert(errInfo.wtimeout, "No errInfo wtimeout, got: " + tojson(res));
 }

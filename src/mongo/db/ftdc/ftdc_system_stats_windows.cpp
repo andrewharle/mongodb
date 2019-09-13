@@ -1,29 +1,31 @@
+
 /**
- * Copyright (C) 2016 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- * This program is free software: you can redistribute it and/or  modify
- * it under the terms of the GNU Affero General Public License, version 3,
- * as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
- * As a special exception, the copyright holders give permission to link the
- * code of portions of this program with the OpenSSL library under certain
- * conditions as described in each individual source file and distribute
- * linked combinations including the program with the OpenSSL library. You
- * must comply with the GNU Affero General Public License in all respects
- * for all of the code used other than as permitted herein. If you modify
- * file(s) with this exception, you may extend this exception to your
- * version of the file(s), but you are not obligated to do so. If you do not
- * wish to do so, delete this exception statement from your version. If you
- * delete this exception statement from all source files in the program,
- * then also delete it in the license file.
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kFTDC
@@ -49,47 +51,47 @@ namespace mongo {
 namespace {
 
 const std::vector<StringData> kCpuCounters = {
-    "\\Processor(_Total)\\% Idle Time",
-    "\\Processor(_Total)\\% Interrupt Time",
-    "\\Processor(_Total)\\% Privileged Time",
-    "\\Processor(_Total)\\% Processor Time",
-    "\\Processor(_Total)\\% User Time",
-    "\\Processor(_Total)\\Interrupts/sec",
-    "\\System\\Context Switches/sec",
-    "\\System\\Processes",
-    "\\System\\Processor Queue Length",
-    "\\System\\System Up Time",
-    "\\System\\Threads",
+    "\\Processor(_Total)\\% Idle Time"_sd,
+    "\\Processor(_Total)\\% Interrupt Time"_sd,
+    "\\Processor(_Total)\\% Privileged Time"_sd,
+    "\\Processor(_Total)\\% Processor Time"_sd,
+    "\\Processor(_Total)\\% User Time"_sd,
+    "\\Processor(_Total)\\Interrupts/sec"_sd,
+    "\\System\\Context Switches/sec"_sd,
+    "\\System\\Processes"_sd,
+    "\\System\\Processor Queue Length"_sd,
+    "\\System\\System Up Time"_sd,
+    "\\System\\Threads"_sd,
 };
 
 const std::vector<StringData> kMemoryCounters = {
-    "\\Memory\\Available Bytes",
-    "\\Memory\\Cache Bytes",
-    "\\Memory\\Cache Faults/sec",
-    "\\Memory\\Committed Bytes",
-    "\\Memory\\Commit Limit",
-    "\\Memory\\Page Reads/sec",
-    "\\Memory\\Page Writes/sec",
-    "\\Memory\\Pages Input/sec",
-    "\\Memory\\Pages Output/sec",
-    "\\Memory\\Pool Nonpaged Bytes",
-    "\\Memory\\Pool Paged Bytes",
-    "\\Memory\\Pool Paged Resident Bytes",
-    "\\Memory\\System Cache Resident Bytes",
-    "\\Memory\\System Code Total Bytes",
+    "\\Memory\\Available Bytes"_sd,
+    "\\Memory\\Cache Bytes"_sd,
+    "\\Memory\\Cache Faults/sec"_sd,
+    "\\Memory\\Committed Bytes"_sd,
+    "\\Memory\\Commit Limit"_sd,
+    "\\Memory\\Page Reads/sec"_sd,
+    "\\Memory\\Page Writes/sec"_sd,
+    "\\Memory\\Pages Input/sec"_sd,
+    "\\Memory\\Pages Output/sec"_sd,
+    "\\Memory\\Pool Nonpaged Bytes"_sd,
+    "\\Memory\\Pool Paged Bytes"_sd,
+    "\\Memory\\Pool Paged Resident Bytes"_sd,
+    "\\Memory\\System Cache Resident Bytes"_sd,
+    "\\Memory\\System Code Total Bytes"_sd,
 
 };
 
 const std::vector<StringData> kDiskCounters = {
-    "\\PhysicalDisk(*)\\% Disk Read Time",
-    "\\PhysicalDisk(*)\\% Disk Write Time",
-    "\\PhysicalDisk(*)\\Avg. Disk Read Queue Length",
-    "\\PhysicalDisk(*)\\Avg. Disk Write Queue Length",
-    "\\PhysicalDisk(*)\\Disk Read Bytes/sec",
-    "\\PhysicalDisk(*)\\Disk Write Bytes/sec",
-    "\\PhysicalDisk(*)\\Disk Reads/sec",
-    "\\PhysicalDisk(*)\\Disk Writes/sec",
-    "\\PhysicalDisk(*)\\Current Disk Queue Length",
+    "\\PhysicalDisk(*)\\% Disk Read Time"_sd,
+    "\\PhysicalDisk(*)\\% Disk Write Time"_sd,
+    "\\PhysicalDisk(*)\\Avg. Disk Read Queue Length"_sd,
+    "\\PhysicalDisk(*)\\Avg. Disk Write Queue Length"_sd,
+    "\\PhysicalDisk(*)\\Disk Read Bytes/sec"_sd,
+    "\\PhysicalDisk(*)\\Disk Write Bytes/sec"_sd,
+    "\\PhysicalDisk(*)\\Disk Reads/sec"_sd,
+    "\\PhysicalDisk(*)\\Disk Writes/sec"_sd,
+    "\\PhysicalDisk(*)\\Current Disk Queue Length"_sd,
 };
 
 
@@ -101,7 +103,7 @@ public:
     WindowsSystemMetricsCollector(std::unique_ptr<PerfCounterCollector> collector)
         : _collector(std::move(collector)) {}
 
-    void collect(OperationContext* txn, BSONObjBuilder& builder) override {
+    void collect(OperationContext* opCtx, BSONObjBuilder& builder) override {
         processStatusErrors(_collector->collect(&builder), &builder);
     }
 
@@ -140,6 +142,7 @@ StatusWith<std::unique_ptr<PerfCounterCollector>> createCollector() {
 }  // namespace
 
 void installSystemMetricsCollector(FTDCController* controller) {
+
     auto swCollector = createCollector();
     if (!swCollector.getStatus().isOK()) {
         warning() << "Failed to initialize Performance Counters for FTDC: "

@@ -1,3 +1,4 @@
+// @tags: [does_not_support_stepdowns]
 
 t = db.mr4;
 t.drop();
@@ -18,9 +19,7 @@ r = function(key, values) {
     for (var i = 0; i < values.length; i++) {
         total += values[i].count;
     }
-    return {
-        count: total
-    };
+    return {count: total};
 };
 
 res = t.mapReduce(m, r, {out: "mr4_out", scope: {xx: {val: 1}}});

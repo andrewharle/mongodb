@@ -1,29 +1,31 @@
+
 /**
- * Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- * This program is free software: you can redistribute it and/or  modify
- * it under the terms of the GNU Affero General Public License, version 3,
- * as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
- * As a special exception, the copyright holders give permission to link the
- * code of portions of this program with the OpenSSL library under certain
- * conditions as described in each individual source file and distribute
- * linked combinations including the program with the OpenSSL library. You
- * must comply with the GNU Affero General Public License in all respects
- * for all of the code used other than as permitted herein. If you modify
- * file(s) with this exception, you may extend this exception to your
- * version of the file(s), but you are not obligated to do so. If you do not
- * wish to do so, delete this exception statement from your version. If you
- * delete this exception statement from all source files in the program,
- * then also delete it in the license file.
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/platform/basic.h"
@@ -44,9 +46,7 @@
 namespace mongo {
 namespace mozjs {
 
-#ifndef _MSC_EXTENSIONS
 const int ObjectWrapper::kMaxWriteFieldDepth;
-#endif  // _MSC_EXTENSIONS
 
 void ObjectWrapper::Key::get(JSContext* cx, JS::HandleObject o, JS::MutableHandleValue value) {
     switch (_type) {
@@ -109,27 +109,29 @@ void ObjectWrapper::Key::set(JSContext* cx, JS::HandleObject o, JS::HandleValue 
 void ObjectWrapper::Key::define(JSContext* cx,
                                 JS::HandleObject o,
                                 JS::HandleValue value,
-                                unsigned attrs) {
+                                unsigned attrs,
+                                JSNative getter,
+                                JSNative setter) {
     switch (_type) {
         case Type::Field:
-            if (JS_DefineProperty(cx, o, _field, value, attrs))
+            if (JS_DefineProperty(cx, o, _field, value, attrs, getter, setter))
                 return;
             break;
         case Type::Index:
-            if (JS_DefineElement(cx, o, _idx, value, attrs))
+            if (JS_DefineElement(cx, o, _idx, value, attrs, getter, setter))
                 return;
             break;
         case Type::Id: {
             JS::RootedId id(cx, _id);
 
-            if (JS_DefinePropertyById(cx, o, id, value, attrs))
+            if (JS_DefinePropertyById(cx, o, id, value, attrs, getter, setter))
                 return;
             break;
         }
         case Type::InternedString: {
             InternedStringId id(cx, _internedString);
 
-            if (JS_DefinePropertyById(cx, o, id, value, attrs))
+            if (JS_DefinePropertyById(cx, o, id, value, attrs, getter, setter))
                 return;
             break;
         }
@@ -363,6 +365,13 @@ void ObjectWrapper::setBSON(Key key, const BSONObj& obj, bool readOnly) {
     setValue(key, value);
 }
 
+void ObjectWrapper::setBSONArray(Key key, const BSONObj& obj, bool readOnly) {
+    JS::RootedValue value(_context);
+    ValueReader(_context, &value).fromBSONArray(obj, nullptr, readOnly);
+
+    setValue(key, value);
+}
+
 void ObjectWrapper::setValue(Key key, JS::HandleValue val) {
     key.set(_context, _object, val);
 }
@@ -374,8 +383,16 @@ void ObjectWrapper::setObject(Key key, JS::HandleObject object) {
     setValue(key, value);
 }
 
-void ObjectWrapper::defineProperty(Key key, JS::HandleValue val, unsigned attrs) {
-    key.define(_context, _object, val, attrs);
+void ObjectWrapper::setPrototype(JS::HandleObject object) {
+    if (JS_SetPrototype(_context, _object, object))
+        return;
+
+    throwCurrentJSException(_context, ErrorCodes::InternalError, "Failed to set prototype");
+}
+
+void ObjectWrapper::defineProperty(
+    Key key, JS::HandleValue val, unsigned attrs, JSNative getter, JSNative setter) {
+    key.define(_context, _object, val, attrs, getter, setter);
 }
 
 void ObjectWrapper::deleteProperty(Key key) {
@@ -440,7 +457,8 @@ void ObjectWrapper::callMethod(JS::HandleValue fun, JS::MutableHandleValue out) 
 }
 
 BSONObj ObjectWrapper::toBSON() {
-    if (getScope(_context)->getProto<BSONInfo>().instanceOf(_object)) {
+    if (getScope(_context)->getProto<BSONInfo>().instanceOf(_object) ||
+        getScope(_context)->getProto<DBRefInfo>().instanceOf(_object)) {
         BSONObj* originalBSON = nullptr;
         bool altered;
 
@@ -527,8 +545,11 @@ BSONObj ObjectWrapper::toBSON() {
     const int sizeWithEOO = b.len() + 1 /*EOO*/ - 4 /*BSONObj::Holder ref count*/;
     uassert(17260,
             str::stream() << "Converting from JavaScript to BSON failed: "
-                          << "Object size " << sizeWithEOO << " exceeds limit of "
-                          << BSONObjMaxInternalSize << " bytes.",
+                          << "Object size "
+                          << sizeWithEOO
+                          << " exceeds limit of "
+                          << BSONObjMaxInternalSize
+                          << " bytes.",
             sizeWithEOO <= BSONObjMaxInternalSize);
 
     return b.obj();
@@ -538,10 +559,13 @@ ObjectWrapper::WriteFieldRecursionFrame::WriteFieldRecursionFrame(JSContext* cx,
                                                                   JSObject* obj,
                                                                   BSONObjBuilder* parent,
                                                                   StringData sd)
-    : thisv(cx, obj), ids(cx) {
+    : thisv(cx, obj), ids(cx, JS::IdVector(cx)) {
     bool isArray = false;
     if (parent) {
-        isArray = JS_IsArrayObject(cx, thisv);
+        if (!JS_IsArrayObject(cx, thisv, &isArray)) {
+            throwCurrentJSException(
+                cx, ErrorCodes::JSInterpreterFailure, "Failure to check object is an array");
+        }
 
         subbob.emplace(isArray ? parent->subarrayStart(sd) : parent->subobjStart(sd));
     }
@@ -564,24 +588,14 @@ ObjectWrapper::WriteFieldRecursionFrame::WriteFieldRecursionFrame(JSContext* cx,
             ids.infallibleAppend(rid);
         }
     } else {
-        auto ridArrayPtr = JS_Enumerate(cx, thisv);
-        if (!ridArrayPtr) {
+        if (!JS_Enumerate(cx, thisv, &ids)) {
             throwCurrentJSException(
                 cx, ErrorCodes::JSInterpreterFailure, "Failure to enumerate object");
         }
-        JS::AutoIdArray rids(cx, ridArrayPtr);
-
-        if (!ids.reserve(rids.length())) {
-            throwCurrentJSException(
-                cx, ErrorCodes::JSInterpreterFailure, "Failure to reserve array");
-        }
-
-        for (uint32_t i = 0; i < rids.length(); i++) {
-            ids.infallibleAppend(rids[i]);
-        }
     }
 
-    if (getScope(cx)->getProto<BSONInfo>().instanceOf(thisv)) {
+    if (getScope(cx)->getProto<BSONInfo>().instanceOf(thisv) ||
+        getScope(cx)->getProto<DBRefInfo>().instanceOf(thisv)) {
         std::tie(originalBSON, altered) = BSONInfo::originalBSON(cx, thisv);
     }
 }

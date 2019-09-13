@@ -1,3 +1,4 @@
+// @tags: [requires_profiling]
 var conn = MongoRunner.runMongod({auth: ""});
 
 var adminDb = conn.getDB("admin");
@@ -38,3 +39,4 @@ testDb.auth('dbAdminAnyDBUser', 'password');
 testDb.setProfilingLevel(0);
 testDb.system.profile.drop();
 assert.commandWorked(testDb.createCollection("system.profile", {capped: true, size: 1024}));
+MongoRunner.stopMongod(conn, null, {user: 'admin', pwd: 'password'});

@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -70,29 +70,10 @@ __wt_connection_close(WT_CONNECTION_IMPL *conn)
 	WT_DECL_RET;
 	WT_DLH *dlh;
 	WT_SESSION_IMPL *s, *session;
-	WT_TXN_GLOBAL *txn_global;
 	u_int i;
 
 	wt_conn = &conn->iface;
-	txn_global = &conn->txn_global;
 	session = conn->default_session;
-
-	/*
-	 * We're shutting down.  Make sure everything gets freed.
-	 *
-	 * It's possible that the eviction server is in the middle of a long
-	 * operation, with a transaction ID pinned.  In that case, we will loop
-	 * here until the transaction ID is released, when the oldest
-	 * transaction ID will catch up with the current ID.
-	 */
-	for (;;) {
-		WT_TRET(__wt_txn_update_oldest(session,
-		    WT_TXN_OLDEST_STRICT | WT_TXN_OLDEST_WAIT));
-		if (txn_global->oldest_id == txn_global->current &&
-		    txn_global->metadata_pinned == txn_global->current)
-			break;
-		__wt_yield();
-	}
 
 	/* Shut down the subsystems, ensuring workers see the state change. */
 	F_SET(conn, WT_CONN_CLOSING);
@@ -120,15 +101,13 @@ __wt_connection_close(WT_CONNECTION_IMPL *conn)
 	F_SET(conn, WT_CONN_CLOSING_NO_MORE_OPENS);
 	WT_FULL_BARRIER();
 
+	WT_TRET(__wt_capacity_server_destroy(session));
 	WT_TRET(__wt_checkpoint_server_destroy(session));
 	WT_TRET(__wt_statlog_destroy(session, true));
 	WT_TRET(__wt_sweep_destroy(session));
 
 	/* The eviction server is shut down last. */
 	WT_TRET(__wt_evict_destroy(session));
-
-	/* Shut down the lookaside table, after all eviction is complete. */
-	WT_TRET(__wt_las_destroy(session));
 
 	/* Close open data handles. */
 	WT_TRET(__wt_conn_dhandle_discard(session));
@@ -169,6 +148,13 @@ __wt_connection_close(WT_CONNECTION_IMPL *conn)
 	if (conn->lock_fh != NULL)
 		WT_TRET(__wt_close(session, &conn->lock_fh));
 
+	/* Close any optrack files */
+	if (session->optrack_fh != NULL)
+		WT_TRET(__wt_close(session, &session->optrack_fh));
+
+	/* Close operation tracking */
+	WT_TRET(__wt_conn_optrack_teardown(session, false));
+
 	/* Close any file handles left open. */
 	WT_TRET(__wt_close_connection_close(session));
 
@@ -190,9 +176,9 @@ __wt_connection_close(WT_CONNECTION_IMPL *conn)
 	if (!F_ISSET(conn, WT_CONN_LEAK_MEMORY))
 		if ((s = conn->sessions) != NULL)
 			for (i = 0; i < conn->session_size; ++s, ++i) {
+				__wt_free(session, s->cursor_cache);
 				__wt_free(session, s->dhhash);
-				__wt_free(session, s->tablehash);
-				__wt_split_stash_discard_all(session, s);
+				__wt_stash_discard_all(session, s);
 				__wt_free(session, s->hazard);
 			}
 
@@ -252,7 +238,7 @@ __wt_connection_workers(WT_SESSION_IMPL *session, const char *cfg[])
 	WT_RET(__wt_meta_track_init(session));
 
 	/* Create the lookaside table. */
-	WT_RET(__wt_las_create(session));
+	WT_RET(__wt_las_create(session, cfg));
 
 	/*
 	 * Start eviction threads.
@@ -265,6 +251,9 @@ __wt_connection_workers(WT_SESSION_IMPL *session, const char *cfg[])
 
 	/* Start the optional async threads. */
 	WT_RET(__wt_async_create(session, cfg));
+
+	/* Start the optional capacity thread. */
+	WT_RET(__wt_capacity_server_create(session, cfg));
 
 	/* Start the optional checkpoint thread. */
 	WT_RET(__wt_checkpoint_server_create(session, cfg));

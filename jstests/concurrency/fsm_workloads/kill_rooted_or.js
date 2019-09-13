@@ -17,7 +17,12 @@ var $config = (function() {
 
     var data = {
         collName: uniqueCollectionName,
-        indexSpecs: [{a: 1}, {a: 1, c: 1}, {b: 1}, {b: 1, c: 1}]
+        indexSpecs: [
+            {a: 1},
+            {a: 1, c: 1},
+            {b: 1},
+            {b: 1, c: 1},
+        ]
     };
 
     var states = {

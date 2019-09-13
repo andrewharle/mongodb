@@ -4,14 +4,13 @@
  */
 
 var testOnlyCommands = [
-    '_testDistLockWithSkew',
-    '_skewClockCommand',
     'configureFailPoint',
     '_hashBSONElement',
     'replSetTest',
     'journalLatencyTest',
     'godinsert',
     'sleep',
+    'cpuload',
     'captrunc',
     'emptycapped'
 ];
@@ -38,7 +37,7 @@ var conn = MongoRunner.runMongod({});
 for (i in testOnlyCommands) {
     assertCmdNotFound(conn.getDB('test'), testOnlyCommands[i]);
 }
-MongoRunner.stopMongod(conn.port);
+MongoRunner.stopMongod(conn);
 
 // Now enable the commands
 jsTest.setOption('enableTestCommands', true);
@@ -47,4 +46,4 @@ var conn = MongoRunner.runMongod({});
 for (i in testOnlyCommands) {
     assertCmdFound(conn.getDB('test'), testOnlyCommands[i]);
 }
-MongoRunner.stopMongod(conn.port);
+MongoRunner.stopMongod(conn);

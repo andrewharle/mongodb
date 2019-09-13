@@ -6,8 +6,9 @@ t.drop();
 t.save({});
 
 function assertResult(expectedUpper, expectedLower, string) {
-    result = t.aggregate({$project: {upper: {$toUpper: string}, lower: {$toLower: string}}})
-                 .toArray()[0];
+    result = t.aggregate({
+                  $project: {upper: {$toUpper: string}, lower: {$toLower: string}}
+              }).toArray()[0];
     assert.eq(expectedUpper, result.upper);
     assert.eq(expectedLower, result.lower);
 }
@@ -38,7 +39,7 @@ assertResult('0XFF0B', '0xff0b', '0XfF0b');
 
 // Type coercion.
 assertResult('555.5', '555.5', 555.5);
-assertResult('1970-01-01T00:00:00', '1970-01-01t00:00:00', new Date(0));
+assertResult('1970-01-01T00:00:00.000Z', '1970-01-01t00:00:00.000z', new Date(0));
 assertResult('', '', null);
 assertException(/abc/);
 

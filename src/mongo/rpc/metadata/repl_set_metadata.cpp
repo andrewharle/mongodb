@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -31,6 +33,7 @@
 #include "mongo/bson/util/bson_check.h"
 #include "mongo/bson/util/bson_extract.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/db/repl/bson_extract_optime.h"
 #include "mongo/rpc/metadata.h"
 
 namespace mongo {
@@ -52,9 +55,7 @@ const char kTermFieldName[] = "term";
 
 }  // unnamed namespace
 
-#ifndef _MSC_EXTENSIONS
 const int ReplSetMetadata::kNoPrimary;
-#endif  // _MSC_EXTENSIONS
 
 ReplSetMetadata::ReplSetMetadata(long long term,
                                  OpTime committedOpTime,
@@ -90,13 +91,16 @@ StatusWith<ReplSetMetadata> ReplSetMetadata::readFromMetadata(const BSONObj& met
     if (!status.isOK())
         return status;
 
+    // We provide a default because these fields will be removed in SERVER-27668.
     long long primaryIndex;
-    status = bsonExtractIntegerField(replMetadataObj, kPrimaryIndexFieldName, &primaryIndex);
+    status = bsonExtractIntegerFieldWithDefault(
+        replMetadataObj, kPrimaryIndexFieldName, -1, &primaryIndex);
     if (!status.isOK())
         return status;
 
     long long syncSourceIndex;
-    status = bsonExtractIntegerField(replMetadataObj, kSyncSourceIndexFieldName, &syncSourceIndex);
+    status = bsonExtractIntegerFieldWithDefault(
+        replMetadataObj, kSyncSourceIndexFieldName, -1, &syncSourceIndex);
     if (!status.isOK())
         return status;
 
@@ -107,12 +111,13 @@ StatusWith<ReplSetMetadata> ReplSetMetadata::readFromMetadata(const BSONObj& met
 
     repl::OpTime lastOpCommitted;
     status = bsonExtractOpTimeField(replMetadataObj, kLastOpCommittedFieldName, &lastOpCommitted);
-    if (!status.isOK())
+    // We check for NoSuchKey because these fields will be removed in SERVER-27668.
+    if (!status.isOK() && status != ErrorCodes::NoSuchKey)
         return status;
 
     repl::OpTime lastOpVisible;
     status = bsonExtractOpTimeField(replMetadataObj, kLastOpVisibleFieldName, &lastOpVisible);
-    if (!status.isOK())
+    if (!status.isOK() && status != ErrorCodes::NoSuchKey)
         return status;
 
     return ReplSetMetadata(
@@ -131,6 +136,19 @@ Status ReplSetMetadata::writeToMetadata(BSONObjBuilder* builder) const {
     replMetadataBuilder.doneFast();
 
     return Status::OK();
+}
+
+std::string ReplSetMetadata::toString() const {
+    str::stream output;
+    output << "ReplSetMetadata";
+    output << " Config Version: " << _configVersion;
+    output << " Replicaset ID: " << _replicaSetId;
+    output << " Term: " << _currentTerm;
+    output << " Primary Index: " << _currentPrimaryIndex;
+    output << " Sync Source Index: " << _currentSyncSourceIndex;
+    output << " Last Op Committed: " << _lastOpCommitted.toString();
+    output << " Last Op Visible: " << _lastOpVisible.toString();
+    return output;
 }
 
 }  // namespace rpc

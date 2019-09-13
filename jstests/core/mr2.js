@@ -1,4 +1,6 @@
-
+// Cannot implicitly shard accessed collections because the "jsMode" option to the "mapReduce"
+// command cannot be used on a sharded collection.
+// @tags: [assumes_unsharded_collection, does_not_support_stepdowns]
 
 t = db.mr2;
 t.drop();
@@ -15,10 +17,7 @@ function m() {
 }
 
 function r(who, values) {
-    var n = {
-        totalSize: 0,
-        num: 0
-    };
+    var n = {totalSize: 0, num: 0};
     for (var i = 0; i < values.length; i++) {
         n.totalSize += values[i].totalSize;
         n.num += values[i].num;

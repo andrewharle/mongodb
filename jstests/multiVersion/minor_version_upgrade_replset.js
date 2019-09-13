@@ -5,8 +5,7 @@
 load('./jstests/multiVersion/libs/multi_rs.js');
 load('./jstests/libs/test_background_ops.js');
 
-// 3.2.1 is the final version to use the old style replSetUpdatePosition command.
-var oldVersion = "3.2.1";
+var oldVersion = "last-stable";
 
 var nodes = {
     n1: {binVersion: oldVersion},
@@ -59,6 +58,11 @@ rst.upgradeSet({binVersion: "latest"});
 
 jsTest.log("Replica set upgraded.");
 
+// We save a reference to the old primary so that we can call reconnect() on it before
+// joinFindInsert() would attempt to send the node an update operation that signals the parallel
+// shell running the background operations to stop.
+var oldPrimary = primary;
+
 // Wait for primary
 var primary = rst.getPrimary();
 
@@ -67,6 +71,10 @@ printjson(rst.status());
 // Allow more valid writes to go through
 sleep(10 * 1000);
 
+// Since the old primary was restarted as part of the upgrade process, we explicitly reconnect to it
+// so that sending it an update operation silently fails with an unchecked NotMaster error rather
+// than a network error.
+reconnect(oldPrimary.getDB("admin"));
 joinFindInsert();
 
 var totalInserts = primary.getCollection(insertNS).find().sort({_id: -1}).next()._id + 1;

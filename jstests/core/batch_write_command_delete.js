@@ -1,4 +1,13 @@
-// @tags: [assumes_write_concern_unchanged]
+// Cannot implicitly shard accessed collections because of following errmsg: A single
+// update/delete on a sharded collection must contain an exact match on _id or contain the shard
+// key.
+//
+// @tags: [
+//   assumes_unsharded_collection,
+//   assumes_write_concern_unchanged,
+//   requires_non_retryable_writes,
+//   requires_fastcount,
+// ]
 
 //
 // Ensures that mongod respects the batch write protocols for delete
@@ -13,7 +22,7 @@ var request;
 var result;
 var batch;
 
-var maxWriteBatchSize = 1000;
+var maxWriteBatchSize = db.isMaster().maxWriteBatchSize;
 
 function resultOK(result) {
     return result.ok && !('code' in result) && !('errmsg' in result) && !('errInfo' in result) &&
@@ -63,9 +72,8 @@ result = coll.runCommand(request);
 assert(resultOK(result), tojson(result));
 assert.eq(0, coll.count());
 
-for (var field in result) {
-    assert.eq('ok', field, 'unexpected field found in result: ' + field);
-}
+var fields = ['ok'];
+assert.hasFields(result, fields, 'fields in result do not match: ' + tojson(fields));
 
 //
 // Single document remove, w:1 write concern specified, ordered:true
@@ -116,10 +124,12 @@ assert.eq(0, coll.count());
 // Large batch under the size threshold should delete successfully
 coll.remove({});
 batch = [];
+var insertBatch = coll.initializeUnorderedBulkOp();
 for (var i = 0; i < maxWriteBatchSize; ++i) {
-    coll.insert({a: i});
-    batch.push({q: {a: i}, limit: 0});
+    insertBatch.insert({_id: i});
+    batch.push({q: {_id: i}, limit: 0});
 }
+assert.writeOK(insertBatch.execute());
 request = {
     delete: coll.getName(),
     deletes: batch,
@@ -135,10 +145,12 @@ assert.eq(0, coll.count());
 // Large batch above the size threshold should fail to delete
 coll.remove({});
 batch = [];
+var insertBatch = coll.initializeUnorderedBulkOp();
 for (var i = 0; i < maxWriteBatchSize + 1; ++i) {
-    coll.insert({a: i});
-    batch.push({q: {a: i}, limit: 0});
+    insertBatch.insert({_id: i});
+    batch.push({q: {_id: i}, limit: 0});
 }
+assert.writeOK(insertBatch.execute());
 request = {
     delete: coll.getName(),
     deletes: batch,
@@ -160,7 +172,7 @@ request = {
     ordered: true
 };
 result = coll.runCommand(request);
-assert.commandWorked(result);
+assert.commandWorkedIgnoringWriteErrors(result);
 assert.eq(1, result.n);
 assert(result.writeErrors != null);
 assert.eq(1, result.writeErrors.length);
@@ -181,7 +193,7 @@ request = {
     ordered: false
 };
 result = coll.runCommand(request);
-assert.commandWorked(result);
+assert.commandWorkedIgnoringWriteErrors(result);
 assert.eq(1, result.n);
 assert.eq(2, result.writeErrors.length);
 
@@ -208,9 +220,7 @@ result = coll.runCommand(request);
 assert.commandWorked(result);
 assert.eq(0, coll.count());
 
-for (var field in result) {
-    assert.eq('ok', field, 'unexpected field found in result: ' + field);
-}
+assert.hasFields(result, fields, 'fields in result do not match: ' + tojson(fields));
 
 //
 // Cause remove error using ordered:true and w:0
@@ -227,9 +237,7 @@ result = coll.runCommand(request);
 assert.commandWorked(result);
 assert.eq(1, coll.count());
 
-for (var field in result) {
-    assert.eq('ok', field, 'unexpected field found in result: ' + field);
-}
+assert.hasFields(result, fields, 'fields in result do not match: ' + tojson(fields));
 
 //
 // When limit is not 0 and 1

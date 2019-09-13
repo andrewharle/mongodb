@@ -2,9 +2,13 @@
 //
 // @tags: [
 //   # This test attempts to perform read operations on a capped collection after truncating
-//   # documents using the captrunc command. The writes from the captrunc command aren't guaranteed
-//   # to become visible until a later w="majority" write occurs.
-//   assumes_write_concern_unchanged,
+//   # documents using the captrunc command. The former operations may be routed to a secondary in
+//   # the replica set, whereas the latter must be routed to the primary.
+//   assumes_read_preference_unchanged,
+//   requires_capped,
+//   requires_fastcount,
+//   requires_non_retryable_commands,
+//   uses_testing_only_commands,
 // ]
 (function() {
     var coll = db.capped6;
@@ -39,15 +43,13 @@
      */
     function prepareCollection(shouldReverse) {
         coll.drop();
-        db._dbCommand(
-            {create: "capped6", capped: true, size: 1000, $nExtents: 11, autoIndexId: false});
+        assert.commandWorked(
+            db.createCollection("capped6", {capped: true, size: 1000, $nExtents: 11}));
         var valueArray = new Array(maxDocuments);
         var c = "";
         for (i = 0; i < maxDocuments; ++i, c += "-") {
             // The a values are strings of increasing length.
-            valueArray[i] = {
-                a: c
-            };
+            valueArray[i] = {a: c};
         }
         if (shouldReverse) {
             valueArray.reverse();

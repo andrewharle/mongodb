@@ -1,25 +1,27 @@
 // record_store_test_updaterecord.h
 
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -40,31 +42,16 @@ namespace {
 
 class UpdateNotifierSpy : public UpdateNotifier {
 public:
-    UpdateNotifierSpy(OperationContext* txn, const RecordId& loc, const char* buf, size_t size)
-        : _txn(txn), _loc(loc), _data(buf, size), nMoveCalls(0), nInPlaceCalls(0) {}
+    UpdateNotifierSpy(OperationContext* opCtx, const RecordId& loc, const char* buf, size_t size)
+        : _opCtx(opCtx), _loc(loc), _data(buf, size), nInPlaceCalls(0) {}
 
     ~UpdateNotifierSpy() {}
 
-    Status recordStoreGoingToMove(OperationContext* txn,
-                                  const RecordId& oldLocation,
-                                  const char* oldBuffer,
-                                  size_t oldSize) {
-        nMoveCalls++;
-        ASSERT_EQUALS(_txn, txn);
-        ASSERT_EQUALS(_loc, oldLocation);
-        ASSERT_EQUALS(_data, oldBuffer);
-        return Status::OK();
-    }
-
-    Status recordStoreGoingToUpdateInPlace(OperationContext* txn, const RecordId& loc) {
+    Status recordStoreGoingToUpdateInPlace(OperationContext* opCtx, const RecordId& loc) {
         nInPlaceCalls++;
-        ASSERT_EQUALS(_txn, txn);
+        ASSERT_EQUALS(_opCtx, opCtx);
         ASSERT_EQUALS(_loc, loc);
         return Status::OK();
-    }
-
-    int numMoveCallbacks() const {
-        return nMoveCalls;
     }
 
     int numInPlaceCallbacks() const {
@@ -72,12 +59,11 @@ public:
     }
 
 private:
-    OperationContext* _txn;
+    OperationContext* _opCtx;
     RecordId _loc;
     std::string _data;
 
     // To verify the number of callbacks to the notifier.
-    int nMoveCalls;
     int nInPlaceCalls;
 };
 

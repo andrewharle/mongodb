@@ -1,6 +1,7 @@
 /**
  * Test that user modifications on replica set primaries
  * will invalidate cached user credentials on secondaries
+ * @tags: [requires_replication]
  */
 
 var NUM_NODES = 3;
@@ -29,5 +30,8 @@ primary.getDB('foo').updateUser('foo', {roles: jsTest.basicUserRoles}, {w: NUM_N
 assert.doesNotThrow(function() {
     secondaryFoo.col.findOne();
 }, [], "Secondary read did not work with permissions");
+
+admin.logout();
+secondaryFoo.logout();
 
 rsTest.stopSet();

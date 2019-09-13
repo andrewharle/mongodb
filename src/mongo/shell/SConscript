@@ -2,10 +2,29 @@
 
 Import("env")
 
+env = env.Clone()
+
+env.Library(
+    target='benchrun',
+    source=[
+        'bench.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/client/clientdriver_network',
+        '$BUILD_DIR/mongo/db/logical_session_id',
+        '$BUILD_DIR/mongo/scripting/bson_template_evaluator',
+    ]
+)
+
 generateJSErrorCodes = env.Command(
     target=['error_codes.js'],
-    source=['$BUILD_DIR/mongo/base/generate_error_codes.py', '$BUILD_DIR/mongo/base/error_codes.err'],
-    action=['$PYTHON ${SOURCES[0]} js ${SOURCES[1]} --js-source=${TARGETS[0]}'])
+    source=[
+        '$BUILD_DIR/mongo/base/generate_error_codes.py',
+        '$BUILD_DIR/mongo/base/error_codes.err',
+        'error_codes.tpl.js',
+    ],
+    action=['$PYTHON ${SOURCES[0]} ${SOURCES[1]} ${SOURCES[2]}=${TARGETS[0]}'])
 env.Alias('generated-sources', generateJSErrorCodes)
 
 # Files added here need to be added in scripting/engine.cpp and buildscripts/vcxproj.header as well.
@@ -17,17 +36,17 @@ js_header = env.JSHeader(
         "collection.js",
         "crud_api.js",
         "db.js",
-        "explain_query.js",
-        "explainable.js",
         "error_codes.js",
+        "explainable.js",
+        "explain_query.js",
         "mongo.js",
         "mr.js",
         "query.js",
+        "session.js",
         "types.js",
-        "upgrade_check.js",
+        "utils_auth.js",
         "utils.js",
         "utils_sh.js",
-        "utils_auth.js",
     ]
 )
 
@@ -54,6 +73,16 @@ env.Library(
         'mongo.cpp',
     ],
     LIBDEPS=[
-        "$BUILD_DIR/mongo/base"
+        "$BUILD_DIR/mongo/base",
+    ],
+)
+
+env.CppUnitTest(
+    target='shell_options_test',
+    source=[
+        "shell_options_test.cpp",
+    ],
+    LIBDEPS=[
+        "$BUILD_DIR/mongo/shell_core",
     ],
 )

@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -59,8 +59,8 @@ __curdump_get_key(WT_CURSOR *cursor, ...)
 	size_t size;
 	uint64_t recno;
 	const char *fmt;
-	const void *buffer;
 	va_list ap;
+	const void *buffer;
 
 	cdump = (WT_CURSOR_DUMP *)cursor;
 	child = cdump->child;
@@ -149,15 +149,15 @@ format:		WT_RET_MSG(session, EINVAL, "%s: invalid record number", p);
 static void
 __curdump_set_key(WT_CURSOR *cursor, ...)
 {
-	WT_CURSOR_DUMP *cdump;
 	WT_CURSOR *child;
+	WT_CURSOR_DUMP *cdump;
 	WT_DECL_RET;
 	WT_SESSION_IMPL *session;
 	uint64_t recno;
-	va_list ap;
 	const uint8_t *up;
 	const char *p;
 	bool json;
+	va_list ap;
 
 	cdump = (WT_CURSOR_DUMP *)cursor;
 	child = cdump->child;
@@ -207,14 +207,14 @@ err:		cursor->saved_err = ret;
 static int
 __curdump_get_value(WT_CURSOR *cursor, ...)
 {
+	WT_CURSOR *child;
 	WT_CURSOR_DUMP *cdump;
 	WT_CURSOR_JSON *json;
-	WT_CURSOR *child;
 	WT_DECL_RET;
 	WT_ITEM item, *itemp;
 	WT_SESSION_IMPL *session;
-	va_list ap;
 	const char *fmt;
+	va_list ap;
 
 	cdump = (WT_CURSOR_DUMP *)cursor;
 	child = cdump->child;
@@ -255,12 +255,12 @@ err:	va_end(ap);
 static void
 __curdump_set_value(WT_CURSOR *cursor, ...)
 {
-	WT_CURSOR_DUMP *cdump;
 	WT_CURSOR *child;
+	WT_CURSOR_DUMP *cdump;
 	WT_DECL_RET;
 	WT_SESSION_IMPL *session;
-	va_list ap;
 	const char *p;
+	va_list ap;
 
 	cdump = (WT_CURSOR_DUMP *)cursor;
 	child = cdump->child;
@@ -330,23 +330,24 @@ WT_CURDUMP_PASS(remove)
 static int
 __curdump_close(WT_CURSOR *cursor)
 {
-	WT_CURSOR_DUMP *cdump;
 	WT_CURSOR *child;
+	WT_CURSOR_DUMP *cdump;
 	WT_DECL_RET;
 	WT_SESSION_IMPL *session;
 
 	cdump = (WT_CURSOR_DUMP *)cursor;
 	child = cdump->child;
+	CURSOR_API_CALL_PREPARE_ALLOWED(cursor, session, close, NULL);
+err:
 
-	CURSOR_API_CALL(cursor, session, close, NULL);
 	if (child != NULL)
 		WT_TRET(child->close(child));
 	/* We shared the child's URI. */
 	cursor->internal_uri = NULL;
 	__wt_json_close(session, cursor);
-	WT_TRET(__wt_cursor_close(cursor));
+	__wt_cursor_close(cursor);
 
-err:	API_END_RET(session, ret);
+	API_END_RET(session, ret);
 }
 
 /*
@@ -369,9 +370,13 @@ __wt_curdump_create(WT_CURSOR *child, WT_CURSOR *owner, WT_CURSOR **cursorp)
 	    __curdump_search,			/* search */
 	    __curdump_search_near,		/* search-near */
 	    __curdump_insert,			/* insert */
+	    __wt_cursor_modify_notsup,		/* modify */
 	    __curdump_update,			/* update */
 	    __curdump_remove,			/* remove */
+	    __wt_cursor_notsup,			/* reserve */
 	    __wt_cursor_reconfigure_notsup,	/* reconfigure */
+	    __wt_cursor_notsup,			/* cache */
+	    __wt_cursor_reopen_notsup,		/* reopen */
 	    __curdump_close);			/* close */
 	WT_CURSOR *cursor;
 	WT_CURSOR_DUMP *cdump;
@@ -385,7 +390,7 @@ __wt_curdump_create(WT_CURSOR *child, WT_CURSOR *owner, WT_CURSOR **cursorp)
 	session = (WT_SESSION_IMPL *)child->session;
 
 	WT_RET(__wt_calloc_one(session, &cdump));
-	cursor = &cdump->iface;
+	cursor = (WT_CURSOR *)cdump;
 	*cursor = iface;
 	cursor->session = child->session;
 	cursor->internal_uri = child->internal_uri;

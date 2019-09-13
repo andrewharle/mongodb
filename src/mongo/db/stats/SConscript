@@ -2,6 +2,8 @@
 
 Import("env")
 
+env = env.Clone()
+
 env.Library(
     target='timer_stats',
     source=[
@@ -9,7 +11,6 @@ env.Library(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
-        '$BUILD_DIR/mongo/util/foundation',
         '$BUILD_DIR/mongo/util/concurrency/spin_lock',
     ],
 )
@@ -28,6 +29,7 @@ env.Library(
     target='top',
     source=[
         'top.cpp',
+        'operation_latency_histogram.cpp'
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/service_context',
@@ -44,6 +46,16 @@ env.CppUnitTest(
     ],
 )
 
+env.CppUnitTest(
+    target='operation_latency_histogram_test',
+    source=[
+        'operation_latency_histogram_test.cpp'
+        ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/stats/top',
+        ])
+
 env.Library(
     target='counters',
     source=[
@@ -52,6 +64,22 @@ env.Library(
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/util/concurrency/spin_lock',
+    ],
+)
+
+env.Library(
+    target='server_read_concern_write_concern_metrics',
+    source=[
+        'server_read_concern_metrics.cpp',
+        'server_write_concern_metrics.cpp',
+        env.Idlc('read_concern_stats.idl')[0],
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/commands/server_status',
+        '$BUILD_DIR/mongo/db/repl/read_concern_args',
+        '$BUILD_DIR/mongo/db/write_concern_options',
+        '$BUILD_DIR/mongo/idl/idl_parser',
     ],
 )
 
@@ -73,5 +101,24 @@ env.CppUnitTest(
     ],
     LIBDEPS=[
         'fill_locker_info',
+    ],
+)
+
+env.Library(
+    target='serveronly_stats',
+    source=[
+        "latency_server_status_section.cpp",
+        "lock_server_status_section.cpp",
+        'storage_stats.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/db_raii',
+        '$BUILD_DIR/mongo/db/index/index_access_method',
+        'fill_locker_info',
+        'top',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/commands/server_status',
     ],
 )

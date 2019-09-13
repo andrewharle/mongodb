@@ -1,23 +1,34 @@
+test_kind: js_test
+
 selector:
-  js_test:
-    roots:
-    - jstests/core/*.js
-    exclude_files:
-    - jstests/core/repair*.js  # Fails on recovery.
-    - jstests/core/shellkillop.js  # Takes forever and doesn't test anything new.
+  roots:
+  - jstests/core/**/*.js
+  exclude_files:
+  # Transactions are not supported on MongoDB standalone nodes.
+  - jstests/core/txns/**/*.js
+  - jstests/core/repair*.js  # Fails on recovery.
+  - jstests/core/shellkillop.js  # Takes forever and doesn't test anything new.
 
 executor:
-  js_test:
-    config:
-      shell_options:
-        readMode: commands
+  archive:
     hooks:
-    - class: ValidateCollections
-    fixture:
-      class: MongoDFixture
-      mongod_options:
-        journal: ''
-        set_parameters:
-          enableTestCommands: 1
-        smallfiles: ''
-        durOptions: 8
+      - ValidateCollections
+  config:
+    shell_options:
+      readMode: commands
+  hooks:
+  - class: ValidateCollections
+    shell_options:
+      global_vars:
+        TestData:
+          skipValidationOnNamespaceNotFound: false
+  - class: CleanEveryN
+    n: 20
+  fixture:
+    class: MongoDFixture
+    mongod_options:
+      journal: ''
+      set_parameters:
+        enableTestCommands: 1
+      smallfiles: ''
+      durOptions: 8

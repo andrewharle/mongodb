@@ -2,10 +2,15 @@
 
 Import('env')
 
+env = env.Clone()
+
 env.SConscript(
     dirs=[
         'mutable',
         'util',
+    ],
+    exports=[
+        'env',
     ],
 )
 
@@ -23,6 +28,7 @@ env.CppUnitTest(
     target='bson_obj_test',
     source=[
         'bson_obj_test.cpp',
+        'simple_bsonobj_comparator_test.cpp',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
@@ -60,11 +66,36 @@ env.CppUnitTest(
 )
 
 env.CppUnitTest(
+    target='bsonelement_test',
+    source=[
+        'bsonelement_test.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+    ],
+)
+
+env.CppUnitTest(
     target='oid_test',
     source=[
         'oid_test.cpp',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
+    ],
+)
+
+asioEnv = env.Clone()
+asioEnv.InjectThirdPartyIncludePaths('asio')
+
+asioEnv.CppIntegrationTest(
+    target='ugly_bson_integration_test',
+    source=[
+        'ugly_bson_integration_test.cpp'
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/executor/network_interface_fixture',
+        '$BUILD_DIR/mongo/rpc/protocol',
+        '$BUILD_DIR/mongo/transport/transport_layer_egress_init',
     ],
 )

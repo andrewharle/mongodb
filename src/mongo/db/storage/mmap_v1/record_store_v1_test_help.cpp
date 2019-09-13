@@ -1,39 +1,41 @@
 // record_store_v1_test_help.cpp
 
+
 /**
-*    Copyright (C) 2014 MongoDB Inc.
-*
-*    This program is free software: you can redistribute it and/or  modify
-*    it under the terms of the GNU Affero General Public License, version 3,
-*    as published by the Free Software Foundation.
-*
-*    This program is distributed in the hope that it will be useful,
-*    but WITHOUT ANY WARRANTY; without even the implied warranty of
-*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*    GNU Affero General Public License for more details.
-*
-*    You should have received a copy of the GNU Affero General Public License
-*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*
-*    As a special exception, the copyright holders give permission to link the
-*    code of portions of this program with the OpenSSL library under certain
-*    conditions as described in each individual source file and distribute
-*    linked combinations including the program with the OpenSSL library. You
-*    must comply with the GNU Affero General Public License in all respects for
-*    all of the code used other than as permitted herein. If you modify file(s)
-*    with this exception, you may extend this exception to your version of the
-*    file(s), but you are not obligated to do so. If you do not wish to do so,
-*    delete this exception statement from your version. If you delete this
-*    exception statement from all source files in the program, then also delete
-*    it in the license file.
-*/
+ *    Copyright (C) 2018-present MongoDB, Inc.
+ *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
+ *
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
+ */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kStorage
 
 #include "mongo/db/storage/mmap_v1/record_store_v1_test_help.h"
 
-#include <boost/next_prior.hpp>
 #include <algorithm>
+#include <boost/next_prior.hpp>
 #include <map>
 #include <set>
 #include <vector>
@@ -68,7 +70,7 @@ const DiskLoc& DummyRecordStoreV1MetaData::capExtent() const {
     return _capExtent;
 }
 
-void DummyRecordStoreV1MetaData::setCapExtent(OperationContext* txn, const DiskLoc& loc) {
+void DummyRecordStoreV1MetaData::setCapExtent(OperationContext* opCtx, const DiskLoc& loc) {
     _capExtent = loc;
 }
 
@@ -76,7 +78,7 @@ const DiskLoc& DummyRecordStoreV1MetaData::capFirstNewRecord() const {
     return _capFirstNewRecord;
 }
 
-void DummyRecordStoreV1MetaData::setCapFirstNewRecord(OperationContext* txn, const DiskLoc& loc) {
+void DummyRecordStoreV1MetaData::setCapFirstNewRecord(OperationContext* opCtx, const DiskLoc& loc) {
     _capFirstNewRecord = loc;
 }
 
@@ -88,14 +90,14 @@ long long DummyRecordStoreV1MetaData::numRecords() const {
     return _numRecords;
 }
 
-void DummyRecordStoreV1MetaData::incrementStats(OperationContext* txn,
+void DummyRecordStoreV1MetaData::incrementStats(OperationContext* opCtx,
                                                 long long dataSizeIncrement,
                                                 long long numRecordsIncrement) {
     _dataSize += dataSizeIncrement;
     _numRecords += numRecordsIncrement;
 }
 
-void DummyRecordStoreV1MetaData::setStats(OperationContext* txn,
+void DummyRecordStoreV1MetaData::setStats(OperationContext* opCtx,
                                           long long dataSize,
                                           long long numRecords) {
     _dataSize = dataSize;
@@ -113,7 +115,7 @@ DiskLoc DummyRecordStoreV1MetaData::deletedListEntry(int bucket) const {
     return _deletedLists[bucket];
 }
 
-void DummyRecordStoreV1MetaData::setDeletedListEntry(OperationContext* txn,
+void DummyRecordStoreV1MetaData::setDeletedListEntry(OperationContext* opCtx,
                                                      int bucket,
                                                      const DiskLoc& loc) {
     invariant(bucket >= 0);
@@ -127,29 +129,29 @@ DiskLoc DummyRecordStoreV1MetaData::deletedListLegacyGrabBag() const {
     return _deletedListLegacyGrabBag;
 }
 
-void DummyRecordStoreV1MetaData::setDeletedListLegacyGrabBag(OperationContext* txn,
+void DummyRecordStoreV1MetaData::setDeletedListLegacyGrabBag(OperationContext* opCtx,
                                                              const DiskLoc& loc) {
     _deletedListLegacyGrabBag = loc;
 }
 
-void DummyRecordStoreV1MetaData::orphanDeletedList(OperationContext* txn) {
+void DummyRecordStoreV1MetaData::orphanDeletedList(OperationContext* opCtx) {
     // They will be recreated on demand.
     _deletedLists.clear();
 }
 
-const DiskLoc& DummyRecordStoreV1MetaData::firstExtent(OperationContext* txn) const {
+const DiskLoc& DummyRecordStoreV1MetaData::firstExtent(OperationContext* opCtx) const {
     return _firstExtent;
 }
 
-void DummyRecordStoreV1MetaData::setFirstExtent(OperationContext* txn, const DiskLoc& loc) {
+void DummyRecordStoreV1MetaData::setFirstExtent(OperationContext* opCtx, const DiskLoc& loc) {
     _firstExtent = loc;
 }
 
-const DiskLoc& DummyRecordStoreV1MetaData::lastExtent(OperationContext* txn) const {
+const DiskLoc& DummyRecordStoreV1MetaData::lastExtent(OperationContext* opCtx) const {
     return _lastExtent;
 }
 
-void DummyRecordStoreV1MetaData::setLastExtent(OperationContext* txn, const DiskLoc& loc) {
+void DummyRecordStoreV1MetaData::setLastExtent(OperationContext* opCtx, const DiskLoc& loc) {
     _lastExtent = loc;
 }
 
@@ -161,21 +163,21 @@ bool DummyRecordStoreV1MetaData::isUserFlagSet(int flag) const {
     return _userFlags & flag;
 }
 
-bool DummyRecordStoreV1MetaData::setUserFlag(OperationContext* txn, int flag) {
+bool DummyRecordStoreV1MetaData::setUserFlag(OperationContext* opCtx, int flag) {
     if ((_userFlags & flag) == flag)
         return false;
 
     _userFlags |= flag;
     return true;
 }
-bool DummyRecordStoreV1MetaData::clearUserFlag(OperationContext* txn, int flag) {
+bool DummyRecordStoreV1MetaData::clearUserFlag(OperationContext* opCtx, int flag) {
     if ((_userFlags & flag) == 0)
         return false;
 
     _userFlags &= ~flag;
     return true;
 }
-bool DummyRecordStoreV1MetaData::replaceUserFlags(OperationContext* txn, int flags) {
+bool DummyRecordStoreV1MetaData::replaceUserFlags(OperationContext* opCtx, int flags) {
     if (_userFlags == flags)
         return false;
     _userFlags = flags;
@@ -183,11 +185,11 @@ bool DummyRecordStoreV1MetaData::replaceUserFlags(OperationContext* txn, int fla
 }
 
 
-int DummyRecordStoreV1MetaData::lastExtentSize(OperationContext* txn) const {
+int DummyRecordStoreV1MetaData::lastExtentSize(OperationContext* opCtx) const {
     return _lastExtentSize;
 }
 
-void DummyRecordStoreV1MetaData::setLastExtentSize(OperationContext* txn, int newMax) {
+void DummyRecordStoreV1MetaData::setLastExtentSize(OperationContext* opCtx, int newMax) {
     _lastExtentSize = newMax;
 }
 
@@ -204,7 +206,9 @@ DummyExtentManager::~DummyExtentManager() {
     }
 }
 
-Status DummyExtentManager::init(OperationContext* txn) {
+void DummyExtentManager::close(OperationContext* opCtx) {}
+
+Status DummyExtentManager::init(OperationContext* opCtx) {
     return Status::OK();
 }
 
@@ -213,11 +217,10 @@ int DummyExtentManager::numFiles() const {
 }
 
 long long DummyExtentManager::fileSize() const {
-    invariant(false);
-    return -1;
+    MONGO_UNREACHABLE;
 }
 
-DiskLoc DummyExtentManager::allocateExtent(OperationContext* txn,
+DiskLoc DummyExtentManager::allocateExtent(OperationContext* opCtx,
                                            bool capped,
                                            int size,
                                            bool enforceQuota) {
@@ -242,17 +245,17 @@ DiskLoc DummyExtentManager::allocateExtent(OperationContext* txn,
     return loc;
 }
 
-void DummyExtentManager::freeExtents(OperationContext* txn, DiskLoc firstExt, DiskLoc lastExt) {
+void DummyExtentManager::freeExtents(OperationContext* opCtx, DiskLoc firstExt, DiskLoc lastExt) {
     // XXX
 }
 
-void DummyExtentManager::freeExtent(OperationContext* txn, DiskLoc extent) {
+void DummyExtentManager::freeExtent(OperationContext* opCtx, DiskLoc extent) {
     // XXX
 }
-void DummyExtentManager::freeListStats(OperationContext* txn,
+void DummyExtentManager::freeListStats(OperationContext* opCtx,
                                        int* numExtents,
                                        int64_t* totalFreeSizeBytes) const {
-    invariant(false);
+    MONGO_UNREACHABLE;
 }
 
 std::unique_ptr<RecordFetcher> DummyExtentManager::recordNeedsFetch(const DiskLoc& loc) const {
@@ -269,7 +272,7 @@ MmapV1RecordHeader* DummyExtentManager::recordForV1(const DiskLoc& loc) const {
 }
 
 Extent* DummyExtentManager::extentForV1(const DiskLoc& loc) const {
-    invariant(false);
+    MONGO_UNREACHABLE;
 }
 
 DiskLoc DummyExtentManager::extentLocForV1(const DiskLoc& loc) const {
@@ -295,6 +298,16 @@ DummyExtentManager::CacheHint* DummyExtentManager::cacheHint(const DiskLoc& exte
     return new CacheHint();
 }
 
+DataFileVersion DummyExtentManager::getFileFormat(OperationContext* opCtx) const {
+    return DataFileVersion::defaultForNewFiles();
+}
+
+void DummyExtentManager::setFileFormat(OperationContext* opCtx, DataFileVersion newVersion) {}
+
+const DataFile* DummyExtentManager::getOpenFile(int n) const {
+    return nullptr;
+}
+
 namespace {
 void accumulateExtentSizeRequirements(const LocAndSize* las, std::map<int, size_t>* sizes) {
     if (!las)
@@ -312,9 +325,11 @@ void accumulateExtentSizeRequirements(const LocAndSize* las, std::map<int, size_
     }
 }
 
-void printRecList(OperationContext* txn, const ExtentManager* em, const RecordStoreV1MetaData* md) {
+void printRecList(OperationContext* opCtx,
+                  const ExtentManager* em,
+                  const RecordStoreV1MetaData* md) {
     log() << " *** BEGIN ACTUAL RECORD LIST *** ";
-    DiskLoc extLoc = md->firstExtent(txn);
+    DiskLoc extLoc = md->firstExtent(opCtx);
     std::set<DiskLoc> seenLocs;
     while (!extLoc.isNull()) {
         Extent* ext = em->getExtent(extLoc, true);
@@ -368,7 +383,7 @@ void printDRecList(const ExtentManager* em, const RecordStoreV1MetaData* md) {
 }
 }
 
-void initializeV1RS(OperationContext* txn,
+void initializeV1RS(OperationContext* opCtx,
                     const LocAndSize* records,
                     const LocAndSize* drecs,
                     const LocAndSize* legacyGrabBag,
@@ -378,7 +393,7 @@ void initializeV1RS(OperationContext* txn,
 
     // Need to start with a blank slate
     invariant(em->numFiles() == 0);
-    invariant(md->firstExtent(txn).isNull());
+    invariant(md->firstExtent(opCtx).isNull());
 
     // pre-allocate extents (even extents that aren't part of this RS)
     {
@@ -392,7 +407,7 @@ void initializeV1RS(OperationContext* txn,
         const int maxExtent = extentSizes.rbegin()->first;
         for (int i = 0; i <= maxExtent; i++) {
             const size_t size = extentSizes.count(i) ? extentSizes[i] : 0;
-            const DiskLoc loc = em->allocateExtent(txn, md->isCapped(), size, 0);
+            const DiskLoc loc = em->allocateExtent(opCtx, md->isCapped(), size, 0);
 
             // This function and assertState depend on these details of DummyExtentManager
             invariant(loc.a() == i);
@@ -400,8 +415,8 @@ void initializeV1RS(OperationContext* txn,
         }
 
         // link together extents that should be part of this RS
-        md->setFirstExtent(txn, DiskLoc(extentSizes.begin()->first, 0));
-        md->setLastExtent(txn, DiskLoc(extentSizes.rbegin()->first, 0));
+        md->setFirstExtent(opCtx, DiskLoc(extentSizes.begin()->first, 0));
+        md->setLastExtent(opCtx, DiskLoc(extentSizes.rbegin()->first, 0));
         for (ExtentSizes::iterator it = extentSizes.begin(); boost::next(it) != extentSizes.end();
              /* ++it */) {
             const int a = it->first;
@@ -413,12 +428,12 @@ void initializeV1RS(OperationContext* txn,
 
         // This signals "done allocating new extents".
         if (md->isCapped())
-            md->setDeletedListEntry(txn, 1, DiskLoc());
+            md->setDeletedListEntry(opCtx, 1, DiskLoc());
     }
 
     if (records && !records[0].loc.isNull()) {
         int recIdx = 0;
-        DiskLoc extLoc = md->firstExtent(txn);
+        DiskLoc extLoc = md->firstExtent(opCtx);
         while (!extLoc.isNull()) {
             Extent* ext = em->getExtent(extLoc);
             int prevOfs = DiskLoc::NullOfs;
@@ -428,7 +443,7 @@ void initializeV1RS(OperationContext* txn,
                 ;
                 invariant(size >= MmapV1RecordHeader::HeaderSize);
 
-                md->incrementStats(txn, size - MmapV1RecordHeader::HeaderSize, 1);
+                md->incrementStats(opCtx, size - MmapV1RecordHeader::HeaderSize, 1);
 
                 if (ext->firstRecord.isNull())
                     ext->firstRecord = loc;
@@ -468,7 +483,7 @@ void initializeV1RS(OperationContext* txn,
             if (md->isCapped()) {
                 // All drecs form a single list in bucket 0
                 if (prevNextPtr == NULL) {
-                    md->setDeletedListEntry(txn, 0, loc);
+                    md->setDeletedListEntry(opCtx, 0, loc);
                 } else {
                     *prevNextPtr = loc;
                 }
@@ -476,11 +491,11 @@ void initializeV1RS(OperationContext* txn,
                 if (loc.a() < md->capExtent().a() &&
                     drecs[drecIdx + 1].loc.a() == md->capExtent().a()) {
                     // Bucket 1 is known as cappedLastDelRecLastExtent
-                    md->setDeletedListEntry(txn, 1, loc);
+                    md->setDeletedListEntry(opCtx, 1, loc);
                 }
             } else if (bucket != lastBucket) {
                 invariant(bucket > lastBucket);  // if this fails, drecs weren't sorted by bucket
-                md->setDeletedListEntry(txn, bucket, loc);
+                md->setDeletedListEntry(opCtx, bucket, loc);
                 lastBucket = bucket;
             } else {
                 *prevNextPtr = loc;
@@ -507,7 +522,7 @@ void initializeV1RS(OperationContext* txn,
             invariant(size >= MmapV1RecordHeader::HeaderSize);
 
             if (grabBagIdx == 0) {
-                md->setDeletedListLegacyGrabBag(txn, loc);
+                md->setDeletedListLegacyGrabBag(opCtx, loc);
             } else {
                 *prevNextPtr = loc;
             }
@@ -523,10 +538,10 @@ void initializeV1RS(OperationContext* txn,
     }
 
     // Make sure we set everything up as requested.
-    assertStateV1RS(txn, records, drecs, legacyGrabBag, em, md);
+    assertStateV1RS(opCtx, records, drecs, legacyGrabBag, em, md);
 }
 
-void assertStateV1RS(OperationContext* txn,
+void assertStateV1RS(OperationContext* opCtx,
                      const LocAndSize* records,
                      const LocAndSize* drecs,
                      const LocAndSize* legacyGrabBag,
@@ -541,7 +556,7 @@ void assertStateV1RS(OperationContext* txn,
 
             int recIdx = 0;
 
-            DiskLoc extLoc = md->firstExtent(txn);
+            DiskLoc extLoc = md->firstExtent(opCtx);
             while (!extLoc.isNull()) {  // for each Extent
                 Extent* ext = em->getExtent(extLoc, true);
                 int expectedPrevOfs = DiskLoc::NullOfs;
@@ -567,7 +582,7 @@ void assertStateV1RS(OperationContext* txn,
                 }
 
                 if (ext->xnext.isNull()) {
-                    ASSERT_EQUALS(md->lastExtent(txn), extLoc);
+                    ASSERT_EQUALS(md->lastExtent(opCtx), extLoc);
                 }
 
                 extLoc = ext->xnext;
@@ -590,7 +605,7 @@ void assertStateV1RS(OperationContext* txn,
                     // the first drec in the capExtent. If the capExtent is the first Extent,
                     // it should be Null.
 
-                    if (md->capExtent() == md->firstExtent(txn)) {
+                    if (md->capExtent() == md->firstExtent(opCtx)) {
                         ASSERT_EQUALS(actualLoc, DiskLoc());
                     } else {
                         ASSERT_NOT_EQUALS(actualLoc.a(), md->capExtent().a());
@@ -647,7 +662,7 @@ void assertStateV1RS(OperationContext* txn,
         }
     } catch (...) {
         // If a test fails, provide extra info to make debugging easier
-        printRecList(txn, em, md);
+        printRecList(opCtx, em, md);
         printDRecList(em, md);
         throw;
     }

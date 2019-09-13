@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -30,9 +32,10 @@
 
 #include <memory>
 
+#include "mongo/bson/bsonobj_comparator_interface.h"
+#include "mongo/db/fts/fts_query.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/matcher/expression.h"
-#include "mongo/db/fts/fts_query.h"
 #include "mongo/db/query/index_bounds.h"
 #include "mongo/db/query/plan_cache.h"
 #include "mongo/db/query/stage_types.h"
@@ -143,7 +146,23 @@ struct QuerySolutionNode {
         }
     }
 
+    /**
+     * Adds a vector of query solution nodes to the list of children of this node.
+     *
+     * TODO SERVER-35512: Once 'children' are held by unique_ptr, this method should no longer be
+     * necessary.
+     */
+    void addChildren(std::vector<std::unique_ptr<QuerySolutionNode>> newChildren) {
+        children.reserve(children.size() + newChildren.size());
+        std::transform(newChildren.begin(),
+                       newChildren.end(),
+                       std::back_inserter(children),
+                       [](auto& child) { return child.release(); });
+    }
+
     // These are owned here.
+    //
+    // TODO SERVER-35512: Make this a vector of unique_ptr.
     std::vector<QuerySolutionNode*> children;
 
     // If a stage has a non-NULL filter all values outputted from that stage must pass that
@@ -217,7 +236,9 @@ private:
 };
 
 struct TextNode : public QuerySolutionNode {
-    TextNode() {}
+    TextNode(IndexEntry index)
+        : _sort(SimpleBSONObjComparator::kInstance.makeBSONObjSet()), index(std::move(index)) {}
+
     virtual ~TextNode() {}
 
     virtual StageType getType() const {
@@ -244,8 +265,15 @@ struct TextNode : public QuerySolutionNode {
 
     BSONObjSet _sort;
 
-    BSONObj indexKeyPattern;
+    IndexEntry index;
     std::unique_ptr<fts::FTSQuery> ftsQuery;
+
+    // The number of fields in the prefix of the text index. For example, if the key pattern is
+    //
+    //   { a: 1, b: 1, _fts: "text", _ftsx: 1, c: 1 }
+    //
+    // then the number of prefix fields is 2, because of "a" and "b".
+    size_t numPrefixFields = 0u;
 
     // "Prefix" fields of a text index can handle equality predicates.  We group them with the
     // text node while creating the text leaf node and convert them into a BSONObj index prefix
@@ -286,10 +314,18 @@ struct CollectionScanNode : public QuerySolutionNode {
     // Should we make a tailable cursor?
     bool tailable;
 
+    // Should we keep track of the timestamp of the latest oplog entry we've seen? This information
+    // is needed to merge cursors from the oplog in order of operation time when reading the oplog
+    // across a sharded cluster.
+    bool shouldTrackLatestOplogTimestamp = false;
+
     int direction;
 
     // maxScan option to .find() limits how many docs we look at.
     int maxScan;
+
+    // Whether or not to wait for oplog visibility on oplog collection scans.
+    bool shouldWaitForOplogVisibility = false;
 };
 
 struct AndHashNode : public QuerySolutionNode {
@@ -433,7 +469,7 @@ struct FetchNode : public QuerySolutionNode {
 };
 
 struct IndexScanNode : public QuerySolutionNode {
-    IndexScanNode();
+    IndexScanNode(IndexEntry index);
     virtual ~IndexScanNode() {}
 
     virtual void computeProperties();
@@ -457,10 +493,17 @@ struct IndexScanNode : public QuerySolutionNode {
 
     bool operator==(const IndexScanNode& other) const;
 
+    /**
+     * This function extracts a list of field names from 'indexKeyPattern' whose corresponding index
+     * bounds in 'bounds' can contain strings.  This is the case if there are intervals containing
+     * String, Object, or Array values.
+     */
+    static std::set<StringData> getFieldsWithStringBounds(const IndexBounds& bounds,
+                                                          const BSONObj& indexKeyPattern);
+
     BSONObjSet _sorts;
 
-    BSONObj indexKeyPattern;
-    bool indexIsMultiKey;
+    IndexEntry index;
 
     int direction;
 
@@ -470,11 +513,15 @@ struct IndexScanNode : public QuerySolutionNode {
     // If there's a 'returnKey' projection we add key metadata.
     bool addKeyMetadata;
 
-    // BIG NOTE:
-    // If you use simple bounds, we'll use whatever index access method the keypattern implies.
-    // If you use the complex bounds, we force Btree access.
-    // The complex bounds require Btree access.
     IndexBounds bounds;
+
+    const CollatorInterface* queryCollator;
+
+    // The set of paths in the index key pattern which have at least one multikey path component, or
+    // empty if the index either is not multikey or does not have path-level multikeyness metadata.
+    //
+    // The correct set of paths is computed and stored here by computeProperties().
+    std::set<StringData> multikeyFields;
 };
 
 struct ProjectionNode : public QuerySolutionNode {
@@ -496,13 +543,19 @@ struct ProjectionNode : public QuerySolutionNode {
         SIMPLE_DOC,
     };
 
-    ProjectionNode() : fullExpression(NULL), projType(DEFAULT) {}
+    ProjectionNode(ParsedProjection proj)
+        : _sorts(SimpleBSONObjComparator::kInstance.makeBSONObjSet()),
+          fullExpression(NULL),
+          projType(DEFAULT),
+          parsed(proj) {}
 
     virtual ~ProjectionNode() {}
 
     virtual StageType getType() const {
         return STAGE_PROJECTION;
     }
+
+    virtual void computeProperties();
 
     virtual void appendToString(mongoutils::str::stream* ss, int indent) const;
 
@@ -532,8 +585,6 @@ struct ProjectionNode : public QuerySolutionNode {
     }
 
     const BSONObjSet& getSort() const {
-        // TODO: If we're applying a projection that maintains sort order, the prefix of the
-        // sort order we project is the sort order.
         return _sorts;
     }
 
@@ -551,6 +602,8 @@ struct ProjectionNode : public QuerySolutionNode {
 
     // What implementation of the projection algorithm should we use?
     ProjectionType projType;
+
+    ParsedProjection parsed;
 
     // Only meaningful if projType == COVERED_ONE_INDEX.  This is the key pattern of the index
     // supplying our covered data.  We can pre-compute which fields to include and cache that
@@ -583,16 +636,13 @@ struct SortKeyGeneratorNode : public QuerySolutionNode {
 
     void appendToString(mongoutils::str::stream* ss, int indent) const final;
 
-    // The query predicate provided by the user. For sorted by an array field, the sort key depends
-    // on the predicate.
-    BSONObj queryObj;
-
     // The user-supplied sort pattern.
     BSONObj sortSpec;
 };
 
 struct SortNode : public QuerySolutionNode {
-    SortNode() : limit(0) {}
+    SortNode() : _sorts(SimpleBSONObjComparator::kInstance.makeBSONObjSet()), limit(0) {}
+
     virtual ~SortNode() {}
 
     virtual StageType getType() const {
@@ -690,7 +740,12 @@ struct SkipNode : public QuerySolutionNode {
 
 // This is a standalone stage.
 struct GeoNear2DNode : public QuerySolutionNode {
-    GeoNear2DNode() : addPointMeta(false), addDistMeta(false) {}
+    GeoNear2DNode(IndexEntry index)
+        : _sorts(SimpleBSONObjComparator::kInstance.makeBSONObjSet()),
+          index(std::move(index)),
+          addPointMeta(false),
+          addDistMeta(false) {}
+
     virtual ~GeoNear2DNode() {}
 
     virtual StageType getType() const {
@@ -719,14 +774,19 @@ struct GeoNear2DNode : public QuerySolutionNode {
     const GeoNearExpression* nq;
     IndexBounds baseBounds;
 
-    BSONObj indexKeyPattern;
+    IndexEntry index;
     bool addPointMeta;
     bool addDistMeta;
 };
 
 // This is actually its own standalone stage.
 struct GeoNear2DSphereNode : public QuerySolutionNode {
-    GeoNear2DSphereNode() : addPointMeta(false), addDistMeta(false) {}
+    GeoNear2DSphereNode(IndexEntry index)
+        : _sorts(SimpleBSONObjComparator::kInstance.makeBSONObjSet()),
+          index(std::move(index)),
+          addPointMeta(false),
+          addDistMeta(false) {}
+
     virtual ~GeoNear2DSphereNode() {}
 
     virtual StageType getType() const {
@@ -755,7 +815,7 @@ struct GeoNear2DSphereNode : public QuerySolutionNode {
     const GeoNearExpression* nq;
     IndexBounds baseBounds;
 
-    BSONObj indexKeyPattern;
+    IndexEntry index;
     bool addPointMeta;
     bool addDistMeta;
 };
@@ -801,7 +861,8 @@ struct ShardingFilterNode : public QuerySolutionNode {
  * into the query result stream.
  */
 struct KeepMutationsNode : public QuerySolutionNode {
-    KeepMutationsNode() {}
+    KeepMutationsNode() : sorts(SimpleBSONObjComparator::kInstance.makeBSONObjSet()) {}
+
     virtual ~KeepMutationsNode() {}
 
     virtual StageType getType() const {
@@ -837,7 +898,9 @@ struct KeepMutationsNode : public QuerySolutionNode {
  * *always* skip over the current key to the next key.
  */
 struct DistinctNode : public QuerySolutionNode {
-    DistinctNode() {}
+    DistinctNode(IndexEntry index)
+        : sorts(SimpleBSONObjComparator::kInstance.makeBSONObjSet()), index(std::move(index)) {}
+
     virtual ~DistinctNode() {}
 
     virtual StageType getType() const {
@@ -851,7 +914,7 @@ struct DistinctNode : public QuerySolutionNode {
         return false;
     }
     bool hasField(const std::string& field) const {
-        return !indexKeyPattern[field].eoo();
+        return !index.keyPattern[field].eoo();
     }
     bool sortedByDiskLoc() const {
         return false;
@@ -864,10 +927,10 @@ struct DistinctNode : public QuerySolutionNode {
 
     BSONObjSet sorts;
 
-    BSONObj indexKeyPattern;
+    IndexEntry index;
     int direction;
     IndexBounds bounds;
-    // We are distinct-ing over the 'fieldNo'-th field of 'indexKeyPattern'.
+    // We are distinct-ing over the 'fieldNo'-th field of 'index.keyPattern'.
     int fieldNo;
 };
 
@@ -875,9 +938,11 @@ struct DistinctNode : public QuerySolutionNode {
  * Some count queries reduce to counting how many keys are between two entries in a
  * Btree.
  */
-struct CountNode : public QuerySolutionNode {
-    CountNode() {}
-    virtual ~CountNode() {}
+struct CountScanNode : public QuerySolutionNode {
+    CountScanNode(IndexEntry index)
+        : sorts(SimpleBSONObjComparator::kInstance.makeBSONObjSet()), index(std::move(index)) {}
+
+    virtual ~CountScanNode() {}
 
     virtual StageType getType() const {
         return STAGE_COUNT_SCAN;
@@ -901,7 +966,7 @@ struct CountNode : public QuerySolutionNode {
 
     BSONObjSet sorts;
 
-    BSONObj indexKeyPattern;
+    IndexEntry index;
 
     BSONObj startKey;
     bool startKeyInclusive;

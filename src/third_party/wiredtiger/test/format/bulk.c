@@ -1,5 +1,5 @@
 /*-
- * Public Domain 2014-2016 MongoDB, Inc.
+ * Public Domain 2014-2019 MongoDB, Inc.
  * Public Domain 2008-2014 WiredTiger, Inc.
  *
  * This is free and unencumbered software released into the public domain.
@@ -58,12 +58,18 @@ wts_load(void)
 	if (g.c_reverse)
 		is_bulk = false;
 
-	testutil_check(session->open_cursor(session, g.uri, NULL,
-	    is_bulk ? "bulk,append" : NULL, &cursor));
+	/*
+	 * open_cursor can return EBUSY if concurrent with a metadata
+	 * operation, retry in that case.
+	 */
+	while ((ret = session->open_cursor(session, g.uri, NULL,
+	    is_bulk ? "bulk,append" : NULL, &cursor)) == EBUSY)
+		__wt_yield();
+	testutil_check(ret);
 
 	/* Set up the key/value buffers. */
-	key_gen_setup(&key);
-	val_gen_setup(NULL, &value);
+	key_gen_init(&key);
+	val_gen_init(&value);
 
 	for (;;) {
 		if (++g.key_cnt > g.c_rows) {
@@ -152,6 +158,6 @@ wts_load(void)
 
 	testutil_check(session->close(session, NULL));
 
-	free(key.mem);
-	free(value.mem);
+	key_gen_teardown(&key);
+	val_gen_teardown(&value);
 }

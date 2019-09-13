@@ -1,18 +1,27 @@
+(function() {
+    "use strict";
 
-t = db.maxscan;
-t.drop();
+    load("jstests/libs/fixture_helpers.js");  // For FixtureHelpers.
 
-N = 100;
-for (i = 0; i < N; i++) {
-    t.insert({_id: i, x: i % 10});
-}
+    const coll = db.maxscan;
+    coll.drop();
 
-assert.eq(N, t.find().itcount(), "A");
-assert.eq(50, t.find().maxScan(50).itcount(), "B");
+    const N = 100;
+    for (let i = 0; i < N; i++) {
+        assert.writeOK(coll.insert({_id: i, x: i % 10}));
+    }
 
-assert.eq(10, t.find({x: 2}).itcount(), "C");
-assert.eq(5, t.find({x: 2}).maxScan(50).itcount(), "D");
+    assert.eq(N, coll.find().itcount());
+    // We should scan no more than 50 things on each shard.
+    assert.lte(coll.find().maxScan(50).itcount(),
+               50 * FixtureHelpers.numberOfShardsForCollection(coll));
 
-t.ensureIndex({x: 1});
-assert.eq(10, t.find({x: 2}).hint({x: 1}).maxScan(N).itcount(), "E");
-assert.eq(0, t.find({x: 2}).hint({x: 1}).maxScan(1).itcount(), "E");
+    assert.eq(coll.find({x: 2}).itcount(), 10);
+    // We should scan no more than 50 things on each shard.
+    assert.lte(coll.find({x: 2}).sort({_id: 1}).maxScan(50).itcount(),
+               5 * FixtureHelpers.numberOfShardsForCollection(coll));
+
+    assert.commandWorked(coll.ensureIndex({x: 1}));
+    assert.eq(coll.find({x: 2}).sort({_id: 1}).hint({x: 1}).maxScan(N).itcount(), 10);
+    assert.eq(coll.find({x: 2}).sort({_id: 1}).hint({x: 1}).maxScan(1).itcount(), 0);
+}());

@@ -15,21 +15,16 @@ var _bulk_api_module = (function() {
     var UNKNOWN_REPL_WRITE_CONCERN = 79;
     var NOT_MASTER = 10107;
 
-    // Constants
-    var IndexCollPattern = new RegExp('system\.indexes$');
-
     /**
      * Helper function to define properties
      */
     var defineReadOnlyProperty = function(self, name, value) {
-        Object.defineProperty(self,
-                              name,
-                              {
-                                enumerable: true,
-                                get: function() {
-                                    return value;
-                                }
-                              });
+        Object.defineProperty(self, name, {
+            enumerable: true,
+            get: function() {
+                return value;
+            }
+        });
     };
 
     /**
@@ -43,8 +38,11 @@ var _bulk_api_module = (function() {
      */
     var WriteConcern = function(wValue, wTimeout, jValue) {
 
-        if (!(this instanceof WriteConcern))
-            return new WriteConcern(wValue, wTimeout, jValue);
+        if (!(this instanceof WriteConcern)) {
+            var writeConcern = Object.create(WriteConcern.prototype);
+            WriteConcern.apply(writeConcern, arguments);
+            return writeConcern;
+        }
 
         var opts = {};
         if (typeof wValue == 'object') {
@@ -375,7 +373,7 @@ var _bulk_api_module = (function() {
         };
     };
 
-    BulkWriteError.prototype = new Error();
+    BulkWriteError.prototype = Object.create(Error.prototype);
     BulkWriteError.prototype.constructor = BulkWriteError;
 
     var getEmptyBulkResult = function() {
@@ -402,6 +400,9 @@ var _bulk_api_module = (function() {
         // Define properties
         defineReadOnlyProperty(this, "code", commandError.code);
         defineReadOnlyProperty(this, "errmsg", commandError.errmsg);
+        if (commandError.hasOwnProperty("errorLabels")) {
+            defineReadOnlyProperty(this, "errorLabels", commandError.errorLabels);
+        }
 
         this.name = 'WriteCommandError';
         this.message = this.errmsg;
@@ -421,17 +422,9 @@ var _bulk_api_module = (function() {
         this.shellPrint = function() {
             return this.toString();
         };
-
-        this.toSingleResult = function() {
-            // This is *only* safe to do with a WriteCommandError from the bulk api when the bulk is
-            // known to be of size == 1
-            var bulkResult = getEmptyBulkResult();
-            bulkResult.writeErrors.push({code: this.code, index: 0, errmsg: this.errmsg});
-            return new BulkWriteResult(bulkResult, NONE).toSingleResult();
-        };
     };
 
-    WriteCommandError.prototype = new Error();
+    WriteCommandError.prototype = Object.create(Error.prototype);
     WriteCommandError.prototype.constructor = WriteCommandError;
 
     /**
@@ -440,6 +433,9 @@ var _bulk_api_module = (function() {
     var WriteError = function(err) {
         if (!(this instanceof WriteError))
             return new WriteError(err);
+
+        this.name = 'WriteError';
+        this.message = err.errmsg || 'unknown write error';
 
         // Define properties
         defineReadOnlyProperty(this, "code", err.code);
@@ -462,11 +458,15 @@ var _bulk_api_module = (function() {
         this.toString = function() {
             return "WriteError(" + tojson(err) + ")";
         };
+        this.stack = this.toString() + "\n" + (new Error().stack);
 
         this.shellPrint = function() {
             return this.toString();
         };
     };
+
+    WriteError.prototype = Object.create(Error.prototype);
+    WriteError.prototype.constructor = WriteError;
 
     /**
      * Wraps a write concern error
@@ -474,6 +474,9 @@ var _bulk_api_module = (function() {
     var WriteConcernError = function(err) {
         if (!(this instanceof WriteConcernError))
             return new WriteConcernError(err);
+
+        this.name = 'WriteConcernError';
+        this.message = err.errmsg || 'unknown write concern error';
 
         // Define properties
         defineReadOnlyProperty(this, "code", err.code);
@@ -490,11 +493,15 @@ var _bulk_api_module = (function() {
         this.toString = function() {
             return "WriteConcernError(" + tojson(err) + ")";
         };
+        this.stack = this.toString() + "\n" + (new Error().stack);
 
         this.shellPrint = function() {
             return this.toString();
         };
     };
+
+    WriteConcernError.prototype = Object.create(Error.prototype);
+    WriteConcernError.prototype.constructor = WriteConcernError;
 
     /**
      * Keeps the state of an unordered batch so we can rewrite the results
@@ -540,26 +547,24 @@ var _bulk_api_module = (function() {
         var batches = [];
 
         var defineBatchTypeCounter = function(self, name, type) {
-            Object.defineProperty(self,
-                                  name,
-                                  {
-                                    enumerable: true,
-                                    get: function() {
-                                        var counter = 0;
+            Object.defineProperty(self, name, {
+                enumerable: true,
+                get: function() {
+                    var counter = 0;
 
-                                        for (var i = 0; i < batches.length; i++) {
-                                            if (batches[i].batchType == type) {
-                                                counter += batches[i].operations.length;
-                                            }
-                                        }
+                    for (var i = 0; i < batches.length; i++) {
+                        if (batches[i].batchType == type) {
+                            counter += batches[i].operations.length;
+                        }
+                    }
 
-                                        if (currentBatch && currentBatch.batchType == type) {
-                                            counter += currentBatch.operations.length;
-                                        }
+                    if (currentBatch && currentBatch.batchType == type) {
+                        counter += currentBatch.operations.length;
+                    }
 
-                                        return counter;
-                                    }
-                                  });
+                    return counter;
+                }
+            });
         };
 
         defineBatchTypeCounter(this, "nInsertOps", INSERT);
@@ -631,9 +636,7 @@ var _bulk_api_module = (function() {
         var addIdIfNeeded = function(obj) {
             if (typeof(obj._id) == "undefined" && !Array.isArray(obj)) {
                 var tmp = obj;  // don't want to modify input
-                obj = {
-                    _id: new ObjectId()
-                };
+                obj = {_id: new ObjectId()};
                 for (var key in tmp) {
                     obj[key] = tmp[key];
                 }
@@ -648,10 +651,6 @@ var _bulk_api_module = (function() {
          * @param document {Object} the document to insert.
          */
         this.insert = function(document) {
-            if (!IndexCollPattern.test(coll.getName())) {
-                collection._validateForStorage(document);
-            }
-
             return addToOperationsList(INSERT, document);
         };
 
@@ -659,17 +658,21 @@ var _bulk_api_module = (function() {
         // Find based operations
         var findOperations = {
             update: function(updateDocument) {
-                collection._validateUpdateDoc(updateDocument);
-
                 // Set the top value for the update 0 = multi true, 1 = multi false
                 var upsert = typeof currentOp.upsert == 'boolean' ? currentOp.upsert : false;
                 // Establish the update command
-                var document = {
-                    q: currentOp.selector,
-                    u: updateDocument,
-                    multi: true,
-                    upsert: upsert
-                };
+                var document =
+                    {q: currentOp.selector, u: updateDocument, multi: true, upsert: upsert};
+
+                // Copy over the collation, if we have one.
+                if (currentOp.hasOwnProperty('collation')) {
+                    document.collation = currentOp.collation;
+                }
+
+                // Copy over the arrayFilters, if we have them.
+                if (currentOp.hasOwnProperty('arrayFilters')) {
+                    document.arrayFilters = currentOp.arrayFilters;
+                }
 
                 // Clear out current Op
                 currentOp = null;
@@ -678,17 +681,21 @@ var _bulk_api_module = (function() {
             },
 
             updateOne: function(updateDocument) {
-                collection._validateUpdateDoc(updateDocument);
-
                 // Set the top value for the update 0 = multi true, 1 = multi false
                 var upsert = typeof currentOp.upsert == 'boolean' ? currentOp.upsert : false;
                 // Establish the update command
-                var document = {
-                    q: currentOp.selector,
-                    u: updateDocument,
-                    multi: false,
-                    upsert: upsert
-                };
+                var document =
+                    {q: currentOp.selector, u: updateDocument, multi: false, upsert: upsert};
+
+                // Copy over the collation, if we have one.
+                if (currentOp.hasOwnProperty('collation')) {
+                    document.collation = currentOp.collation;
+                }
+
+                // Copy over the arrayFilters, if we have them.
+                if (currentOp.hasOwnProperty('arrayFilters')) {
+                    document.arrayFilters = currentOp.arrayFilters;
+                }
 
                 // Clear out current Op
                 currentOp = null;
@@ -707,13 +714,13 @@ var _bulk_api_module = (function() {
             },
 
             removeOne: function() {
-                collection._validateRemoveDoc(currentOp.selector);
-
                 // Establish the removeOne command
-                var document = {
-                    q: currentOp.selector,
-                    limit: 1
-                };
+                var document = {q: currentOp.selector, limit: 1};
+
+                // Copy over the collation, if we have one.
+                if (currentOp.hasOwnProperty('collation')) {
+                    document.collation = currentOp.collation;
+                }
 
                 // Clear out current Op
                 currentOp = null;
@@ -722,19 +729,49 @@ var _bulk_api_module = (function() {
             },
 
             remove: function() {
-                collection._validateRemoveDoc(currentOp.selector);
-
                 // Establish the remove command
-                var document = {
-                    q: currentOp.selector,
-                    limit: 0
-                };
+                var document = {q: currentOp.selector, limit: 0};
+
+                // Copy over the collation, if we have one.
+                if (currentOp.hasOwnProperty('collation')) {
+                    document.collation = currentOp.collation;
+                }
 
                 // Clear out current Op
                 currentOp = null;
                 // Add the remove document to the list
                 return addToOperationsList(REMOVE, document);
-            }
+            },
+
+            collation: function(collationSpec) {
+                if (!collection.getMongo().hasWriteCommands()) {
+                    throw new Error(
+                        "cannot use collation if server does not support write commands");
+                }
+
+                if (collection.getMongo().writeMode() !== "commands") {
+                    throw new Error("write mode must be 'commands' in order to use collation, " +
+                                    "but found write mode: " + collection.getMongo().writeMode());
+                }
+
+                currentOp.collation = collationSpec;
+                return findOperations;
+            },
+
+            arrayFilters: function(filters) {
+                if (!collection.getMongo().hasWriteCommands()) {
+                    throw new Error(
+                        "cannot use arrayFilters if server does not support write commands");
+                }
+
+                if (collection.getMongo().writeMode() !== "commands") {
+                    throw new Error("write mode must be 'commands' in order to use arrayFilters, " +
+                                    "but found write mode: " + collection.getMongo().writeMode());
+                }
+
+                currentOp.arrayFilters = filters;
+                return findOperations;
+            },
         };
 
         //
@@ -743,9 +780,7 @@ var _bulk_api_module = (function() {
             if (selector == undefined)
                 throw Error("find() requires query criteria");
             // Save a current selector
-            currentOp = {
-                selector: selector
-            };
+            currentOp = {selector: selector};
 
             // Return the find Operations
             return findOperations;
@@ -819,11 +854,7 @@ var _bulk_api_module = (function() {
 
             // Generate the right update
             if (batch.batchType == UPDATE) {
-                cmd = {
-                    update: coll.getName(),
-                    updates: batch.operations,
-                    ordered: ordered
-                };
+                cmd = {update: coll.getName(), updates: batch.operations, ordered: ordered};
             } else if (batch.batchType == INSERT) {
                 var transformedInserts = [];
                 batch.operations.forEach(function(insertDoc) {
@@ -831,22 +862,28 @@ var _bulk_api_module = (function() {
                 });
                 batch.operations = transformedInserts;
 
-                cmd = {
-                    insert: coll.getName(),
-                    documents: batch.operations,
-                    ordered: ordered
-                };
+                cmd = {insert: coll.getName(), documents: batch.operations, ordered: ordered};
             } else if (batch.batchType == REMOVE) {
-                cmd = {
-                    delete: coll.getName(),
-                    deletes: batch.operations,
-                    ordered: ordered
-                };
+                cmd = {delete: coll.getName(), deletes: batch.operations, ordered: ordered};
             }
 
             // If we have a write concern
             if (writeConcern) {
                 cmd.writeConcern = writeConcern;
+            }
+
+            {
+                const kWireVersionSupportingRetryableWrites = 6;
+                const serverSupportsRetryableWrites =
+                    coll.getMongo().getMinWireVersion() <= kWireVersionSupportingRetryableWrites &&
+                    kWireVersionSupportingRetryableWrites <= coll.getMongo().getMaxWireVersion();
+
+                const session = collection.getDB().getSession();
+                if (serverSupportsRetryableWrites && session.getOptions().shouldRetryWrites() &&
+                    session._serverSession.canRetryWrites(cmd) &&
+                    !session._serverSession.isTxnActive()) {
+                    cmd = session._serverSession.assignTransactionNumber(cmd);
+                }
             }
 
             return cmd;
@@ -859,20 +896,7 @@ var _bulk_api_module = (function() {
             var cmd = buildBatchCmd(batch);
 
             // Run the command (may throw)
-
-            // Get command collection
-            var cmdColl = collection._db.getCollection('$cmd');
-            // Bypass runCommand to ignore slaveOk and read pref settings
-            result = new DBQuery(collection.getMongo(),
-                                 collection._db,
-                                 cmdColl,
-                                 cmdColl.getFullName(),
-                                 cmd,
-                                 {} /* proj */,
-                                 -1 /* limit */,
-                                 0 /* skip */,
-                                 0 /* batchSize */,
-                                 0 /* flags */).next();
+            result = collection.runCommand(cmd);
 
             if (result.ok == 0) {
                 throw new WriteCommandError(result);
@@ -933,17 +957,11 @@ var _bulk_api_module = (function() {
             var code = gleResponse.code;
             var timeout = gleResponse.wtimeout ? true : false;
 
-            var extractedErr = {
-                writeError: null,
-                wcError: null,
-                unknownError: null
-            };
+            var extractedErr = {writeError: null, wcError: null, unknownError: null};
 
             if (err == 'norepl' || err == 'noreplset') {
                 // Know this is legacy gle and the repl not enforced - write concern error in 2.4.
-                var errObj = {
-                    code: WRITE_CONCERN_FAILED
-                };
+                var errObj = {code: WRITE_CONCERN_FAILED};
 
                 if (errMsg != '') {
                     errObj.errmsg = errMsg;
@@ -956,9 +974,7 @@ var _bulk_api_module = (function() {
                 extractedErr.wcError = errObj;
             } else if (timeout) {
                 // Know there was not write error.
-                var errObj = {
-                    code: WRITE_CONCERN_FAILED
-                };
+                var errObj = {code: WRITE_CONCERN_FAILED};
 
                 if (errMsg != '') {
                     errObj.errmsg = errMsg;
@@ -966,35 +982,21 @@ var _bulk_api_module = (function() {
                     errObj.errmsg = err;
                 }
 
-                errObj.errInfo = {
-                    wtimeout: true
-                };
+                errObj.errInfo = {wtimeout: true};
                 extractedErr.wcError = errObj;
             } else if (code == 19900 ||  // No longer primary
                        code == 16805 ||  // replicatedToNum no longer primary
                        code == 14330 ||  // gle wmode changed; invalid
                        code == NOT_MASTER ||
                        code == UNKNOWN_REPL_WRITE_CONCERN || code == WRITE_CONCERN_FAILED) {
-                extractedErr.wcError = {
-                    code: code,
-                    errmsg: errMsg
-                };
+                extractedErr.wcError = {code: code, errmsg: errMsg};
             } else if (!isOK) {
                 // This is a GLE failure we don't understand
-                extractedErr.unknownError = {
-                    code: code,
-                    errmsg: errMsg
-                };
+                extractedErr.unknownError = {code: code, errmsg: errMsg};
             } else if (err != '') {
-                extractedErr.writeError = {
-                    code: (code == 0) ? UNKNOWN_ERROR : code,
-                    errmsg: err
-                };
+                extractedErr.writeError = {code: (code == 0) ? UNKNOWN_ERROR : code, errmsg: err};
             } else if (jNote != '') {
-                extractedErr.writeError = {
-                    code: WRITE_CONCERN_FAILED,
-                    errmsg: jNote
-                };
+                extractedErr.writeError = {code: WRITE_CONCERN_FAILED, errmsg: jNote};
             }
 
             // Handling of writeback not needed for mongo shell.
@@ -1005,9 +1007,7 @@ var _bulk_api_module = (function() {
          * getLastErrorMethod that supports all write concerns
          */
         var executeGetLastError = function(db, options) {
-            var cmd = {
-                getlasterror: 1
-            };
+            var cmd = {getlasterror: 1};
             cmd = Object.extend(cmd, options);
             // Execute the getLastErrorCommand
             return db.runCommand(cmd);
@@ -1016,11 +1016,7 @@ var _bulk_api_module = (function() {
         // Execute the operations, serially
         var executeBatchWithLegacyOps = function(batch) {
 
-            var batchResult = {
-                n: 0,
-                writeErrors: [],
-                upserted: []
-            };
+            var batchResult = {n: 0, writeErrors: [], upserted: []};
 
             var extractedErr = null;
 
@@ -1196,10 +1192,7 @@ var _bulk_api_module = (function() {
 
             var explainBatch = batches[0];
             var writeCmd = buildBatchCmd(explainBatch);
-            return {
-                "explain": writeCmd,
-                "verbosity": verbosity
-            };
+            return {"explain": writeCmd, "verbosity": verbosity};
         };
     };
 
@@ -1213,6 +1206,7 @@ var _bulk_api_module = (function() {
     module.BulkWriteResult = BulkWriteResult;
     module.BulkWriteError = BulkWriteError;
     module.WriteCommandError = WriteCommandError;
+    module.WriteError = WriteError;
     module.initializeUnorderedBulkOp = function() {
         return new Bulk(this, false);
     };
@@ -1230,6 +1224,7 @@ WriteResult = _bulk_api_module.WriteResult;
 BulkWriteResult = _bulk_api_module.BulkWriteResult;
 BulkWriteError = _bulk_api_module.BulkWriteError;
 WriteCommandError = _bulk_api_module.WriteCommandError;
+WriteError = _bulk_api_module.WriteError;
 
 /***********************************************************
  * Adds the initializers of bulk operations to the db collection

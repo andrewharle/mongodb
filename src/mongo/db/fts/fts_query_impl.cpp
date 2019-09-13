@@ -1,43 +1,45 @@
 // fts_query_impl.cpp
 
+
 /**
-*    Copyright (C) 2012 10gen Inc.
-*
-*    This program is free software: you can redistribute it and/or  modify
-*    it under the terms of the GNU Affero General Public License, version 3,
-*    as published by the Free Software Foundation.
-*
-*    This program is distributed in the hope that it will be useful,
-*    but WITHOUT ANY WARRANTY; without even the implied warranty of
-*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*    GNU Affero General Public License for more details.
-*
-*    You should have received a copy of the GNU Affero General Public License
-*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*
-*    As a special exception, the copyright holders give permission to link the
-*    code of portions of this program with the OpenSSL library under certain
-*    conditions as described in each individual source file and distribute
-*    linked combinations including the program with the OpenSSL library. You
-*    must comply with the GNU Affero General Public License in all respects for
-*    all of the code used other than as permitted herein. If you modify file(s)
-*    with this exception, you may extend this exception to your version of the
-*    file(s), but you are not obligated to do so. If you do not wish to do so,
-*    delete this exception statement from your version. If you delete this
-*    exception statement from all source files in the program, then also delete
-*    it in the license file.
-*/
+ *    Copyright (C) 2018-present MongoDB, Inc.
+ *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
+ *
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
+ */
 
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/fts/fts_query_impl.h"
 
-#include "mongo/db/fts/fts_spec.h"
 #include "mongo/db/fts/fts_query_parser.h"
+#include "mongo/db/fts/fts_spec.h"
 #include "mongo/db/fts/fts_tokenizer.h"
+#include "mongo/stdx/memory.h"
 #include "mongo/util/mongoutils/str.h"
 #include "mongo/util/stringutils.h"
-#include "mongo/stdx/memory.h"
 
 namespace mongo {
 
@@ -75,6 +77,13 @@ Status FTSQueryImpl::parse(TextIndexVersion textIndexVersion) {
             if (inPhrase && inNegation) {
                 // don't add term
             } else {
+                // A negation should only continue until the next whitespace character. For example,
+                // "-foo" should negate "foo", "- foo" should not negate "foo", and "-foo-bar"
+                // should negate both "foo" and "bar".
+                if (inNegation && t.previousWhiteSpace) {
+                    inNegation = false;
+                }
+
                 if (inNegation) {
                     negativeTermSentence.append(s);
                     negativeTermSentence.push_back(' ');
@@ -83,9 +92,6 @@ Status FTSQueryImpl::parse(TextIndexVersion textIndexVersion) {
                     positiveTermSentence.push_back(' ');
                 }
             }
-
-            if (inNegation && !inPhrase)
-                inNegation = false;
         } else if (t.type == QueryToken::DELIMITER) {
             char c = t.data[0];
             if (c == '-') {
@@ -105,16 +111,25 @@ Status FTSQueryImpl::parse(TextIndexVersion textIndexVersion) {
                     } else {
                         _positivePhrases.push_back(phrase.toString());
                     }
-                    inNegation = false;
+
+                    // Do not reset 'inNegation' here, since a negation should continue until the
+                    // next whitespace character. For example, '-"foo bar"-"baz quux"' should negate
+                    // both the phrase "foo bar" and the phrase "baz quux".
+
                     inPhrase = false;
                 } else {
                     // start of a phrase
                     inPhrase = true;
+                    // A "-" should only be treated as a negation if there is no whitespace between
+                    // the "-" and the start of the phrase.
+                    if (inNegation && t.previousWhiteSpace) {
+                        inNegation = false;
+                    }
                     quoteOffset = t.offset;
                 }
             }
         } else {
-            invariant(false);
+            MONGO_UNREACHABLE;
         }
     }
 
@@ -184,64 +199,6 @@ void FTSQueryImpl::_addTerms(FTSTokenizer* tokenizer, const string& sentence, bo
 
         activeTerms.insert(word);
     }
-}
-
-namespace {
-void _debugHelp(stringstream& ss, const set<string>& s, const string& sep) {
-    bool first = true;
-    for (set<string>::const_iterator i = s.begin(); i != s.end(); ++i) {
-        if (first)
-            first = false;
-        else
-            ss << sep;
-        ss << *i;
-    }
-}
-
-void _debugHelp(stringstream& ss, const vector<string>& v, const string& sep) {
-    set<string> s(v.begin(), v.end());
-    _debugHelp(ss, s, sep);
-}
-}
-
-string FTSQueryImpl::toString() const {
-    stringstream ss;
-    ss << "FTSQueryImpl\n";
-
-    ss << "  terms: ";
-    _debugHelp(ss, getPositiveTerms(), ", ");
-    ss << "\n";
-
-    ss << "  negated terms: ";
-    _debugHelp(ss, getNegatedTerms(), ", ");
-    ss << "\n";
-
-    ss << "  phrases: ";
-    _debugHelp(ss, getPositivePhr(), ", ");
-    ss << "\n";
-
-    ss << "  negated phrases: ";
-    _debugHelp(ss, getNegatedPhr(), ", ");
-    ss << "\n";
-
-    return ss.str();
-}
-
-string FTSQueryImpl::debugString() const {
-    stringstream ss;
-
-    _debugHelp(ss, getPositiveTerms(), "|");
-    ss << "||";
-
-    _debugHelp(ss, getNegatedTerms(), "|");
-    ss << "||";
-
-    _debugHelp(ss, getPositivePhr(), "|");
-    ss << "||";
-
-    _debugHelp(ss, getNegatedPhr(), "|");
-
-    return ss.str();
 }
 
 BSONObj FTSQueryImpl::toBSON() const {

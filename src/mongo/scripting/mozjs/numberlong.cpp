@@ -1,83 +1,82 @@
+
 /**
- * Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- * This program is free software: you can redistribute it and/or  modify
- * it under the terms of the GNU Affero General Public License, version 3,
- * as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
- * As a special exception, the copyright holders give permission to link the
- * code of portions of this program with the OpenSSL library under certain
- * conditions as described in each individual source file and distribute
- * linked combinations including the program with the OpenSSL library. You
- * must comply with the GNU Affero General Public License in all respects
- * for all of the code used other than as permitted herein. If you modify
- * file(s) with this exception, you may extend this exception to your
- * version of the file(s), but you are not obligated to do so. If you do not
- * wish to do so, delete this exception statement from your version. If you
- * delete this exception statement from all source files in the program,
- * then also delete it in the license file.
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/platform/basic.h"
 
 #include "mongo/scripting/mozjs/numberlong.h"
 
+#include <boost/optional.hpp>
 #include <js/Conversions.h>
 
+#include "mongo/base/parse_number.h"
 #include "mongo/scripting/mozjs/implscope.h"
 #include "mongo/scripting/mozjs/objectwrapper.h"
 #include "mongo/scripting/mozjs/valuereader.h"
 #include "mongo/scripting/mozjs/valuewriter.h"
 #include "mongo/scripting/mozjs/wrapconstrainedmethod.h"
 #include "mongo/util/mongoutils/str.h"
+#include "mongo/util/represent_as.h"
 #include "mongo/util/text.h"
 
 namespace mongo {
 namespace mozjs {
 
-const JSFunctionSpec NumberLongInfo::methods[5] = {
+const JSFunctionSpec NumberLongInfo::methods[6] = {
     MONGO_ATTACH_JS_CONSTRAINED_METHOD(toNumber, NumberLongInfo),
     MONGO_ATTACH_JS_CONSTRAINED_METHOD(toString, NumberLongInfo),
+    MONGO_ATTACH_JS_CONSTRAINED_METHOD(toJSON, NumberLongInfo),
     MONGO_ATTACH_JS_CONSTRAINED_METHOD(valueOf, NumberLongInfo),
     MONGO_ATTACH_JS_CONSTRAINED_METHOD(compare, NumberLongInfo),
-    JS_FS_END,
-};
+    JS_FS_END};
 
 const char* const NumberLongInfo::className = "NumberLong";
 
-long long NumberLongInfo::ToNumberLong(JSContext* cx, JS::HandleValue thisv) {
-    JS::RootedObject obj(cx, thisv.toObjectOrNull());
-    return ToNumberLong(cx, obj);
+void NumberLongInfo::finalize(JSFreeOp* fop, JSObject* obj) {
+    auto numLong = static_cast<int64_t*>(JS_GetPrivate(obj));
+
+    if (numLong)
+        getScope(fop)->trackedDelete(numLong);
 }
 
-long long NumberLongInfo::ToNumberLong(JSContext* cx, JS::HandleObject thisv) {
-    ObjectWrapper o(cx, thisv);
+int64_t NumberLongInfo::ToNumberLong(JSContext* cx, JS::HandleValue thisv) {
+    auto numLong = static_cast<int64_t*>(JS_GetPrivate(thisv.toObjectOrNull()));
+    return numLong ? *numLong : 0;
+}
 
-    if (!o.hasOwnField(InternedString::top)) {
-        if (!o.hasOwnField(InternedString::floatApprox))
-            uasserted(ErrorCodes::InternalError, "No top and no floatApprox fields");
-
-        return o.getNumberLongLong(InternedString::floatApprox);
-    }
-
-    if (!o.hasOwnField(InternedString::bottom))
-        uasserted(ErrorCodes::InternalError, "top but no bottom field");
-
-    return ((unsigned long long)((long long)o.getNumberLongLong(InternedString::top) << 32) +
-            (unsigned)(o.getNumberLongLong(InternedString::bottom)));
+int64_t NumberLongInfo::ToNumberLong(JSContext* cx, JS::HandleObject thisv) {
+    auto numLong = static_cast<int64_t*>(JS_GetPrivate(thisv));
+    return numLong ? *numLong : 0;
 }
 
 void NumberLongInfo::Functions::valueOf::call(JSContext* cx, JS::CallArgs args) {
-    long long out = NumberLongInfo::ToNumberLong(cx, args.thisv());
-
+    int64_t out = NumberLongInfo::ToNumberLong(cx, args.thisv());
     ValueReader(cx, args.rval()).fromDouble(out);
 }
 
@@ -88,26 +87,34 @@ void NumberLongInfo::Functions::toNumber::call(JSContext* cx, JS::CallArgs args)
 void NumberLongInfo::Functions::toString::call(JSContext* cx, JS::CallArgs args) {
     str::stream ss;
 
-    long long val = NumberLongInfo::ToNumberLong(cx, args.thisv());
+    int64_t val = NumberLongInfo::ToNumberLong(cx, args.thisv());
 
-    const long long limit = 2LL << 30;
+    const int64_t limit = 2LL << 30;
 
     if (val <= -limit || limit <= val)
         ss << "NumberLong(\"" << val << "\")";
     else
         ss << "NumberLong(" << val << ")";
 
+
     ValueReader(cx, args.rval()).fromStringData(ss.operator std::string());
+}
+
+void NumberLongInfo::Functions::toJSON::call(JSContext* cx, JS::CallArgs args) {
+    int64_t val = NumberLongInfo::ToNumberLong(cx, args.thisv());
+
+    ValueReader(cx, args.rval())
+        .fromBSON(BSON("$numberLong" << std::to_string(val)), nullptr, false);
 }
 
 void NumberLongInfo::Functions::compare::call(JSContext* cx, JS::CallArgs args) {
     uassert(ErrorCodes::BadValue, "NumberLong.compare() needs 1 argument", args.length() == 1);
     uassert(ErrorCodes::BadValue,
-            "NumberLong.compare() argument must be an object",
-            args.get(0).isObject());
+            "NumberLong.compare() argument must be a NumberLong",
+            getScope(cx)->getProto<NumberLongInfo>().instanceOf(args.get(0)));
 
-    long long thisVal = NumberLongInfo::ToNumberLong(cx, args.thisv());
-    long long otherVal = NumberLongInfo::ToNumberLong(cx, args.get(0));
+    int64_t thisVal = NumberLongInfo::ToNumberLong(cx, args.thisv());
+    int64_t otherVal = NumberLongInfo::ToNumberLong(cx, args.get(0));
 
     int comparison = 0;
     if (thisVal < otherVal) {
@@ -117,6 +124,21 @@ void NumberLongInfo::Functions::compare::call(JSContext* cx, JS::CallArgs args) 
     }
 
     ValueReader(cx, args.rval()).fromDouble(comparison);
+}
+
+void NumberLongInfo::Functions::floatApprox::call(JSContext* cx, JS::CallArgs args) {
+    int64_t numLong = NumberLongInfo::ToNumberLong(cx, args.thisv());
+    ValueReader(cx, args.rval()).fromDouble(numLong);
+}
+
+void NumberLongInfo::Functions::top::call(JSContext* cx, JS::CallArgs args) {
+    auto numULong = static_cast<uint64_t>(NumberLongInfo::ToNumberLong(cx, args.thisv()));
+    ValueReader(cx, args.rval()).fromDouble(numULong >> 32);
+}
+
+void NumberLongInfo::Functions::bottom::call(JSContext* cx, JS::CallArgs args) {
+    auto numULong = static_cast<uint64_t>(NumberLongInfo::ToNumberLong(cx, args.thisv()));
+    ValueReader(cx, args.rval()).fromDouble(numULong & 0x00000000FFFFFFFF);
 }
 
 void NumberLongInfo::construct(JSContext* cx, JS::CallArgs args) {
@@ -129,59 +151,95 @@ void NumberLongInfo::construct(JSContext* cx, JS::CallArgs args) {
     JS::RootedObject thisv(cx);
 
     scope->getProto<NumberLongInfo>().newObject(&thisv);
+
+    int64_t numLong;
+
     ObjectWrapper o(cx, thisv);
 
-    JS::RootedValue floatApprox(cx);
-    JS::RootedValue top(cx);
-    JS::RootedValue bottom(cx);
-
     if (args.length() == 0) {
-        o.setNumber(InternedString::floatApprox, 0);
+        numLong = 0;
     } else if (args.length() == 1) {
         auto arg = args.get(0);
-        if (arg.isNumber()) {
-            o.setValue(InternedString::floatApprox, arg);
-        } else {
-            std::string str = ValueWriter(cx, arg).toString();
-            long long val;
-            // For string values we call strtoll because we expect non-number string
-            // values to fail rather than return 0 (which is the behavior of ToInt64.
-            if (arg.isString())
-                val = parseLL(str.c_str());
-            // Otherwise we call the toNumber on the js value to get the long long value.
-            else
-                val = ValueWriter(cx, arg).toInt64();
 
-            // values above 2^53 are not accurately represented in JS
-            if (val == INT64_MIN || std::abs(val) >= 9007199254740992LL) {
-                auto val64 = static_cast<unsigned long long>(val);
-                o.setNumber(InternedString::floatApprox, val);
-                o.setNumber(InternedString::top, val64 >> 32);
-                o.setNumber(InternedString::bottom, val64 & 0x00000000ffffffff);
-            } else {
-                o.setNumber(InternedString::floatApprox, val);
-            }
+        if (arg.isInt32()) {
+            numLong = arg.toInt32();
+        } else if (arg.isDouble()) {
+            auto opt = representAs<int64_t>(arg.toDouble());
+            uassert(ErrorCodes::BadValue,
+                    "number passed to NumberLong must be representable as an int64_t",
+                    opt);
+            numLong = *opt;
+        } else if (arg.isString()) {
+            // For string values we call strtoll because we expect non-number string
+            // values to fail rather than return 0 (which is the behavior of ToInt64).
+            std::string str = ValueWriter(cx, arg).toString();
+
+            // Call parseNumberFromStringWithBase() function to convert string to a number
+            Status status = parseNumberFromStringWithBase(str, 10, &numLong);
+            uassert(ErrorCodes::BadValue, "could not convert string to long long", status.isOK());
+        } else {
+            numLong = ValueWriter(cx, arg).toInt64();
         }
     } else {
-        if (!args.get(0).isNumber())
-            uasserted(ErrorCodes::BadValue, "floatApprox must be a number");
+        uassert(ErrorCodes::BadValue, "floatApprox must be a number", args.get(0).isNumber());
+        uassert(ErrorCodes::BadValue, "top must be a number", args.get(1).isNumber());
+        uassert(ErrorCodes::BadValue, "bottom must be a number", args.get(2).isNumber());
 
-        if (!args.get(1).isNumber() ||
-            args.get(1).toNumber() !=
-                static_cast<double>(static_cast<uint32_t>(args.get(1).toNumber())))
-            uasserted(ErrorCodes::BadValue, "top must be a 32 bit unsigned number");
+        auto topOpt = representAs<uint32_t>(args.get(1).toNumber());
+        uassert(ErrorCodes::BadValue, "top must be a 32 bit unsigned number", topOpt);
+        uint64_t top = *topOpt;
 
-        if (!args.get(2).isNumber() ||
-            args.get(2).toNumber() !=
-                static_cast<double>(static_cast<uint32_t>(args.get(2).toNumber())))
-            uasserted(ErrorCodes::BadValue, "bottom must be a 32 bit unsigned number");
+        auto botOpt = representAs<uint32_t>(args.get(2).toNumber());
+        uassert(ErrorCodes::BadValue, "bottom must be a 32 bit unsigned number", botOpt);
+        uint64_t bot = *botOpt;
 
-        o.setValue(InternedString::floatApprox, args.get(0));
-        o.setValue(InternedString::top, args.get(1));
-        o.setValue(InternedString::bottom, args.get(2));
+        numLong = (top << 32) + bot;
     }
 
+    JS_SetPrivate(thisv, scope->trackedNew<int64_t>(numLong));
+
     args.rval().setObjectOrNull(thisv);
+}
+
+void NumberLongInfo::postInstall(JSContext* cx, JS::HandleObject global, JS::HandleObject proto) {
+    JS::RootedValue undef(cx);
+    undef.setUndefined();
+
+    // floatapprox
+    if (!JS_DefinePropertyById(
+            cx,
+            proto,
+            getScope(cx)->getInternedStringId(InternedString::floatApprox),
+            undef,
+            JSPROP_ENUMERATE | JSPROP_SHARED,
+            smUtils::wrapConstrainedMethod<Functions::floatApprox, false, NumberLongInfo>,
+            nullptr)) {
+        uasserted(ErrorCodes::JSInterpreterFailure, "Failed to JS_DefinePropertyById");
+    }
+
+    // top
+    if (!JS_DefinePropertyById(
+            cx,
+            proto,
+            getScope(cx)->getInternedStringId(InternedString::top),
+            undef,
+            JSPROP_ENUMERATE | JSPROP_SHARED,
+            smUtils::wrapConstrainedMethod<Functions::top, false, NumberLongInfo>,
+            nullptr)) {
+        uasserted(ErrorCodes::JSInterpreterFailure, "Failed to JS_DefinePropertyById");
+    }
+
+    // bottom
+    if (!JS_DefinePropertyById(
+            cx,
+            proto,
+            getScope(cx)->getInternedStringId(InternedString::bottom),
+            undef,
+            JSPROP_ENUMERATE | JSPROP_SHARED,
+            smUtils::wrapConstrainedMethod<Functions::bottom, false, NumberLongInfo>,
+            nullptr)) {
+        uasserted(ErrorCodes::JSInterpreterFailure, "Failed to JS_DefinePropertyById");
+    }
 }
 
 }  // namespace mozjs

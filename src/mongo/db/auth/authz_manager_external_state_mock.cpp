@@ -1,30 +1,32 @@
-/*
-*    Copyright (C) 2013 10gen Inc.
-*
-*    This program is free software: you can redistribute it and/or  modify
-*    it under the terms of the GNU Affero General Public License, version 3,
-*    as published by the Free Software Foundation.
-*
-*    This program is distributed in the hope that it will be useful,
-*    but WITHOUT ANY WARRANTY; without even the implied warranty of
-*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*    GNU Affero General Public License for more details.
-*
-*    You should have received a copy of the GNU Affero General Public License
-*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*
-*    As a special exception, the copyright holders give permission to link the
-*    code of portions of this program with the OpenSSL library under certain
-*    conditions as described in each individual source file and distribute
-*    linked combinations including the program with the OpenSSL library. You
-*    must comply with the GNU Affero General Public License in all respects for
-*    all of the code used other than as permitted herein. If you modify file(s)
-*    with this exception, you may extend this exception to your version of the
-*    file(s), but you are not obligated to do so. If you do not wish to do so,
-*    delete this exception statement from your version. If you delete this
-*    exception statement from all source files in the program, then also delete
-*    it in the license file.
-*/
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
+ *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
+ *
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
+ */
 
 #include "mongo/db/auth/authz_manager_external_state_mock.h"
 
@@ -36,17 +38,23 @@
 #include "mongo/bson/mutable/element.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authz_session_external_state_mock.h"
+#include "mongo/db/auth/privilege_parser.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/matcher/expression_parser.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context_noop.h"
-#include "mongo/db/ops/update_driver.h"
-#include "mongo/platform/unordered_set.h"
+#include "mongo/db/update/update_driver.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/util/map_util.h"
 #include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
+
+MONGO_REGISTER_SHIM(AuthzManagerExternalState::create)
+()->std::unique_ptr<AuthzManagerExternalState> {
+    return std::make_unique<AuthzManagerExternalStateMock>();
+}
+
 namespace {
 void addRoleNameToObjectElement(mutablebson::Element object, const RoleName& role) {
     fassert(17175, object.appendString(AuthorizationManager::ROLE_NAME_FIELD_NAME, role.getRole()));
@@ -76,7 +84,8 @@ void addPrivilegeObjectsOrWarningsToArrayElement(mutablebson::Element privileges
                         std::string(mongoutils::str::stream()
                                     << "Skipped privileges on resource "
                                     << privileges[i].getResourcePattern().toString()
-                                    << ". Reason: " << errmsg)));
+                                    << ". Reason: "
+                                    << errmsg)));
         }
     }
 }
@@ -105,12 +114,12 @@ AuthzManagerExternalStateMock::makeAuthzSessionExternalState(AuthorizationManage
     return stdx::make_unique<AuthzSessionExternalStateMock>(authzManager);
 }
 
-Status AuthzManagerExternalStateMock::findOne(OperationContext* txn,
+Status AuthzManagerExternalStateMock::findOne(OperationContext* opCtx,
                                               const NamespaceString& collectionName,
                                               const BSONObj& query,
                                               BSONObj* result) {
     BSONObjCollection::iterator iter;
-    Status status = _findOneIter(collectionName, query, &iter);
+    Status status = _findOneIter(opCtx, collectionName, query, &iter);
     if (!status.isOK())
         return status;
     *result = iter->copy();
@@ -118,13 +127,13 @@ Status AuthzManagerExternalStateMock::findOne(OperationContext* txn,
 }
 
 Status AuthzManagerExternalStateMock::query(
-    OperationContext* txn,
+    OperationContext* opCtx,
     const NamespaceString& collectionName,
     const BSONObj& query,
     const BSONObj&,
     const stdx::function<void(const BSONObj&)>& resultProcessor) {
     std::vector<BSONObjCollection::iterator> iterVector;
-    Status status = _queryVector(collectionName, query, &iterVector);
+    Status status = _queryVector(opCtx, collectionName, query, &iterVector);
     if (!status.isOK()) {
         return status;
     }
@@ -140,7 +149,7 @@ Status AuthzManagerExternalStateMock::query(
     return status;
 }
 
-Status AuthzManagerExternalStateMock::insert(OperationContext* txn,
+Status AuthzManagerExternalStateMock::insert(OperationContext* opCtx,
                                              const NamespaceString& collectionName,
                                              const BSONObj& document,
                                              const BSONObj&) {
@@ -156,68 +165,79 @@ Status AuthzManagerExternalStateMock::insert(OperationContext* txn,
     _documents[collectionName].push_back(toInsert);
 
     if (_authzManager) {
-        _authzManager->logOp(txn, "i", collectionName.ns().c_str(), toInsert, NULL);
+        _authzManager->logOp(opCtx, "i", collectionName, toInsert, NULL);
     }
 
     return Status::OK();
 }
 
-Status AuthzManagerExternalStateMock::insertPrivilegeDocument(OperationContext* txn,
+Status AuthzManagerExternalStateMock::insertPrivilegeDocument(OperationContext* opCtx,
                                                               const BSONObj& userObj,
                                                               const BSONObj& writeConcern) {
-    return insert(txn, AuthorizationManager::usersCollectionNamespace, userObj, writeConcern);
+    return insert(opCtx, AuthorizationManager::usersCollectionNamespace, userObj, writeConcern);
 }
 
-Status AuthzManagerExternalStateMock::updateOne(OperationContext* txn,
+Status AuthzManagerExternalStateMock::updateOne(OperationContext* opCtx,
                                                 const NamespaceString& collectionName,
                                                 const BSONObj& query,
                                                 const BSONObj& updatePattern,
                                                 bool upsert,
                                                 const BSONObj& writeConcern) {
     namespace mmb = mutablebson;
-    UpdateDriver::Options updateOptions;
-    UpdateDriver driver(updateOptions);
-    Status status = driver.parse(updatePattern);
+    const CollatorInterface* collator = nullptr;
+    boost::intrusive_ptr<ExpressionContext> expCtx(new ExpressionContext(opCtx, collator));
+    UpdateDriver driver(std::move(expCtx));
+    std::map<StringData, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
+    Status status = driver.parse(updatePattern, arrayFilters);
     if (!status.isOK())
         return status;
 
     BSONObjCollection::iterator iter;
-    status = _findOneIter(collectionName, query, &iter);
+    status = _findOneIter(opCtx, collectionName, query, &iter);
     mmb::Document document;
     if (status.isOK()) {
         document.reset(*iter, mmb::Document::kInPlaceDisabled);
+        const bool validateForStorage = false;
+        const FieldRefSet emptyImmutablePaths;
         BSONObj logObj;
-        status = driver.update(StringData(), &document, &logObj);
+        status = driver.update(
+            StringData(), &document, validateForStorage, emptyImmutablePaths, &logObj);
         if (!status.isOK())
             return status;
         BSONObj newObj = document.getObject().copy();
         *iter = newObj;
-        BSONObj idQuery = driver.makeOplogEntryQuery(newObj, false);
+        BSONObj idQuery = newObj["_id"_sd].Obj();
 
         if (_authzManager) {
-            _authzManager->logOp(txn, "u", collectionName.ns().c_str(), logObj, &idQuery);
+            _authzManager->logOp(opCtx, "u", collectionName, logObj, &idQuery);
         }
 
         return Status::OK();
     } else if (status == ErrorCodes::NoMatchingDocument && upsert) {
         if (query.hasField("_id")) {
-            document.root().appendElement(query["_id"]);
+            document.root().appendElement(query["_id"]).transitional_ignore();
         }
-        status = driver.populateDocumentWithQueryFields(query, NULL, document);
+        const FieldRef idFieldRef("_id");
+        FieldRefSet immutablePaths;
+        invariant(immutablePaths.insert(&idFieldRef));
+        status = driver.populateDocumentWithQueryFields(opCtx, query, immutablePaths, document);
         if (!status.isOK()) {
             return status;
         }
-        status = driver.update(StringData(), &document);
+
+        const bool validateForStorage = false;
+        const FieldRefSet emptyImmutablePaths;
+        status = driver.update(StringData(), &document, validateForStorage, emptyImmutablePaths);
         if (!status.isOK()) {
             return status;
         }
-        return insert(txn, collectionName, document.getObject(), writeConcern);
+        return insert(opCtx, collectionName, document.getObject(), writeConcern);
     } else {
         return status;
     }
 }
 
-Status AuthzManagerExternalStateMock::update(OperationContext* txn,
+Status AuthzManagerExternalStateMock::update(OperationContext* opCtx,
                                              const NamespaceString& collectionName,
                                              const BSONObj& query,
                                              const BSONObj& updatePattern,
@@ -229,20 +249,20 @@ Status AuthzManagerExternalStateMock::update(OperationContext* txn,
                   "AuthzManagerExternalStateMock::update not implemented in mock.");
 }
 
-Status AuthzManagerExternalStateMock::remove(OperationContext* txn,
+Status AuthzManagerExternalStateMock::remove(OperationContext* opCtx,
                                              const NamespaceString& collectionName,
                                              const BSONObj& query,
                                              const BSONObj&,
                                              int* numRemoved) {
     int n = 0;
     BSONObjCollection::iterator iter;
-    while (_findOneIter(collectionName, query, &iter).isOK()) {
+    while (_findOneIter(opCtx, collectionName, query, &iter).isOK()) {
         BSONObj idQuery = (*iter)["_id"].wrap();
         _documents[collectionName].erase(iter);
         ++n;
 
         if (_authzManager) {
-            _authzManager->logOp(txn, "d", collectionName.ns().c_str(), idQuery, NULL);
+            _authzManager->logOp(opCtx, "d", collectionName, idQuery, NULL);
         }
     }
     *numRemoved = n;
@@ -254,11 +274,12 @@ std::vector<BSONObj> AuthzManagerExternalStateMock::getCollectionContents(
     return mapFindWithDefault(_documents, collectionName, std::vector<BSONObj>());
 }
 
-Status AuthzManagerExternalStateMock::_findOneIter(const NamespaceString& collectionName,
+Status AuthzManagerExternalStateMock::_findOneIter(OperationContext* opCtx,
+                                                   const NamespaceString& collectionName,
                                                    const BSONObj& query,
                                                    BSONObjCollection::iterator* result) {
     std::vector<BSONObjCollection::iterator> iterVector;
-    Status status = _queryVector(collectionName, query, &iterVector);
+    Status status = _queryVector(opCtx, collectionName, query, &iterVector);
     if (!status.isOK()) {
         return status;
     }
@@ -270,11 +291,13 @@ Status AuthzManagerExternalStateMock::_findOneIter(const NamespaceString& collec
 }
 
 Status AuthzManagerExternalStateMock::_queryVector(
+    OperationContext* opCtx,
     const NamespaceString& collectionName,
     const BSONObj& query,
     std::vector<BSONObjCollection::iterator>* result) {
-    StatusWithMatchExpression parseResult =
-        MatchExpressionParser::parse(query, ExtensionsCallback());
+    const CollatorInterface* collator = nullptr;
+    boost::intrusive_ptr<ExpressionContext> expCtx(new ExpressionContext(opCtx, collator));
+    StatusWithMatchExpression parseResult = MatchExpressionParser::parse(query, std::move(expCtx));
     if (!parseResult.isOK()) {
         return parseResult.getStatus();
     }

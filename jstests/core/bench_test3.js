@@ -1,3 +1,8 @@
+/**
+ * @tags: [
+ *   uses_multiple_connections,
+ * ]
+ */
 t = db.bench_test3;
 t.drop();
 
@@ -10,14 +15,14 @@ benchArgs = {
         update: {$inc: {x: 1}}
     }],
     parallel: 2,
-    seconds: 5,
+    seconds: 10,
     host: db.getMongo().host
 };
 
 if (jsTest.options().auth) {
     benchArgs['db'] = 'admin';
-    benchArgs['username'] = jsTest.options().adminUser;
-    benchArgs['password'] = jsTest.options().adminPassword;
+    benchArgs['username'] = jsTest.options().authUser;
+    benchArgs['password'] = jsTest.options().authPassword;
 }
 
 res = benchRun(benchArgs);

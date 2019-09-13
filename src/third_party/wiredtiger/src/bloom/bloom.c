@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -133,8 +133,12 @@ __bloom_open_cursor(WT_BLOOM *bloom, WT_CURSOR *owner)
 	c = NULL;
 	WT_RET(__wt_open_cursor(session, bloom->uri, owner, cfg, &c));
 
-	/* Bump the cache priority for Bloom filters. */
-	__wt_evict_priority_set(session, WT_EVICT_INT_SKEW);
+	/*
+	 * Bump the cache priority for Bloom filters: this makes eviction favor
+	 * pages from other trees over Bloom filters.
+	 */
+#define	WT_EVICT_BLOOM_SKEW	1000
+	__wt_evict_priority_set(session, WT_EVICT_BLOOM_SKEW);
 
 	bloom->c = c;
 	return (0);
@@ -261,15 +265,16 @@ __wt_bloom_hash_get(WT_BLOOM *bloom, WT_BLOOM_HASH *bhash)
 {
 	WT_CURSOR *c;
 	WT_DECL_RET;
-	int result;
-	uint32_t i;
 	uint64_t h1, h2;
+	uint32_t i;
 	uint8_t bit;
+	int result;
 
 	/* Get operations are only supported by finalized bloom filters. */
 	WT_ASSERT(bloom->session, bloom->bitstring == NULL);
 
 	/* Create a cursor on the first time through. */
+	c = NULL;
 	WT_ERR(__bloom_open_cursor(bloom, NULL));
 	c = bloom->c;
 
@@ -294,11 +299,22 @@ __wt_bloom_hash_get(WT_BLOOM *bloom, WT_BLOOM_HASH *bhash)
 	WT_ERR(c->reset(c));
 	return (result);
 
-err:	/* Don't return WT_NOTFOUND from a failed search. */
-	if (ret == WT_NOTFOUND)
-		ret = WT_ERROR;
-	__wt_err(bloom->session, ret, "Failed lookup in bloom filter");
-	return (ret);
+err:	if (c != NULL)
+		WT_TRET(c->reset(c));
+
+	/*
+	 * Error handling from this function is complex. A search in the
+	 * backing bit field should never return WT_NOTFOUND - so translate
+	 * that into a different error code and report an error. If we got a
+	 * WT_ROLLBACK it may be because there is a lot of cache pressure and
+	 * the transaction is being killed - don't report an error message in
+	 * that case.
+	 */
+	if (ret == WT_ROLLBACK || ret == WT_CACHE_FULL)
+		return (ret);
+	WT_RET_MSG(bloom->session,
+	    ret == WT_NOTFOUND ? WT_ERROR : ret,
+	    "Failed lookup in bloom filter");
 }
 
 /*

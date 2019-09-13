@@ -1,12 +1,13 @@
 /**
  * This tests that the proper access control is enforced around modifications to user and role data.
+ * @tags: [requires_sharding]
  */
 
 function runTest(conn) {
     var authzErrorCode = 13;
 
-    conn.getDB('admin')
-        .createUser({user: 'userAdmin', pwd: 'pwd', roles: ['userAdminAnyDatabase']});
+    conn.getDB('admin').createUser(
+        {user: 'userAdmin', pwd: 'pwd', roles: ['userAdminAnyDatabase']});
 
     var userAdminConn = new Mongo(conn.host);
     userAdminConn.getDB('admin').auth('userAdmin', 'pwd');
@@ -62,11 +63,7 @@ function runTest(conn) {
     (function() {
         jsTestLog("Testing role creation, of user-defined roles with same name as built-in roles");
 
-        var cmdObj = {
-            createRole: "readWrite",
-            roles: [],
-            privileges: []
-        };
+        var cmdObj = {createRole: "readWrite", roles: [], privileges: []};
         var res = adminUserAdmin.runCommand(cmdObj);
         assert.commandFailed(res, tojson(cmdObj));
 
@@ -300,9 +297,11 @@ function runTest(conn) {
 jsTest.log('Test standalone');
 var conn = MongoRunner.runMongod({auth: ''});
 runTest(conn);
-MongoRunner.stopMongod(conn.port);
+MongoRunner.stopMongod(conn);
 
 jsTest.log('Test sharding');
-var st = new ShardingTest({shards: 2, config: 3, keyFile: 'jstests/libs/key1'});
+// TODO: Remove 'shardAsReplicaSet: false' when SERVER-32672 is fixed.
+var st = new ShardingTest(
+    {shards: 2, config: 3, keyFile: 'jstests/libs/key1', other: {shardAsReplicaSet: false}});
 runTest(st.s);
 st.stop();

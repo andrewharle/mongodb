@@ -56,10 +56,95 @@ Mongo.prototype.getDB = function(name) {
     return new DB(this, name);
 };
 
-Mongo.prototype.getDBs = function() {
-    var res = this.getDB("admin").runCommand({"listDatabases": 1});
-    if (!res.ok)
+Mongo.prototype._getDatabaseNamesFromPrivileges = function() {
+    'use strict';
+
+    const ret = this.adminCommand({connectionStatus: 1, showPrivileges: 1});
+    if (!ret.ok) {
+        throw _getErrorWithCode(ret, "Failed to acquire database information from privileges");
+    }
+
+    const privileges = (ret.authInfo || {}).authenticatedUserPrivileges;
+    if (privileges === undefined) {
+        return [];
+    }
+
+    return privileges
+        .filter(function(priv) {
+            // Find all named databases in priv list.
+            return ((priv.resource || {}).db || '').length > 0;
+        })
+        .map(function(priv) {
+            // Return just the names.
+            return priv.resource.db;
+        })
+        .filter(function(db, idx, arr) {
+            // Make sure the list is unique
+            return arr.indexOf(db) === idx;
+        })
+        .sort();
+};
+
+Mongo.prototype.getDBs = function(driverSession = this._getDefaultSession(),
+                                  filter = undefined,
+                                  nameOnly = undefined,
+                                  authorizedDatabases = undefined) {
+    'use strict';
+
+    let cmdObj = {listDatabases: 1};
+    if (filter !== undefined) {
+        cmdObj.filter = filter;
+    }
+    if (nameOnly !== undefined) {
+        cmdObj.nameOnly = nameOnly;
+    }
+    if (authorizedDatabases !== undefined) {
+        cmdObj.authorizedDatabases = authorizedDatabases;
+    }
+
+    if (driverSession._isExplicit || !jsTest.options().disableImplicitSessions) {
+        cmdObj = driverSession._serverSession.injectSessionId(cmdObj);
+    }
+
+    const res = this.adminCommand(cmdObj);
+    if (!res.ok) {
+        // If "Unauthorized" was returned by the back end and we haven't explicitly
+        // asked for anything difficult to provide from userspace, then we can
+        // fallback on inspecting the user's permissions.
+        // This means that:
+        //   * filter must be undefined, as reimplementing that logic is out of scope.
+        //   * nameOnly must not be false as we can't infer size information.
+        //   * authorizedDatabases must not be false as those are the only DBs we can infer.
+        // Note that if the above are valid and we get Unauthorized, that also means
+        // that we MUST be talking to a pre-4.0 mongod.
+        //
+        // Like the server response mode, this path will return a simple list of
+        // names if nameOnly is specified as true.
+        // If nameOnly is undefined, we come as close as we can to what the
+        // server would return by supplying the databases key of the returned
+        // object.  Other information is unavailable.
+        if ((res.code === ErrorCodes.Unauthorized) && (filter === undefined) &&
+            (nameOnly !== false) && (authorizedDatabases !== false)) {
+            const names = this._getDatabaseNamesFromPrivileges();
+            if (nameOnly === true) {
+                return names;
+            } else {
+                return {
+                    databases: names.map(function(x) {
+                        return {name: x};
+                    }),
+                };
+            }
+        }
         throw _getErrorWithCode(res, "listDatabases failed:" + tojson(res));
+    }
+
+    if (nameOnly) {
+        return res.databases.map(function(db) {
+            return db.name;
+        });
+    }
+
     return res;
 };
 
@@ -70,8 +155,13 @@ Mongo.prototype.adminCommand = function(cmd) {
 /**
  * Returns all log components and current verbosity values
  */
-Mongo.prototype.getLogComponents = function() {
-    var res = this.adminCommand({getParameter: 1, logComponentVerbosity: 1});
+Mongo.prototype.getLogComponents = function(driverSession = this._getDefaultSession()) {
+    var cmdObj = {getParameter: 1, logComponentVerbosity: 1};
+    if (driverSession._isExplicit || !jsTest.options().disableImplicitSessions) {
+        cmdObj = driverSession._serverSession.injectSessionId(cmdObj);
+    }
+
+    var res = this.adminCommand(cmdObj);
     if (!res.ok)
         throw _getErrorWithCode(res, "getLogComponents failed:" + tojson(res));
     return res.logComponentVerbosity;
@@ -81,16 +171,15 @@ Mongo.prototype.getLogComponents = function() {
  * Accepts optional second argument "component",
  * string of form "storage.journaling"
  */
-Mongo.prototype.setLogLevel = function(logLevel, component) {
+Mongo.prototype.setLogLevel = function(
+    logLevel, component, driverSession = this._getDefaultSession()) {
     componentNames = [];
     if (typeof component === "string") {
         componentNames = component.split(".");
     } else if (component !== undefined) {
         throw Error("setLogLevel component must be a string:" + tojson(component));
     }
-    var vDoc = {
-        verbosity: logLevel
-    };
+    var vDoc = {verbosity: logLevel};
 
     // nest vDoc
     for (var key, obj; componentNames.length > 0;) {
@@ -99,7 +188,13 @@ Mongo.prototype.setLogLevel = function(logLevel, component) {
         obj[key] = vDoc;
         vDoc = obj;
     }
-    var res = this.adminCommand({setParameter: 1, logComponentVerbosity: vDoc});
+
+    var cmdObj = {setParameter: 1, logComponentVerbosity: vDoc};
+    if (driverSession._isExplicit || !jsTest.options().disableImplicitSessions) {
+        cmdObj = driverSession._serverSession.injectSessionId(cmdObj);
+    }
+
+    var res = this.adminCommand(cmdObj);
     if (!res.ok)
         throw _getErrorWithCode(res, "setLogLevel failed:" + tojson(res));
     return res;
@@ -173,7 +268,34 @@ Mongo.prototype.getReadPref = function() {
     return obj;
 };
 
+/**
+ * Sets the read concern.
+ *
+ * @param level {string} read concern level to use. Pass null to disable read concern.
+ */
+Mongo.prototype.setReadConcern = function(level) {
+    if (!level) {
+        this._readConcernLevel = undefined;
+    } else if (level === "local" || level === "majority") {
+        this._readConcernLevel = level;
+    } else {
+        throw Error("Invalid read concern.");
+    }
+};
+
+/**
+ * Gets the read concern.
+ */
+Mongo.prototype.getReadConcern = function() {
+    return this._readConcernLevel;
+};
+
 connect = function(url, user, pass) {
+    if (url instanceof MongoURI) {
+        user = url.user;
+        pass = url.password;
+        url = url.uri;
+    }
     if (user && !pass)
         throw Error("you specified a user and not a password.  " +
                     "either you need a password, or you're using the old connect api");
@@ -181,8 +303,7 @@ connect = function(url, user, pass) {
     // Validate connection string "url" as "hostName:portNumber/databaseName"
     //                                  or "hostName/databaseName"
     //                                  or "databaseName"
-    // hostName may be an IPv6 address (with colons), in which case ":portNumber" is required
-    //
+    //                                  or full mongo uri.
     var urlType = typeof url;
     if (urlType == "undefined") {
         throw Error("Missing connection string");
@@ -195,46 +316,70 @@ connect = function(url, user, pass) {
     if (0 == url.length) {
         throw Error("Empty connection string");
     }
-    if (!url.startsWith("mongodb://")) {
-        var colon = url.lastIndexOf(":");
-        var slash = url.lastIndexOf("/");
-        if (0 == colon || 0 == slash) {
-            throw Error("Missing host name in connection string \"" + url + "\"");
+
+    if (!url.startsWith("mongodb://") && !url.startsWith("mongodb+srv://")) {
+        const colon = url.lastIndexOf(":");
+        const slash = url.lastIndexOf("/");
+        if (url.split("/").length > 1) {
+            url = url.substring(0, slash).replace(/\//g, "%2F") + url.substring(slash);
         }
-        if (colon == slash - 1 || colon == url.length - 1) {
-            throw Error("Missing port number in connection string \"" + url + "\"");
+        if (slash == 0) {
+            throw Error("Failed to parse mongodb:// URL: " + url);
         }
-        if (colon != -1 && colon < slash) {
-            var portNumber = url.substring(colon + 1, slash);
-            if (portNumber.length > 5 || !/^\d*$/.test(portNumber) ||
-                parseInt(portNumber) > 65535) {
-                throw Error("Invalid port number \"" + portNumber + "\" in connection string \"" +
-                            url + "\"");
-            }
-        }
-        if (slash == url.length - 1) {
-            throw Error("Missing database name in connection string \"" + url + "\"");
+        if (slash == -1 && colon == -1) {
+            url = "mongodb://127.0.0.1:27017/" + url;
+        } else if (slash != -1) {
+            url = "mongodb://" + url;
         }
     }
 
-    chatty("connecting to: " + url);
-    var db;
-    if (url.startsWith("mongodb://")) {
-        db = new Mongo(url);
-        if (db.defaultDB.length == 0) {
-            db.defaultDB = "test";
+    var atPos = url.indexOf("@");
+    var protocolPos = url.indexOf("://");
+    var safeURL = url;
+    if (atPos != -1 && protocolPos != -1) {
+        safeURL = url.substring(0, protocolPos + 3) + url.substring(atPos + 1);
+    }
+    chatty("connecting to: " + safeURL);
+    try {
+        var m = new Mongo(url);
+    } catch (e) {
+        if (url.indexOf(".mongodb.net") != -1) {
+            print("\n\n*** It looks like this is a MongoDB Atlas cluster. Please ensure that your" +
+                  " IP whitelist allows connections from your network.\n\n");
         }
-        db = db.getDB(db.defaultDB);
-    } else if (slash == -1)
-        db = new Mongo().getDB(url);
-    else
-        db = new Mongo(url.substring(0, slash)).getDB(url.substring(slash + 1));
+
+        throw e;
+    }
+    var db = m.getDB(m.defaultDB);
 
     if (user && pass) {
         if (!db.auth(user, pass)) {
             throw Error("couldn't login");
         }
     }
+
+    if (_shouldUseImplicitSessions()) {
+        chatty("Implicit session: " + db.getSession());
+    }
+
+    // Implicit sessions should not be used when opening a connection. In particular, the buildInfo
+    // command is erroneously marked as requiring auth in MongoDB 3.6 and therefore fails if a
+    // logical session id is included in the request.
+    const originalTestData = TestData;
+    TestData = Object.merge(originalTestData, {disableImplicitSessions: true});
+    try {
+        // Check server version
+        var serverVersion = db.version();
+        chatty("MongoDB server version: " + serverVersion);
+
+        var shellVersion = version();
+        if (serverVersion.slice(0, 3) != shellVersion.slice(0, 3)) {
+            chatty("WARNING: shell and server versions do not match");
+        }
+    } finally {
+        TestData = originalTestData;
+    }
+
     return db;
 };
 
@@ -326,11 +471,7 @@ Mongo.prototype.readMode = function() {
         // commands. If it does, use commands mode. If not, degrade to legacy mode.
         try {
             var hasReadCommands = (this.getMinWireVersion() <= 4 && 4 <= this.getMaxWireVersion());
-            // TODO SERVER-23219: DBCommandCursor doesn't route getMore and killCursors operations
-            // to the server that the cursor was originally established on. As a workaround, we make
-            // replica set connections use 'legacy' read mode because the underlying DBClientCursor
-            // will correctly route operations to the original server.
-            if (hasReadCommands && !this.isReplicaSetConnection()) {
+            if (hasReadCommands) {
                 this._readMode = "commands";
             } else {
                 this._readMode = "legacy";
@@ -365,4 +506,123 @@ Mongo.prototype.getWriteConcern = function() {
 
 Mongo.prototype.unsetWriteConcern = function() {
     delete this._writeConcern;
+};
+
+Mongo.prototype.advanceClusterTime = function(newTime) {
+    if (!newTime.hasOwnProperty("clusterTime")) {
+        throw new Error("missing clusterTime field in setClusterTime argument");
+    }
+
+    if (typeof this._clusterTime === "object" && this._clusterTime !== null) {
+        this._clusterTime =
+            (bsonWoCompare({_: this._clusterTime.clusterTime}, {_: newTime.clusterTime}) >= 0)
+            ? this._clusterTime
+            : newTime;
+    } else {
+        this._clusterTime = newTime;
+    }
+};
+
+Mongo.prototype.resetClusterTime_forTesting = function() {
+    delete this._clusterTime;
+};
+
+Mongo.prototype.getClusterTime = function() {
+    return this._clusterTime;
+};
+
+Mongo.prototype.startSession = function startSession(options = {}) {
+    // Set retryWrites if not already set on options.
+    if (!options.hasOwnProperty("retryWrites") && this.hasOwnProperty("_retryWrites")) {
+        options.retryWrites = this._retryWrites;
+    }
+    return new DriverSession(this, options);
+};
+
+Mongo.prototype._getDefaultSession = function getDefaultSession() {
+    // We implicitly associate a Mongo connection object with a real session so all requests include
+    // a logical session id. These implicit sessions are intentionally not causally consistent. If
+    // implicit sessions have been globally disabled, a dummy session is used instead of a real one.
+    if (!this.hasOwnProperty("_defaultSession")) {
+        if (_shouldUseImplicitSessions()) {
+            try {
+                this._defaultSession = this.startSession({causalConsistency: false});
+            } catch (e) {
+                if (e instanceof DriverSession.UnsupportedError) {
+                    chatty("WARNING: No implicit session: " + e.message);
+                    this._setDummyDefaultSession();
+                } else {
+                    print("ERROR: Implicit session failed: " + e.message);
+                    throw(e);
+                }
+            }
+        } else {
+            this._setDummyDefaultSession();
+        }
+        this._defaultSession._isExplicit = false;
+    }
+    return this._defaultSession;
+};
+
+Mongo.prototype._setDummyDefaultSession = function setDummyDefaultSession() {
+    this._defaultSession = new _DummyDriverSession(this);
+};
+
+Mongo.prototype.isCausalConsistency = function isCausalConsistency() {
+    if (!this.hasOwnProperty("_causalConsistency")) {
+        this._causalConsistency = false;
+    }
+    return this._causalConsistency;
+};
+
+Mongo.prototype.setCausalConsistency = function setCausalConsistency(causalConsistency = true) {
+    this._causalConsistency = causalConsistency;
+};
+
+Mongo.prototype.waitForClusterTime = function waitForClusterTime(maxRetries = 10) {
+    let isFirstTime = true;
+    let count = 0;
+    while (count < maxRetries) {
+        if (typeof this._clusterTime === "object" && this._clusterTime !== null) {
+            if (this._clusterTime.hasOwnProperty("signature") &&
+                this._clusterTime.signature.keyId > 0) {
+                return;
+            }
+        }
+        if (isFirstTime) {
+            isFirstTime = false;
+        } else {
+            sleep(500);
+        }
+        count++;
+        this.adminCommand({"ping": 1});
+    }
+    throw new Error("failed waiting for non default clusterTime");
+};
+
+Mongo.prototype.watch = function(pipeline, options) {
+    pipeline = pipeline || [];
+    options = options || {};
+    assert(pipeline instanceof Array, "'pipeline' argument must be an array");
+    assert(options instanceof Object, "'options' argument must be an object");
+
+    let changeStreamStage = {
+        allChangesForCluster: true,
+        fullDocument: options.fullDocument || "default"
+    };
+    delete options.allChangesForCluster;
+    delete options.fullDocument;
+
+    if (options.hasOwnProperty("resumeAfter")) {
+        changeStreamStage.resumeAfter = options.resumeAfter;
+        delete options.resumeAfter;
+    }
+
+    if (options.hasOwnProperty("startAtOperationTime")) {
+        changeStreamStage.startAtOperationTime = options.startAtOperationTime;
+        delete options.startAtOperationTime;
+    }
+
+    pipeline.unshift({$changeStream: changeStreamStage});
+    return this.getDB("admin")._runAggregate({aggregate: 1, pipeline: pipeline}, options);
 };

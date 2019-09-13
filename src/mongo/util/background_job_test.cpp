@@ -1,28 +1,31 @@
-/*    Copyright 2013 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/platform/basic.h"
@@ -32,25 +35,18 @@
 #include "mongo/stdx/thread.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/background.h"
-#include "mongo/util/concurrency/synchronization.h"
+#include "mongo/util/concurrency/notification.h"
 #include "mongo/util/time_support.h"
 
+namespace mongo {
 namespace {
 
-using mongo::AtomicWord;
-using mongo::BackgroundJob;
-using mongo::MsgAssertionException;
-using mongo::stdx::mutex;
-using mongo::Notification;
-
-namespace stdx = mongo::stdx;
-
-class TestJob final : public mongo::BackgroundJob {
+class TestJob final : public BackgroundJob {
 public:
     TestJob(bool selfDelete,
             AtomicWord<bool>* flag,
-            Notification* canProceed = nullptr,
-            Notification* destructorInvoked = nullptr)
+            Notification<void>* canProceed = nullptr,
+            Notification<void>* destructorInvoked = nullptr)
         : BackgroundJob(selfDelete),
           _flag(flag),
           _canProceed(canProceed),
@@ -58,7 +54,7 @@ public:
 
     ~TestJob() override {
         if (_destructorInvoked)
-            _destructorInvoked->notifyOne();
+            _destructorInvoked->set();
     }
 
     std::string name() const override {
@@ -67,14 +63,14 @@ public:
 
     void run() override {
         if (_canProceed)
-            _canProceed->waitToBeNotified();
+            _canProceed->get();
         _flag->store(true);
     }
 
 private:
     AtomicWord<bool>* const _flag;
-    Notification* const _canProceed;
-    Notification* const _destructorInvoked;
+    Notification<void>* const _canProceed;
+    Notification<void>* const _destructorInvoked;
 };
 
 TEST(BackgroundJobBasic, NormalCase) {
@@ -87,24 +83,24 @@ TEST(BackgroundJobBasic, NormalCase) {
 
 TEST(BackgroundJobBasic, TimeOutCase) {
     AtomicWord<bool> flag(false);
-    Notification canProceed;
+    Notification<void> canProceed;
     TestJob tj(false, &flag, &canProceed);
     tj.go();
 
     ASSERT(!tj.wait(1000));
     ASSERT_EQUALS(false, flag.load());
 
-    canProceed.notifyOne();
+    canProceed.set();
     ASSERT(tj.wait());
     ASSERT_EQUALS(true, flag.load());
 }
 
 TEST(BackgroundJobBasic, SelfDeletingCase) {
     AtomicWord<bool> flag(false);
-    Notification destructorInvoked;
+    Notification<void> destructorInvoked;
     // Though it looks like one, this is not a leak since the job is self deleting.
     (new TestJob(true, &flag, nullptr, &destructorInvoked))->go();
-    destructorInvoked.waitToBeNotified();
+    destructorInvoked.get();
     ASSERT_EQUALS(true, flag.load());
 }
 
@@ -124,17 +120,17 @@ TEST(BackgroundJobLifeCycle, Go) {
                 _hasRun = true;
             }
 
-            _n.waitToBeNotified();
+            _n.get();
         }
 
         void notify() {
-            _n.notifyOne();
+            _n.set();
         }
 
     private:
-        mutex _mutex;
+        stdx::mutex _mutex;
         bool _hasRun;
-        Notification _n;
+        Notification<void> _n;
     };
 
     Job j;
@@ -143,7 +139,7 @@ TEST(BackgroundJobLifeCycle, Go) {
     j.go();
 
     // Calling 'go' again while it is running is an error.
-    ASSERT_THROWS(j.go(), MsgAssertionException);
+    ASSERT_THROWS(j.go(), AssertionException);
 
     // Stop the Job
     j.notify();
@@ -155,3 +151,4 @@ TEST(BackgroundJobLifeCycle, Go) {
 }
 
 }  // namespace
+}  // namespace mongo

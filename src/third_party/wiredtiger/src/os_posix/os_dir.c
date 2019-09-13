@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -11,13 +11,13 @@
 #include <dirent.h>
 
 /*
- * __wt_posix_directory_list --
+ * __directory_list_worker --
  *	Get a list of files from a directory, POSIX version.
  */
-int
-__wt_posix_directory_list(WT_FILE_SYSTEM *file_system,
+static int
+__directory_list_worker(WT_FILE_SYSTEM *file_system,
     WT_SESSION *wt_session, const char *directory,
-    const char *prefix, char ***dirlistp, uint32_t *countp)
+    const char *prefix, char ***dirlistp, uint32_t *countp, bool single)
 {
 	struct dirent *dp;
 	DIR *dirp;
@@ -28,11 +28,10 @@ __wt_posix_directory_list(WT_FILE_SYSTEM *file_system,
 	int tret;
 	char **entries;
 
-	session = (WT_SESSION_IMPL *)wt_session;
-
 	*dirlistp = NULL;
 	*countp = 0;
 
+	session = (WT_SESSION_IMPL *)wt_session;
 	dirp = NULL;
 	dirallocsz = 0;
 	entries = NULL;
@@ -42,11 +41,12 @@ __wt_posix_directory_list(WT_FILE_SYSTEM *file_system,
 	 * but various static analysis programs remain unconvinced, check both.
 	 */
 	WT_SYSCALL_RETRY(((dirp = opendir(directory)) == NULL ? -1 : 0), ret);
-	if (dirp == NULL && ret == 0)
-		ret = EINVAL;
-	if (ret != 0)
+	if (dirp == NULL || ret != 0) {
+		if (ret == 0)
+			ret = EINVAL;
 		WT_RET_MSG(session, ret,
 		    "%s: directory-list: opendir", directory);
+	}
 
 	for (count = 0; (dp = readdir(dirp)) != NULL;) {
 		/*
@@ -64,19 +64,20 @@ __wt_posix_directory_list(WT_FILE_SYSTEM *file_system,
 		    session, &dirallocsz, count + 1, &entries));
 		WT_ERR(__wt_strdup(session, dp->d_name, &entries[count]));
 		++count;
+
+		if (single)
+			break;
 	}
 
 	*dirlistp = entries;
 	*countp = count;
 
-err:	if (dirp != NULL) {
-		WT_SYSCALL(closedir(dirp), tret);
-		if (tret != 0) {
-			__wt_err(session, tret,
-			    "%s: directory-list: closedir", directory);
-			if (ret == 0)
-				ret = tret;
-		}
+err:	WT_SYSCALL(closedir(dirp), tret);
+	if (tret != 0) {
+		__wt_err(session, tret,
+		    "%s: directory-list: closedir", directory);
+		if (ret == 0)
+			ret = tret;
 	}
 
 	if (ret == 0)
@@ -88,6 +89,32 @@ err:	if (dirp != NULL) {
 	WT_RET_MSG(session, ret,
 	    "%s: directory-list, prefix \"%s\"",
 	    directory, prefix == NULL ? "" : prefix);
+}
+
+/*
+ * __wt_posix_directory_list --
+ *	Get a list of files from a directory, POSIX version.
+ */
+int
+__wt_posix_directory_list(WT_FILE_SYSTEM *file_system,
+    WT_SESSION *wt_session, const char *directory,
+    const char *prefix, char ***dirlistp, uint32_t *countp)
+{
+	return (__directory_list_worker(file_system,
+	    wt_session, directory, prefix, dirlistp, countp, false));
+}
+
+/*
+ * __wt_posix_directory_list_single --
+ *	Get one file from a directory, POSIX version.
+ */
+int
+__wt_posix_directory_list_single(WT_FILE_SYSTEM *file_system,
+    WT_SESSION *wt_session, const char *directory,
+    const char *prefix, char ***dirlistp, uint32_t *countp)
+{
+	return (__directory_list_worker(file_system,
+	    wt_session, directory, prefix, dirlistp, countp, true));
 }
 
 /*

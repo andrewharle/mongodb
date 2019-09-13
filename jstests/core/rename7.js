@@ -1,3 +1,6 @@
+// @tags: [requires_non_retryable_commands, requires_fastcount,
+// requires_collstats, requires_capped]
+
 // ***************************************************************
 // rename7.js
 // Test renameCollection functionality across different databases.

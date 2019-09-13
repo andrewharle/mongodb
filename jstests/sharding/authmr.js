@@ -10,12 +10,8 @@
     var adminUser = {
         user: "admin",
         pwd: "a",
-        roles: [
-            "readWriteAnyDatabase",
-            "dbAdminAnyDatabase",
-            "userAdminAnyDatabase",
-            "clusterAdmin"
-        ]
+        roles:
+            ["readWriteAnyDatabase", "dbAdminAnyDatabase", "userAdminAnyDatabase", "clusterAdmin"]
     };
 
     var test1User = {
@@ -32,11 +28,12 @@
         assert.writeOK(collection.insert(obj));
     }
 
+    // TODO: Remove 'shardAsReplicaSet: false' when SERVER-32672 is fixed.
     var cluster = new ShardingTest({
         name: "authmr",
         shards: 1,
         mongos: 1,
-        other: {extraOptions: {keyFile: "jstests/libs/key1"}}
+        other: {keyFile: "jstests/libs/key1", shardAsReplicaSet: false}
     });
 
     // Set up the test data.
@@ -116,4 +113,5 @@
         }
     }());
 
+    cluster.stop();
 })();

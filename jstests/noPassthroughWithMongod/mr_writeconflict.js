@@ -1,15 +1,12 @@
 // SERVER-16262: Write-conflict during map-reduce operations
+
 (function() {
     "use strict";
 
     load('jstests/libs/parallelTester.js');
 
     var makeDoc = function(keyLimit, valueLimit) {
-        return {
-            _id: ObjectId(),
-            key: Random.randInt(keyLimit),
-            value: Random.randInt(valueLimit)
-        };
+        return {_id: ObjectId(), key: Random.randInt(keyLimit), value: Random.randInt(valueLimit)};
     };
 
     var main = function() {
@@ -41,6 +38,8 @@
             assert.commandWorked(res);
         }
     };
+
+    Random.setRandomSeed();
 
     var numDocs = 200;
     var bulk = db.source.initializeUnorderedBulkOp();

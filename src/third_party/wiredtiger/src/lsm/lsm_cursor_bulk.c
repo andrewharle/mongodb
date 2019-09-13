@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -15,8 +15,8 @@
 static int
 __clsm_close_bulk(WT_CURSOR *cursor)
 {
-	WT_CURSOR_LSM *clsm;
 	WT_CURSOR *bulk_cursor;
+	WT_CURSOR_LSM *clsm;
 	WT_LSM_CHUNK *chunk;
 	WT_LSM_TREE *lsm_tree;
 	WT_SESSION_IMPL *session;

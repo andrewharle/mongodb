@@ -1,24 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
- *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -51,14 +52,20 @@ public:
         RecordId lastRecord;  // RecordId of the last record in a chunk of the oplog.
     };
 
-    OplogStones(OperationContext* txn, WiredTigerRecordStore* rs);
+    OplogStones(OperationContext* opCtx, WiredTigerRecordStore* rs);
 
     bool isDead();
 
     void kill();
 
-    bool hasExcessStones() const {
-        return _stones.size() > _numStonesToKeep;
+    bool hasExcessStones_inlock() const {
+        int64_t total_bytes = 0;
+        for (std::deque<OplogStones::Stone>::const_iterator it = _stones.begin();
+             it != _stones.end();
+             ++it) {
+            total_bytes += it->bytes;
+        }
+        return total_bytes > _rs->cappedMaxSize();
     }
 
     void awaitHasExcessStonesOrDead();
@@ -69,17 +76,20 @@ public:
 
     void createNewStoneIfNeeded(RecordId lastRecord);
 
-    void updateCurrentStoneAfterInsertOnCommit(OperationContext* txn,
+    void updateCurrentStoneAfterInsertOnCommit(OperationContext* opCtx,
                                                int64_t bytesInserted,
                                                RecordId highestInserted,
                                                int64_t countInserted);
 
-    void clearStonesOnCommit(OperationContext* txn);
+    void clearStonesOnCommit(OperationContext* opCtx);
 
     // Updates the metadata about the oplog stones after a rollback occurs.
     void updateStonesAfterCappedTruncateAfter(int64_t recordsRemoved,
                                               int64_t bytesRemoved,
                                               RecordId firstRemovedId);
+
+    // Resize oplog size
+    void adjust(int64_t maxSize);
 
     // The start point of where to truncate next. Used by the background reclaim thread to
     // efficiently truncate records with WiredTiger by skipping over tombstones, etc.
@@ -104,15 +114,13 @@ public:
 
     void setMinBytesPerStone(int64_t size);
 
-    void setNumStonesToKeep(size_t numStones);
-
 private:
     class InsertChange;
     class TruncateChange;
 
-    void _calculateStones(OperationContext* txn);
-    void _calculateStonesByScanning(OperationContext* txn);
-    void _calculateStonesBySampling(OperationContext* txn,
+    void _calculateStones(OperationContext* opCtx, size_t size);
+    void _calculateStonesByScanning(OperationContext* opCtx);
+    void _calculateStonesBySampling(OperationContext* opCtx,
                                     int64_t estRecordsPerStone,
                                     int64_t estBytesPerStone);
 
@@ -129,12 +137,8 @@ private:
     // database, and false otherwise.
     bool _isDead = false;
 
-    // Maximum number of stones to keep in the deque before the background reclaim thread should
-    // truncate the oldest ones. Does not include the stone currently being filled. This value
-    // should not be changed after initialization.
-    size_t _numStonesToKeep;
     // Minimum number of bytes the stone being filled should contain before it gets added to the
-    // deque of oplog stones. This value should not be changed after initialization.
+    // deque of oplog stones.
     int64_t _minBytesPerStone;
 
     AtomicInt64 _currentRecords;  // Number of records in the stone being filled.

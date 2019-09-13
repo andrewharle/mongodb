@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -30,8 +32,8 @@
 
 #include "mongo/db/exec/and_common-inl.h"
 #include "mongo/db/exec/scoped_timer.h"
-#include "mongo/db/exec/working_set_common.h"
 #include "mongo/db/exec/working_set.h"
+#include "mongo/db/exec/working_set_common.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/util/mongoutils/str.h"
 
@@ -107,12 +109,7 @@ bool AndHashStage::isEOF() {
         _children[_children.size() - 1]->isEOF();
 }
 
-PlanStage::StageState AndHashStage::work(WorkingSetID* out) {
-    ++_commonStats.works;
-
-    // Adds the amount of time taken by work() to executionTimeMillis.
-    ScopedTimer timer(&_commonStats.executionTimeMillis);
-
+PlanStage::StageState AndHashStage::doWork(WorkingSetID* out) {
     if (isEOF()) {
         return PlanStage::IS_EOF;
     }
@@ -150,20 +147,10 @@ PlanStage::StageState AndHashStage::work(WorkingSetID* out) {
                     _ws->get(_lookAheadResults[i])->makeObjOwnedIfNeeded();
                     break;  // Stop looking at this child.
                 } else if (PlanStage::FAILURE == childStatus || PlanStage::DEAD == childStatus) {
-                    // Propage error to parent.
+                    // The stage which produces a failure is responsible for allocating a working
+                    // set member with error details.
+                    invariant(WorkingSet::INVALID_ID != _lookAheadResults[i]);
                     *out = _lookAheadResults[i];
-                    // If a stage fails, it may create a status WSM to indicate why it
-                    // failed, in which case 'id' is valid.  If ID is invalid, we
-                    // create our own error message.
-                    if (WorkingSet::INVALID_ID == *out) {
-                        mongoutils::str::stream ss;
-                        ss << "hashed AND stage failed to read in look ahead results "
-                           << "from child " << i
-                           << ", childStatus: " << PlanStage::stateStr(childStatus);
-                        Status status(ErrorCodes::InternalError, ss);
-                        *out = WorkingSetCommon::allocateStatusMember(_ws, status);
-                    }
-
                     _hashingChildren = false;
                     _dataMap.clear();
                     return childStatus;
@@ -224,16 +211,15 @@ PlanStage::StageState AndHashStage::work(WorkingSetID* out) {
 
     // Maybe the child had an invalidation.  We intersect RecordId(s) so we can't do anything
     // with this WSM.
-    if (!member->hasLoc()) {
+    if (!member->hasRecordId()) {
         _ws->flagForReview(*out);
         return PlanStage::NEED_TIME;
     }
 
-    DataMap::iterator it = _dataMap.find(member->loc);
+    DataMap::iterator it = _dataMap.find(member->recordId);
     if (_dataMap.end() == it) {
         // Child's output wasn't in every previous child.  Throw it out.
         _ws->free(*out);
-        ++_commonStats.needTime;
         return PlanStage::NEED_TIME;
     } else {
         // Child's output was in every previous child.  Merge any key data in
@@ -244,7 +230,6 @@ PlanStage::StageState AndHashStage::work(WorkingSetID* out) {
         AndCommon::mergeFrom(_ws, hashID, *member);
         _ws->free(*out);
 
-        ++_commonStats.advanced;
         *out = hashID;
         return PlanStage::ADVANCED;
     }
@@ -271,17 +256,16 @@ PlanStage::StageState AndHashStage::readFirstChild(WorkingSetID* out) {
 
         // Maybe the child had an invalidation.  We intersect RecordId(s) so we can't do anything
         // with this WSM.
-        if (!member->hasLoc()) {
+        if (!member->hasRecordId()) {
             _ws->flagForReview(id);
             return PlanStage::NEED_TIME;
         }
 
-        if (!_dataMap.insert(std::make_pair(member->loc, id)).second) {
-            // Didn't insert because we already had this loc inside the map. This should only
+        if (!_dataMap.insert(std::make_pair(member->recordId, id)).second) {
+            // Didn't insert because we already had this RecordId inside the map. This should only
             // happen if we're seeing a newer copy of the same doc in a more recent snapshot.
             // Throw out the newer copy of the doc.
             _ws->free(id);
-            ++_commonStats.needTime;
             return PlanStage::NEED_TIME;
         }
 
@@ -291,7 +275,6 @@ PlanStage::StageState AndHashStage::readFirstChild(WorkingSetID* out) {
         // Update memory stats.
         _memUsage += member->getMemUsage();
 
-        ++_commonStats.needTime;
         return PlanStage::NEED_TIME;
     } else if (PlanStage::IS_EOF == childStatus) {
         // Done reading child 0.
@@ -303,27 +286,17 @@ PlanStage::StageState AndHashStage::readFirstChild(WorkingSetID* out) {
             return PlanStage::IS_EOF;
         }
 
-        ++_commonStats.needTime;
         _specificStats.mapAfterChild.push_back(_dataMap.size());
 
         return PlanStage::NEED_TIME;
     } else if (PlanStage::FAILURE == childStatus || PlanStage::DEAD == childStatus) {
+        // The stage which produces a failure is responsible for allocating a working set member
+        // with error details.
+        invariant(WorkingSet::INVALID_ID != id);
         *out = id;
-        // If a stage fails, it may create a status WSM to indicate why it
-        // failed, in which case 'id' is valid.  If ID is invalid, we
-        // create our own error message.
-        if (WorkingSet::INVALID_ID == id) {
-            mongoutils::str::stream ss;
-            ss << "hashed AND stage failed to read in results to from first child";
-            Status status(ErrorCodes::InternalError, ss);
-            *out = WorkingSetCommon::allocateStatusMember(_ws, status);
-        }
         return childStatus;
     } else {
-        if (PlanStage::NEED_TIME == childStatus) {
-            ++_commonStats.needTime;
-        } else if (PlanStage::NEED_YIELD == childStatus) {
-            ++_commonStats.needYield;
+        if (PlanStage::NEED_YIELD == childStatus) {
             *out = id;
         }
 
@@ -342,18 +315,18 @@ PlanStage::StageState AndHashStage::hashOtherChildren(WorkingSetID* out) {
 
         // Maybe the child had an invalidation.  We intersect RecordId(s) so we can't do anything
         // with this WSM.
-        if (!member->hasLoc()) {
+        if (!member->hasRecordId()) {
             _ws->flagForReview(id);
             return PlanStage::NEED_TIME;
         }
 
-        verify(member->hasLoc());
-        if (_dataMap.end() == _dataMap.find(member->loc)) {
+        verify(member->hasRecordId());
+        if (_dataMap.end() == _dataMap.find(member->recordId)) {
             // Ignore.  It's not in any previous child.
         } else {
             // We have a hit.  Copy data into the WSM we already have.
-            _seenMap.insert(member->loc);
-            WorkingSetID olderMemberID = _dataMap[member->loc];
+            _seenMap.insert(member->recordId);
+            WorkingSetID olderMemberID = _dataMap[member->recordId];
             WorkingSetMember* olderMember = _ws->get(olderMemberID);
             size_t memUsageBefore = olderMember->getMemUsage();
 
@@ -363,7 +336,6 @@ PlanStage::StageState AndHashStage::hashOtherChildren(WorkingSetID* out) {
             _memUsage += olderMember->getMemUsage() - memUsageBefore;
         }
         _ws->free(id);
-        ++_commonStats.needTime;
         return PlanStage::NEED_TIME;
     } else if (PlanStage::IS_EOF == childStatus) {
         // Finished with a child.
@@ -404,25 +376,15 @@ PlanStage::StageState AndHashStage::hashOtherChildren(WorkingSetID* out) {
             _hashingChildren = false;
         }
 
-        ++_commonStats.needTime;
         return PlanStage::NEED_TIME;
     } else if (PlanStage::FAILURE == childStatus || PlanStage::DEAD == childStatus) {
+        // The stage which produces a failure is responsible for allocating a working set member
+        // with error details.
+        invariant(WorkingSet::INVALID_ID != id);
         *out = id;
-        // If a stage fails, it may create a status WSM to indicate why it
-        // failed, in which case 'id' is valid.  If ID is invalid, we
-        // create our own error message.
-        if (WorkingSet::INVALID_ID == id) {
-            mongoutils::str::stream ss;
-            ss << "hashed AND stage failed to read in results from other child " << _currentChild;
-            Status status(ErrorCodes::InternalError, ss);
-            *out = WorkingSetCommon::allocateStatusMember(_ws, status);
-        }
         return childStatus;
     } else {
-        if (PlanStage::NEED_TIME == childStatus) {
-            ++_commonStats.needTime;
-        } else if (PlanStage::NEED_YIELD == childStatus) {
-            ++_commonStats.needYield;
+        if (PlanStage::NEED_YIELD == childStatus) {
             *out = id;
         }
 
@@ -430,7 +392,9 @@ PlanStage::StageState AndHashStage::hashOtherChildren(WorkingSetID* out) {
     }
 }
 
-void AndHashStage::doInvalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) {
+void AndHashStage::doInvalidate(OperationContext* opCtx,
+                                const RecordId& dl,
+                                InvalidationType type) {
     // TODO remove this since calling isEOF is illegal inside of doInvalidate().
     if (isEOF()) {
         return;
@@ -441,8 +405,8 @@ void AndHashStage::doInvalidate(OperationContext* txn, const RecordId& dl, Inval
     for (size_t i = 0; i < _lookAheadResults.size(); ++i) {
         if (WorkingSet::INVALID_ID != _lookAheadResults[i]) {
             WorkingSetMember* member = _ws->get(_lookAheadResults[i]);
-            if (member->hasLoc() && member->loc == dl) {
-                WorkingSetCommon::fetchAndInvalidateLoc(txn, member, _collection);
+            if (member->hasRecordId() && member->recordId == dl) {
+                WorkingSetCommon::fetchAndInvalidateRecordId(opCtx, member, _collection);
                 _ws->flagForReview(_lookAheadResults[i]);
                 _lookAheadResults[i] = WorkingSet::INVALID_ID;
             }
@@ -459,7 +423,7 @@ void AndHashStage::doInvalidate(OperationContext* txn, const RecordId& dl, Inval
     if (_dataMap.end() != it) {
         WorkingSetID id = it->second;
         WorkingSetMember* member = _ws->get(id);
-        verify(member->loc == dl);
+        verify(member->recordId == dl);
 
         if (_hashingChildren) {
             ++_specificStats.flaggedInProgress;
@@ -470,8 +434,8 @@ void AndHashStage::doInvalidate(OperationContext* txn, const RecordId& dl, Inval
         // Update memory stats.
         _memUsage -= member->getMemUsage();
 
-        // The loc is about to be invalidated.  Fetch it and clear the loc.
-        WorkingSetCommon::fetchAndInvalidateLoc(txn, member, _collection);
+        // The RecordId is about to be invalidated.  Fetch it and clear the RecordId.
+        WorkingSetCommon::fetchAndInvalidateRecordId(opCtx, member, _collection);
 
         // Add the WSID to the to-be-reviewed list in the WS.
         _ws->flagForReview(id);

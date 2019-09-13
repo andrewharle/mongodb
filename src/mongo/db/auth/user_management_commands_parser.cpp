@@ -1,81 +1,70 @@
+
 /**
-*    Copyright (C) 2013 10gen Inc.
-*
-*    This program is free software: you can redistribute it and/or  modify
-*    it under the terms of the GNU Affero General Public License, version 3,
-*    as published by the Free Software Foundation.
-*
-*    This program is distributed in the hope that it will be useful,
-*    but WITHOUT ANY WARRANTY; without even the implied warranty of
-*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*    GNU Affero General Public License for more details.
-*
-*    You should have received a copy of the GNU Affero General Public License
-*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*
-*    As a special exception, the copyright holders give permission to link the
-*    code of portions of this program with the OpenSSL library under certain
-*    conditions as described in each individual source file and distribute
-*    linked combinations including the program with the OpenSSL library. You
-*    must comply with the GNU Affero General Public License in all respects for
-*    all of the code used other than as permitted herein. If you modify file(s)
-*    with this exception, you may extend this exception to your version of the
-*    file(s), but you are not obligated to do so. If you do not wish to do so,
-*    delete this exception statement from your version. If you delete this
-*    exception statement from all source files in the program, then also delete
-*    it in the license file.
-*/
+ *    Copyright (C) 2018-present MongoDB, Inc.
+ *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
+ *
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
+ */
+
+#include "mongo/platform/basic.h"
 
 #include "mongo/db/auth/user_management_commands_parser.h"
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
 #include "mongo/base/status.h"
 #include "mongo/bson/util/bson_extract.h"
 #include "mongo/db/auth/action_type.h"
+#include "mongo/db/auth/address_restriction.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/auth/privilege_parser.h"
 #include "mongo/db/auth/user_document_parser.h"
 #include "mongo/db/auth/user_name.h"
+#include "mongo/db/command_generic_argument.h"
+#include "mongo/db/commands.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/platform/unordered_set.h"
+#include "mongo/stdx/unordered_set.h"
 #include "mongo/util/mongoutils/str.h"
-#include "mongo/util/password_digest.h"
+#include "mongo/util/stringutils.h"
 
 namespace mongo {
 namespace auth {
 
 using std::vector;
 
-/**
- * Writes into *writeConcern a BSONObj describing the parameters to getLastError to use for
- * the write confirmation.
- */
-Status _extractWriteConcern(const BSONObj& cmdObj, BSONObj* writeConcern) {
-    BSONElement writeConcernElement;
-    Status status = bsonExtractTypedField(cmdObj, "writeConcern", Object, &writeConcernElement);
-    if (!status.isOK()) {
-        if (status.code() == ErrorCodes::NoSuchKey) {
-            *writeConcern = BSONObj();
-            return Status::OK();
-        }
-        return status;
-    }
-    *writeConcern = writeConcernElement.Obj().getOwned();
-    ;
-    return Status::OK();
-}
-
 Status _checkNoExtraFields(const BSONObj& cmdObj,
                            StringData cmdName,
-                           const unordered_set<std::string>& validFieldNames) {
+                           const stdx::unordered_set<std::string>& validFieldNames) {
     // Iterate through all fields in command object and make sure there are no unexpected
     // ones.
     for (BSONObjIterator iter(cmdObj); iter.more(); iter.next()) {
         StringData fieldName = (*iter).fieldNameStringData();
-        if (!validFieldNames.count(fieldName.toString())) {
+        if (!isGenericArgument(fieldName) && !validFieldNames.count(fieldName.toString())) {
             return Status(ErrorCodes::BadValue,
                           mongoutils::str::stream() << "\"" << fieldName << "\" is not "
                                                                             "a valid argument to "
@@ -160,20 +149,12 @@ Status parseRolePossessionManipulationCommands(const BSONObj& cmdObj,
                                                StringData cmdName,
                                                const std::string& dbname,
                                                std::string* parsedName,
-                                               vector<RoleName>* parsedRoleNames,
-                                               BSONObj* parsedWriteConcern) {
-    unordered_set<std::string> validFieldNames;
+                                               vector<RoleName>* parsedRoleNames) {
+    stdx::unordered_set<std::string> validFieldNames;
     validFieldNames.insert(cmdName.toString());
     validFieldNames.insert("roles");
-    validFieldNames.insert("writeConcern");
-    validFieldNames.insert("maxTimeMS");
 
     Status status = _checkNoExtraFields(cmdObj, cmdName, validFieldNames);
-    if (!status.isOK()) {
-        return status;
-    }
-
-    status = _extractWriteConcern(cmdObj, parsedWriteConcern);
     if (!status.isOK()) {
         return status;
     }
@@ -206,21 +187,16 @@ Status parseCreateOrUpdateUserCommands(const BSONObj& cmdObj,
                                        StringData cmdName,
                                        const std::string& dbname,
                                        CreateOrUpdateUserArgs* parsedArgs) {
-    unordered_set<std::string> validFieldNames;
+    stdx::unordered_set<std::string> validFieldNames;
     validFieldNames.insert(cmdName.toString());
     validFieldNames.insert("customData");
     validFieldNames.insert("digestPassword");
     validFieldNames.insert("pwd");
     validFieldNames.insert("roles");
-    validFieldNames.insert("writeConcern");
-    validFieldNames.insert("maxTimeMS");
+    validFieldNames.insert("authenticationRestrictions");
+    validFieldNames.insert("mechanisms");
 
     Status status = _checkNoExtraFields(cmdObj, cmdName, validFieldNames);
-    if (!status.isOK()) {
-        return status;
-    }
-
-    status = _extractWriteConcern(cmdObj, &parsedArgs->writeConcern);
     if (!status.isOK()) {
         return status;
     }
@@ -239,30 +215,41 @@ Status parseCreateOrUpdateUserCommands(const BSONObj& cmdObj,
 
     parsedArgs->userName = UserName(userName, dbname);
 
+    // Parse mechanisms
+    if (cmdObj.hasField("mechanisms")) {
+        const auto mechsElem = cmdObj["mechanisms"];
+        if (mechsElem.type() != Array) {
+            return {ErrorCodes::UnsupportedFormat, "mechanisms field must be an array"};
+        }
+        const auto mechs = mechsElem.Obj();
+        if (mechs.nFields() == 0) {
+            return {ErrorCodes::UnsupportedFormat, "mechanisms field must not be empty"};
+        }
+        for (auto elem : mechs) {
+            if (elem.type() != String) {
+                return {ErrorCodes::BadValue, "mechanisms field must be an array of strings"};
+            }
+            parsedArgs->mechanisms.push_back(elem.String());
+        }
+    }
+
     // Parse password
     if (cmdObj.hasField("pwd")) {
-        std::string password;
-        status = bsonExtractStringField(cmdObj, "pwd", &password);
+        status = bsonExtractStringField(cmdObj, "pwd", &parsedArgs->password);
         if (!status.isOK()) {
             return status;
         }
-        if (password.empty()) {
+        if (parsedArgs->password.empty()) {
             return Status(ErrorCodes::BadValue, "User passwords must not be empty");
         }
+        parsedArgs->hasPassword = true;
 
-        bool digestPassword;  // True if the server should digest the password
-        status =
-            bsonExtractBooleanFieldWithDefault(cmdObj, "digestPassword", true, &digestPassword);
+        // True if the server should digest the password
+        status = bsonExtractBooleanFieldWithDefault(
+            cmdObj, "digestPassword", true, &parsedArgs->digestPassword);
         if (!status.isOK()) {
             return status;
         }
-
-        if (digestPassword) {
-            parsedArgs->hashedPassword = mongo::createPasswordDigest(userName, password);
-        } else {
-            parsedArgs->hashedPassword = password;
-        }
-        parsedArgs->hasHashedPassword = true;
     }
 
     // Parse custom data
@@ -274,6 +261,16 @@ Status parseCreateOrUpdateUserCommands(const BSONObj& cmdObj,
         }
         parsedArgs->customData = element.Obj();
         parsedArgs->hasCustomData = true;
+    }
+
+    // Parse authentication restrictions
+    if (cmdObj.hasField("authenticationRestrictions")) {
+        BSONElement element = cmdObj["authenticationRestrictions"];
+        if (element.type() != Array) {
+            return Status(ErrorCodes::BadValue, "authenticationRestrictions must be an array");
+        }
+        parsedArgs->authenticationRestrictions =
+            BSONArray(cmdObj["authenticationRestrictions"].Obj());
     }
 
     // Parse roles
@@ -296,12 +293,9 @@ Status parseCreateOrUpdateUserCommands(const BSONObj& cmdObj,
 
 Status parseAndValidateDropUserCommand(const BSONObj& cmdObj,
                                        const std::string& dbname,
-                                       UserName* parsedUserName,
-                                       BSONObj* parsedWriteConcern) {
-    unordered_set<std::string> validFieldNames;
+                                       UserName* parsedUserName) {
+    stdx::unordered_set<std::string> validFieldNames;
     validFieldNames.insert("dropUser");
-    validFieldNames.insert("writeConcern");
-    validFieldNames.insert("maxTimeMS");
 
     Status status = _checkNoExtraFields(cmdObj, "dropUser", validFieldNames);
     if (!status.isOK()) {
@@ -314,30 +308,17 @@ Status parseAndValidateDropUserCommand(const BSONObj& cmdObj,
         return status;
     }
 
-    status = _extractWriteConcern(cmdObj, parsedWriteConcern);
-    if (!status.isOK()) {
-        return status;
-    }
-
     *parsedUserName = UserName(user, dbname);
     return Status::OK();
 }
 
 Status parseFromDatabaseCommand(const BSONObj& cmdObj,
                                 const std::string& dbname,
-                                BSONObj* parsedWriteConcern,
                                 std::string command) {
-    unordered_set<std::string> validFieldNames;
+    stdx::unordered_set<std::string> validFieldNames;
     validFieldNames.insert(command);
-    validFieldNames.insert("writeConcern");
-    validFieldNames.insert("maxTimeMS");
 
     Status status = _checkNoExtraFields(cmdObj, command, validFieldNames);
-    if (!status.isOK()) {
-        return status;
-    }
-
-    status = _extractWriteConcern(cmdObj, parsedWriteConcern);
     if (!status.isOK()) {
         return status;
     }
@@ -345,17 +326,17 @@ Status parseFromDatabaseCommand(const BSONObj& cmdObj,
     return Status::OK();
 }
 Status parseAndValidateDropAllUsersFromDatabaseCommand(const BSONObj& cmdObj,
-                                                       const std::string& dbname,
-                                                       BSONObj* parsedWriteConcern) {
-    return parseFromDatabaseCommand(cmdObj, dbname, parsedWriteConcern, "dropAllUsersFromDatabase");
+                                                       const std::string& dbname) {
+    return parseFromDatabaseCommand(cmdObj, dbname, "dropAllUsersFromDatabase");
 }
 
 Status parseUsersInfoCommand(const BSONObj& cmdObj, StringData dbname, UsersInfoArgs* parsedArgs) {
-    unordered_set<std::string> validFieldNames;
+    stdx::unordered_set<std::string> validFieldNames;
     validFieldNames.insert("usersInfo");
+    validFieldNames.insert("showAuthenticationRestrictions");
     validFieldNames.insert("showPrivileges");
     validFieldNames.insert("showCredentials");
-    validFieldNames.insert("maxTimeMS");
+    validFieldNames.insert("filter");
 
     Status status = _checkNoExtraFields(cmdObj, "usersInfo", validFieldNames);
     if (!status.isOK()) {
@@ -363,14 +344,20 @@ Status parseUsersInfoCommand(const BSONObj& cmdObj, StringData dbname, UsersInfo
     }
 
     if (cmdObj["usersInfo"].numberInt() == 1) {
-        parsedArgs->allForDB = true;
+        parsedArgs->target = UsersInfoArgs::Target::kDB;
+    } else if (cmdObj["usersInfo"].type() == Object &&
+               cmdObj["usersInfo"].Obj().getBoolField("forAllDBs")) {
+        parsedArgs->target = UsersInfoArgs::Target::kGlobal;
     } else if (cmdObj["usersInfo"].type() == Array) {
+        parsedArgs->target = UsersInfoArgs::Target::kExplicitUsers;
         status = parseUserNamesFromBSONArray(
             BSONArray(cmdObj["usersInfo"].Obj()), dbname, &parsedArgs->userNames);
         if (!status.isOK()) {
             return status;
         }
+        std::sort(parsedArgs->userNames.begin(), parsedArgs->userNames.end());
     } else {
+        parsedArgs->target = UsersInfoArgs::Target::kExplicitUsers;
         UserName name;
         status = _parseNameFromBSONElement(cmdObj["usersInfo"],
                                            dbname,
@@ -394,15 +381,38 @@ Status parseUsersInfoCommand(const BSONObj& cmdObj, StringData dbname, UsersInfo
         return status;
     }
 
+    const auto showAuthenticationRestrictions = cmdObj["showAuthenticationRestrictions"];
+    if (showAuthenticationRestrictions.eoo()) {
+        parsedArgs->authenticationRestrictionsFormat = AuthenticationRestrictionsFormat::kOmit;
+    } else {
+        bool show;
+        status = bsonExtractBooleanField(cmdObj, "showAuthenticationRestrictions", &show);
+        if (!status.isOK()) {
+            return status;
+        }
+        parsedArgs->authenticationRestrictionsFormat = show
+            ? AuthenticationRestrictionsFormat::kShow
+            : AuthenticationRestrictionsFormat::kOmit;
+    }
+
+
+    const auto filterObj = cmdObj["filter"];
+    if (!filterObj.eoo()) {
+        if (filterObj.type() != Object) {
+            return Status(ErrorCodes::TypeMismatch, "filter must be an Object");
+        }
+        parsedArgs->filter = filterObj.Obj();
+    }
+
     return Status::OK();
 }
 
 Status parseRolesInfoCommand(const BSONObj& cmdObj, StringData dbname, RolesInfoArgs* parsedArgs) {
-    unordered_set<std::string> validFieldNames;
+    stdx::unordered_set<std::string> validFieldNames;
     validFieldNames.insert("rolesInfo");
     validFieldNames.insert("showPrivileges");
+    validFieldNames.insert("showAuthenticationRestrictions");
     validFieldNames.insert("showBuiltinRoles");
-    validFieldNames.insert("maxTimeMS");
 
     Status status = _checkNoExtraFields(cmdObj, "rolesInfo", validFieldNames);
     if (!status.isOK()) {
@@ -430,10 +440,38 @@ Status parseRolesInfoCommand(const BSONObj& cmdObj, StringData dbname, RolesInfo
         parsedArgs->roleNames.push_back(name);
     }
 
-    status = bsonExtractBooleanFieldWithDefault(
-        cmdObj, "showPrivileges", false, &parsedArgs->showPrivileges);
-    if (!status.isOK()) {
-        return status;
+    BSONElement showPrivileges = cmdObj["showPrivileges"];
+    if (showPrivileges.eoo()) {
+        parsedArgs->privilegeFormat = PrivilegeFormat::kOmit;
+    } else if (showPrivileges.isNumber() || showPrivileges.isBoolean()) {
+        parsedArgs->privilegeFormat =
+            showPrivileges.trueValue() ? PrivilegeFormat::kShowSeparate : PrivilegeFormat::kOmit;
+    } else if (showPrivileges.type() == BSONType::String &&
+               showPrivileges.String() == "asUserFragment") {
+        parsedArgs->privilegeFormat = PrivilegeFormat::kShowAsUserFragment;
+    } else {
+        return Status(ErrorCodes::FailedToParse,
+                      str::stream() << "Failed to parse 'showPrivileges'. 'showPrivileges' should "
+                                       "either be a boolean or the string 'asUserFragment', given: "
+                                    << showPrivileges.toString());
+    }
+
+    const auto showAuthenticationRestrictions = cmdObj["showAuthenticationRestrictions"];
+    if (showAuthenticationRestrictions.eoo()) {
+        parsedArgs->authenticationRestrictionsFormat = AuthenticationRestrictionsFormat::kOmit;
+    } else if (parsedArgs->privilegeFormat == PrivilegeFormat::kShowAsUserFragment) {
+        return Status(
+            ErrorCodes::UnsupportedFormat,
+            "showAuthenticationRestrictions may not be used with showPrivileges='asUserFragment'");
+    } else {
+        bool show;
+        status = bsonExtractBooleanField(cmdObj, "showAuthenticationRestrictions", &show);
+        if (!status.isOK()) {
+            return status;
+        }
+        parsedArgs->authenticationRestrictionsFormat = show
+            ? AuthenticationRestrictionsFormat::kShow
+            : AuthenticationRestrictionsFormat::kOmit;
     }
 
     status = bsonExtractBooleanFieldWithDefault(
@@ -468,8 +506,18 @@ Status parseAndValidatePrivilegeArray(const BSONArray& privileges,
         }
 
         Privilege privilege;
-        if (!ParsedPrivilege::parsedPrivilegeToPrivilege(parsedPrivilege, &privilege, &errmsg)) {
-            return Status(ErrorCodes::FailedToParse, errmsg);
+        std::vector<std::string> unrecognizedActions;
+        Status status = ParsedPrivilege::parsedPrivilegeToPrivilege(
+            parsedPrivilege, &privilege, &unrecognizedActions);
+        if (!status.isOK()) {
+            return status;
+        }
+        if (unrecognizedActions.size()) {
+            std::string unrecognizedActionsString;
+            joinStringDelim(unrecognizedActions, &unrecognizedActionsString, ',');
+            return Status(ErrorCodes::FailedToParse,
+                          str::stream() << "Unrecognized action privilege strings: "
+                                        << unrecognizedActionsString);
         }
 
         parsedPrivileges->push_back(privilege);
@@ -481,28 +529,27 @@ Status parseCreateOrUpdateRoleCommands(const BSONObj& cmdObj,
                                        StringData cmdName,
                                        const std::string& dbname,
                                        CreateOrUpdateRoleArgs* parsedArgs) {
-    unordered_set<std::string> validFieldNames;
+    stdx::unordered_set<std::string> validFieldNames;
     validFieldNames.insert(cmdName.toString());
     validFieldNames.insert("privileges");
     validFieldNames.insert("roles");
-    validFieldNames.insert("writeConcern");
-    validFieldNames.insert("maxTimeMS");
+    validFieldNames.insert("authenticationRestrictions");
 
     Status status = _checkNoExtraFields(cmdObj, cmdName, validFieldNames);
     if (!status.isOK()) {
         return status;
     }
 
-    status = _extractWriteConcern(cmdObj, &parsedArgs->writeConcern);
-    if (!status.isOK()) {
-        return status;
-    }
-
+    // Parse role name
     std::string roleName;
     status = bsonExtractStringField(cmdObj, cmdName, &roleName);
     if (!status.isOK()) {
         return status;
     }
+    if (roleName.find('\0') != std::string::npos) {
+        return Status(ErrorCodes::BadValue, "Role name cannot contain NULL characters");
+    }
+
     parsedArgs->roleName = RoleName(roleName, dbname);
 
     // Parse privileges
@@ -534,6 +581,22 @@ Status parseCreateOrUpdateRoleCommands(const BSONObj& cmdObj,
         }
         parsedArgs->hasRoles = true;
     }
+
+    // Parse restrictions
+    if (cmdObj.hasField("authenticationRestrictions")) {
+        BSONElement restrictionsElement;
+        status = bsonExtractTypedField(
+            cmdObj, "authenticationRestrictions", Array, &restrictionsElement);
+        if (!status.isOK()) {
+            return status;
+        }
+        auto restrictions = getRawAuthenticationRestrictions(BSONArray(restrictionsElement.Obj()));
+        if (!restrictions.isOK()) {
+            return restrictions.getStatus();
+        }
+        parsedArgs->authenticationRestrictions = restrictions.getValue();
+    }
+
     return Status::OK();
 }
 
@@ -541,20 +604,12 @@ Status parseAndValidateRolePrivilegeManipulationCommands(const BSONObj& cmdObj,
                                                          StringData cmdName,
                                                          const std::string& dbname,
                                                          RoleName* parsedRoleName,
-                                                         PrivilegeVector* parsedPrivileges,
-                                                         BSONObj* parsedWriteConcern) {
-    unordered_set<std::string> validFieldNames;
+                                                         PrivilegeVector* parsedPrivileges) {
+    stdx::unordered_set<std::string> validFieldNames;
     validFieldNames.insert(cmdName.toString());
     validFieldNames.insert("privileges");
-    validFieldNames.insert("writeConcern");
-    validFieldNames.insert("maxTimeMS");
 
     Status status = _checkNoExtraFields(cmdObj, cmdName, validFieldNames);
-    if (!status.isOK()) {
-        return status;
-    }
-
-    status = _extractWriteConcern(cmdObj, parsedWriteConcern);
     if (!status.isOK()) {
         return status;
     }
@@ -590,12 +645,9 @@ Status parseAndValidateRolePrivilegeManipulationCommands(const BSONObj& cmdObj,
 
 Status parseDropRoleCommand(const BSONObj& cmdObj,
                             const std::string& dbname,
-                            RoleName* parsedRoleName,
-                            BSONObj* parsedWriteConcern) {
-    unordered_set<std::string> validFieldNames;
+                            RoleName* parsedRoleName) {
+    stdx::unordered_set<std::string> validFieldNames;
     validFieldNames.insert("dropRole");
-    validFieldNames.insert("writeConcern");
-    validFieldNames.insert("maxTimeMS");
 
     Status status = _checkNoExtraFields(cmdObj, "dropRole", validFieldNames);
     if (!status.isOK()) {
@@ -608,38 +660,24 @@ Status parseDropRoleCommand(const BSONObj& cmdObj,
         return status;
     }
 
-    status = _extractWriteConcern(cmdObj, parsedWriteConcern);
-    if (!status.isOK()) {
-        return status;
-    }
-
     *parsedRoleName = RoleName(user, dbname);
     return Status::OK();
 }
 
-Status parseDropAllRolesFromDatabaseCommand(const BSONObj& cmdObj,
-                                            const std::string& dbname,
-                                            BSONObj* parsedWriteConcern) {
-    return parseFromDatabaseCommand(cmdObj, dbname, parsedWriteConcern, "dropAllRolesFromDatabase");
+Status parseDropAllRolesFromDatabaseCommand(const BSONObj& cmdObj, const std::string& dbname) {
+    return parseFromDatabaseCommand(cmdObj, dbname, "dropAllRolesFromDatabase");
 }
 
 Status parseMergeAuthzCollectionsCommand(const BSONObj& cmdObj,
                                          MergeAuthzCollectionsArgs* parsedArgs) {
-    unordered_set<std::string> validFieldNames;
+    stdx::unordered_set<std::string> validFieldNames;
     validFieldNames.insert("_mergeAuthzCollections");
     validFieldNames.insert("tempUsersCollection");
     validFieldNames.insert("tempRolesCollection");
     validFieldNames.insert("db");
     validFieldNames.insert("drop");
-    validFieldNames.insert("writeConcern");
-    validFieldNames.insert("maxTimeMS");
 
     Status status = _checkNoExtraFields(cmdObj, "_mergeAuthzCollections", validFieldNames);
-    if (!status.isOK()) {
-        return status;
-    }
-
-    status = _extractWriteConcern(cmdObj, &parsedArgs->writeConcern);
     if (!status.isOK()) {
         return status;
     }
@@ -675,48 +713,5 @@ Status parseMergeAuthzCollectionsCommand(const BSONObj& cmdObj,
     return Status::OK();
 }
 
-Status parseAuthSchemaUpgradeCommand(const BSONObj& cmdObj,
-                                     const std::string& dbname,
-                                     AuthSchemaUpgradeArgs* parsedArgs) {
-    static const int minUpgradeSteps = 1;
-    static const int maxUpgradeSteps = 2;
-
-    unordered_set<std::string> validFieldNames;
-    validFieldNames.insert("authSchemaUpgrade");
-    validFieldNames.insert("maxSteps");
-    validFieldNames.insert("upgradeShards");
-    validFieldNames.insert("writeConcern");
-    validFieldNames.insert("maxTimeMS");
-
-    Status status = _checkNoExtraFields(cmdObj, "authSchemaUpgrade", validFieldNames);
-    if (!status.isOK()) {
-        return status;
-    }
-
-    status = bsonExtractBooleanFieldWithDefault(
-        cmdObj, "upgradeShards", true, &parsedArgs->shouldUpgradeShards);
-    if (!status.isOK()) {
-        return status;
-    }
-
-    long long steps;
-    status = bsonExtractIntegerFieldWithDefault(cmdObj, "maxSteps", maxUpgradeSteps, &steps);
-    if (!status.isOK())
-        return status;
-    if (steps < minUpgradeSteps || steps > maxUpgradeSteps) {
-        return Status(ErrorCodes::BadValue,
-                      mongoutils::str::stream() << "Legal values for \"maxSteps\" are at least "
-                                                << minUpgradeSteps << " and no more than "
-                                                << maxUpgradeSteps << "; found " << steps);
-    }
-    parsedArgs->maxSteps = static_cast<int>(steps);
-
-    status = _extractWriteConcern(cmdObj, &parsedArgs->writeConcern);
-    if (!status.isOK()) {
-        return status;
-    }
-
-    return Status::OK();
-}
 }  // namespace auth
 }  // namespace mongo

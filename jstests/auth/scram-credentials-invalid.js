@@ -15,27 +15,27 @@
         test.createUser({user: 'user', pwd: 'pass', roles: jsTest.basicUserRoles});
 
         // Give the test user an invalid set of SCRAM-SHA-1 credentials.
-        assert.eq(admin.system.users.update({_id: "test.user"},
-                                            {
-                                              $set: {
-                                                  "credentials.SCRAM-SHA-1": {
-                                                      salt: "AAAA",
-                                                      storedKey: "AAAA",
-                                                      serverKey: "AAAA",
-                                                      iterationCount: 10000
-                                                  }
-                                              }
-                                            }).nModified,
+        assert.eq(admin.system.users
+                      .update({_id: "test.user"}, {
+                          $set: {
+                              "credentials.SCRAM-SHA-1": {
+                                  salt: "AAAA",
+                                  storedKey: "AAAA",
+                                  serverKey: "AAAA",
+                                  iterationCount: 10000
+                              }
+                          }
+                      })
+                      .nModified,
                   1,
                   "Should have updated one document for user@test");
         admin.logout();
 
-        assert(!test.auth({user: 'user', pwd: 'pass'}));
+        const error = assert.throws(function() {
+            test._authOrThrow({user: 'user', pwd: 'pass'});
+        });
 
-        assert.soon(function() {
-            const log = cat(mongod.fullOptions.logFile);
-            return /Unable to perform SCRAM-SHA-1 auth.* invalid SCRAM credentials/.test(log);
-        }, "No warning issued for invalid SCRAM-SHA-1 credendials doc", 30 * 1000, 5 * 1000);
+        assert.eq(error, "Error: credential document SCRAM-SHA-1 failed validation");
     }
 
     const mongod = MongoRunner.runMongod({auth: "", useLogFiles: true});

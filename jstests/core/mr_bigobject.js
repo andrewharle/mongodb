@@ -1,3 +1,4 @@
+// @tags: [does_not_support_stepdowns, requires_fastcount]
 
 t = db.mr_bigobject;
 t.drop();
@@ -21,7 +22,7 @@ r = function(k, v) {
 
 assert.throws(function() {
     r = t.mapReduce(m, r, "mr_bigobject_out");
-}, null, "emit should fail");
+}, [], "emit should fail");
 
 m = function() {
     emit(1, this.s);
@@ -41,8 +42,7 @@ r = function(k, v) {
     return total;
 };
 
-assert.eq({1: t.count() * s.length},
-          t.mapReduce(m, r, "mr_bigobject_out").convertToSingleObject(),
-          "A1");
+assert.eq(
+    {1: t.count() * s.length}, t.mapReduce(m, r, "mr_bigobject_out").convertToSingleObject(), "A1");
 
 t.drop();

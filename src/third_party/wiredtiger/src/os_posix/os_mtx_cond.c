@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -19,11 +19,22 @@ __wt_cond_alloc(WT_SESSION_IMPL *session, const char *name, WT_CONDVAR **condp)
 	WT_DECL_RET;
 
 	WT_RET(__wt_calloc_one(session, &cond));
-
 	WT_ERR(pthread_mutex_init(&cond->mtx, NULL));
 
-	/* Initialize the condition variable to permit self-blocking. */
+#ifdef HAVE_PTHREAD_COND_MONOTONIC
+	{
+	pthread_condattr_t condattr;
+
+	WT_ERR(pthread_condattr_init(&condattr));
+	ret = pthread_condattr_setclock(&condattr, CLOCK_MONOTONIC);
+	if (ret == 0)
+		ret = pthread_cond_init(&cond->cond, &condattr);
+	WT_TRET(pthread_condattr_destroy(&condattr));
+	WT_ERR(ret);
+	}
+#else
 	WT_ERR(pthread_cond_init(&cond->cond, NULL));
+#endif
 
 	cond->name = name;
 	cond->waiters = 0;
@@ -46,14 +57,19 @@ __wt_cond_wait_signal(WT_SESSION_IMPL *session, WT_CONDVAR *cond,
 {
 	struct timespec ts;
 	WT_DECL_RET;
+	WT_TRACK_OP_DECL;
 	bool locked;
+
+	WT_TRACK_OP_INIT(session);
 
 	locked = false;
 
 	/* Fast path if already signalled. */
 	*signalled = true;
-	if (__wt_atomic_addi32(&cond->waiters, 1) == 0)
+	if (__wt_atomic_addi32(&cond->waiters, 1) == 0) {
+		WT_TRACK_OP_END(session);
 		return;
+	}
 
 	__wt_verbose(session, WT_VERB_MUTEX, "wait %s", cond->name);
 	WT_STAT_CONN_INCR(session, cond_wait);
@@ -79,7 +95,26 @@ __wt_cond_wait_signal(WT_SESSION_IMPL *session, WT_CONDVAR *cond,
 		goto skipping;
 
 	if (usecs > 0) {
-		__wt_epoch(session, &ts);
+		/*
+		 * Get the current time as the basis for calculating when the
+		 * wait should end.  Prefer a monotonic clock source to avoid
+		 * unexpectedly long sleeps when the system clock is adjusted.
+		 *
+		 * Failing that, query the time directly and don't attempt to
+		 * correct for the clock moving backwards, which would result
+		 * in a sleep that is too long by however much the clock is
+		 * updated.  This isn't as good as a monotonic clock source but
+		 * makes the window of vulnerability smaller (i.e., the
+		 * calculated time is only incorrect if the system clock
+		 * changes in between us querying it and waiting).
+		 */
+#ifdef HAVE_PTHREAD_COND_MONOTONIC
+		WT_SYSCALL_RETRY(clock_gettime(CLOCK_MONOTONIC, &ts), ret);
+		if (ret != 0)
+			WT_PANIC_MSG(session, ret, "clock_gettime");
+#else
+		__wt_epoch_raw(session, &ts);
+#endif
 		ts.tv_sec += (time_t)
 		    (((uint64_t)ts.tv_nsec + WT_THOUSAND * usecs) / WT_BILLION);
 		ts.tv_nsec = (long)
@@ -105,6 +140,8 @@ err:	(void)__wt_atomic_subi32(&cond->waiters, 1);
 
 	if (locked)
 		WT_TRET(pthread_mutex_unlock(&cond->mtx));
+
+	WT_TRACK_OP_END(session);
 	if (ret == 0)
 		return;
 

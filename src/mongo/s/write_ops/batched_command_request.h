@@ -1,135 +1,113 @@
+
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
 
 #include <boost/optional.hpp>
 
-#include "mongo/base/disallow_copying.h"
+#include "mongo/db/ops/write_ops.h"
+#include "mongo/rpc/op_msg.h"
 #include "mongo/s/chunk_version.h"
-#include "mongo/s/write_ops/batched_insert_request.h"
-#include "mongo/s/write_ops/batched_update_request.h"
-#include "mongo/s/write_ops/batched_delete_request.h"
+#include "mongo/stdx/memory.h"
 
 namespace mongo {
 
-class NamespaceString;
-
 /**
- * This class wraps the different kinds of command requests into a generically usable write
- * command request.
- *
- * Designed to be a very thin wrapper that mimics the underlying requests exactly.  Owns the
- * wrapped request object once constructed.
+ * This class wraps the different kinds of command requests into a generically usable write command
+ * request that can be passed around.
  */
 class BatchedCommandRequest {
-    MONGO_DISALLOW_COPYING(BatchedCommandRequest);
-
 public:
-    // Maximum number of write ops supported per batch
-    static const size_t kMaxWriteBatchSize;
+    enum BatchType { BatchType_Insert, BatchType_Update, BatchType_Delete };
 
-    enum BatchType { BatchType_Insert, BatchType_Update, BatchType_Delete, BatchType_Unknown };
+    BatchedCommandRequest(write_ops::Insert insertOp)
+        : _batchType(BatchType_Insert),
+          _insertReq(stdx::make_unique<write_ops::Insert>(std::move(insertOp))) {}
 
-    //
-    // construction / destruction
-    //
+    BatchedCommandRequest(write_ops::Update updateOp)
+        : _batchType(BatchType_Update),
+          _updateReq(stdx::make_unique<write_ops::Update>(std::move(updateOp))) {}
 
-    BatchedCommandRequest(BatchType batchType);
+    BatchedCommandRequest(write_ops::Delete deleteOp)
+        : _batchType(BatchType_Delete),
+          _deleteReq(stdx::make_unique<write_ops::Delete>(std::move(deleteOp))) {}
 
-    /**
-     * insertReq ownership is transferred to here.
-     */
-    BatchedCommandRequest(BatchedInsertRequest* insertReq)
-        : _batchType(BatchType_Insert), _insertReq(insertReq) {}
+    BatchedCommandRequest(BatchedCommandRequest&&) = default;
 
-    /**
-     * updateReq ownership is transferred to here.
-     */
-    BatchedCommandRequest(BatchedUpdateRequest* updateReq)
-        : _batchType(BatchType_Update), _updateReq(updateReq) {}
+    static BatchedCommandRequest parseInsert(const OpMsgRequest& request);
+    static BatchedCommandRequest parseUpdate(const OpMsgRequest& request);
+    static BatchedCommandRequest parseDelete(const OpMsgRequest& request);
 
-    /**
-     * deleteReq ownership is transferred to here.
-     */
-    BatchedCommandRequest(BatchedDeleteRequest* deleteReq)
-        : _batchType(BatchType_Delete), _deleteReq(deleteReq) {}
+    BatchType getBatchType() const {
+        return _batchType;
+    }
 
-    ~BatchedCommandRequest(){};
-
-    /** Copies all the fields present in 'this' to 'other'. */
-    void cloneTo(BatchedCommandRequest* other) const;
-
-    bool isValid(std::string* errMsg) const;
-    BSONObj toBSON() const;
-    bool parseBSON(StringData dbName, const BSONObj& source, std::string* errMsg);
-    void clear();
-    std::string toString() const;
-
-    //
-    // Batch type accessors
-    //
-
-    BatchType getBatchType() const;
-    BatchedInsertRequest* getInsertRequest() const;
-    BatchedUpdateRequest* getUpdateRequest() const;
-    BatchedDeleteRequest* getDeleteRequest() const;
-    // Index creation is also an insert, but a weird one.
-    bool isInsertIndexRequest() const;
-    bool isUniqueIndexRequest() const;
-    bool isValidIndexRequest(std::string* errMsg) const;
-    std::string getTargetingNS() const;
-    const NamespaceString& getTargetingNSS() const;
-    BSONObj getIndexKeyPattern() const;
-
-    //
-    // individual field accessors
-    //
-
-    bool isVerboseWC() const;
-
-    /**
-     * Sets the namespace for this batched request.
-     */
-    void setNS(NamespaceString ns);
     const NamespaceString& getNS() const;
+    NamespaceString getTargetingNS() const;
+
+    /**
+     * Index creation can be expressed as an insert into the 'system.indexes' namespace.
+     */
+    bool isInsertIndexRequest() const;
+
+    const auto& getInsertRequest() const {
+        invariant(_insertReq);
+        return *_insertReq;
+    }
+
+    const auto& getUpdateRequest() const {
+        invariant(_updateReq);
+        return *_updateReq;
+    }
+
+    const auto& getDeleteRequest() const {
+        invariant(_deleteReq);
+        return *_deleteReq;
+    }
 
     std::size_t sizeWriteOps() const;
 
-    void setWriteConcern(const BSONObj& writeConcern);
-    void unsetWriteConcern();
-    bool isWriteConcernSet() const;
-    const BSONObj& getWriteConcern() const;
+    void setWriteConcern(const BSONObj& writeConcern) {
+        _writeConcern = writeConcern.getOwned();
+    }
 
-    void setOrdered(bool ordered);
-    void unsetOrdered();
-    bool isOrderedSet() const;
-    bool getOrdered() const;
+    bool hasWriteConcern() const {
+        return _writeConcern.is_initialized();
+    }
+
+    const BSONObj& getWriteConcern() const {
+        invariant(_writeConcern);
+        return *_writeConcern;
+    }
+
+    bool isVerboseWC() const;
 
     void setShardVersion(ChunkVersion shardVersion) {
         _shardVersion = std::move(shardVersion);
@@ -140,55 +118,62 @@ public:
     }
 
     const ChunkVersion& getShardVersion() const {
-        return _shardVersion.get();
+        invariant(_shardVersion);
+        return *_shardVersion;
     }
 
-    void setShouldBypassValidation(bool newVal);
-    bool shouldBypassValidation() const;
+    const write_ops::WriteCommandBase& getWriteCommandBase() const;
+    void setWriteCommandBase(write_ops::WriteCommandBase writeCommandBase);
 
-    //
-    // Helpers for batch pre-processing
-    //
+    void serialize(BSONObjBuilder* builder) const;
+    BSONObj toBSON() const;
+    std::string toString() const;
+
+    void setAllowImplicitCreate(bool doAllow) {
+        _allowImplicitCollectionCreation = doAllow;
+    }
+
+    bool isImplicitCreateAllowed() const {
+        return _allowImplicitCollectionCreation;
+    }
 
     /**
      * Generates a new request, the same as the old, but with insert _ids if required.
-     * Returns NULL if this is not an insert request or all inserts already have _ids.
      */
-    static BatchedCommandRequest* cloneWithIds(const BatchedCommandRequest& origCmdRequest);
-
-    /**
-     * Whether or not this batch contains an upsert without an _id - these can't be sent
-     * to multiple hosts.
-     */
-    static bool containsNoIDUpsert(const BatchedCommandRequest& request);
-
-    //
-    // Helpers for auth pre-parsing
-    //
-
-    /**
-     * Helper to determine whether or not there are any upserts in the batch
-     */
-    static bool containsUpserts(const BSONObj& writeCmdObj);
-
-    /**
-     * Helper to extract the namespace being indexed from a raw BSON write command.
-     *
-     * Returns false with errMsg if the index write command seems invalid.
-     * TODO: Remove when we have parsing hooked before authorization
-     */
-    static bool getIndexedNS(const BSONObj& writeCmdObj,
-                             std::string* nsToIndex,
-                             std::string* errMsg);
+    static BatchedCommandRequest cloneInsertWithIds(BatchedCommandRequest origCmdRequest);
 
 private:
+    template <typename Req, typename F, typename... As>
+    static decltype(auto) _visitImpl(Req&& r, F&& f, As&&... as) {
+        switch (r._batchType) {
+            case BatchedCommandRequest::BatchType_Insert:
+                return std::forward<F>(f)(*r._insertReq, std::forward<As>(as)...);
+            case BatchedCommandRequest::BatchType_Update:
+                return std::forward<F>(f)(*r._updateReq, std::forward<As>(as)...);
+            case BatchedCommandRequest::BatchType_Delete:
+                return std::forward<F>(f)(*r._deleteReq, std::forward<As>(as)...);
+        }
+        MONGO_UNREACHABLE;
+    }
+    template <typename... As>
+    decltype(auto) _visit(As&&... as) {
+        return _visitImpl(*this, std::forward<As>(as)...);
+    }
+    template <typename... As>
+    decltype(auto) _visit(As&&... as) const {
+        return _visitImpl(*this, std::forward<As>(as)...);
+    }
+
     BatchType _batchType;
+
+    std::unique_ptr<write_ops::Insert> _insertReq;
+    std::unique_ptr<write_ops::Update> _updateReq;
+    std::unique_ptr<write_ops::Delete> _deleteReq;
 
     boost::optional<ChunkVersion> _shardVersion;
 
-    std::unique_ptr<BatchedInsertRequest> _insertReq;
-    std::unique_ptr<BatchedUpdateRequest> _updateReq;
-    std::unique_ptr<BatchedDeleteRequest> _deleteReq;
+    boost::optional<BSONObj> _writeConcern;
+    bool _allowImplicitCollectionCreation = true;
 };
 
 /**
@@ -214,30 +199,19 @@ public:
         return _request->getBatchType();
     }
 
-    const BSONObj& getDocument() const {
+    const auto& getDocument() const {
         dassert(_itemIndex < static_cast<int>(_request->sizeWriteOps()));
-        return _request->getInsertRequest()->getDocumentsAt(_itemIndex);
+        return _request->getInsertRequest().getDocuments().at(_itemIndex);
     }
 
-    const BatchedUpdateDocument* getUpdate() const {
+    const auto& getUpdate() const {
         dassert(_itemIndex < static_cast<int>(_request->sizeWriteOps()));
-        return _request->getUpdateRequest()->getUpdatesAt(_itemIndex);
+        return _request->getUpdateRequest().getUpdates().at(_itemIndex);
     }
 
-    const BatchedDeleteDocument* getDelete() const {
+    const auto& getDelete() const {
         dassert(_itemIndex < static_cast<int>(_request->sizeWriteOps()));
-        return _request->getDeleteRequest()->getDeletesAt(_itemIndex);
-    }
-
-    BSONObj toBSON() const {
-        switch (getOpType()) {
-            case BatchedCommandRequest::BatchType_Insert:
-                return getDocument();
-            case BatchedCommandRequest::BatchType_Update:
-                return getUpdate()->toBSON();
-            default:
-                return getDelete()->toBSON();
-        }
+        return _request->getDeleteRequest().getDeletes().at(_itemIndex);
     }
 
 private:

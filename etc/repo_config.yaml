@@ -66,15 +66,15 @@ repos:
 #
 ####################
 
-  - name: rhel55
+  - name: rhel62
     type: rpm
     edition: org
     bucket: repo.mongodb.org
     repos:
-      - yum/redhat/5/mongodb-org
-      - yum/redhat/5Server/mongodb-org
+      - yum/redhat/6/mongodb-org
+      - yum/redhat/6Server/mongodb-org
 
-  - name: rhel62
+  - name: rhel67
     type: rpm
     edition: org
     bucket: repo.mongodb.org
@@ -90,12 +90,27 @@ repos:
       - yum/redhat/7/mongodb-org
       - yum/redhat/7Server/mongodb-org
 
+  - name: rhel72
+    type: rpm
+    edition: org
+    bucket: repo.mongodb.org
+    repos:
+      - yum/redhat/7/mongodb-org
+      - yum/redhat/7Server/mongodb-org
+
   - name: amazon
     type: rpm
     edition: org
     bucket: repo.mongodb.org
     repos:
       - yum/amazon/2013.03/mongodb-org
+
+  - name: amazon2
+    type: rpm
+    edition: org
+    bucket: repo.mongodb.org
+    repos:
+      - yum/amazon/2/mongodb-org
 
   - name: suse11
     type: rpm
@@ -119,8 +134,20 @@ repos:
     component: main
     architectures:
       - amd64
+      - i386
     repos:
       - apt/debian/dists/jessie/mongodb-org
+
+  - name: debian92
+    type: deb
+    code_name: "stretch"
+    bucket: repo.mongodb.org
+    edition: org
+    component: main
+    architectures:
+      - amd64
+    repos:
+      - apt/debian/dists/stretch/mongodb-org
 
   - name: debian71
     type: deb
@@ -130,6 +157,7 @@ repos:
     component: main
     architectures:
       - amd64
+      - i386
     repos:
       - apt/debian/dists/wheezy/mongodb-org
 
@@ -141,6 +169,7 @@ repos:
     component: multiverse
     architectures:
       - amd64
+      - i386
     repos:
       - apt/ubuntu/dists/precise/mongodb-org
 
@@ -152,6 +181,7 @@ repos:
     component: multiverse
     architectures:
       - amd64
+      - i386
     repos:
       - apt/ubuntu/dists/trusty/mongodb-org
 
@@ -163,22 +193,29 @@ repos:
     component: multiverse
     architectures:
       - amd64
+      - arm64
+      - i386
     repos:
       - apt/ubuntu/dists/xenial/mongodb-org
+
+  - name: ubuntu1804
+    type: deb
+    code_name: "bionic"
+    edition: org
+    bucket: repo.mongodb.org
+    component: multiverse
+    architectures:
+      - amd64
+      - i386
+      - s390x
+    repos:
+      - apt/ubuntu/dists/bionic/mongodb-org
 
 ####################
 #
 # Enterprise Repos:
 #
 ####################
-
-  - name: rhel57
-    type: rpm
-    edition: enterprise
-    bucket: repo.mongodb.com
-    repos:
-      - yum/redhat/5/mongodb-enterprise
-      - yum/redhat/5Server/mongodb-enterprise
 
   - name: rhel62
     type: rpm
@@ -188,6 +225,14 @@ repos:
       - yum/redhat/6/mongodb-enterprise
       - yum/redhat/6Server/mongodb-enterprise
 
+  - name: rhel67
+    type: rpm
+    edition: enterprise
+    bucket: repo.mongodb.com
+    repos:
+      - yum/redhat/6/mongodb-enterprise
+      - yum/redhat/6Server/mongodb-enterprise
+        
   - name: rhel70
     type: rpm
     edition: enterprise
@@ -219,6 +264,13 @@ repos:
     repos:
       - yum/amazon/2013.03/mongodb-enterprise
 
+  - name: amazon2
+    type: rpm
+    edition: enterprise
+    bucket: repo.mongodb.com
+    repos:
+      - yum/amazon/2/mongodb-enterprise
+
   - name: suse11
     type: rpm
     edition: enterprise
@@ -233,6 +285,17 @@ repos:
     repos:
       - zypper/suse/12/mongodb-enterprise
 
+  - name: debian92
+    type: deb
+    edition: enterprise
+    code_name: "stretch"
+    bucket: repo.mongodb.com
+    component: main
+    architectures:
+      - amd64
+    repos:
+      - apt/debian/dists/stretch/mongodb-enterprise
+
   - name: debian81
     type: deb
     edition: enterprise
@@ -243,6 +306,7 @@ repos:
       - amd64
       - ppc64el
       - s390x
+      - i386
     repos:
       - apt/debian/dists/jessie/mongodb-enterprise
 
@@ -256,6 +320,7 @@ repos:
       - amd64
       - ppc64el
       - s390x
+      - i386
     repos:
       - apt/debian/dists/wheezy/mongodb-enterprise
 
@@ -269,6 +334,7 @@ repos:
       - amd64
       - ppc64el
       - s390x
+      - i386
     repos:
       - apt/ubuntu/dists/precise/mongodb-enterprise
 
@@ -282,6 +348,7 @@ repos:
       - amd64
       - ppc64el
       - s390x
+      - i386
     repos:
       - apt/ubuntu/dists/trusty/mongodb-enterprise
 
@@ -295,5 +362,20 @@ repos:
       - amd64
       - ppc64el
       - s390x
+      - arm64
+      - i386
     repos:
       - apt/ubuntu/dists/xenial/mongodb-enterprise
+
+  - name: ubuntu1804
+    type: deb
+    code_name: "bionic"
+    edition: enterprise
+    bucket: repo.mongodb.com
+    component: multiverse
+    architectures:
+      - amd64
+      - i386
+      - s390x
+    repos:
+      - apt/ubuntu/dists/bionic/mongodb-enterprise

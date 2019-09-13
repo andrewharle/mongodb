@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -19,8 +19,8 @@ static int
 __wt_endian_check(void)
 {
 	uint64_t v;
-	bool big;
 	const char *e;
+	bool big;
 
 	v = 1;
 	big = *((uint8_t *)&v) == 0;
@@ -41,6 +41,68 @@ __wt_endian_check(void)
 }
 
 /*
+ * __global_calibrate_ticks --
+ *	Calibrate a ratio from rdtsc ticks to nanoseconds.
+ */
+static void
+__global_calibrate_ticks(void)
+{
+	/*
+	 * Default to using __wt_epoch until we have a good value for the ratio.
+	 */
+	__wt_process.tsc_nsec_ratio = WT_TSC_DEFAULT_RATIO;
+	__wt_process.use_epochtime = true;
+
+#if defined (__i386) || defined (__amd64)
+	{
+	struct timespec start, stop;
+	double ratio;
+	uint64_t diff_nsec, diff_tsc, min_nsec, min_tsc;
+	uint64_t tries, tsc_start, tsc_stop;
+	volatile uint64_t i;
+
+	/*
+	 * Run this calibration loop a few times to make sure we get a
+	 * reading that does not have a potential scheduling shift in it.
+	 * The inner loop is CPU intensive but a scheduling change in the
+	 * middle could throw off calculations. Take the minimum amount
+	 * of time and compute the ratio.
+	 */
+	min_nsec = min_tsc = UINT64_MAX;
+	for (tries = 0; tries < 3; ++tries) {
+		/* This needs to be CPU intensive and large enough. */
+		__wt_epoch(NULL, &start);
+		tsc_start = __wt_rdtsc();
+		for (i = 0; i < 100 * WT_MILLION; i++)
+			;
+		tsc_stop = __wt_rdtsc();
+		__wt_epoch(NULL, &stop);
+		diff_nsec = WT_TIMEDIFF_NS(stop, start);
+		diff_tsc = tsc_stop - tsc_start;
+
+		/* If the clock didn't tick over, we don't have a sample. */
+		if (diff_nsec == 0 || diff_tsc == 0)
+			continue;
+		min_nsec = WT_MIN(min_nsec, diff_nsec);
+		min_tsc = WT_MIN(min_tsc, diff_tsc);
+	}
+
+	/*
+	 * Only use rdtsc if we got a good reading.  One reason this might fail
+	 * is that the system's clock granularity is not fine-grained enough.
+	 */
+	if (min_nsec != UINT64_MAX) {
+		ratio = (double)min_tsc / (double)min_nsec;
+		if (ratio > DBL_EPSILON) {
+			__wt_process.tsc_nsec_ratio = ratio;
+			__wt_process.use_epochtime = false;
+		}
+	}
+	}
+#endif
+}
+
+/*
  * __wt_global_once --
  *	Global initialization, run once.
  */
@@ -55,14 +117,14 @@ __wt_global_once(void)
 		return;
 	}
 
-	__wt_checksum_init();
+	/*
+	 * Set up the checksum functions. If there's only one, set it as the
+	 * alternate, that way code doesn't have to check if it's set or not.
+	 */
+	__wt_process.checksum = wiredtiger_crc32c_func();
+	__global_calibrate_ticks();
 
 	TAILQ_INIT(&__wt_process.connqh);
-
-#ifdef HAVE_DIAGNOSTIC
-	/* Load debugging code the compiler might optimize out. */
-	__wt_breakpoint();
-#endif
 }
 
 /*
@@ -91,40 +153,3 @@ __wt_library_init(void)
 	}
 	return (__wt_pthread_once_failed);
 }
-
-#ifdef HAVE_DIAGNOSTIC
-/*
- * __wt_breakpoint --
- *	A simple place to put a breakpoint, if you need one.
- */
-void
-__wt_breakpoint(void)
-{
-	/*
-	 * Yield the processor (just to keep the compiler from optimizing the
-	 * function out).
-	 */
-	__wt_yield();
-}
-
-/*
- * __wt_attach --
- *	A routine to wait for the debugging to attach.
- */
-void
-__wt_attach(WT_SESSION_IMPL *session)
-{
-#ifdef HAVE_ATTACH
-	u_int i;
-
-	__wt_errx(session, "process ID %" PRIdMAX
-	    ": waiting for debugger...", (intmax_t)getpid());
-
-	/* Sleep forever, the debugger will interrupt us when it attaches. */
-	for (i = 0; i < WT_MILLION; ++i)
-		__wt_sleep(10, 0);
-#else
-	WT_UNUSED(session);
-#endif
-}
-#endif

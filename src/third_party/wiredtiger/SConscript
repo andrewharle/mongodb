@@ -7,6 +7,7 @@ Import("get_option")
 Import("endian")
 
 env = env.Clone()
+
 env.InjectThirdPartyIncludePaths(libraries=['snappy', 'zlib'])
 
 if endian == "big":
@@ -35,9 +36,14 @@ if conf.CheckFunc("sync_file_range"):
         "HAVE_SYNC_FILE_RANGE"
     ])
 
-if conf.CheckCHeader('x86intrin.h'):
+# GCC 8+ includes x86intrin.h in non-x64 versions of the compiler so limit the check to x64.
+if env['TARGET_ARCH'] == 'x86_64' and conf.CheckCHeader('x86intrin.h'):
     conf.env.Append(CPPDEFINES=[
         "HAVE_X86INTRIN_H"
+    ])
+if conf.CheckCHeader('arm_neon.h'):
+    conf.env.Append(CPPDEFINES=[
+        "HAVE_ARM_NEON_INTRIN_H"
     ])
 env = conf.Finish();
 
@@ -49,7 +55,7 @@ if env.TargetOSIs('windows'):
     if env['MONGO_ALLOCATOR'] == 'tcmalloc':
         env.InjectThirdPartyIncludePaths(libraries=['gperftools'])
         env.Append(CPPDEFINES=['HAVE_LIBTCMALLOC'])
-elif env.TargetOSIs('osx'):
+elif env.TargetOSIs('darwin'):
     env.Append(CPPPATH=["build_darwin"])
 elif env.TargetOSIs('solaris'):
     env.Append(CPPPATH=["build_solaris"])
@@ -61,8 +67,12 @@ elif env.TargetOSIs('freebsd'):
 elif env.TargetOSIs('openbsd'):
     env.Append(CPPPATH=["build_openbsd"])
 elif env.TargetOSIs('linux'):
-    env.Append(CPPPATH=["build_linux"])
-    env.Append(CPPDEFINES=["_GNU_SOURCE"])
+    if env.TargetOSIs('android'):
+        env.Append(CPPPATH=["build_android"])
+        env.Append(CPPDEFINES=["_GNU_SOURCE"])
+    else:
+        env.Append(CPPPATH=["build_linux"])
+        env.Append(CPPDEFINES=["_GNU_SOURCE"])
 else:
     print("Wiredtiger is not supported on this platform. " +
         "Please generate an approriate wiredtiger_config.h")
@@ -87,7 +97,7 @@ if (VERSION_MAJOR == None or
     VERSION_MINOR == None or
     VERSION_PATCH == None or
     VERSION_STRING == None):
-    print "Failed to find version variables in " + version_file
+    print("Failed to find version variables in " + version_file)
     Exit(1)
 
 wiredtiger_includes = """
@@ -120,7 +130,15 @@ env.Substfile(
     ],
     SUBST_DICT=replacements)
 
+env.Install(
+    target='.',
+    source=[
+        'src/include/wiredtiger_ext.h'
+    ],
+)
+
 env.Alias('generated-sources', "wiredtiger.h")
+env.Alias('generated-sources', "wiredtiger_ext.h")
 
 #
 # WiredTiger library
@@ -144,7 +162,7 @@ def filtered_filelist(f):
         file_cond = line.split()
         if line.startswith("#") or len(file_cond) == 0:
             continue
-        if len(file_cond) == 1 or condition_map[file_cond[1]]:
+        if len(file_cond) == 1 or condition_map.get(file_cond[1], False):
             yield file_cond[0]
 
 filelistfile = 'dist/filelist'
@@ -161,12 +179,8 @@ if useSnappy:
 
 # Use hardware by default on all platforms if available.
 # If not available at runtime, we fall back to software in some cases.
-#
-# On zSeries we may disable because SLES 11 kernel doe not support the instructions.
-if not (env['TARGET_ARCH'] == 's390x' and get_option("use-s390x-crc32") == "off"):
-    # Disable ARM hardware CRC for now - the extensions aren't always available
-    if env['TARGET_ARCH'] != 'aarch64':
-        env.Append(CPPDEFINES=["HAVE_CRC32_HARDWARE"])
+if (get_option("use-s390x-crc32") == "off"):
+    env.Append(CPPDEFINES=["HAVE_NO_CRC32_HARDWARE"])
 
 wtlib = env.Library(
     target="wiredtiger",
@@ -175,7 +189,9 @@ wtlib = env.Library(
         '$BUILD_DIR/third_party/shim_snappy',
         '$BUILD_DIR/third_party/shim_zlib',
     ],
+    LIBDEPS_TAGS=[
+        'init-no-global-side-effects',
+    ],
 )
 
 env.Depends(wtlib, [filelistfile, version_file])
-

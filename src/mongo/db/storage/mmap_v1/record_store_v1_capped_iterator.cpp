@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -39,10 +41,10 @@ namespace mongo {
 //
 // Capped collection traversal
 //
-CappedRecordStoreV1Iterator::CappedRecordStoreV1Iterator(OperationContext* txn,
+CappedRecordStoreV1Iterator::CappedRecordStoreV1Iterator(OperationContext* opCtx,
                                                          const CappedRecordStoreV1* collection,
                                                          bool forward)
-    : _txn(txn), _recordStore(collection), _forward(forward) {
+    : _opCtx(opCtx), _recordStore(collection), _forward(forward) {
     const RecordStoreV1MetaData* nsd = _recordStore->details();
 
     // If a start position isn't specified, we fill one out from the start of the
@@ -51,7 +53,7 @@ CappedRecordStoreV1Iterator::CappedRecordStoreV1Iterator(OperationContext* txn,
         // Going forwards.
         if (!nsd->capLooped()) {
             // If our capped collection doesn't loop around, the first record is easy.
-            _curr = collection->firstRecord(_txn);
+            _curr = collection->firstRecord(_opCtx);
         } else {
             // Our capped collection has "looped' around.
             // Copied verbatim from ForwardCappedCursor::init.
@@ -66,7 +68,7 @@ CappedRecordStoreV1Iterator::CappedRecordStoreV1Iterator(OperationContext* txn,
         // Going backwards
         if (!nsd->capLooped()) {
             // Start at the end.
-            _curr = collection->lastRecord(_txn);
+            _curr = collection->lastRecord(_opCtx);
         } else {
             _curr = _getExtent(nsd->capExtent())->lastRecord;
         }
@@ -78,15 +80,15 @@ boost::optional<Record> CappedRecordStoreV1Iterator::next() {
         return {};
     auto toReturn = _curr.toRecordId();
     _curr = getNextCapped(_curr);
-    return {{toReturn, _recordStore->RecordStore::dataFor(_txn, toReturn)}};
+    return {{toReturn, _recordStore->RecordStore::dataFor(_opCtx, toReturn)}};
 }
 
 boost::optional<Record> CappedRecordStoreV1Iterator::seekExact(const RecordId& id) {
     _curr = getNextCapped(DiskLoc::fromRecordId(id));
-    return {{id, _recordStore->RecordStore::dataFor(_txn, id)}};
+    return {{id, _recordStore->RecordStore::dataFor(_opCtx, id)}};
 }
 
-void CappedRecordStoreV1Iterator::invalidate(OperationContext* txn, const RecordId& id) {
+void CappedRecordStoreV1Iterator::invalidate(OperationContext* opCtx, const RecordId& id) {
     const DiskLoc dl = DiskLoc::fromRecordId(id);
     if (dl == _curr) {
         // We *could* move to the next thing, since there is actually a next
@@ -179,7 +181,7 @@ DiskLoc CappedRecordStoreV1Iterator::nextLoop(const DiskLoc& prev) {
     if (!next.isNull()) {
         return next;
     }
-    return _recordStore->firstRecord(_txn);
+    return _recordStore->firstRecord(_opCtx);
 }
 
 DiskLoc CappedRecordStoreV1Iterator::prevLoop(const DiskLoc& curr) {
@@ -188,7 +190,7 @@ DiskLoc CappedRecordStoreV1Iterator::prevLoop(const DiskLoc& curr) {
     if (!prev.isNull()) {
         return prev;
     }
-    return _recordStore->lastRecord(_txn);
+    return _recordStore->lastRecord(_opCtx);
 }
 
 
@@ -197,11 +199,11 @@ Extent* CappedRecordStoreV1Iterator::_getExtent(const DiskLoc& loc) {
 }
 
 DiskLoc CappedRecordStoreV1Iterator::_getNextRecord(const DiskLoc& loc) {
-    return _recordStore->getNextRecord(_txn, loc);
+    return _recordStore->getNextRecord(_opCtx, loc);
 }
 
 DiskLoc CappedRecordStoreV1Iterator::_getPrevRecord(const DiskLoc& loc) {
-    return _recordStore->getPrevRecord(_txn, loc);
+    return _recordStore->getPrevRecord(_opCtx, loc);
 }
 
 std::unique_ptr<RecordFetcher> CappedRecordStoreV1Iterator::fetcherForNext() const {

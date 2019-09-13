@@ -3,6 +3,9 @@
  * dropping its directory in directoryperdb mode.
  */
 
+// Preallocation is an mmap only behavior.
+// @tags: [requires_mmapv1]
+
 var baseDir = "jstests_disk_preallocate_directoryperdb";
 var baseName = "preallocate_directoryperdb";
 var baseName2 = "preallocate_directoryperdb2";
@@ -48,3 +51,5 @@ assert.writeOK(c3.insert({}));
 assert.eq(1, c3.count());
 
 checkDb2DirAbsent();
+
+MongoRunner.stopMongod(m);

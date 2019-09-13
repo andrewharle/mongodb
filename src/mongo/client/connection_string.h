@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2009-2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -28,11 +30,14 @@
 
 #pragma once
 
+#include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
+#include "mongo/bson/util/builder.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/net/hostandport.h"
@@ -40,6 +45,7 @@
 namespace mongo {
 
 class DBClientBase;
+class MongoURI;
 
 /**
  * ConnectionString handles parsing different ways to connect to mongo and determining method
@@ -47,10 +53,6 @@ class DBClientBase;
  *    server
  *    server:port
  *    foo/server:port,server:port   SET
- *    server,server,server          SYNC
- *                                    Warning - you usually don't want "SYNC", it's used
- *                                    for some special things such as sharding config servers.
- *                                    See syncclusterconnection.h for more info.
  *
  * Typical use:
  *
@@ -60,7 +62,7 @@ class DBClientBase;
  */
 class ConnectionString {
 public:
-    enum ConnectionType { INVALID, MASTER, SET, SYNC, CUSTOM };
+    enum ConnectionType { INVALID, MASTER, SET, CUSTOM, LOCAL };
 
     ConnectionString() = default;
 
@@ -68,6 +70,11 @@ public:
      * Constructs a connection string representing a replica set.
      */
     static ConnectionString forReplicaSet(StringData setName, std::vector<HostAndPort> servers);
+
+    /**
+     * Constructs a local connection string.
+     */
+    static ConnectionString forLocal();
 
     /**
      * Creates a MASTER connection string with the specified server.
@@ -86,7 +93,7 @@ public:
                      std::vector<HostAndPort> servers,
                      const std::string& setName);
 
-    ConnectionString(const std::string& s, ConnectionType favoredMultipleType);
+    ConnectionString(const std::string& s, ConnectionType connType);
 
     bool isValid() const {
         return _type != INVALID;
@@ -109,16 +116,24 @@ public:
     }
 
     /**
-     * This returns true if this and other point to the same logical entity.
-     * For single nodes, thats the same address.
-     * For replica sets, thats just the same replica set name.
-     * For pair (deprecated) or sync cluster connections, that's the same hosts in any ordering.
+     * Returns true if two connection strings match in terms of their type and the exact order of
+     * their hosts.
      */
-    bool sameLogicalEndpoint(const ConnectionString& other) const;
+    bool operator==(const ConnectionString& other) const;
+    bool operator!=(const ConnectionString& other) const;
 
-    DBClientBase* connect(std::string& errmsg, double socketTimeout = 0) const;
+    std::unique_ptr<DBClientBase> connect(StringData applicationName,
+                                          std::string& errmsg,
+                                          double socketTimeout = 0,
+                                          const MongoURI* uri = nullptr) const;
 
     static StatusWith<ConnectionString> parse(const std::string& url);
+
+    /**
+     * Deserialize a ConnectionString object from a string. Used by the IDL parser for the
+     * connectionstring type. Essentially just a throwing wrapper around ConnectionString::parse.
+     */
+    static ConnectionString deserialize(StringData url);
 
     static std::string typeToString(ConnectionType type);
 
@@ -133,9 +148,9 @@ public:
         virtual ~ConnectionHook() {}
 
         // Returns an alternative connection object for a string
-        virtual DBClientBase* connect(const ConnectionString& c,
-                                      std::string& errmsg,
-                                      double socketTimeout) = 0;
+        virtual std::unique_ptr<DBClientBase> connect(const ConnectionString& c,
+                                                      std::string& errmsg,
+                                                      double socketTimeout) = 0;
     };
 
     static void setConnectionHook(ConnectionHook* hook) {
@@ -153,12 +168,20 @@ public:
         return _string < other._string;
     }
 
+
+    friend std::ostream& operator<<(std::ostream&, const ConnectionString&);
+    friend StringBuilder& operator<<(StringBuilder&, const ConnectionString&);
+
 private:
     /**
      * Creates a SET connection string with the specified set name and servers.
      */
     ConnectionString(StringData setName, std::vector<HostAndPort> servers);
 
+    /**
+     * Creates a connection string with the specified type. Used for creating LOCAL strings.
+     */
+    explicit ConnectionString(ConnectionType connType);
 
     void _fillServers(std::string s);
     void _finishInit();
@@ -171,4 +194,15 @@ private:
     static stdx::mutex _connectHookMutex;
     static ConnectionHook* _connectHook;
 };
+
+inline std::ostream& operator<<(std::ostream& ss, const ConnectionString& cs) {
+    ss << cs._string;
+    return ss;
+}
+
+inline StringBuilder& operator<<(StringBuilder& sb, const ConnectionString& cs) {
+    sb << cs._string;
+    return sb;
+}
+
 }  // namespace mongo

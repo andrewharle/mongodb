@@ -1,6 +1,9 @@
+// @tags: [
+//   requires_non_retryable_writes,
+//   uses_multiple_connections,
+// ]
+
 // Yield and delete test case for query optimizer cursor.  SERVER-4401
-//
-// @tags: [requires_parallel_shell]
 
 t = db.jstests_distinct3;
 t.drop();

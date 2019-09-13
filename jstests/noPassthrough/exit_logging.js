@@ -1,5 +1,6 @@
 /**
  * Tests that various forms of normal and abnormal shutdown write to the log files as expected.
+ * @tags: [requires_sharding]
  */
 
 (function() {
@@ -15,44 +16,52 @@
 
     function makeRegExMatchFn(pattern) {
         return function(text) {
-            if (!pattern.test(text)) {
-                print("--- LOG CONTENTS ---");
-                print(text);
-                print("--- END LOG CONTENTS ---");
-                doassert("Log contents did not match " + pattern);
-            }
+            return pattern.test(text);
         };
     }
 
-    function testShutdownLogging(launcher, crashFn, matchFn) {
-        var logFileName = MongoRunner.dataPath + "mongod.log";
-        var opts = {
-            logpath: logFileName
-        };
-        var conn = launcher.start(opts);
-        try {
-            crashFn(conn);
-        } finally {
-            launcher.stop(conn);
+    function testShutdownLogging(launcher, crashFn, matchFn, expectedExitCode) {
+        clearRawMongoProgramOutput();
+        var conn = launcher.start({});
+
+        function checkOutput() {
+            var logContents = rawMongoProgramOutput();
+            function printLog() {
+                // We can't just return a string because it will be well over the max
+                // line length.
+                // So we just print manually.
+                print("================ BEGIN LOG CONTENTS ==================");
+                logContents.split(/\n/).forEach((line) => {
+                    print(line);
+                });
+                print("================ END LOG CONTENTS =====================");
+                return "";
+            }
+
+            assert(matchFn(logContents), printLog);
         }
-        var logContents = cat(logFileName);
-        matchFn(logContents);
+
+        crashFn(conn);
+        launcher.stop(conn, undefined, {allowedExitCode: expectedExitCode});
+        checkOutput();
     }
 
     function runAllTests(launcher) {
-        testShutdownLogging(launcher,
-                            function(conn) {
-                                conn.getDB('admin').shutdownServer();
-                            },
-                            makeRegExMatchFn(/shutdown command received[\s\S]*dbexit:/));
+        const SIGSEGV = 11;
+        const SIGABRT = 6;
+        testShutdownLogging(launcher, function(conn) {
+            conn.getDB('admin').shutdownServer();
+        }, makeRegExMatchFn(/shutdown command received/), MongoRunner.EXIT_CLEAN);
 
         testShutdownLogging(launcher,
                             makeShutdownByCrashFn('fault'),
-                            makeRegExMatchFn(/Invalid access at address[\s\S]*printStackTrace/));
+                            makeRegExMatchFn(/Invalid access at address[\s\S]*printStackTrace/),
+                            -SIGSEGV);
 
         testShutdownLogging(launcher,
                             makeShutdownByCrashFn('abort'),
-                            makeRegExMatchFn(/Got signal[\s\S]*printStackTrace/));
+                            makeRegExMatchFn(/Got signal[\s\S]*printStackTrace/),
+                            -SIGABRT);
     }
 
     if (_isWindows()) {
@@ -70,12 +79,11 @@
 
         runAllTests({
             start: function(opts) {
-                var actualOpts = {
-                    nojournal: ""
-                };
+                var actualOpts = {nojournal: ""};
                 Object.extend(actualOpts, opts);
                 return MongoRunner.runMongod(actualOpts);
             },
+
             stop: MongoRunner.stopMongod
         });
     }());
@@ -83,12 +91,10 @@
     (function testMongos() {
         print("********************\nTesting exit logging in mongos\n********************");
 
-        var st = new ShardingTest({shards: 1, other: {shardOptions: {nojournal: ""}}});
+        var st = new ShardingTest({shards: 1});
         var mongosLauncher = {
             start: function(opts) {
-                var actualOpts = {
-                    configdb: st._configDB
-                };
+                var actualOpts = {configdb: st._configDB};
                 Object.extend(actualOpts, opts);
                 return MongoRunner.runMongos(actualOpts);
             },
@@ -97,6 +103,7 @@
         };
 
         runAllTests(mongosLauncher);
+        st.stop();
     }());
 
 }());

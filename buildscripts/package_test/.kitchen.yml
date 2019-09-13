@@ -10,6 +10,10 @@ driver:
   aws_ssh_key_id: <%= ENV['KITCHEN_SSH_KEY_ID'] %>
   interface: private
   associate_public_ip: true
+  tags:
+    name: "server package test"
+    owner: "build"
+    expire-on: "<%= ENV['KITCHEN_EXPIRE'] %>"
 
 verifier:
   name: inspec
@@ -25,6 +29,11 @@ platforms:
       image_id: ami-c481fad3
     transport:
       username: ec2-user
+  - name: amazon2
+    driver:
+      image_id: ami-428aa838
+    transport:
+      username: ec2-user
   - name: debian71
     driver:
       image_id: ami-4b124a22
@@ -33,6 +42,11 @@ platforms:
   - name: debian81
     driver:
       image_id: ami-896d85e2
+    transport:
+      username: admin
+  - name: debian92
+    driver:
+      image_id: ami-71b7750b
     transport:
       username: admin
   - name: rhel62
@@ -69,6 +83,11 @@ platforms:
   - name: ubuntu1604
     driver:
       image_id: ami-64140d0e
+    transport:
+      username: ubuntu
+  - name: ubuntu1804
+    driver:
+      image_id: ami-7ad76705
     transport:
       username: ubuntu
 

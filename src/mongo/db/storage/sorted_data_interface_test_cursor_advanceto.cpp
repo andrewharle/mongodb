@@ -1,25 +1,27 @@
 // sorted_data_interface_test_cursor_advanceto.cpp
 
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -36,6 +38,7 @@
 #include "mongo/unittest/unittest.h"
 
 namespace mongo {
+namespace {
 
 // Insert multiple single-field keys and advance to each of them
 // using a forward cursor by specifying their exact key. When
@@ -43,16 +46,16 @@ namespace mongo {
 // positioned at the first occurrence of that key in ascending
 // order by RecordId.
 TEST(SortedDataInterface, AdvanceTo) {
-    const std::unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const auto harnessHelper(newSortedDataInterfaceHarnessHelper());
     const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         ASSERT(sorted->isEmpty(opCtx.get()));
     }
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             ASSERT_OK(sorted->insert(opCtx.get(), key1, loc1, true));
@@ -65,12 +68,12 @@ TEST(SortedDataInterface, AdvanceTo) {
     }
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(5, sorted->numEntries(opCtx.get()));
     }
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         const std::unique_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get()));
 
         ASSERT_EQ(cursor->seek(key1, true), IndexKeyEntry(key1, loc1));
@@ -98,16 +101,16 @@ TEST(SortedDataInterface, AdvanceTo) {
 // positioned at the first occurrence of that key in descending
 // order by RecordId (last occurrence in index order).
 TEST(SortedDataInterface, AdvanceToReversed) {
-    const std::unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const auto harnessHelper(newSortedDataInterfaceHarnessHelper());
     const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         ASSERT(sorted->isEmpty(opCtx.get()));
     }
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             ASSERT_OK(sorted->insert(opCtx.get(), key1, loc1, true));
@@ -120,12 +123,12 @@ TEST(SortedDataInterface, AdvanceToReversed) {
     }
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(5, sorted->numEntries(opCtx.get()));
     }
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         const std::unique_ptr<SortedDataInterface::Cursor> cursor(
             sorted->newCursor(opCtx.get(), false));
 
@@ -152,16 +155,16 @@ TEST(SortedDataInterface, AdvanceToReversed) {
 // the smaller one.  Ending position is on the smaller one since a seek describes where to go
 // and should not be effected by current position.
 TEST(SortedDataInterface, AdvanceToKeyBeforeCursorPosition) {
-    const std::unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const auto harnessHelper(newSortedDataInterfaceHarnessHelper());
     const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         ASSERT(sorted->isEmpty(opCtx.get()));
     }
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             ASSERT_OK(sorted->insert(opCtx.get(), key1, loc1, true));
@@ -171,12 +174,12 @@ TEST(SortedDataInterface, AdvanceToKeyBeforeCursorPosition) {
     }
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(2, sorted->numEntries(opCtx.get()));
     }
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         const std::unique_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get()));
 
         ASSERT_EQ(cursor->seek(key1, true), IndexKeyEntry(key1, loc1));
@@ -196,16 +199,16 @@ TEST(SortedDataInterface, AdvanceToKeyBeforeCursorPosition) {
 // the larger one.  Ending position is on the larger one since a seek describes where to go
 // and should not be effected by current position.
 TEST(SortedDataInterface, AdvanceToKeyAfterCursorPositionReversed) {
-    const std::unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const auto harnessHelper(newSortedDataInterfaceHarnessHelper());
     const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         ASSERT(sorted->isEmpty(opCtx.get()));
     }
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             ASSERT_OK(sorted->insert(opCtx.get(), key1, loc1, true));
@@ -215,12 +218,12 @@ TEST(SortedDataInterface, AdvanceToKeyAfterCursorPositionReversed) {
     }
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(2, sorted->numEntries(opCtx.get()));
     }
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         const std::unique_ptr<SortedDataInterface::Cursor> cursor(
             sorted->newCursor(opCtx.get(), false));
 
@@ -243,16 +246,16 @@ TEST(SortedDataInterface, AdvanceToKeyAfterCursorPositionReversed) {
 // the cursor should remain at its current position. An exclusive seek will
 // position the cursor on the next position, which may be EOF.
 TEST(SortedDataInterface, AdvanceToKeyAtCursorPosition) {
-    const std::unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const auto harnessHelper(newSortedDataInterfaceHarnessHelper());
     const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         ASSERT(sorted->isEmpty(opCtx.get()));
     }
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             ASSERT_OK(sorted->insert(opCtx.get(), key1, loc1, true));
@@ -261,12 +264,12 @@ TEST(SortedDataInterface, AdvanceToKeyAtCursorPosition) {
     }
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(1, sorted->numEntries(opCtx.get()));
     }
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         const std::unique_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get()));
 
         ASSERT_EQ(cursor->seek(key1, true), IndexKeyEntry(key1, loc1));
@@ -288,16 +291,16 @@ TEST(SortedDataInterface, AdvanceToKeyAtCursorPosition) {
 // the cursor should remain at its current position. An exclusive seek will
 // position the cursor on the next position, which may be EOF.
 TEST(SortedDataInterface, AdvanceToKeyAtCursorPositionReversed) {
-    const std::unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const auto harnessHelper(newSortedDataInterfaceHarnessHelper());
     const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         ASSERT(sorted->isEmpty(opCtx.get()));
     }
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             ASSERT_OK(sorted->insert(opCtx.get(), key1, loc1, true));
@@ -306,12 +309,12 @@ TEST(SortedDataInterface, AdvanceToKeyAtCursorPositionReversed) {
     }
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(1, sorted->numEntries(opCtx.get()));
     }
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         const std::unique_ptr<SortedDataInterface::Cursor> cursor(
             sorted->newCursor(opCtx.get(), false));
 
@@ -333,16 +336,16 @@ TEST(SortedDataInterface, AdvanceToKeyAtCursorPositionReversed) {
 // When advanceTo() is called in non-inclusive mode, the cursor is
 // positioned at the key that comes after the one specified.
 TEST(SortedDataInterface, AdvanceToExclusive) {
-    const std::unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const auto harnessHelper(newSortedDataInterfaceHarnessHelper());
     const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         ASSERT(sorted->isEmpty(opCtx.get()));
     }
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             ASSERT_OK(sorted->insert(opCtx.get(), key1, loc1, true));
@@ -355,12 +358,12 @@ TEST(SortedDataInterface, AdvanceToExclusive) {
     }
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(5, sorted->numEntries(opCtx.get()));
     }
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         const std::unique_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get()));
 
         ASSERT_EQ(cursor->seek(key1, true), IndexKeyEntry(key1, loc1));
@@ -387,16 +390,16 @@ TEST(SortedDataInterface, AdvanceToExclusive) {
 // When advanceTo() is called in non-inclusive mode, the cursor is
 // positioned at the key that comes before the one specified.
 TEST(SortedDataInterface, AdvanceToExclusiveReversed) {
-    const std::unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const auto harnessHelper(newSortedDataInterfaceHarnessHelper());
     const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         ASSERT(sorted->isEmpty(opCtx.get()));
     }
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             ASSERT_OK(sorted->insert(opCtx.get(), key1, loc1, true));
@@ -409,12 +412,12 @@ TEST(SortedDataInterface, AdvanceToExclusiveReversed) {
     }
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(5, sorted->numEntries(opCtx.get()));
     }
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         const std::unique_ptr<SortedDataInterface::Cursor> cursor(
             sorted->newCursor(opCtx.get(), false));
 
@@ -441,18 +444,18 @@ TEST(SortedDataInterface, AdvanceToExclusiveReversed) {
 // each of them using a forward cursor by specifying a key between their
 // exact key and the current position of the cursor.
 TEST(SortedDataInterface, AdvanceToIndirect) {
-    const std::unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const auto harnessHelper(newSortedDataInterfaceHarnessHelper());
     const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
 
     BSONObj unusedKey = key6;  // larger than any inserted key
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         ASSERT(sorted->isEmpty(opCtx.get()));
     }
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             ASSERT_OK(sorted->insert(opCtx.get(), key1, loc1, true));
@@ -463,12 +466,12 @@ TEST(SortedDataInterface, AdvanceToIndirect) {
     }
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(3, sorted->numEntries(opCtx.get()));
     }
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         const std::unique_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get()));
 
         ASSERT_EQ(cursor->seek(key1, true), IndexKeyEntry(key1, loc1));
@@ -491,18 +494,18 @@ TEST(SortedDataInterface, AdvanceToIndirect) {
 // each of them using a reverse cursor by specifying a key between their
 // exact key and the current position of the cursor.
 TEST(SortedDataInterface, AdvanceToIndirectReversed) {
-    const std::unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const auto harnessHelper(newSortedDataInterfaceHarnessHelper());
     const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
 
     BSONObj unusedKey = key0;  // smaller than any inserted key
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         ASSERT(sorted->isEmpty(opCtx.get()));
     }
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             ASSERT_OK(sorted->insert(opCtx.get(), key1, loc1, true));
@@ -513,12 +516,12 @@ TEST(SortedDataInterface, AdvanceToIndirectReversed) {
     }
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(3, sorted->numEntries(opCtx.get()));
     }
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         const std::unique_ptr<SortedDataInterface::Cursor> cursor(
             sorted->newCursor(opCtx.get(), false));
 
@@ -544,18 +547,18 @@ TEST(SortedDataInterface, AdvanceToIndirectReversed) {
 // is called in non-inclusive mode, the cursor is positioned at the key
 // that comes after the one specified.
 TEST(SortedDataInterface, AdvanceToIndirectExclusive) {
-    const std::unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const auto harnessHelper(newSortedDataInterfaceHarnessHelper());
     const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
 
     BSONObj unusedKey = key6;  // larger than any inserted key
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         ASSERT(sorted->isEmpty(opCtx.get()));
     }
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             ASSERT_OK(sorted->insert(opCtx.get(), key1, loc1, true));
@@ -566,12 +569,12 @@ TEST(SortedDataInterface, AdvanceToIndirectExclusive) {
     }
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(3, sorted->numEntries(opCtx.get()));
     }
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         const std::unique_ptr<SortedDataInterface::Cursor> cursor(sorted->newCursor(opCtx.get()));
 
         ASSERT_EQ(cursor->seek(key1, true), IndexKeyEntry(key1, loc1));
@@ -601,18 +604,18 @@ TEST(SortedDataInterface, AdvanceToIndirectExclusive) {
 // is called in non-inclusive mode, the cursor is positioned at the key
 // that comes before the one specified.
 TEST(SortedDataInterface, AdvanceToIndirectExclusiveReversed) {
-    const std::unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const auto harnessHelper(newSortedDataInterfaceHarnessHelper());
     const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
 
     BSONObj unusedKey = key0;  // smaller than any inserted key
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         ASSERT(sorted->isEmpty(opCtx.get()));
     }
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
             ASSERT_OK(sorted->insert(opCtx.get(), key1, loc1, true));
@@ -623,12 +626,12 @@ TEST(SortedDataInterface, AdvanceToIndirectExclusiveReversed) {
     }
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         ASSERT_EQUALS(3, sorted->numEntries(opCtx.get()));
     }
 
     {
-        const std::unique_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         const std::unique_ptr<SortedDataInterface::Cursor> cursor(
             sorted->newCursor(opCtx.get(), false));
 
@@ -653,4 +656,5 @@ TEST(SortedDataInterface, AdvanceToIndirectExclusiveReversed) {
     }
 }
 
+}  // namespace
 }  // namespace mongo

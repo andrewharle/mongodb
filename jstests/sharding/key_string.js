@@ -3,13 +3,13 @@
     var s = new ShardingTest({name: "keystring", shards: 2});
 
     s.adminCommand({enablesharding: "test"});
-    s.ensurePrimaryShard('test', 'shard0001');
+    s.ensurePrimaryShard('test', s.shard1.shardName);
     s.adminCommand({shardcollection: "test.foo", key: {name: 1}});
 
-    primary = s.getServer("test").getDB("test");
+    primary = s.getPrimaryShard("test").getDB("test");
     seconday = s.getOther(primary).getDB("test");
 
-    assert.eq(1, s.config.chunks.count(), "sanity check A");
+    assert.eq(1, s.config.chunks.count({"ns": "test.foo"}), "sanity check A");
 
     var db = s.getDB("test");
 
@@ -49,12 +49,9 @@
               }),
               "sort 1");
     assert.eq("sara,mark,joe,eliot,bob,allan",
-              db.foo.find()
-                  .sort({name: -1})
-                  .toArray()
-                  .map(function(z) {
-                      return z.name;
-                  }),
+              db.foo.find().sort({name: -1}).toArray().map(function(z) {
+                  return z.name;
+              }),
               "sort 2");
 
     // make sure we can't foce a split on an extreme key

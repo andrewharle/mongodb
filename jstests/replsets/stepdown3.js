@@ -19,13 +19,11 @@
     // do another write, because the first one might be longer than 10 seconds ago
     // on the secondary (due to starting up), and we need to be within 10 seconds
     // to step down.
-    var options = {
-        writeConcern: {w: 2, wtimeout: 30000}
-    };
+    var options = {writeConcern: {w: 2, wtimeout: 30000}};
     assert.writeOK(master.getDB("test").foo.insert({x: 2}, options));
     // lock secondary, to pause replication
     print("\nlock secondary");
-    var locked = replTest.liveNodes.slaves[0];
+    var locked = replTest._slaves[0];
     printjson(locked.getDB("admin").runCommand({fsync: 1, lock: 1}));
 
     // do a write
@@ -39,7 +37,8 @@
 
     print("getlasterror; should assert or return an error, depending on timing");
     var gleFunction = function() {
-        var result = master.getDB("test").runCommand({getLastError: 1, w: 2, wtimeout: 30000});
+        var result =
+            master.getDB("test").runCommand({getLastError: 1, w: 2, wtimeout: 10 * 60 * 1000});
         if (result.errmsg === "not master" || result.code == ErrorCodes.NotMaster ||
             result.code == ErrorCodes.InterruptedDueToReplStateChange) {
             throw new Error("satisfy assert.throws()");

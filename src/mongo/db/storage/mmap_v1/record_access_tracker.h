@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -28,11 +30,15 @@
 
 #pragma once
 
+#include <memory>
 
 #include "mongo/util/concurrency/mutex.h"
+#include "mongo/util/time_support.h"
 
 namespace mongo {
 
+class ClockSource;
+class Date_t;
 class MmapV1RecordHeader;
 
 /**
@@ -46,7 +52,7 @@ class RecordAccessTracker {
     MONGO_DISALLOW_COPYING(RecordAccessTracker);
 
 public:
-    RecordAccessTracker();
+    RecordAccessTracker(ClockSource* cs);
 
     enum Constants {
         SliceSize = 1024,
@@ -111,13 +117,10 @@ private:
          */
         bool put(int regionHash, size_t region, short offset);
 
-        time_t lastReset() const;
-
     private:
         Entry* _get(int start, size_t region, bool add);
 
         Entry _data[SliceSize];
-        time_t _lastReset;
     };
 
     /**
@@ -127,7 +130,7 @@ private:
      */
     class Rolling {
     public:
-        Rolling();
+        Rolling() = default;
 
         /**
          * After this call, we assume the page is in RAM.
@@ -136,13 +139,18 @@ private:
          *
          * @return whether we know the page is in RAM
          */
-        bool access(size_t region, short offset, bool doHalf);
+        bool access(size_t region, short offset, bool doHalf, ClockSource* cs);
+
+        /**
+         * Updates _lastRotate to the current time.
+         */
+        void updateLastRotate(ClockSource* cs);
 
     private:
-        void _rotate();
+        void _rotate(ClockSource* cs);
 
-        int _curSlice;
-        long long _lastRotate;
+        int _curSlice = 0;
+        Date_t _lastRotate;
         Slice _slices[NumSlices];
 
         SimpleMutex _lock;
@@ -150,6 +158,7 @@ private:
 
     // Should this record tracker fallback to making a system call?
     bool _blockSupported;
+    ClockSource* _clock;
 
     // An array of Rolling instances for tracking record accesses.
     std::unique_ptr<Rolling[]> _rollingTable;

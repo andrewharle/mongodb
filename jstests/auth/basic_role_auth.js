@@ -10,6 +10,7 @@
  * 2nd level field name: user names.
  * 3rd level is an object that has the format:
  *     { pwd: <password>, roles: [<list of roles>] }
+ * @tags: [requires_sharding]
  */
 var AUTH_INFO = {
     admin: {
@@ -36,36 +37,13 @@ var AUTH_INFO = {
 };
 
 // Constants that lists the privileges of a given role.
-var READ_PERM = {
-    query: 1,
-    index_r: 1,
-    killCursor: 1
-};
-var READ_WRITE_PERM = {
-    insert: 1,
-    update: 1,
-    remove: 1,
-    query: 1,
-    index_r: 1,
-    index_w: 1,
-    killCursor: 1
-};
-var ADMIN_PERM = {
-    index_r: 1,
-    index_w: 1,
-    profile_r: 1
-};
-var UADMIN_PERM = {
-    user_r: 1,
-    user_w: 1
-};
-var CLUSTER_PERM = {
-    killOp: 1,
-    currentOp: 1,
-    fsync_unlock: 1,
-    killCursor: 1,
-    profile_r: 1
-};
+var READ_PERM = {query: 1, index_r: 1, killCursor: 1};
+var READ_WRITE_PERM =
+    {insert: 1, update: 1, remove: 1, query: 1, index_r: 1, index_w: 1, killCursor: 1};
+var ADMIN_PERM = {index_r: 1, index_w: 1, profile_r: 1};
+var UADMIN_PERM = {user_r: 1, user_w: 1};
+var CLUSTER_PERM =
+    {killOp: 1, currentOp: 1, fsync_unlock: 1, killCursor: 1, killAnyCursor: 1, profile_r: 1};
 
 /**
  * Checks whether an error occurs after running an operation.
@@ -101,91 +79,79 @@ var checkErr = function(shouldPass, opFunc) {
  *     fsync_unlock.
  */
 var testOps = function(db, allowedActions) {
-    checkErr(allowedActions.hasOwnProperty('insert'),
-             function() {
-                 var res = db.user.insert({y: 1});
-                 if (res.hasWriteError())
-                     throw Error("insert failed: " + tojson(res.getRawResponse()));
-             });
+    checkErr(allowedActions.hasOwnProperty('insert'), function() {
+        var res = db.user.insert({y: 1});
+        if (res.hasWriteError())
+            throw Error("insert failed: " + tojson(res.getRawResponse()));
+    });
 
-    checkErr(allowedActions.hasOwnProperty('update'),
-             function() {
-                 var res = db.user.update({y: 1}, {z: 3});
-                 if (res.hasWriteError())
-                     throw Error("update failed: " + tojson(res.getRawResponse()));
-             });
+    checkErr(allowedActions.hasOwnProperty('update'), function() {
+        var res = db.user.update({y: 1}, {z: 3});
+        if (res.hasWriteError())
+            throw Error("update failed: " + tojson(res.getRawResponse()));
+    });
 
-    checkErr(allowedActions.hasOwnProperty('remove'),
-             function() {
-                 var res = db.user.remove({y: 1});
-                 if (res.hasWriteError())
-                     throw Error("remove failed: " + tojson(res.getRawResponse()));
-             });
+    checkErr(allowedActions.hasOwnProperty('remove'), function() {
+        var res = db.user.remove({y: 1});
+        if (res.hasWriteError())
+            throw Error("remove failed: " + tojson(res.getRawResponse()));
+    });
 
-    checkErr(allowedActions.hasOwnProperty('query'),
-             function() {
-                 db.user.findOne({y: 1});
-             });
+    checkErr(allowedActions.hasOwnProperty('query'), function() {
+        db.user.findOne({y: 1});
+    });
 
-    checkErr(allowedActions.hasOwnProperty('killOp'),
-             function() {
-                 var errorCodeUnauthorized = 13;
-                 var res = db.killOp(1);
+    checkErr(allowedActions.hasOwnProperty('killOp'), function() {
+        var errorCodeUnauthorized = 13;
+        var res = db.killOp(1);
 
-                 if (res.code == errorCodeUnauthorized) {
-                     throw Error("unauthorized killOp");
-                 }
-             });
+        if (res.code == errorCodeUnauthorized) {
+            throw Error("unauthorized killOp");
+        }
+    });
 
-    checkErr(allowedActions.hasOwnProperty('currentOp'),
-             function() {
-                 var errorCodeUnauthorized = 13;
-                 var res = db.currentOp();
+    checkErr(allowedActions.hasOwnProperty('currentOp'), function() {
+        var errorCodeUnauthorized = 13;
+        var res = db.currentOp();
 
-                 if (res.code == errorCodeUnauthorized) {
-                     throw Error("unauthorized currentOp");
-                 }
-             });
+        if (res.code == errorCodeUnauthorized) {
+            throw Error("unauthorized currentOp");
+        }
+    });
 
-    checkErr(allowedActions.hasOwnProperty('index_r'),
-             function() {
-                 db.system.indexes.findOne();
-             });
+    checkErr(allowedActions.hasOwnProperty('index_r'), function() {
+        db.system.indexes.findOne();
+    });
 
-    checkErr(allowedActions.hasOwnProperty('index_w'),
-             function() {
-                 var res = db.user.ensureIndex({x: 1});
-                 if (res.code == 13) {  // Unauthorized
-                     throw Error("unauthorized currentOp");
-                 }
-             });
+    checkErr(allowedActions.hasOwnProperty('index_w'), function() {
+        var res = db.user.ensureIndex({x: 1});
+        if (res.code == 13) {  // Unauthorized
+            throw Error("unauthorized currentOp");
+        }
+    });
 
-    checkErr(allowedActions.hasOwnProperty('profile_r'),
-             function() {
-                 db.system.profile.findOne();
-             });
+    checkErr(allowedActions.hasOwnProperty('profile_r'), function() {
+        db.system.profile.findOne();
+    });
 
-    checkErr(allowedActions.hasOwnProperty('profile_w'),
-             function() {
-                 var res = db.system.profile.insert({x: 1});
-                 if (res.hasWriteError()) {
-                     throw Error("profile insert failed: " + tojson(res.getRawResponse()));
-                 }
-             });
+    checkErr(allowedActions.hasOwnProperty('profile_w'), function() {
+        var res = db.system.profile.insert({x: 1});
+        if (res.hasWriteError()) {
+            throw Error("profile insert failed: " + tojson(res.getRawResponse()));
+        }
+    });
 
-    checkErr(allowedActions.hasOwnProperty('user_r'),
-             function() {
-                 var result = db.runCommand({usersInfo: 1});
-                 if (!result.ok) {
-                     throw new Error(tojson(result));
-                 }
-             });
+    checkErr(allowedActions.hasOwnProperty('user_r'), function() {
+        var result = db.runCommand({usersInfo: 1});
+        if (!result.ok) {
+            throw new Error(tojson(result));
+        }
+    });
 
-    checkErr(allowedActions.hasOwnProperty('user_w'),
-             function() {
-                 db.createUser({user: 'a', pwd: 'a', roles: jsTest.basicUserRoles});
-                 assert(db.dropUser('a'));
-             });
+    checkErr(allowedActions.hasOwnProperty('user_w'), function() {
+        db.createUser({user: 'a', pwd: 'a', roles: jsTest.basicUserRoles});
+        assert(db.dropUser('a'));
+    });
 
     // Test for kill cursor
     (function() {
@@ -193,46 +159,61 @@ var testOps = function(db, allowedActions) {
         var dbName = db.getName();
         var db2 = newConn.getDB(dbName);
 
-        if (db2 == 'admin') {
+        if (db2.getName() == 'admin') {
             assert.eq(1, db2.auth('aro', AUTH_INFO.admin.aro.pwd));
         } else {
             assert.eq(1, db2.auth('ro', AUTH_INFO.test.ro.pwd));
         }
 
-        var cursor = db2.kill_cursor.find().batchSize(2);
+        // Create cursor from db2.
+        var cmdRes = db2.runCommand({find: db2.kill_cursor.getName(), batchSize: 2});
+        assert.commandWorked(cmdRes);
+        var cursorId = cmdRes.cursor.id;
+        assert(!bsonBinaryEqual({cursorId: cursorId}, {cursorId: NumberLong(0)}),
+               "find command didn't return a cursor: " + tojson(cmdRes));
 
-        db.killCursor(cursor.id());
-        // Send a synchronous message to make sure that kill cursor was processed
-        // before proceeding.
-        db.runCommand({whatsmyuri: 1});
+        const shouldSucceed = (function() {
+            // admin users can do anything they want.
+            if (allowedActions.hasOwnProperty('killAnyCursor')) {
+                return true;
+            }
 
-        checkErr(!allowedActions.hasOwnProperty('killCursor'),
-                 function() {
-                     while (cursor.hasNext()) {
-                         var next = cursor.next();
+            // users can kill their own cursors
+            const users = assert.commandWorked(db.runCommand({connectionStatus: 1}))
+                              .authInfo.authenticatedUsers;
+            const users2 = assert.commandWorked(db2.runCommand({connectionStatus: 1}))
+                               .authInfo.authenticatedUsers;
+            if (!users.length && !users2.length) {
+                // Special case, no-auth
+                return true;
+            }
+            return users.some(function(u) {
+                return users2.some(function(u2) {
+                    return ((u.db === u2.db) && (u.user === u2.user));
+                });
+            });
+        })();
 
-                         // This is a failure in mongos case. Standalone case will fail
-                         // when next() was called.
-                         if (next.code == 16336) {
-                             // could not find cursor in cache for id
-                             throw next.$err;
-                         }
-                     }
-                 });
-    });  // TODO: enable test after SERVER-5813 is fixed.
+        checkErr(shouldSucceed, function() {
+            // Issue killCursor command from db.
+            cmdRes = db.runCommand({killCursors: db2.kill_cursor.getName(), cursors: [cursorId]});
+            assert.commandWorked(cmdRes);
+            assert(bsonBinaryEqual({cursorId: cmdRes.cursorsKilled}, {cursorId: [cursorId]}),
+                   "unauthorized to kill cursor: " + tojson(cmdRes));
+        });
+    })();
 
     var isMongos = db.runCommand({isdbgrid: 1}).isdbgrid;
     // Note: fsyncUnlock is not supported in mongos.
     if (!isMongos) {
-        checkErr(allowedActions.hasOwnProperty('fsync_unlock'),
-                 function() {
-                     var res = db.fsyncUnlock();
-                     var errorCodeUnauthorized = 13;
+        checkErr(allowedActions.hasOwnProperty('fsync_unlock'), function() {
+            var res = db.fsyncUnlock();
+            var errorCodeUnauthorized = 13;
 
-                     if (res.code == errorCodeUnauthorized) {
-                         throw Error("unauthorized unauthorized fsyncUnlock");
-                     }
-                 });
+            if (res.code == errorCodeUnauthorized) {
+                throw Error("unauthorized fsyncUnlock");
+            }
+        });
     }
 };
 
@@ -512,7 +493,7 @@ var runTests = function(conn) {
             testFunc.test(newConn);
         } catch (x) {
             failures.push(testFunc.name);
-            jsTestLog(x);
+            jsTestLog(tojson(x));
         }
     });
 
@@ -529,10 +510,12 @@ var runTests = function(conn) {
 
 var conn = MongoRunner.runMongod({auth: ''});
 runTests(conn);
-MongoRunner.stopMongod(conn.port);
+MongoRunner.stopMongod(conn);
 
 jsTest.log('Test sharding');
-var st = new ShardingTest({shards: 1, keyFile: 'jstests/libs/key1'});
+// TODO: Remove 'shardAsReplicaSet: false' when SERVER-32672 is fixed.
+var st =
+    new ShardingTest({shards: 1, keyFile: 'jstests/libs/key1', other: {shardAsReplicaSet: false}});
 runTests(st.s);
 st.stop();
 

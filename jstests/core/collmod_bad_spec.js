@@ -1,9 +1,11 @@
+// Cannot implicitly shard accessed collections because of collection existing when none
+// expected.
+// @tags: [assumes_no_implicit_collection_creation_after_drop, requires_non_retryable_commands]
+
 // This is a regression test for SERVER-21545.
 //
 // Tests that a collMod with a bad specification does not cause any changes, and does not crash the
 // server.
-//
-// @tags: [requires_collmod_command]
 (function() {
     "use strict";
 

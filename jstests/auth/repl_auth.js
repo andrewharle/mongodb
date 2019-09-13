@@ -1,6 +1,7 @@
 /**
  * Test that the replica set connections to the secondaries will have the right auth credentials
  * even when these connections are shared within the same connection pool.
+ * @tags: [requires_replication]
  */
 
 var NUM_NODES = 3;
@@ -16,11 +17,11 @@ var admin = setupConn.getDB('admin');
 admin.createUser({user: 'admin', pwd: 'password', roles: jsTest.adminUserRoles});
 admin.auth('admin', 'password');
 
-setupConn.getDB('foo')
-    .createUser({user: 'foo', pwd: 'foopwd', roles: jsTest.basicUserRoles}, {w: NUM_NODES});
+setupConn.getDB('foo').createUser({user: 'foo', pwd: 'foopwd', roles: jsTest.basicUserRoles},
+                                  {w: NUM_NODES});
 setupConn.getDB('foo').logout();
-setupConn.getDB('bar')
-    .createUser({user: 'bar', pwd: 'barpwd', roles: jsTest.basicUserRoles}, {w: NUM_NODES});
+setupConn.getDB('bar').createUser({user: 'bar', pwd: 'barpwd', roles: jsTest.basicUserRoles},
+                                  {w: NUM_NODES});
 setupConn.getDB('bar').logout();
 
 var replConn0 = new Mongo(rsTest.getURL());
@@ -63,5 +64,9 @@ for (var x = 0; x < 20; x++) {
     explain = barDB1.user.find().readPref('secondary').explain('executionStats');
     assert.eq(1, explain.executionStats.nReturned);
 }
+
+admin.logout();
+fooDB0.logout();
+barDB1.logout();
 
 rsTest.stopSet();

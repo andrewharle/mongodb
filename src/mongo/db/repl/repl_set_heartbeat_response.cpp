@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -37,6 +39,8 @@
 #include "mongo/base/status.h"
 #include "mongo/bson/util/bson_extract.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/db/repl/bson_extract_optime.h"
+#include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
@@ -48,8 +52,6 @@ namespace {
 const std::string kConfigFieldName = "config";
 const std::string kConfigVersionFieldName = "v";
 const std::string kElectionTimeFieldName = "electionTime";
-const std::string kErrMsgFieldName = "errmsg";
-const std::string kErrorCodeFieldName = "code";
 const std::string kHasDataFieldName = "hasData";
 const std::string kHasStateDisagreementFieldName = "stateDisagreement";
 const std::string kHbMessageFieldName = "hbmsg";
@@ -157,18 +159,11 @@ Status ReplSetHeartbeatResponse::initialize(const BSONObj& doc, long long term) 
         _setName = replSetNameElement.String();
     }
 
-    if (_setName.empty() && !doc[kOkFieldName].trueValue()) {
-        std::string errMsg = doc[kErrMsgFieldName].str();
-
-        BSONElement errCodeElem = doc[kErrorCodeFieldName];
-        if (errCodeElem.ok()) {
-            if (!errCodeElem.isNumber())
-                return Status(ErrorCodes::BadValue, "Error code is not a number!");
-
-            int errorCode = errCodeElem.numberInt();
-            return Status(ErrorCodes::Error(errorCode), errMsg);
+    if (_setName.empty()) {
+        auto status = getStatusFromCommandResult(doc);
+        if (!status.isOK()) {
+            return status;
         }
-        return Status(ErrorCodes::UnknownError, errMsg);
     }
 
     const BSONElement hasDataElement = doc[kHasDataFieldName];
@@ -260,18 +255,18 @@ Status ReplSetHeartbeatResponse::initialize(const BSONObj& doc, long long term) 
     if (memberStateElement.eoo()) {
         _stateSet = false;
     } else if (memberStateElement.type() != NumberInt && memberStateElement.type() != NumberLong) {
-        return Status(ErrorCodes::TypeMismatch,
-                      str::stream()
-                          << "Expected \"" << kMemberStateFieldName
+        return Status(
+            ErrorCodes::TypeMismatch,
+            str::stream() << "Expected \"" << kMemberStateFieldName
                           << "\" field in response to replSetHeartbeat "
                              "command to have type NumberInt or NumberLong, but found type "
                           << typeName(memberStateElement.type()));
     } else {
         long long stateInt = memberStateElement.numberLong();
         if (stateInt < 0 || stateInt > MemberState::RS_MAX) {
-            return Status(ErrorCodes::BadValue,
-                          str::stream()
-                              << "Value for \"" << kMemberStateFieldName
+            return Status(
+                ErrorCodes::BadValue,
+                str::stream() << "Value for \"" << kMemberStateFieldName
                               << "\" in response to replSetHeartbeat is "
                                  "out of range; legal values are non-negative and no more than "
                               << MemberState::RS_MAX);
@@ -311,7 +306,8 @@ Status ReplSetHeartbeatResponse::initialize(const BSONObj& doc, long long term) 
         return Status(ErrorCodes::TypeMismatch,
                       str::stream() << "Expected \"" << kHbMessageFieldName
                                     << "\" field in response to replSetHeartbeat to have "
-                                       "type String, but found " << typeName(hbMsgElement.type()));
+                                       "type String, but found "
+                                    << typeName(hbMsgElement.type()));
     } else {
         _hbmsg = hbMsgElement.String();
     }
@@ -332,13 +328,14 @@ Status ReplSetHeartbeatResponse::initialize(const BSONObj& doc, long long term) 
     const BSONElement rsConfigElement = doc[kConfigFieldName];
     if (rsConfigElement.eoo()) {
         _configSet = false;
-        _config = ReplicaSetConfig();
+        _config = ReplSetConfig();
         return Status::OK();
     } else if (rsConfigElement.type() != Object) {
         return Status(ErrorCodes::TypeMismatch,
                       str::stream() << "Expected \"" << kConfigFieldName
                                     << "\" in response to replSetHeartbeat to have type "
-                                       "Object, but found " << typeName(rsConfigElement.type()));
+                                       "Object, but found "
+                                    << typeName(rsConfigElement.type()));
     }
     _configSet = true;
 
@@ -365,7 +362,7 @@ Seconds ReplSetHeartbeatResponse::getTime() const {
     return _time;
 }
 
-const ReplicaSetConfig& ReplSetHeartbeatResponse::getConfig() const {
+const ReplSetConfig& ReplSetHeartbeatResponse::getConfig() const {
     invariant(_configSet);
     return _config;
 }

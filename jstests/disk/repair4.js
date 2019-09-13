@@ -1,5 +1,8 @@
 // test that disk space check happens on --repairpath partition
 
+// `--repairpath` is mmap only.
+// @tags: [requires_mmapv1]
+
 var baseName = "jstests_disk_repair4";
 var smallbase = MongoRunner.dataDir + "/repairpartitiontest";
 var smallpath = smallbase + "/dir";
@@ -29,7 +32,6 @@ if (doIt) {
         smallfiles: "",
         dbpath: smallpath,
         repairpath: repairpath,
-        nohttpinterface: "",
         bind_ip: "127.0.0.1",
     });
 
@@ -47,5 +49,5 @@ if (doIt) {
     }
 
     check();
-    MongoRunner.stopMongod(port);
+    MongoRunner.stopMongod(m);
 }

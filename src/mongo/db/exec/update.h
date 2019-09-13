@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -32,13 +34,14 @@
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/exec/plan_stage.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/db/ops/update_driver.h"
 #include "mongo/db/ops/update_request.h"
 #include "mongo/db/ops/update_result.h"
+#include "mongo/db/update/update_driver.h"
 
 namespace mongo {
 
 class OperationContext;
+class OpDebug;
 struct PlanSummaryStats;
 
 struct UpdateStageParams {
@@ -76,14 +79,14 @@ class UpdateStage final : public PlanStage {
     MONGO_DISALLOW_COPYING(UpdateStage);
 
 public:
-    UpdateStage(OperationContext* txn,
+    UpdateStage(OperationContext* opCtx,
                 const UpdateStageParams& params,
                 WorkingSet* ws,
                 Collection* collection,
                 PlanStage* child);
 
     bool isEOF() final;
-    StageState work(WorkingSetID* out) final;
+    StageState doWork(WorkingSetID* out) final;
 
     void doRestoreState() final;
 
@@ -106,12 +109,9 @@ public:
     static const UpdateStats* getUpdateStats(const PlanExecutor* exec);
 
     /**
-     * Populate 'opDebug' with stats from 'updateStats' and 'summaryStats' describing the execution
-     * of this update.
+     * Populate 'opDebug' with stats from 'updateStats' describing the execution of this update.
      */
-    static void fillOutOpDebug(const UpdateStats* updateStats,
-                               const PlanSummaryStats* summaryStats,
-                               OpDebug* opDebug);
+    static void recordUpdateStatsInOpDebug(const UpdateStats* updateStats, OpDebug* opDebug);
 
     /**
      * Converts 'updateStats' into an UpdateResult.
@@ -134,24 +134,25 @@ public:
      *
      * Fills out whether or not this is a fastmodinsert in 'stats'.
      *
-     * Returns the document to insert in *out.
+     * Returns the document to insert.
      */
-    static Status applyUpdateOpsForInsert(const CanonicalQuery* cq,
-                                          const BSONObj& query,
-                                          UpdateDriver* driver,
-                                          UpdateLifecycle* lifecycle,
-                                          mutablebson::Document* doc,
-                                          bool isInternalRequest,
-                                          UpdateStats* stats,
-                                          BSONObj* out);
+    static BSONObj applyUpdateOpsForInsert(OperationContext* opCtx,
+                                           const CanonicalQuery* cq,
+                                           const BSONObj& query,
+                                           UpdateDriver* driver,
+                                           mutablebson::Document* doc,
+                                           bool isInternalRequest,
+                                           const NamespaceString& ns,
+                                           bool enforceOkForStorage,
+                                           UpdateStats* stats);
 
 private:
     /**
-     * Computes the result of applying mods to the document 'oldObj' at RecordId 'loc' in
+     * Computes the result of applying mods to the document 'oldObj' at RecordId 'recordId' in
      * memory, then commits these changes to the database. Returns a possibly unowned copy
      * of the newly-updated version of the document.
      */
-    BSONObj transformAndUpdate(const Snapshotted<BSONObj>& oldObj, RecordId& loc);
+    BSONObj transformAndUpdate(const Snapshotted<BSONObj>& oldObj, RecordId& recordId);
 
     /**
      * Computes the document to insert and inserts it into the collection. Used if the
@@ -172,9 +173,10 @@ private:
     bool needInsert();
 
     /**
-     * Helper for restoring the state of this update.
+     * Stores 'idToRetry' in '_idRetrying' so the update can be retried during the next call to
+     * work(). Always returns NEED_YIELD and sets 'out' to WorkingSet::INVALID_ID.
      */
-    Status restoreUpdateState();
+    StageState prepareToRetryWSM(WorkingSetID idToRetry, WorkingSetID* out);
 
     UpdateStageParams _params;
 
@@ -193,6 +195,9 @@ private:
     // Stats
     UpdateStats _specificStats;
 
+    // True if updated documents should be validated with storage_validation::storageValid().
+    bool _enforceOkForStorage;
+
     // If the update was in-place, we may see it again.  This only matters if we're doing
     // a multi-update; if we're not doing a multi-update we stop after one update and we
     // won't see any more docs.
@@ -205,8 +210,8 @@ private:
     // document and we wouldn't want to update that.
     //
     // So, no matter what, we keep track of where the doc wound up.
-    typedef unordered_set<RecordId, RecordId::Hasher> DiskLocSet;
-    const std::unique_ptr<DiskLocSet> _updatedLocs;
+    typedef stdx::unordered_set<RecordId, RecordId::Hasher> RecordIdSet;
+    const std::unique_ptr<RecordIdSet> _updatedRecordIds;
 
     // These get reused for each update.
     mutablebson::Document& _doc;

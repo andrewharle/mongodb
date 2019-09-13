@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -62,7 +64,7 @@ ProjectionStage::ProjectionStage(OperationContext* opCtx,
 
     if (ProjectionStageParams::NO_FAST_PATH == _projImpl) {
         _exec.reset(
-            new ProjectionExec(params.projObj, params.fullExpression, *params.extensionsCallback));
+            new ProjectionExec(opCtx, params.projObj, params.fullExpression, params.collator));
     } else {
         // We shouldn't need the full expression if we're fast-pathing.
         invariant(NULL == params.fullExpression);
@@ -182,7 +184,7 @@ Status ProjectionStage::transform(WorkingSetMember* member) {
     }
 
     member->keyData.clear();
-    member->loc = RecordId();
+    member->recordId = RecordId();
     member->obj = Snapshotted<BSONObj>(SnapshotId(), bob.obj());
     member->transitionToOwnedObj();
     return Status::OK();
@@ -192,12 +194,7 @@ bool ProjectionStage::isEOF() {
     return child()->isEOF();
 }
 
-PlanStage::StageState ProjectionStage::work(WorkingSetID* out) {
-    ++_commonStats.works;
-
-    // Adds the amount of time taken by work() to executionTimeMillis.
-    ScopedTimer timer(&_commonStats.executionTimeMillis);
-
+PlanStage::StageState ProjectionStage::doWork(WorkingSetID* out) {
     WorkingSetID id = WorkingSet::INVALID_ID;
     StageState status = child()->work(&id);
 
@@ -208,28 +205,18 @@ PlanStage::StageState ProjectionStage::work(WorkingSetID* out) {
         // Punt to our specific projection impl.
         Status projStatus = transform(member);
         if (!projStatus.isOK()) {
-            warning() << "Couldn't execute projection, status = " << projStatus.toString() << endl;
+            warning() << "Couldn't execute projection, status = " << redact(projStatus);
             *out = WorkingSetCommon::allocateStatusMember(_ws, projStatus);
             return PlanStage::FAILURE;
         }
 
         *out = id;
-        ++_commonStats.advanced;
     } else if (PlanStage::FAILURE == status || PlanStage::DEAD == status) {
+        // The stage which produces a failure is responsible for allocating a working set member
+        // with error details.
+        invariant(WorkingSet::INVALID_ID != id);
         *out = id;
-        // If a stage fails, it may create a status WSM to indicate why it
-        // failed, in which case 'id' is valid.  If ID is invalid, we
-        // create our own error message.
-        if (WorkingSet::INVALID_ID == id) {
-            mongoutils::str::stream ss;
-            ss << "projection stage failed to read in results from child";
-            Status status(ErrorCodes::InternalError, ss);
-            *out = WorkingSetCommon::allocateStatusMember(_ws, status);
-        }
-    } else if (PlanStage::NEED_TIME == status) {
-        _commonStats.needTime++;
     } else if (PlanStage::NEED_YIELD == status) {
-        _commonStats.needYield++;
         *out = id;
     }
 

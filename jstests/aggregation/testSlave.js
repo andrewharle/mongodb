@@ -1,4 +1,8 @@
 // This test just make sure that aggregation is possible on a secondary node.
+// @tags: [
+//   requires_replication,
+//   requires_spawning_own_processes,
+// ]
 var replTest = new ReplSetTest({name: 'aggTestSlave', nodes: 2});
 var nodes = replTest.startSet();
 replTest.initiate();
@@ -7,9 +11,7 @@ replTest.awaitReplication();
 var primary = replTest.getPrimary().getDB('test');
 var secondary = replTest.getSecondary().getDB('test');
 
-var options = {
-    writeConcern: {w: 2}
-};
+var options = {writeConcern: {w: 2}};
 primary.agg.insert({}, options);
 primary.agg.insert({}, options);
 primary.agg.insert({}, options);

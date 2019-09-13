@@ -1,29 +1,31 @@
+
 /**
- * Copyright (C) 2016 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- * This program is free software: you can redistribute it and/or  modify
- * it under the terms of the GNU Affero General Public License, version 3,
- * as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
- * As a special exception, the copyright holders give permission to link the
- * code of portions of this program with the OpenSSL library under certain
- * conditions as described in each individual source file and distribute
- * linked combinations including the program with the OpenSSL library. You
- * must comply with the GNU Affero General Public License in all respects
- * for all of the code used other than as permitted herein. If you modify
- * file(s) with this exception, you may extend this exception to your
- * version of the file(s), but you are not obligated to do so. If you do not
- * wish to do so, delete this exception statement from your version. If you
- * delete this exception statement from all source files in the program,
- * then also delete it in the license file.
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kFTDC
@@ -85,6 +87,11 @@ StringMap toNestedStringMap(BSONObj& obj) {
     ASSERT_OK(procparser::parseProcMemInfo(_keys, _x, &builder)); \
     auto obj = builder.obj();                                     \
     auto stringMap = toStringMap(obj);
+#define ASSERT_PARSE_NETSTAT(_keys, _x)                           \
+    BSONObjBuilder builder;                                       \
+    ASSERT_OK(procparser::parseProcNetstat(_keys, _x, &builder)); \
+    auto obj = builder.obj();                                     \
+    auto stringMap = toStringMap(obj);
 #define ASSERT_PARSE_DISKSTATS(_disks, _x)                           \
     BSONObjBuilder builder;                                          \
     ASSERT_OK(procparser::parseProcDiskStats(_disks, _x, &builder)); \
@@ -92,6 +99,7 @@ StringMap toNestedStringMap(BSONObj& obj) {
     auto stringMap = toNestedStringMap(obj);
 
 TEST(FTDCProcStat, TestStat) {
+
     std::vector<StringData> keys{"cpu", "ctxt", "processes"};
 
     // Normal case
@@ -238,6 +246,7 @@ TEST(FTDCProcStat, TestLocalNonExistentStat) {
 }
 
 TEST(FTDCProcMemInfo, TestMemInfo) {
+
     std::vector<StringData> keys{"Key1", "Key2", "Key3"};
 
     // Normal case
@@ -290,44 +299,25 @@ TEST(FTDCProcMemInfo, TestMemInfo) {
 // otherwise.
 TEST(FTDCProcMemInfo, TestLocalMemInfo) {
     std::vector<StringData> keys{
-        "Active",
-        "Active(anon)",
-        "Active(file)",
-        "AnonHugePages",
-        "AnonPages",
-        "Bounce",
-        "Buffers",
-        "Cached",
-        "CmaFree",
-        "CmaTotal",
-        "CommitLimit",
-        "Committed_AS",
-        "Dirty",
-        "HardwareCorrupted",
-        "Inactive",
-        "Inactive(anon)",
-        "Inactive(file)",
-        "KernelStack",
-        "Mapped",
-        "MemAvailable",
-        "MemFree",
-        "MemTotal",
-        "Mlocked",
-        "NFS_Unstable",
-        "PageTables",
-        "SReclaimable",
-        "SUnreclaim",
-        "Shmem",
-        "Slab",
-        "SwapCached",
-        "SwapFree",
-        "SwapTotal",
-        "Unevictable",
-        "VmallocChunk",
-        "VmallocTotal",
-        "VmallocUsed",
-        "Writeback",
-        "WritebackTmp",
+        "Active",         "Active(anon)",
+        "Active(file)",   "AnonHugePages",
+        "AnonPages",      "Bounce",
+        "Buffers",        "Cached",
+        "CmaFree",        "CmaTotal",
+        "CommitLimit",    "Committed_AS",
+        "Dirty",          "HardwareCorrupted",
+        "Inactive",       "Inactive(anon)",
+        "Inactive(file)", "KernelStack",
+        "Mapped",         "MemAvailable",
+        "MemFree",        "MemTotal",
+        "Mlocked",        "NFS_Unstable",
+        "PageTables",     "SReclaimable",
+        "SUnreclaim",     "Shmem",
+        "Slab",           "SwapCached",
+        "SwapFree",       "SwapTotal",
+        "Unevictable",    "VmallocChunk",
+        "VmallocTotal",   "VmallocUsed",
+        "Writeback",      "WritebackTmp",
     };
 
     BSONObjBuilder builder;
@@ -385,8 +375,136 @@ TEST(FTDCProcMemInfo, TestLocalNonExistentMemInfo) {
     ASSERT_NOT_OK(procparser::parseProcMemInfoFile("/proc/does_not_exist", keys, &builder));
 }
 
+TEST(FTDCProcNetstat, TestNetstat) {
+
+    // test keys
+    std::vector<StringData> keys{"pfx1", "pfx2", "pfx3"};
+
+    // Normal case
+    {
+        ASSERT_PARSE_NETSTAT(keys,
+                             "pfx1 key1 key2 key3\n"
+                             "pfx1 1 2 3\n"
+                             "pfxX key1 key2\n"
+                             "pfxX key1 key2\n"
+                             "pfx2 key4 key5\n"
+                             "pfx2 4 5\n");
+        ASSERT_KEY_AND_VALUE("pfx1key1", 1UL);
+        ASSERT_KEY_AND_VALUE("pfx1key2", 2UL);
+        ASSERT_NO_KEY("pfxXkey1");
+        ASSERT_NO_KEY("pfxXkey2");
+        ASSERT_KEY_AND_VALUE("pfx1key3", 3UL)
+        ASSERT_KEY_AND_VALUE("pfx2key4", 4UL);
+        ASSERT_KEY_AND_VALUE("pfx2key5", 5UL);
+    }
+
+    // Mismatched keys and values
+    {
+        ASSERT_PARSE_NETSTAT(keys,
+                             "pfx1 key1 key2 key3\n"
+                             "pfx1 1 2 3 4\n"
+                             "pfx2 key4 key5\n"
+                             "pfx2 4\n"
+                             "pfx3 key6 key7\n");
+        ASSERT_KEY_AND_VALUE("pfx1key1", 1UL);
+        ASSERT_KEY_AND_VALUE("pfx1key2", 2UL);
+        ASSERT_KEY_AND_VALUE("pfx1key3", 3UL);
+        ASSERT_NO_KEY("pfx1key4");
+        ASSERT_KEY_AND_VALUE("pfx2key4", 4UL);
+        ASSERT_NO_KEY("pfx2key5");
+        ASSERT_NO_KEY("pfx3key6");
+        ASSERT_NO_KEY("pfx3key7");
+    }
+
+    // Non-numeric value
+    {
+        ASSERT_PARSE_NETSTAT(keys,
+                             "pfx1 key1 key2 key3\n"
+                             "pfx1 1 foo 3\n");
+        ASSERT_KEY_AND_VALUE("pfx1key1", 1UL);
+        ASSERT_NO_KEY("pfx1key2");
+        ASSERT_KEY_AND_VALUE("pfx1key3", 3UL)
+    }
+
+    // No newline
+    {
+        ASSERT_PARSE_NETSTAT(keys,
+                             "pfx1 key1 key2 key3\n"
+                             "pfx1 1 2 3\n"
+                             "pfx2 key4 key5\n"
+                             "pfx2 4 5");
+        ASSERT_KEY_AND_VALUE("pfx1key1", 1UL);
+        ASSERT_KEY_AND_VALUE("pfx1key2", 2UL);
+        ASSERT_KEY_AND_VALUE("pfx1key3", 3UL)
+        ASSERT_KEY_AND_VALUE("pfx2key4", 4UL);
+        ASSERT_KEY_AND_VALUE("pfx2key5", 5UL);
+    }
+
+    // Single line only
+    {
+        BSONObjBuilder builder;
+        ASSERT_NOT_OK(procparser::parseProcNetstat(keys, "pfx1 key1 key2 key3\n", &builder));
+    }
+
+    // Empty string
+    {
+        BSONObjBuilder builder;
+        ASSERT_NOT_OK(procparser::parseProcNetstat(keys, "", &builder));
+    }
+}
+
+// Test we can parse the /proc/net/netstat on this machine and assert we have some expected fields
+// Some keys can vary between distros, so we test only for the existence of a few basic ones
+TEST(FTDCProcNetstat, TestLocalNetstat) {
+
+    BSONObjBuilder builder;
+
+    std::vector<StringData> keys{"TcpExt:"_sd, "IpExt:"_sd};
+
+    ASSERT_OK(procparser::parseProcNetstatFile(keys, "/proc/net/netstat", &builder));
+
+    BSONObj obj = builder.obj();
+    auto stringMap = toStringMap(obj);
+    log() << "OBJ:" << obj;
+    ASSERT_KEY("TcpExt:TCPTimeouts");
+    ASSERT_KEY("TcpExt:TCPPureAcks");
+    ASSERT_KEY("TcpExt:TCPAbortOnTimeout");
+    ASSERT_KEY("TcpExt:EmbryonicRsts");
+    ASSERT_KEY("TcpExt:ListenDrops");
+    ASSERT_KEY("TcpExt:ListenOverflows");
+    ASSERT_KEY("TcpExt:DelayedACKs");
+    ASSERT_KEY("IpExt:OutOctets");
+    ASSERT_KEY("IpExt:InOctets");
+}
+
+// Test we can parse the /proc/net/snmp on this machine and assert we have some expected fields
+// Some keys can vary between distros, so we test only for the existence of a few basic ones
+TEST(FTDCProcNetstat, TestLocalNetSnmp) {
+
+    BSONObjBuilder builder;
+
+    std::vector<StringData> keys{"Tcp:"_sd, "Ip:"_sd};
+
+    ASSERT_OK(procparser::parseProcNetstatFile(keys, "/proc/net/snmp", &builder));
+
+    BSONObj obj = builder.obj();
+    auto stringMap = toStringMap(obj);
+    log() << "OBJ:" << obj;
+    ASSERT_KEY("Ip:InReceives");
+    ASSERT_KEY("Ip:OutRequests");
+    ASSERT_KEY("Tcp:InSegs");
+    ASSERT_KEY("Tcp:OutSegs");
+}
+
+TEST(FTDCProcNetstat, TestLocalNonExistentNetstat) {
+    std::vector<StringData> keys{};
+    BSONObjBuilder builder;
+
+    ASSERT_NOT_OK(procparser::parseProcNetstatFile(keys, "/proc/does_not_exist", &builder));
+}
 
 TEST(FTDCProcDiskStats, TestDiskStats) {
+
     std::vector<StringData> disks{"dm-1", "sda", "sdb"};
 
     // Normal case including high device major numbers.

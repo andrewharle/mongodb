@@ -1,4 +1,8 @@
 // SERVER-7781 $geoNear pipeline stage
+// @tags: [
+//   requires_sharding,
+//   requires_spawning_own_processes,
+// ]
 (function() {
     'use strict';
 
@@ -11,10 +15,9 @@
     db[coll].insert({loc: [0, 0]});
 
     // $geoNear is only allowed as the first stage in a pipeline, nowhere else.
-    assertErrorCode(
-        db[coll],
-        [{$match: {x: 1}}, {$geoNear: {near: [1, 1], spherical: true, distanceField: 'dis'}}],
-        28837);
+    assert.throws(
+        () => db[coll].aggregate(
+            [{$match: {x: 1}}, {$geoNear: {near: [1, 1], spherical: true, distanceField: 'dis'}}]));
 
     function checkOutput(cmdOut, aggOut, expectedNum) {
         assert.commandWorked(cmdOut, "geoNear command");
@@ -31,10 +34,7 @@
         for (var i = 0; i < cmdOut.length; i++) {
             massaged = {};
             Object.extend(massaged, cmdOut[i].obj, /*deep=*/true);
-            massaged.stats = {
-                'dis': cmdOut[i].dis,
-                'loc': cmdOut[i].loc
-            };
+            massaged.stats = {'dis': cmdOut[i].dis, 'loc': cmdOut[i].loc};
 
             if (!friendlyEqual(massaged, aggOut[i])) {
                 allSame = false;  // don't bail yet since we want to print all differences
@@ -90,12 +90,7 @@
 
         // test with defaults
         var queryPoint = pointMaker.mkPt(0.25);  // stick to center of map
-        var geoCmd = {
-            geoNear: coll,
-            near: queryPoint,
-            includeLocs: true,
-            spherical: true
-        };
+        var geoCmd = {geoNear: coll, near: queryPoint, includeLocs: true, spherical: true};
         var aggCmd = {
             $geoNear: {
                 near: queryPoint,
@@ -152,7 +147,7 @@
         delete aggCmd.$geoNear.num;
         var cmdRes = db[coll].runCommand("aggregate", {pipeline: [aggCmd], cursor: {batchSize: 0}});
         assert.commandWorked(cmdRes);
-        var cmdCursor = new DBCommandCursor(db[coll].getMongo(), cmdRes, 0);
+        var cmdCursor = new DBCommandCursor(db, cmdRes, 0);
         checkOutput(db.runCommand(geoCmd), cmdCursor, 70);
     }
 
@@ -161,7 +156,7 @@
 
     var sharded = new ShardingTest({shards: 3, mongos: 1});
     assert.commandWorked(sharded.s0.adminCommand({enablesharding: "test"}));
-    sharded.ensurePrimaryShard('test', 'shard0001');
+    sharded.ensurePrimaryShard('test', sharded.shard1.shardName);
 
     test(sharded.getDB('test'), true, '2d');
     test(sharded.getDB('test'), true, '2dsphere');

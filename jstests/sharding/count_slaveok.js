@@ -1,16 +1,21 @@
-// Tests count and distinct using slaveOk. Also tests a scenario querying a set where only one
-// secondary is up.
+/**
+ * Tests count and distinct using slaveOk. Also tests a scenario querying a set where only one
+ * secondary is up.
+ */
+
+// Checking UUID consistency involves talking to a shard node, which in this test is shutdown
+TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
+
 (function() {
     'use strict';
 
-    var st = new ShardingTest(
-        {name: "countSlaveOk", shards: 1, mongos: 1, other: {rs: true, rs0: {nodes: 2}}});
+    load("jstests/replsets/rslib.js");
 
-    var rst = st._rs[0].test;
+    var st = new ShardingTest({shards: 1, mongos: 1, other: {rs: true, rs0: {nodes: 2}}});
+    var rst = st.rs0;
 
     // Insert data into replica set
     var conn = new Mongo(st.s.host);
-    conn.setLogLevel(3);
 
     var coll = conn.getCollection('test.countSlaveOk');
     coll.drop();
@@ -38,10 +43,10 @@
     printjson(rst.status());
 
     // Wait for the mongos to recognize the slave
-    ReplSetTest.awaitRSClientHosts(conn, sec, {ok: true, secondary: true});
+    awaitRSClientHosts(conn, sec, {ok: true, secondary: true});
 
     // Make sure that mongos realizes that primary is already down
-    ReplSetTest.awaitRSClientHosts(conn, primary, {ok: false});
+    awaitRSClientHosts(conn, primary, {ok: false});
 
     // Need to check slaveOk=true first, since slaveOk=false will destroy conn in pool when
     // master is down
@@ -60,11 +65,9 @@
 
         print("Should not reach here!");
         assert(false);
-
     } catch (e) {
         print("Non-slaveOk'd connection failed.");
     }
 
     st.stop();
-
 })();

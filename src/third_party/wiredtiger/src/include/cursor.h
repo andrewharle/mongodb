@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -22,9 +22,13 @@
 	search,								\
 	search_near,							\
 	insert,								\
+	modify,								\
 	update,								\
 	remove,								\
+	reserve,							\
 	reconfigure,							\
+	cache,								\
+	reopen,								\
 	close)								\
 	static const WT_CURSOR n = {					\
 	NULL,				/* session */			\
@@ -43,10 +47,15 @@
 	search,								\
 	search_near,							\
 	insert,								\
+	modify,								\
 	update,								\
 	remove,								\
+	reserve,							\
 	close,								\
 	reconfigure,							\
+	cache,								\
+	reopen,								\
+	0,				/* uri_hash */			\
 	{ NULL, NULL },			/* TAILQ_ENTRY q */		\
 	0,				/* recno key */			\
 	{ 0 },				/* recno raw buffer */		\
@@ -70,7 +79,10 @@ struct __wt_cursor_backup {
 	size_t list_allocated;
 	size_t list_next;
 
-#define	WT_CURBACKUP_LOCKER	0x01	/* Hot-backup started */
+/* AUTOMATIC FLAG VALUE GENERATION START */
+#define	WT_CURBACKUP_DUP	0x1u	/* Duplicated backup cursor */
+#define	WT_CURBACKUP_LOCKER	0x2u	/* Hot-backup started */
+/* AUTOMATIC FLAG VALUE GENERATION STOP */
 	uint8_t	flags;
 };
 #define	WT_CURSOR_BACKUP_ID(cursor)	(((WT_CURSOR_BACKUP *)(cursor))->maxid)
@@ -78,7 +90,13 @@ struct __wt_cursor_backup {
 struct __wt_cursor_btree {
 	WT_CURSOR iface;
 
+	/*
+	 * The btree field is safe to use when the cursor is open.  When the
+	 * cursor is cached, the btree may be closed, so it is only safe
+	 * initially to look at the underlying data handle.
+	 */
 	WT_BTREE *btree;		/* Enclosing btree */
+	WT_DATA_HANDLE *dhandle;	/* Data handle for the btree */
 
 	/*
 	 * The following fields are set by the search functions as a precursor
@@ -205,20 +223,25 @@ struct __wt_cursor_btree {
 	uint64_t lastrecno;
 #endif
 
-#define	WT_CBT_ACTIVE		0x01	/* Active in the tree */
-#define	WT_CBT_ITERATE_APPEND	0x02	/* Col-store: iterating append list */
-#define	WT_CBT_ITERATE_NEXT	0x04	/* Next iteration configuration */
-#define	WT_CBT_ITERATE_PREV	0x08	/* Prev iteration configuration */
-#define	WT_CBT_NO_TXN   	0x10	/* Non-transactional cursor
-					   (e.g. on a checkpoint) */
-#define	WT_CBT_SEARCH_SMALLEST	0x20	/* Row-store: small-key insert list */
-#define	WT_CBT_VAR_ONPAGE_MATCH	0x40	/* Var-store: on-page recno match */
+/* AUTOMATIC FLAG VALUE GENERATION START */
+#define	WT_CBT_ACTIVE		0x001u	/* Active in the tree */
+#define	WT_CBT_ITERATE_APPEND	0x002u	/* Col-store: iterating append list */
+#define	WT_CBT_ITERATE_NEXT	0x004u	/* Next iteration configuration */
+#define	WT_CBT_ITERATE_PREV	0x008u	/* Prev iteration configuration */
+#define	WT_CBT_ITERATE_RETRY_NEXT	0x010u	/* Prepare conflict by next. */
+#define	WT_CBT_ITERATE_RETRY_PREV	0x020u	/* Prepare conflict by prev. */
+#define	WT_CBT_NO_TXN   	0x040u	/* Non-txn cursor (e.g. a checkpoint) */
+#define	WT_CBT_READ_ONCE	0x080u	/* Page in with WT_READ_WONT_NEED */
+#define	WT_CBT_SEARCH_SMALLEST	0x100u	/* Row-store: small-key insert list */
+#define	WT_CBT_VAR_ONPAGE_MATCH	0x200u	/* Var-store: on-page recno match */
+/* AUTOMATIC FLAG VALUE GENERATION STOP */
 
 #define	WT_CBT_POSITION_MASK		/* Flags associated with position */ \
 	(WT_CBT_ITERATE_APPEND | WT_CBT_ITERATE_NEXT | WT_CBT_ITERATE_PREV | \
+	WT_CBT_ITERATE_RETRY_NEXT | WT_CBT_ITERATE_RETRY_PREV |		     \
 	WT_CBT_SEARCH_SMALLEST | WT_CBT_VAR_ONPAGE_MATCH)
 
-	uint8_t flags;
+	uint32_t flags;
 };
 
 struct __wt_cursor_bulk {
@@ -332,12 +355,14 @@ struct __wt_cursor_join_endpoint {
 	uint8_t			 recno_buf[10];	/* holds packed recno */
 	WT_CURSOR		*cursor;
 
-#define	WT_CURJOIN_END_LT	0x01		/* include values <  cursor */
-#define	WT_CURJOIN_END_EQ	0x02		/* include values == cursor */
-#define	WT_CURJOIN_END_GT	0x04		/* include values >  cursor */
+/* AUTOMATIC FLAG VALUE GENERATION START */
+#define	WT_CURJOIN_END_EQ		0x1u	/* include values == cursor */
+#define	WT_CURJOIN_END_GT		0x2u	/* include values >  cursor */
+#define	WT_CURJOIN_END_LT		0x4u	/* include values <  cursor */
+#define	WT_CURJOIN_END_OWN_CURSOR	0x8u	/* must close cursor */
+/* AUTOMATIC FLAG VALUE GENERATION STOP */
 #define	WT_CURJOIN_END_GE	(WT_CURJOIN_END_GT | WT_CURJOIN_END_EQ)
 #define	WT_CURJOIN_END_LE	(WT_CURJOIN_END_LT | WT_CURJOIN_END_EQ)
-#define	WT_CURJOIN_END_OWN_CURSOR 0x08		/* must close cursor */
 	uint8_t			 flags;		/* range for this endpoint */
 };
 #define	WT_CURJOIN_END_RANGE(endp)					\
@@ -361,11 +386,12 @@ struct __wt_cursor_join_entry {
 	uint32_t		 bloom_hash_count; /* hash functions in bloom */
 	uint64_t		 count;		/* approx number of matches */
 
-#define	WT_CURJOIN_ENTRY_BLOOM		 0x01	/* use a bloom filter */
-#define	WT_CURJOIN_ENTRY_DISJUNCTION	 0x02	/* endpoints are or-ed */
-#define	WT_CURJOIN_ENTRY_FALSE_POSITIVES 0x04	/* after bloom filter do not
-						 * filter false positives */
-#define	WT_CURJOIN_ENTRY_OWN_BLOOM	 0x08	/* this entry owns the bloom */
+/* AUTOMATIC FLAG VALUE GENERATION START */
+#define	WT_CURJOIN_ENTRY_BLOOM		 0x1u	/* use a bloom filter */
+#define	WT_CURJOIN_ENTRY_DISJUNCTION	 0x2u	/* endpoints are or-ed */
+#define	WT_CURJOIN_ENTRY_FALSE_POSITIVES 0x4u	/* don't filter false pos */
+#define	WT_CURJOIN_ENTRY_OWN_BLOOM	 0x8u	/* this entry owns the bloom */
+/* AUTOMATIC FLAG VALUE GENERATION STOP */
 	uint8_t			 flags;
 
 	WT_CURSOR_JOIN_ENDPOINT	*ends;		/* reference endpoints */
@@ -388,9 +414,11 @@ struct __wt_cursor_join {
 	u_int			 entries_next;
 	uint8_t			 recno_buf[10];	/* holds packed recno */
 
-#define	WT_CURJOIN_DISJUNCTION		0x01	/* Entries are or-ed */
-#define	WT_CURJOIN_ERROR		0x02	/* Error in initialization */
-#define	WT_CURJOIN_INITIALIZED		0x04	/* Successful initialization */
+/* AUTOMATIC FLAG VALUE GENERATION START */
+#define	WT_CURJOIN_DISJUNCTION		0x1u	/* Entries are or-ed */
+#define	WT_CURJOIN_ERROR		0x2u	/* Error in initialization */
+#define	WT_CURJOIN_INITIALIZED		0x4u	/* Successful initialization */
+/* AUTOMATIC FLAG VALUE GENERATION STOP */
 	uint8_t			 flags;
 };
 
@@ -415,7 +443,9 @@ struct __wt_cursor_log {
 	uint32_t	rectype;	/* Record type */
 	uint64_t	txnid;		/* Record txnid */
 
-#define	WT_CURLOG_ARCHIVE_LOCK	0x01	/* Archive lock held */
+/* AUTOMATIC FLAG VALUE GENERATION START */
+#define	WT_CURLOG_ARCHIVE_LOCK	0x1u	/* Archive lock held */
+/* AUTOMATIC FLAG VALUE GENERATION STOP */
 	uint8_t		flags;
 };
 
@@ -425,9 +455,11 @@ struct __wt_cursor_metadata {
 	WT_CURSOR *file_cursor;		/* Queries of regular metadata */
 	WT_CURSOR *create_cursor;	/* Extra cursor for create option */
 
-#define	WT_MDC_CREATEONLY	0x01
-#define	WT_MDC_ONMETADATA	0x02
-#define	WT_MDC_POSITIONED	0x04
+/* AUTOMATIC FLAG VALUE GENERATION START */
+#define	WT_MDC_CREATEONLY	0x1u
+#define	WT_MDC_ONMETADATA	0x2u
+#define	WT_MDC_POSITIONED	0x4u
+/* AUTOMATIC FLAG VALUE GENERATION STOP */
 	uint8_t	flags;
 };
 
@@ -456,6 +488,7 @@ struct __wt_cursor_stat {
 		WT_DSRC_STATS dsrc_stats;
 		WT_CONNECTION_STATS conn_stats;
 		WT_JOIN_STATS_GROUP join_stats_group;
+		WT_SESSION_STATS session_stats;
 	} u;
 
 	const char **cfg;		/* Original cursor configuration */
@@ -496,58 +529,6 @@ struct __wt_cursor_table {
 	(((WT_CURSOR_TABLE *)(cursor))->cg_cursors[0])
 
 #define	WT_CURSOR_RECNO(cursor)	WT_STREQ((cursor)->key_format, "r")
-
-/*
- * WT_CURSOR_NEEDKEY, WT_CURSOR_NEEDVALUE --
- *	Check if we have a key/value set.  There's an additional semantic
- * implemented here: if we're pointing into the tree, and about to perform
- * a cursor operation, get a local copy of whatever we're referencing in
- * the tree, there's an obvious race with the cursor moving and the key or
- * value reference, and it's better to solve it here than in the underlying
- * data-source layers.
- *
- * WT_CURSOR_CHECKKEY --
- *	Check if a key is set without making a copy.
- *
- * WT_CURSOR_NOVALUE --
- *	Release any cached value before an operation that could update the
- * transaction context and free data a value is pointing to.
- */
-#define	WT_CURSOR_CHECKKEY(cursor) do {					\
-	if (!F_ISSET(cursor, WT_CURSTD_KEY_SET))			\
-		WT_ERR(__wt_cursor_kv_not_set(cursor, true));		\
-} while (0)
-#define	WT_CURSOR_CHECKVALUE(cursor) do {				\
-	if (!F_ISSET(cursor, WT_CURSTD_VALUE_SET))			\
-		WT_ERR(__wt_cursor_kv_not_set(cursor, false));		\
-} while (0)
-#define	WT_CURSOR_NEEDKEY(cursor) do {					\
-	if (F_ISSET(cursor, WT_CURSTD_KEY_INT)) {			\
-		if (!WT_DATA_IN_ITEM(&(cursor)->key))			\
-			WT_ERR(__wt_buf_set(				\
-			    (WT_SESSION_IMPL *)(cursor)->session,	\
-			    &(cursor)->key,				\
-			    (cursor)->key.data, (cursor)->key.size));	\
-		F_CLR(cursor, WT_CURSTD_KEY_INT);			\
-		F_SET(cursor, WT_CURSTD_KEY_EXT);			\
-	}								\
-	WT_CURSOR_CHECKKEY(cursor);					\
-} while (0)
-#define	WT_CURSOR_NEEDVALUE(cursor) do {				\
-	if (F_ISSET(cursor, WT_CURSTD_VALUE_INT)) {			\
-		if (!WT_DATA_IN_ITEM(&(cursor)->value))			\
-			WT_ERR(__wt_buf_set(				\
-			    (WT_SESSION_IMPL *)(cursor)->session,	\
-			    &(cursor)->value,				\
-			    (cursor)->value.data, (cursor)->value.size));\
-		F_CLR(cursor, WT_CURSTD_VALUE_INT);			\
-		F_SET(cursor, WT_CURSTD_VALUE_EXT);			\
-	}								\
-	WT_CURSOR_CHECKVALUE(cursor);					\
-} while (0)
-#define	WT_CURSOR_NOVALUE(cursor) do {					\
-	F_CLR(cursor, WT_CURSTD_VALUE_INT);				\
-} while (0)
 
 #define	WT_CURSOR_RAW_OK						\
 	(WT_CURSTD_DUMP_HEX | WT_CURSTD_DUMP_PRINT | WT_CURSTD_RAW)

@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -30,94 +32,85 @@
 
 #include "mongo/rpc/legacy_request_builder.h"
 
-#include <utility>
 #include <tuple>
+#include <utility>
 
+#include "mongo/client/dbclientinterface.h"
+#include "mongo/client/read_preference.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/rpc/message.h"
 #include "mongo/rpc/metadata.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/net/message.h"
 
 namespace mongo {
 namespace rpc {
 
-LegacyRequestBuilder::LegacyRequestBuilder() : LegacyRequestBuilder(Message()) {}
-
-LegacyRequestBuilder::~LegacyRequestBuilder() {}
-
-LegacyRequestBuilder::LegacyRequestBuilder(Message&& message) : _message{std::move(message)} {
-    _builder.skip(mongo::MsgData::MsgDataHeaderSize);
+namespace {
+void mergeInDocumentSequences(const OpMsgRequest& request, BSONObjBuilder* body) {
+    for (auto&& seq : request.sequences) {
+        invariant(seq.name.find('.') == std::string::npos);  // Only support top-level for now.
+        dassert(!body->asTempObj().hasField(seq.name));
+        body->append(seq.name, seq.objs);
+    }
 }
 
-LegacyRequestBuilder& LegacyRequestBuilder::setDatabase(StringData database) {
-    invariant(_state == State::kDatabase);
-    _ns = NamespaceString(database, "$cmd").toString();
-    _state = State::kCommandName;
-    return *this;
-}
+/**
+ * Given a command request, attempts to construct a legacy command
+ * object and query flags bitfield augmented with the given metadata.
+ */
+BSONObj downconvertRequestBody(const OpMsgRequest& request, int* queryOptions) {
+    *queryOptions = 0;
 
-LegacyRequestBuilder& LegacyRequestBuilder::setCommandName(StringData commandName) {
-    invariant(_state == State::kCommandName);
-    // no op, as commandName is the first element of commandArgs
-    _state = State::kCommandArgs;
-    return *this;
-}
+    if (auto readPref = request.body["$readPreference"]) {
+        auto parsed = ReadPreferenceSetting::fromInnerBSON(readPref);
+        if (parsed.isOK() && parsed.getValue().canRunOnSecondary()) {
+            *queryOptions |= QueryOption_SlaveOk;
+        }
 
-LegacyRequestBuilder& LegacyRequestBuilder::setCommandArgs(BSONObj commandArgs) {
-    invariant(_state == State::kCommandArgs);
-    _commandArgs = std::move(commandArgs);
-    _state = State::kMetadata;
-    return *this;
+        BSONObjBuilder outer;
+        {
+            BSONObjBuilder inner(outer.subobjStart("$query"));
+            for (auto field : request.body) {
+                const auto name = field.fieldNameStringData();
+                if (name == "$readPreference" || name == "$db") {
+                    // skip field.
+                } else {
+                    inner.append(field);
+                }
+            }
+            mergeInDocumentSequences(request, &inner);
+        }
+        outer.append(readPref);
+        return outer.obj();
+    } else {
+        BSONObjBuilder body(request.body.removeField("$db"));
+        mergeInDocumentSequences(request, &body);
+        return body.obj();
+    }
 }
+}  // namespace
 
-LegacyRequestBuilder& LegacyRequestBuilder::setMetadata(BSONObj metadata) {
-    invariant(_state == State::kMetadata);
-    BSONObj legacyCommandArgs;
+Message legacyRequestFromOpMsgRequest(const OpMsgRequest& request) {
+    BufBuilder builder;
+    builder.skip(mongo::MsgData::MsgDataHeaderSize);
+
+    const auto cmdNS = NamespaceString(request.getDatabase(), "").getCommandNS().toString();
+
     int queryOptions;
+    const auto downconvertedBody = downconvertRequestBody(request, &queryOptions);
 
-    std::tie(legacyCommandArgs, queryOptions) = uassertStatusOK(
-        rpc::downconvertRequestMetadata(std::move(_commandArgs), std::move(metadata)));
+    builder.appendNum(queryOptions);
+    builder.appendStr(cmdNS);
+    builder.appendNum(0);  // nToSkip
+    builder.appendNum(1);  // nToReturn
 
-    _builder.appendNum(queryOptions);  // queryOptions
-    _builder.appendStr(_ns);
-    _builder.appendNum(0);  // nToSkip
-    _builder.appendNum(1);  // nToReturn
+    downconvertedBody.appendSelfToBufBuilder(builder);
 
-    legacyCommandArgs.appendSelfToBufBuilder(_builder);
-    _state = State::kInputDocs;
-    return *this;
-}
-
-LegacyRequestBuilder& LegacyRequestBuilder::addInputDocs(DocumentRange inputDocs) {
-    invariant(_state == State::kInputDocs);
-    // no op
-    return *this;
-}
-
-LegacyRequestBuilder& LegacyRequestBuilder::addInputDoc(BSONObj inputDoc) {
-    invariant(_state == State::kInputDocs);
-    // no op
-    return *this;
-}
-
-RequestBuilderInterface::State LegacyRequestBuilder::getState() const {
-    return _state;
-}
-
-Protocol LegacyRequestBuilder::getProtocol() const {
-    return rpc::Protocol::kOpQuery;
-}
-
-Message LegacyRequestBuilder::done() {
-    invariant(_state == State::kInputDocs);
-    MsgData::View msg = _builder.buf();
-    msg.setLen(_builder.len());
+    MsgData::View msg = builder.buf();
+    msg.setLen(builder.len());
     msg.setOperation(dbQuery);
-    _builder.decouple();                     // release ownership from BufBuilder
-    _message.setData(msg.view2ptr(), true);  // transfer ownership to Message
-    _state = State::kDone;
-    return std::move(_message);
+    return Message(builder.release());
 }
 
 }  // namespace rpc

@@ -1,5 +1,6 @@
 /**
  * This tests that CLAC (collection level access control) handles system collections properly.
+ * @tags: [requires_sharding]
  */
 
 // Verify that system collections are treated correctly
@@ -23,10 +24,7 @@ function runTest(admindb) {
             {resource: {db: admindb.getName(), collection: sysCollections[i]}, actions: ['find']});
     }
 
-    var findPriv = {
-        resource: {db: admindb.getName(), collection: ""},
-        actions: ['find']
-    };
+    var findPriv = {resource: {db: admindb.getName(), collection: ""}, actions: ['find']};
 
     admindb.createRole({role: "FindInDB", roles: [], privileges: [findPriv]});
     admindb.createRole({role: "FindOnSysRes", roles: [], privileges: sysPrivs});
@@ -60,9 +58,11 @@ function runTest(admindb) {
 jsTest.log('Test standalone');
 var conn = MongoRunner.runMongod({auth: ''});
 runTest(conn.getDB("admin"));
-MongoRunner.stopMongod(conn.port);
+MongoRunner.stopMongod(conn);
 
 jsTest.log('Test sharding');
-var st = new ShardingTest({shards: 2, config: 3, keyFile: 'jstests/libs/key1'});
+// TODO: Remove 'shardAsReplicaSet: false' when SERVER-32672 is fixed.
+var st = new ShardingTest(
+    {shards: 2, config: 3, keyFile: 'jstests/libs/key1', other: {shardAsReplicaSet: false}});
 runTest(st.s.getDB("admin"));
 st.stop();

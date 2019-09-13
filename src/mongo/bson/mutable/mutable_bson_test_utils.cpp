@@ -1,28 +1,31 @@
-/* Copyright 2013 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/platform/basic.h"
@@ -142,7 +145,7 @@ bool checkDocNoOrderingImpl(ConstElement lhs, ConstElement rhs) {
     } else {
         // This is some leaf type. We've already checked or ignored field names, so
         // don't recheck it here.
-        return lhs.compareWithElement(rhs, false) == 0;
+        return lhs.compareWithElement(rhs, nullptr, false) == 0;
     }
 }
 
@@ -158,32 +161,37 @@ bool checkDoc(const Document& lhs, const BSONObj& rhs) {
     const int primaryResult = fromLhs.woCompare(rhs);
 
     // Validate primary result via other comparison paths.
-    const int secondaryResult = lhs.compareWithBSONObj(rhs);
+    const int secondaryResult = lhs.compareWithBSONObj(rhs, nullptr);
 
     assertSameSign(primaryResult, secondaryResult);
 
     // Check that mutables serialized result matches against its origin.
-    ASSERT_EQUALS(0, lhs.compareWithBSONObj(fromLhs));
+    ASSERT_EQUALS(0, lhs.compareWithBSONObj(fromLhs, nullptr));
 
     return (primaryResult == 0);
 }
 
 bool checkDoc(const Document& lhs, const Document& rhs) {
-    const int primaryResult = lhs.compareWith(rhs);
+    const int primaryResult = lhs.compareWith(rhs, nullptr);
 
     const BSONObj fromLhs = lhs.getObject();
     const BSONObj fromRhs = rhs.getObject();
 
-    const int result_d_o = lhs.compareWithBSONObj(fromRhs);
-    const int result_o_d = rhs.compareWithBSONObj(fromLhs);
+    const int result_d_o = lhs.compareWithBSONObj(fromRhs, nullptr);
+    const int result_o_d = rhs.compareWithBSONObj(fromLhs, nullptr);
 
     assertSameSign(primaryResult, result_d_o);
     assertOppositeSign(primaryResult, result_o_d);
 
-    ASSERT_EQUALS(0, lhs.compareWithBSONObj(fromLhs));
-    ASSERT_EQUALS(0, rhs.compareWithBSONObj(fromRhs));
+    ASSERT_EQUALS(0, lhs.compareWithBSONObj(fromLhs, nullptr));
+    ASSERT_EQUALS(0, rhs.compareWithBSONObj(fromRhs, nullptr));
 
     return (primaryResult == 0);
+}
+
+std::ostream& operator<<(std::ostream& stream, const ConstElement& elt) {
+    stream << elt.toString();
+    return stream;
 }
 
 std::ostream& operator<<(std::ostream& stream, const Document& doc) {
@@ -191,7 +199,7 @@ std::ostream& operator<<(std::ostream& stream, const Document& doc) {
     return stream;
 }
 
-std::ostream& operator<<(std::ostream& stream, const ConstElement& elt) {
+std::ostream& operator<<(std::ostream& stream, const Element& elt) {
     stream << elt.toString();
     return stream;
 }

@@ -1,42 +1,47 @@
-/**
-*    Copyright (C) 2008 10gen Inc.
-*
-*    This program is free software: you can redistribute it and/or  modify
-*    it under the terms of the GNU Affero General Public License, version 3,
-*    as published by the Free Software Foundation.
-*
-*    This program is distributed in the hope that it will be useful,
-*    but WITHOUT ANY WARRANTY; without even the implied warranty of
-*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*    GNU Affero General Public License for more details.
-*
-*    You should have received a copy of the GNU Affero General Public License
-*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*
-*    As a special exception, the copyright holders give permission to link the
-*    code of portions of this program with the OpenSSL library under certain
-*    conditions as described in each individual source file and distribute
-*    linked combinations including the program with the OpenSSL library. You
-*    must comply with the GNU Affero General Public License in all respects for
-*    all of the code used other than as permitted herein. If you modify file(s)
-*    with this exception, you may extend this exception to your version of the
-*    file(s), but you are not obligated to do so. If you do not wish to do so,
-*    delete this exception statement from your version. If you delete this
-*    exception statement from all source files in the program, then also delete
-*    it in the license file.
-*/
 
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
+ *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
+ *
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
+ */
+
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kCommand
 #include "mongo/platform/basic.h"
 
 #include "mongo/base/status.h"
 #include "mongo/db/auth/action_set.h"
-#include "mongo/db/auth/resource_pattern.h"
 #include "mongo/db/auth/authorization_session.h"
+#include "mongo/db/auth/resource_pattern.h"
 #include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/cloner.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/s/grid.h"
+#include "mongo/util/log.h"
 
 namespace {
 
@@ -46,31 +51,32 @@ using std::set;
 using std::string;
 using std::stringstream;
 
-/* Usage:
+/* The clone command is deprecated. See http://dochub.mongodb.org/core/copydb-clone-deprecation.
+   Usage:
    mydb.$cmd.findOne( { clone: "fromhost" } );
    Note: doesn't work with authentication enabled, except as internal operation or for
    old-style users for backwards compatibility.
 */
-class CmdClone : public Command {
+class CmdClone : public BasicCommand {
 public:
-    CmdClone() : Command("clone") {}
+    CmdClone() : BasicCommand("clone") {}
 
-    virtual bool slaveOk() const {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
     }
 
-    virtual bool isWriteCommandForConfigServer() const {
+    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return true;
     }
 
-    virtual void help(stringstream& help) const {
-        help << "clone this database from an instance of the db on another host\n";
-        help << "{clone: \"host13\"[, slaveOk: <bool>]}";
+    std::string help() const override {
+        return "clone this database from an instance of the db on another host\n"
+               "{clone: \"host13\"[, slaveOk: <bool>]}";
     }
 
-    virtual Status checkAuthForCommand(ClientBasic* client,
+    virtual Status checkAuthForCommand(Client* client,
                                        const std::string& dbname,
-                                       const BSONObj& cmdObj) {
+                                       const BSONObj& cmdObj) const {
         ActionSet actions;
         actions.addAction(ActionType::insert);
         actions.addAction(ActionType::createIndex);
@@ -85,15 +91,18 @@ public:
         return Status::OK();
     }
 
-    virtual bool run(OperationContext* txn,
+    virtual bool run(OperationContext* opCtx,
                      const string& dbname,
-                     BSONObj& cmdObj,
-                     int,
-                     string& errmsg,
+                     const BSONObj& cmdObj,
                      BSONObjBuilder& result) {
+        const char* deprecationWarning =
+            "Support for the clone command has been deprecated. See "
+            "http://dochub.mongodb.org/core/copydb-clone-deprecation";
+        warning() << deprecationWarning;
+        result.append("note", deprecationWarning);
         boost::optional<DisableDocumentValidation> maybeDisableValidation;
         if (shouldBypassDocumentValidationForCommand(cmdObj)) {
-            maybeDisableValidation.emplace(txn);
+            maybeDisableValidation.emplace(opCtx);
         }
 
         string from = cmdObj.getStringField("clone");
@@ -103,46 +112,33 @@ public:
         CloneOptions opts;
         opts.fromDB = dbname;
         opts.slaveOk = cmdObj["slaveOk"].trueValue();
-        opts.checkForCatalogChange = cmdObj["_checkForCatalogChange"].trueValue();
 
-        if (opts.checkForCatalogChange) {
-            auto catalogManager = grid.catalogManager(txn);
-            if (!catalogManager) {
-                return appendCommandStatus(
-                    result,
-                    Status(ErrorCodes::NotYetInitialized,
-                           "Cannot run clone command for use by sharding movePrimary command on a "
-                           "node that isn't yet sharding aware"));
-            }
-            opts.initialCatalogMode = catalogManager->getMode();
-        }
-
-        // See if there's any collections we should ignore
+        // collsToIgnore is only used by movePrimary and contains a list of the
+        // sharded collections.
         if (cmdObj["collsToIgnore"].type() == Array) {
             BSONObjIterator it(cmdObj["collsToIgnore"].Obj());
 
             while (it.more()) {
                 BSONElement e = it.next();
                 if (e.type() == String) {
-                    opts.collsToIgnore.insert(e.String());
+                    opts.shardedColls.insert(e.String());
                 }
             }
         }
 
+        // Clone the non-ignored collections.
         set<string> clonedColls;
-
-        ScopedTransaction transaction(txn, MODE_IX);
-        Lock::DBLock dbXLock(txn->lockState(), dbname, MODE_X);
+        Lock::DBLock dbXLock(opCtx, dbname, MODE_X);
 
         Cloner cloner;
-        Status status = cloner.copyDb(txn, dbname, from, opts, &clonedColls);
+        Status status = cloner.copyDb(opCtx, dbname, from, opts, &clonedColls);
 
         BSONArrayBuilder barr;
         barr.append(clonedColls);
-
         result.append("clonedColls", barr.arr());
 
-        return appendCommandStatus(result, status);
+        uassertStatusOK(status);
+        return true;
     }
 
 } cmdClone;

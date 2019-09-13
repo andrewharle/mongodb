@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -28,13 +30,15 @@
 
 #pragma once
 
-#include "mongo/db/jsobj.h"
 #include "mongo/db/hasher.h"
+#include "mongo/db/jsobj.h"
 #include "mongo/db/matcher/expression_parser.h"
 #include "mongo/db/query/index_bounds.h"
 #include "mongo/db/query/index_entry.h"
 
 namespace mongo {
+
+class CollatorInterface;
 
 /**
  * Translates expressions over fields into bounds on an index.
@@ -68,13 +72,24 @@ public:
     static void allValuesForField(const BSONElement& elt, OrderedIntervalList* out);
 
     /**
+     * Returns true if 'expr' can correctly be assigned as an INEXACT_COVERED predicate to an index
+     * scan over 'index'.
+     *
+     * The result of this function is not meaningful when the predicate applies to special fields
+     * such as "hashed", "2d", or "2dsphere". That is, the caller is responsible for ensuring that
+     * 'expr' is a candidate for covered matching over a regular ascending/descending field of the
+     * index.
+     */
+    static bool canUseCoveredMatching(const MatchExpression* expr, const IndexEntry& index);
+
+    /**
      * Turn the MatchExpression in 'expr' into a set of index bounds.  The field that 'expr' is
      * concerned with is indexed according to the keypattern element 'elt' from index 'index'.
      *
      * If 'expr' is elemMatch, the index tag is affixed to a child.
      *
-     * The expression must be a predicate over one field.  That is, expr->isLeaf() or
-     * expr->isArray() must be true, and expr->isLogical() must be false.
+     * The expression must be a predicate over one field.  That is, expression category must be
+     * kLeaf or kArrayMatching.
      */
     static void translate(const MatchExpression* expr,
                           const BSONElement& elt,
@@ -106,15 +121,14 @@ public:
      * Make a range interval from the provided object.
      * The object must have exactly two fields.  The first field is the start, the second the
      * end.
-     * The two inclusive flags indicate whether or not the start/end fields are included in the
+     * The BoundInclusion indicates whether or not the start/end fields are included in the
      * interval (closed interval if included, open if not).
      */
-    static Interval makeRangeInterval(const BSONObj& obj, bool startInclusive, bool endInclusive);
+    static Interval makeRangeInterval(const BSONObj& obj, BoundInclusion boundInclusion);
 
     static Interval makeRangeInterval(const std::string& start,
                                       const std::string& end,
-                                      bool startInclusive,
-                                      bool endInclusive);
+                                      BoundInclusion boundInclusion);
 
     /**
      * Make a point interval from the provided object.
@@ -125,10 +139,11 @@ public:
     static Interval makePointInterval(double d);
 
     /**
-     * Since we have no BSONValue we must make an object that's a copy of a piece of another
-     * object.
+     * Wraps 'elt' in a BSONObj with an empty field name and returns the result. If 'elt' is a
+     * string, and 'collator' is non-null, the result contains the collator-generated comparison key
+     * rather than the original string.
      */
-    static BSONObj objFromElement(const BSONElement& elt);
+    static BSONObj objFromElement(const BSONElement& elt, const CollatorInterface* collator);
 
     /**
      * Swap start/end in the provided interval.
@@ -136,16 +151,14 @@ public:
     static void reverseInterval(Interval* ival);
 
     /**
-     * Copied almost verbatim from db/queryutil.cpp.
+     * Returns a std::string that when used as a matcher, would match a superset of regex. Used to
+     * optimize queries in some simple regex cases that start with '^'.
      *
-     *  returns a std::string that when used as a matcher, would match a super set of regex()
-     *
-     *  returns "" for complex regular expressions
-     *
-     *  used to optimize queries in some simple regex cases that start with '^'
+     * Returns "" for complex regular expressions that cannot use tight index bounds.
      */
     static std::string simpleRegex(const char* regex,
                                    const char* flags,
+                                   const IndexEntry& index,
                                    BoundsTightness* tightnessOut);
 
     /**
@@ -154,10 +167,12 @@ public:
     static Interval allValues();
 
     static void translateRegex(const RegexMatchExpression* rme,
+                               const IndexEntry& index,
                                OrderedIntervalList* oil,
                                BoundsTightness* tightnessOut);
 
     static void translateEquality(const BSONElement& data,
+                                  const IndexEntry& index,
                                   bool isHashed,
                                   OrderedIntervalList* oil,
                                   BoundsTightness* tightnessOut);

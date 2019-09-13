@@ -1,3 +1,13 @@
+// @tags: [
+//     # Cannot implicitly shard accessed collections because of following errmsg: A single
+//     # update/delete on a sharded collection must contain an exact match on _id or contain the
+//     # shard key.
+//     assumes_unsharded_collection,
+//
+//     # group requires javascript
+//     requires_scripting,
+// ]
+
 /**
  * Tests running explain on a variety of explainable commands (find, update, remove, etc.) when
  * there are multiple plans available. This is a regression test for SERVER-20849 and SERVER-21376.
@@ -49,13 +59,12 @@
     });
 
     assert.doesNotThrow(function() {
-        coll.explain("allPlansExecution")
-            .group({
-                key: {a: 1},
-                cond: {a: {$gte: 1}},
-                reduce: function(curr, result) {},
-                initial: {}
-            });
+        coll.explain("allPlansExecution").group({
+            key: {a: 1},
+            cond: {a: {$gte: 1}},
+            reduce: function(curr, result) {},
+            initial: {}
+        });
     });
 
     // SERVER-21376: Make sure the 'rejectedPlans' field is filled in appropriately.

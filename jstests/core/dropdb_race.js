@@ -1,6 +1,10 @@
 // test dropping a db with simultaneous commits
 //
-// @tags: [assumes_write_concern_unchanged]
+// @tags: [
+//   assumes_superuser_permissions,
+//   assumes_write_concern_unchanged,
+//   does_not_support_stepdowns,
+// ]
 
 m = db.getMongo();
 baseName = "jstests_dur_droprace";
@@ -16,7 +20,7 @@ var start = new Date();
 for (var pass = 0; pass < 100; pass++) {
     if (pass % 2 == 0) {
         // sometimes wait for create db first, to vary the timing of things
-        var options = ( pass % 4 == 0 )? { writeConcern: { fsync: true }} : undefined;
+        var options = (pass % 4 == 0) ? {writeConcern: {fsync: true}} : undefined;
         t.insert({}, options);
     }
     t.insert({x: 1});

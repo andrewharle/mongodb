@@ -1,32 +1,34 @@
 // btree_test_help.cpp : Helper functions for Btree unit-testing
 //
 
+
 /**
- *    Copyright (C) 2014 MongoDB
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/db/storage/mmap_v1/btree/btree_test_help.h"
@@ -73,9 +75,9 @@ BtreeLogicTestHelper<OnDiskFormat>::BtreeLogicTestHelper(const BSONObj& order)
 
     // Generate a valid record location for a "fake" record, which we will repeatedly use
     // thoughout the tests.
-    OperationContextNoop txn;
-    StatusWith<RecordId> s =
-        recordStore.insertRecord(&txn, randomData.c_str(), randomData.length(), false);
+    OperationContextNoop opCtx;
+    StatusWith<RecordId> s = recordStore.insertRecord(
+        &opCtx, randomData.c_str(), randomData.length(), Timestamp(), false);
 
     ASSERT_TRUE(s.isOK());
     ASSERT_EQUALS(1, recordStore.numRecords(NULL));
@@ -90,13 +92,13 @@ BtreeLogicTestHelper<OnDiskFormat>::BtreeLogicTestHelper(const BSONObj& order)
 
 template <class OnDiskFormat>
 void ArtificialTreeBuilder<OnDiskFormat>::makeTree(const string& spec) {
-    _helper->headManager.setHead(_txn, makeTree(fromjson(spec)).toRecordId());
+    _helper->headManager.setHead(_opCtx, makeTree(fromjson(spec)).toRecordId());
 }
 
 template <class OnDiskFormat>
 DiskLoc ArtificialTreeBuilder<OnDiskFormat>::makeTree(const BSONObj& spec) {
-    DiskLoc bucketLoc = _helper->btree._addBucket(_txn);
-    BucketType* bucket = _helper->btree.getBucket(_txn, bucketLoc);
+    DiskLoc bucketLoc = _helper->btree._addBucket(_opCtx);
+    BucketType* bucket = _helper->btree.getBucket(_opCtx, bucketLoc);
 
     BSONObjIterator i(spec);
     while (i.more()) {
@@ -114,13 +116,13 @@ DiskLoc ArtificialTreeBuilder<OnDiskFormat>::makeTree(const BSONObj& spec) {
         }
     }
 
-    _helper->btree.fixParentPtrs(_txn, bucket, bucketLoc);
+    _helper->btree.fixParentPtrs(_opCtx, bucket, bucketLoc);
     return bucketLoc;
 }
 
 template <class OnDiskFormat>
 void ArtificialTreeBuilder<OnDiskFormat>::checkStructure(const string& spec) const {
-    checkStructure(fromjson(spec), DiskLoc::fromRecordId(_helper->headManager.getHead(_txn)));
+    checkStructure(fromjson(spec), DiskLoc::fromRecordId(_helper->headManager.getHead(_opCtx)));
 }
 
 template <class OnDiskFormat>
@@ -128,16 +130,16 @@ void ArtificialTreeBuilder<OnDiskFormat>::push(const DiskLoc bucketLoc,
                                                const BSONObj& key,
                                                const DiskLoc child) {
     KeyDataOwnedType k(key);
-    BucketType* bucket = _helper->btree.getBucket(_txn, bucketLoc);
+    BucketType* bucket = _helper->btree.getBucket(_opCtx, bucketLoc);
 
     invariant(_helper->btree.pushBack(bucket, _helper->dummyDiskLoc, k, child));
-    _helper->btree.fixParentPtrs(_txn, bucket, bucketLoc);
+    _helper->btree.fixParentPtrs(_opCtx, bucket, bucketLoc);
 }
 
 template <class OnDiskFormat>
 void ArtificialTreeBuilder<OnDiskFormat>::checkStructure(const BSONObj& spec,
                                                          const DiskLoc node) const {
-    BucketType* bucket = _helper->btree.getBucket(_txn, node);
+    BucketType* bucket = _helper->btree.getBucket(_opCtx, node);
 
     BSONObjIterator j(spec);
     for (int i = 0; i < bucket->n; ++i) {
@@ -172,8 +174,8 @@ template <class OnDiskFormat>
 bool ArtificialTreeBuilder<OnDiskFormat>::isPresent(const BSONObj& key, int direction) const {
     int pos;
     DiskLoc loc;
-    OperationContextNoop txn;
-    return _helper->btree.locate(&txn, key, _helper->dummyDiskLoc, direction, &pos, &loc);
+    OperationContextNoop opCtx;
+    return _helper->btree.locate(&opCtx, key, _helper->dummyDiskLoc, direction, &pos, &loc);
 }
 
 // Static
@@ -200,7 +202,7 @@ int ArtificialTreeBuilder<OnDiskFormat>::fillBucketToExactSize(const DiskLoc buc
                                                                char startKey) {
     ASSERT_FALSE(bucketLoc.isNull());
 
-    BucketType* bucket = _helper->btree.getBucket(_txn, bucketLoc);
+    BucketType* bucket = _helper->btree.getBucket(_opCtx, bucketLoc);
     ASSERT_EQUALS(0, bucket->n);
 
     static const int bigSize = KeyDataOwnedType(simpleKey('a', 801)).dataSize();

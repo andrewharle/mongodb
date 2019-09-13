@@ -1,33 +1,38 @@
-/*    Copyright 2013 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kControl
 
 #include <boost/filesystem.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
 #include <fstream>
 #include <iostream>
 #include <malloc.h>
@@ -68,15 +73,15 @@ struct ProcPsinfo {
     ProcPsinfo() {
         FILE* f = fopen("/proc/self/psinfo", "r");
         massert(16846,
-                mongoutils::str::stream()
-                    << "couldn't open \"/proc/self/psinfo\": " << errnoWithDescription(),
+                mongoutils::str::stream() << "couldn't open \"/proc/self/psinfo\": "
+                                          << errnoWithDescription(),
                 f);
         size_t num = fread(&psinfo, sizeof(psinfo), 1, f);
         int err = errno;
         fclose(f);
         massert(16847,
-                mongoutils::str::stream()
-                    << "couldn't read from \"/proc/self/psinfo\": " << errnoWithDescription(err),
+                mongoutils::str::stream() << "couldn't read from \"/proc/self/psinfo\": "
+                                          << errnoWithDescription(err),
                 num == 1);
     }
     psinfo_t psinfo;
@@ -86,15 +91,15 @@ struct ProcUsage {
     ProcUsage() {
         FILE* f = fopen("/proc/self/usage", "r");
         massert(16848,
-                mongoutils::str::stream()
-                    << "couldn't open \"/proc/self/usage\": " << errnoWithDescription(),
+                mongoutils::str::stream() << "couldn't open \"/proc/self/usage\": "
+                                          << errnoWithDescription(),
                 f);
         size_t num = fread(&prusage, sizeof(prusage), 1, f);
         int err = errno;
         fclose(f);
         massert(16849,
-                mongoutils::str::stream()
-                    << "couldn't read from \"/proc/self/usage\": " << errnoWithDescription(err),
+                mongoutils::str::stream() << "couldn't read from \"/proc/self/usage\": "
+                                          << errnoWithDescription(err),
                 num == 1);
     }
     prusage_t prusage;
@@ -105,6 +110,14 @@ ProcessInfo::~ProcessInfo() {}
 
 bool ProcessInfo::supported() {
     return true;
+}
+
+// get the number of CPUs available to the scheduler
+boost::optional<unsigned long> ProcessInfo::getNumCoresForProcess() {
+    long nprocs = sysconf(_SC_NPROCESSORS_ONLN);
+    if (nprocs)
+        return nprocs;
+    return boost::none;
 }
 
 int ProcessInfo::getVirtualMemorySize() {
@@ -132,7 +145,7 @@ void ProcessInfo::getExtraInfo(BSONObjBuilder& info) {
 void ProcessInfo::SystemInfo::collectSystemInfo() {
     struct utsname unameData;
     if (uname(&unameData) == -1) {
-        log() << "Unable to collect detailed system information: " << strerror(errno) << endl;
+        log() << "Unable to collect detailed system information: " << strerror(errno);
     }
 
     char buf_64[32];
@@ -141,7 +154,7 @@ void ProcessInfo::SystemInfo::collectSystemInfo() {
         sysinfo(SI_ARCHITECTURE_NATIVE, buf_native, sizeof(buf_native)) != -1) {
         addrSize = mongoutils::str::equals(buf_64, buf_native) ? 64 : 32;
     } else {
-        log() << "Unable to determine system architecture: " << strerror(errno) << endl;
+        log() << "Unable to determine system architecture: " << strerror(errno);
     }
 
     osType = unameData.sysname;
@@ -149,6 +162,7 @@ void ProcessInfo::SystemInfo::collectSystemInfo() {
     osVersion = unameData.version;
     pageSize = static_cast<unsigned long long>(sysconf(_SC_PAGESIZE));
     memSize = pageSize * static_cast<unsigned long long>(sysconf(_SC_PHYS_PAGES));
+    memLimit = memSize;
     numCores = static_cast<unsigned>(sysconf(_SC_NPROCESSORS_CONF));
     cpuArch = unameData.machine;
     hasNuma = checkNumaEnabled();
@@ -215,7 +229,7 @@ bool ProcessInfo::blockInMemory(const void* start) {
     char x = 0;
     if (mincore(
             static_cast<char*>(const_cast<void*>(alignToStartOfPage(start))), getPageSize(), &x)) {
-        log() << "mincore failed: " << errnoWithDescription() << endl;
+        log() << "mincore failed: " << errnoWithDescription();
         return 1;
     }
     return x & 0x1;
@@ -226,7 +240,7 @@ bool ProcessInfo::pagesInMemory(const void* start, size_t numPages, std::vector<
     if (mincore(static_cast<char*>(const_cast<void*>(alignToStartOfPage(start))),
                 numPages * getPageSize(),
                 &out->front())) {
-        log() << "mincore failed: " << errnoWithDescription() << endl;
+        log() << "mincore failed: " << errnoWithDescription();
         return false;
     }
     for (size_t i = 0; i < numPages; ++i) {

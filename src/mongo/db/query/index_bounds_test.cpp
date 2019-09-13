@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -30,13 +32,15 @@
  * This file contains tests for mongo/db/query/index_bounds.cpp
  */
 
-#include "mongo/db/query/index_bounds.h"
-#include "mongo/db/json.h"
+#include "mongo/platform/basic.h"
+
 #include "mongo/db/jsobj.h"
+#include "mongo/db/json.h"
+#include "mongo/db/query/index_bounds.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/text.h"
 #include "mongo/util/mongoutils/str.h"
+#include "mongo/util/text.h"
 
 using namespace mongo;
 
@@ -118,6 +122,58 @@ TEST(IndexBoundsTest, ValidOverlapOnlyWhenBothOpen) {
     IndexBounds bounds;
     bounds.fields.push_back(list);
     ASSERT(bounds.isValidFor(BSON("foo" << 1), 1));
+}
+
+TEST(IndexBoundsCheckerTest, CheckOILReverse) {
+    // Check that the reverse of an empty list is empty.
+    OrderedIntervalList emptyList("someField");
+    emptyList.reverse();
+    OrderedIntervalList expectedReversedEmptyList("someField");
+    ASSERT_TRUE(emptyList == expectedReversedEmptyList);
+
+    // The reverse of a single-interval OIL is just an OIL with that interval reversed.
+    OrderedIntervalList singleEltList("xyz");
+    singleEltList.intervals = {Interval(BSON("" << 5 << "" << 0), false, false)};
+    singleEltList.reverse();
+
+    OrderedIntervalList expectedReversedSingleEltList("xyz");
+    expectedReversedSingleEltList.intervals = {Interval(BSON("" << 0 << "" << 5), false, false)};
+    ASSERT_TRUE(singleEltList == expectedReversedSingleEltList);
+
+    // List with a few elements
+    OrderedIntervalList fooList("foo");
+    fooList.intervals = {Interval(BSON("" << 40 << "" << 35), false, true),
+                         Interval(BSON("" << 30 << "" << 21), true, true),
+                         Interval(BSON("" << 20 << "" << 7), true, false)};
+    fooList.reverse();
+
+    OrderedIntervalList expectedReverseFooList("foo");
+    expectedReverseFooList.intervals = {Interval(BSON("" << 7 << "" << 20), false, true),
+                                        Interval(BSON("" << 21 << "" << 30), true, true),
+                                        Interval(BSON("" << 35 << "" << 40), true, false)};
+
+    ASSERT_TRUE(fooList == expectedReverseFooList);
+}
+
+TEST(IndexBoundsTest, OILReverseClone) {
+    OrderedIntervalList emptyA("foo");
+    OrderedIntervalList emptyB = emptyA.reverseClone();
+
+    ASSERT(emptyA == emptyB);
+    ASSERT(emptyA.computeDirection() == Interval::Direction::kDirectionNone);
+    ASSERT(emptyB.computeDirection() == Interval::Direction::kDirectionNone);
+
+    OrderedIntervalList list("foo");
+
+    list.intervals.push_back(Interval(BSON("" << 7 << "" << 20), true, false));
+    list.intervals.push_back(Interval(BSON("" << 20 << "" << 25), false, true));
+
+    OrderedIntervalList listClone = list.reverseClone();
+    OrderedIntervalList reverseList("foo");
+    reverseList.intervals = {Interval(BSON("" << 25 << "" << 20), true, false),
+                             Interval(BSON("" << 20 << "" << 7), false, true)};
+    ASSERT(reverseList == listClone);
+    ASSERT(listClone.computeDirection() == Interval::Direction::kDirectionDescending);
 }
 
 //
@@ -296,13 +352,13 @@ TEST(IndexBoundsTest, SimpleRangeBoundsEqual) {
     bounds1.isSimpleRange = true;
     bounds1.startKey = BSON("" << 1 << "" << 3);
     bounds1.endKey = BSON("" << 2 << "" << 4);
-    bounds1.endKeyInclusive = false;
+    bounds1.boundInclusion = BoundInclusion::kIncludeStartKeyOnly;
 
     IndexBounds bounds2;
     bounds2.isSimpleRange = true;
     bounds2.startKey = BSON("" << 1 << "" << 3);
     bounds2.endKey = BSON("" << 2 << "" << 4);
-    bounds2.endKeyInclusive = false;
+    bounds2.boundInclusion = BoundInclusion::kIncludeStartKeyOnly;
 
     ASSERT_TRUE(bounds1 == bounds2);
     ASSERT_FALSE(bounds1 != bounds2);
@@ -455,7 +511,7 @@ TEST(IndexBoundsTest, SimpleRangeBoundsNotEqualToRegularBounds) {
     bounds1.isSimpleRange = true;
     bounds1.startKey = BSON("" << 1 << "" << 3);
     bounds1.endKey = BSON("" << 2 << "" << 4);
-    bounds1.endKeyInclusive = false;
+    bounds1.boundInclusion = BoundInclusion::kIncludeStartKeyOnly;
 
     IndexBounds bounds2;
     OrderedIntervalList oil;
@@ -471,13 +527,13 @@ TEST(IndexBoundsTest, SimpleRangeBoundsNotEqualDifferentStartKey) {
     bounds1.isSimpleRange = true;
     bounds1.startKey = BSON("" << 1 << "" << 3);
     bounds1.endKey = BSON("" << 2 << "" << 4);
-    bounds1.endKeyInclusive = false;
+    bounds1.boundInclusion = BoundInclusion::kIncludeStartKeyOnly;
 
     IndexBounds bounds2;
     bounds1.isSimpleRange = true;
     bounds1.startKey = BSON("" << 1 << "" << 1);
     bounds1.endKey = BSON("" << 2 << "" << 4);
-    bounds1.endKeyInclusive = false;
+    bounds1.boundInclusion = BoundInclusion::kIncludeStartKeyOnly;
 
     ASSERT_FALSE(bounds1 == bounds2);
     ASSERT_TRUE(bounds1 != bounds2);
@@ -488,13 +544,13 @@ TEST(IndexBoundsTest, SimpleRangeBoundsNotEqualDifferentEndKey) {
     bounds1.isSimpleRange = true;
     bounds1.startKey = BSON("" << 1 << "" << 3);
     bounds1.endKey = BSON("" << 2 << "" << 4);
-    bounds1.endKeyInclusive = false;
+    bounds1.boundInclusion = BoundInclusion::kIncludeStartKeyOnly;
 
     IndexBounds bounds2;
     bounds1.isSimpleRange = true;
     bounds1.startKey = BSON("" << 1 << "" << 3);
     bounds1.endKey = BSON("" << 2 << "" << 99);
-    bounds1.endKeyInclusive = false;
+    bounds1.boundInclusion = BoundInclusion::kIncludeStartKeyOnly;
 
     ASSERT_FALSE(bounds1 == bounds2);
     ASSERT_TRUE(bounds1 != bounds2);
@@ -505,16 +561,57 @@ TEST(IndexBoundsTest, SimpleRangeBoundsNotEqualDifferentEndKeyInclusive) {
     bounds1.isSimpleRange = true;
     bounds1.startKey = BSON("" << 1 << "" << 3);
     bounds1.endKey = BSON("" << 2 << "" << 4);
-    bounds1.endKeyInclusive = false;
+    bounds1.boundInclusion = BoundInclusion::kIncludeStartKeyOnly;
 
     IndexBounds bounds2;
     bounds1.isSimpleRange = true;
     bounds1.startKey = BSON("" << 1 << "" << 3);
     bounds1.endKey = BSON("" << 2 << "" << 4);
-    bounds1.endKeyInclusive = true;
+    bounds1.boundInclusion = BoundInclusion::kIncludeBothStartAndEndKeys;
 
     ASSERT_FALSE(bounds1 == bounds2);
     ASSERT_TRUE(bounds1 != bounds2);
+}
+
+TEST(IndexBoundsTest, ForwardizeSimpleRange) {
+    IndexBounds bounds1;
+    bounds1.isSimpleRange = true;
+    bounds1.startKey = BSON("" << 2 << "" << 4);
+    bounds1.endKey = BSON("" << 1 << "" << 3);
+    bounds1.boundInclusion = BoundInclusion::kIncludeStartKeyOnly;
+
+    IndexBounds expectedBounds1;
+    expectedBounds1.isSimpleRange = true;
+    expectedBounds1.startKey = bounds1.endKey;
+    expectedBounds1.endKey = bounds1.startKey;
+    expectedBounds1.boundInclusion = BoundInclusion::kIncludeEndKeyOnly;
+    ASSERT(bounds1.forwardize() == expectedBounds1);
+
+    IndexBounds bounds2;
+    bounds1.isSimpleRange = true;
+    bounds1.startKey = BSON("" << 1 << "" << 3);
+    bounds1.endKey = BSON("" << 2 << "" << 4);
+    bounds1.boundInclusion = BoundInclusion::kIncludeStartKeyOnly;
+    ASSERT(bounds2 == bounds2.forwardize());
+}
+
+
+TEST(IndexBoundsTest, ForwardizeOnNonSimpleRangeShouldOnlyReverseDescendingRanges) {
+    OrderedIntervalList fooList("foo");
+    fooList.intervals = {Interval(BSON("" << 7 << "" << 20), true, true)};
+
+    OrderedIntervalList barList("bar");
+    barList.intervals = {Interval(BSON("" << 10 << "" << 5), false, false),
+                         Interval(BSON("" << 4 << "" << 3), false, false)};
+
+    IndexBounds bounds;
+    bounds.fields = {fooList, barList};
+
+    IndexBounds forwardizedBounds = bounds.forwardize();
+
+    IndexBounds expectedBounds;
+    expectedBounds.fields = {fooList, barList.reverseClone()};
+    ASSERT(expectedBounds == forwardizedBounds);
 }
 
 //
@@ -854,7 +951,7 @@ std::string toString(IndexBoundsChecker::Location location) {
         case IndexBoundsChecker::AHEAD:
             return "AHEAD";
     }
-    invariant(0);
+    MONGO_UNREACHABLE;
 }
 
 /**

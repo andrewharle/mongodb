@@ -39,7 +39,7 @@ if (Array.contains(storageEngines, "wiredTiger")) {
     checkCollectionOptions(db);
 
     assert.commandWorked(db.adminCommand({enableSharding: 'test'}));
-    st.ensurePrimaryShard('test', 'shard0001');
+    st.ensurePrimaryShard('test', st.shard1.shardName);
     assert.commandWorked(db.adminCommand({shardCollection: coll + '', key: {x: 1}}));
 
     coll.insert({x: 0});
@@ -47,16 +47,17 @@ if (Array.contains(storageEngines, "wiredTiger")) {
 
     assert.commandWorked(db.adminCommand({split: coll + '', middle: {x: 5}}));
 
-    printShardingStatus();
+    st.printShardingStatus();
 
-    var primaryShard = st.getServer("test");
+    var primaryShard = st.getPrimaryShard("test");
     anotherShard = st.getOther(primaryShard);
     assert.commandWorked(
         db.adminCommand({movechunk: coll + '', find: {x: 5}, to: anotherShard.name}));
 
-    printShardingStatus();
+    st.printShardingStatus();
 
     checkCollectionOptions(anotherShard.getDB("test"));
 } else {
     print("Skipping test. wiredTiger engine not supported by mongod binary.");
 }
+st.stop();

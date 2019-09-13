@@ -1,28 +1,31 @@
-/* Copyright 2012 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/platform/basic.h"
@@ -32,11 +35,13 @@
 #include "mongo/bson/mutable/document.h"
 #include "mongo/bson/mutable/mutable_bson_test_utils.h"
 #include "mongo/db/json.h"
+#include "mongo/db/query/collation/collator_interface_mock.h"
 #include "mongo/platform/basic.h"
 #include "mongo/unittest/unittest.h"
 
 namespace {
 
+using mongo::CollatorInterfaceMock;
 using mongo::Status;
 using namespace mongo::mutablebson;
 
@@ -309,7 +314,7 @@ TEST_F(CountTest, CountSiblingsMany) {
 
 TEST(DeduplicateTest, ManyDuplicates) {
     Document doc(mongo::fromjson("{ x : [ 1, 2, 2, 3, 3, 3, 4, 4, 4 ] }"));
-    deduplicateChildren(doc.root().leftChild(), woEqual(false));
+    deduplicateChildren(doc.root().leftChild(), woEqual(nullptr, false));
     ASSERT_TRUE(checkDoc(doc, mongo::fromjson("{x : [ 1, 2, 3, 4 ]}")));
 }
 
@@ -327,6 +332,45 @@ TEST(FullNameTest, InsideArray) {
     Document doc(mongo::fromjson("{ x : { y: [ 1 , 2 ] } }"));
     ASSERT_EQUALS("x.y.1",
                   getFullName(doc.root().leftChild().leftChild().leftChild().rightSibling()));
+}
+
+TEST(WoLessTest, CollationAware) {
+    CollatorInterfaceMock collator(CollatorInterfaceMock::MockType::kReverseString);
+    Document less(mongo::fromjson("{ x: 'cbc' }"));
+    Document greater(mongo::fromjson("{ x: 'abd' }"));
+
+    woLess comp(&collator, true);
+    ASSERT_TRUE(comp(less.root(), greater.root()));
+    ASSERT_FALSE(comp(greater.root(), less.root()));
+}
+
+TEST(WoGreaterTest, CollationAware) {
+    CollatorInterfaceMock collator(CollatorInterfaceMock::MockType::kReverseString);
+    Document less(mongo::fromjson("{ x: 'cbc' }"));
+    Document greater(mongo::fromjson("{ x: 'abd' }"));
+
+    woGreater comp(&collator, true);
+    ASSERT_TRUE(comp(greater.root(), less.root()));
+    ASSERT_FALSE(comp(less.root(), greater.root()));
+}
+
+TEST(WoEqualTest, CollationAware) {
+    CollatorInterfaceMock collator(CollatorInterfaceMock::MockType::kAlwaysEqual);
+    Document docA(mongo::fromjson("{ x: 'not' }"));
+    Document docB(mongo::fromjson("{ x: 'equal' }"));
+
+    woEqual comp(&collator, true);
+    ASSERT_TRUE(comp(docA.root(), docB.root()));
+    ASSERT_TRUE(comp(docB.root(), docA.root()));
+}
+
+TEST(WoEqualToTest, CollationAware) {
+    CollatorInterfaceMock collator(CollatorInterfaceMock::MockType::kAlwaysEqual);
+    Document docA(mongo::fromjson("{ x: 'not' }"));
+    Document docB(mongo::fromjson("{ x: 'equal' }"));
+
+    woEqualTo comp(docA.root(), &collator, true);
+    ASSERT_TRUE(comp(docB.root()));
 }
 
 }  // namespace

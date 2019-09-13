@@ -3,16 +3,16 @@
 (function() {
     'use strict';
 
-    function verifyChunk(keys, expectFail) {
+    function verifyChunk(keys, expectFail, ns) {
         // If split failed then there's only 1 chunk
         // With a min & max for the shardKey
         if (expectFail) {
-            assert.eq(1, configDB.chunks.find().count(), "Chunks count no split");
-            var chunkDoc = configDB.chunks.findOne();
+            assert.eq(1, configDB.chunks.find({"ns": ns}).count(), "Chunks count no split");
+            var chunkDoc = configDB.chunks.findOne({"ns": ns});
             assert.eq(0, bsonWoCompare(chunkDoc.min, keys.min), "Chunks min");
             assert.eq(0, bsonWoCompare(chunkDoc.max, keys.max), "Chunks max");
         } else {
-            assert.eq(2, configDB.chunks.find().count(), "Chunks count split");
+            assert.eq(2, configDB.chunks.find({"ns": ns}).count(), "Chunks count split");
         }
     }
 
@@ -38,10 +38,7 @@
     tests.forEach(function(test) {
         var collName = "split_large_key_" + test.name;
         var midKey = {};
-        var chunkKeys = {
-            min: {},
-            max: {}
-        };
+        var chunkKeys = {min: {}, max: {}};
         for (var k in test.key) {
             // new Array with join creates string length 1 less than size, so add 1
             midKey[k] = new Array(test.keyFieldSize + 1).join('a');
@@ -61,7 +58,7 @@
             assert(res.ok, "Split: " + collName + " " + res.errmsg);
         }
 
-        verifyChunk(chunkKeys, test.expectFail);
+        verifyChunk(chunkKeys, test.expectFail, "test." + collName);
 
         st.s0.getCollection("test." + collName).drop();
     });

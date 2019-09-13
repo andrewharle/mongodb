@@ -1,111 +1,142 @@
 # -*- mode: python; -*-
 
 Import('env')
+Import("has_option")
+Import("get_option")
+Import('ssl_provider')
 
-env.Library(
-    target='hostandport',
-    source=[
-        'hostandport.cpp',
-    ],
-    LIBDEPS=[
-        '$BUILD_DIR/mongo/util/foundation',
-    ],
-)
-
-env.CppUnitTest(
-    target='hostandport_test',
-    source=[
-        'hostandport_test.cpp'
-    ],
-    LIBDEPS=[
-        'hostandport',
-    ],
-)
+env = env.Clone()
 
 env.Library(
     target='network',
     source=[
+        "cidr.cpp",
+        "hostandport.cpp",
         "hostname_canonicalization.cpp",
-        "httpclient.cpp",
-        "listen.cpp",
-        "message.cpp",
-        "message_port.cpp",
-        "sock.cpp",
-        "socket_poll.cpp",
-        "ssl_expiration.cpp",
-        "ssl_manager.cpp",
-        "ssl_options.cpp",
-    ],
-    LIBDEPS=[
-        '$BUILD_DIR/mongo/db/server_options_core',
-        '$BUILD_DIR/mongo/db/server_parameters',
-        '$BUILD_DIR/mongo/util/background_job',
-        '$BUILD_DIR/mongo/util/concurrency/ticketholder',
-        '$BUILD_DIR/mongo/util/fail_point',
-        '$BUILD_DIR/mongo/util/foundation',
-        '$BUILD_DIR/mongo/util/options_parser/options_parser',
-        'hostandport',
-    ],
-    LIBDEPS_TAGS=[
-        # Depends on inShutdown
-        'incomplete',
-    ],
-)
-
-env.Library(
-    target='message_port_mock',
-    source=[
-        "message_port_mock.cpp",
-    ],
-    LIBDEPS=[
-        'network',
-    ],
-)
-
-env.CppUnitTest(
-    target='sock_test',
-    source=[
-        'sock_test.cpp',
-    ],
-    LIBDEPS=[
-        '$BUILD_DIR/mongo/util/concurrency/synchronization',
-        'network',
-    ],
-)
-
-env.Library(
-    target="hostname_canonicalization_worker",
-    source=[
-        "hostname_canonicalization_worker.cpp",
+        "sockaddr.cpp",
+        "socket_exception.cpp",
+        "socket_utils.cpp",
+        env.Idlc('hostandport.idl')[0],
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
-        '$BUILD_DIR/mongo/db/service_context',
-        'network',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/server_options_core',
+        '$BUILD_DIR/mongo/util/concurrency/spin_lock',
+        '$BUILD_DIR/mongo/util/winutil',
     ],
 )
 
 env.Library(
-    target="message_server_port",
+    target='ssl_options',
     source=[
-        "message_server_port.cpp",
+        "ssl_options.cpp",
     ],
     LIBDEPS=[
-        'network',
-        '$BUILD_DIR/mongo/db/stats/counters',
+        '$BUILD_DIR/mongo/base',
     ],
-    LIBDEPS_TAGS=[
-        # Depends on inShutdown and dbexit
-        'incomplete',
-    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/server_options_core',
+        '$BUILD_DIR/mongo/util/options_parser/options_parser',
+    ]
 )
 
 env.Library(
-    target='miniwebserver',
+    target='socket',
     source=[
-        'miniwebserver.cpp',
+        "private/socket_poll.cpp",
+        "sock.cpp",
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/util/fail_point',
+        'network',
+    ]
+)
+
+env.Library(
+    target='ssl_types',
+    source=[
+        "ssl_types.cpp",
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/transport/transport_layer_common',
+        'ssl_options',
+    ]
+)
+
+if not get_option('ssl') == 'off':
+    env.Library(
+        target='ssl_manager',
+        source=[
+            "private/ssl_expiration.cpp",
+            "ssl_manager.cpp",
+            "ssl_parameters.cpp",
+            "ssl_manager_%s.cpp" % (ssl_provider),
+            "ssl_stream.cpp",
+        ],
+        LIBDEPS=[
+            '$BUILD_DIR/mongo/base',
+            '$BUILD_DIR/mongo/db/auth/auth_rolename',
+            '$BUILD_DIR/third_party/shim_asio',
+            'network',
+            'socket',
+            'ssl_options',
+            'ssl_types',
+        ],
+        LIBDEPS_PRIVATE=[
+            '$BUILD_DIR/mongo/crypto/sha_block_${MONGO_CRYPTO}',
+            '$BUILD_DIR/mongo/db/auth/internal_user_auth',
+            '$BUILD_DIR/mongo/db/commands/server_status',
+            '$BUILD_DIR/mongo/db/server_options_core',
+            '$BUILD_DIR/mongo/db/server_parameters',
+            '$BUILD_DIR/mongo/db/service_context',
+            '$BUILD_DIR/mongo/util/background_job',
+            '$BUILD_DIR/mongo/util/winutil',
+        ]
+    )
+else:
+    env.Library(
+        target='ssl_manager',
+        source=[
+            "ssl_manager_none.cpp",
+        ],
+        LIBDEPS=[
+            '$BUILD_DIR/mongo/base',
+            'ssl_options',
+        ],
+    )
+
+env.CppUnitTest(
+    target='network_test',
+    source=[
+        'cidr_test.cpp',
+        'hostandport_test.cpp',
     ],
     LIBDEPS=[
         'network',
     ],
 )
+
+if has_option('ssl'):
+    env.CppUnitTest(
+        target='ssl_manager_test',
+        source=[
+            'ssl_manager_test.cpp',
+            'ssl_options_test.cpp',
+            'sock_test.cpp',
+        ],
+        LIBDEPS=[
+            '$BUILD_DIR/mongo/db/server_options_servers',
+            '$BUILD_DIR/mongo/util/fail_point',
+            'network',
+            'socket',
+            'ssl_manager',
+        ],
+    )

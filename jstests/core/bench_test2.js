@@ -1,4 +1,9 @@
 
+/**
+ * @tags: [
+ *   uses_multiple_connections,
+ * ]
+ */
 t = db.bench_test2;
 t.drop();
 
@@ -19,8 +24,8 @@ benchArgs = {
 
 if (jsTest.options().auth) {
     benchArgs['db'] = 'admin';
-    benchArgs['username'] = jsTest.options().adminUser;
-    benchArgs['password'] = jsTest.options().adminPassword;
+    benchArgs['username'] = jsTest.options().authUser;
+    benchArgs['password'] = jsTest.options().authPassword;
 }
 
 res = benchRun(benchArgs);

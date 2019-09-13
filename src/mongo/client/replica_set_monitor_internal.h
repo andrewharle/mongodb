@@ -1,28 +1,31 @@
-/*    Copyright 2014 MongoDB Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 /**
@@ -45,6 +48,7 @@
 #include "mongo/db/jsobj.h"
 #include "mongo/platform/random.h"
 #include "mongo/stdx/condition_variable.h"
+#include "mongo/stdx/mutex.h"
 #include "mongo/util/net/hostandport.h"
 
 namespace mongo {
@@ -67,17 +71,19 @@ struct ReplicaSetMonitor::IsMasterReply {
     bool isMaster;
     bool secondary;
     bool hidden;
-    int configVersion{0};
+    int configVersion{};
     OID electionId;                     // Set if this isMaster reply is from the primary
     HostAndPort primary;                // empty if not present
     std::set<HostAndPort> normalHosts;  // both "hosts" and "passives"
     BSONObj tags;
-    int minWireVersion{0};
-    int maxWireVersion{0};
+    int minWireVersion{};
+    int maxWireVersion{};
 
     // remaining fields aren't in isMaster reply, but are known to caller.
     HostAndPort host;
     int64_t latencyMicros;  // ignored if negative
+    Date_t lastWriteDate{};
+    repl::OpTime opTime{};
 };
 
 struct ReplicaSetMonitor::SetState {
@@ -107,7 +113,12 @@ public:
          * not match: { "dc": "nyc", "rack": 2 }
          * not match: { "dc": "sf" }
          */
-        bool matches(const BSONObj& tag) const;
+        bool matches(const BSONObj&) const;
+
+        /**
+         *  Returns true if all of the tags in the tag set match node's tags
+         */
+        bool matches(const TagSet&) const;
 
         /**
          * Updates this Node based on information in reply. The reply must be from this host.
@@ -116,11 +127,15 @@ public:
 
         HostAndPort host;
         bool isUp{false};
-        bool isMaster{false};   // implies isUp
-        int64_t latencyMicros;  // unknownLatency if unknown
-        BSONObj tags;           // owned
-        int minWireVersion{0};
-        int maxWireVersion{0};
+        bool isMaster{false};
+        int64_t latencyMicros{};
+        BSONObj tags;  // owned
+        int minWireVersion{};
+        int maxWireVersion{};
+        Date_t lastWriteDate{};            // from isMasterReply
+        Date_t lastWriteDateUpdateTime{};  // set to the local system's time at the time of updating
+                                           // lastWriteDate
+        repl::OpTime opTime{};             // from isMasterReply
     };
 
     typedef std::vector<Node> Nodes;
@@ -128,7 +143,9 @@ public:
     /**
      * seedNodes must not be empty
      */
-    SetState(StringData name, const std::set<HostAndPort>& seedNodes);
+    SetState(StringData name, const std::set<HostAndPort>& seedNodes, MongoURI uri = {});
+
+    SetState(const MongoURI& uri);
 
     bool isUsable() const;
 
@@ -191,6 +208,8 @@ public:
     int64_t latencyThresholdMicros;
     mutable PseudoRandom rand;  // only used for host selection to balance load
     mutable int roundRobin;     // used when useDeterministicHostSelection is true
+    const MongoURI setUri;      // URI that may have constructed this
+    Seconds refreshPeriod;
 };
 
 struct ReplicaSetMonitor::ScanState {

@@ -1,3 +1,13 @@
+// @tags: [
+//     # Cannot implicitly shard accessed collections because group is not supported on sharded
+//     # collections.
+//     assumes_unsharded_collection,
+//     requires_fastcount,
+//
+//     # reduce uses javascript
+//     requires_scripting,
+// ]
+
 t = db.geo_group;
 t.drop();
 
@@ -20,22 +30,18 @@ assert.eq(t.find({loc: {$near: [56, 8, 10]}}).count(), 81);
 // Test basic group that effectively does a count
 assert.eq(t.group({
     reduce: function(obj, prev) {
-        prev.sums = {
-            count: prev.sums.count + 1
-        };
+        prev.sums = {count: prev.sums.count + 1};
     },
     initial: {sums: {count: 0}}
 }),
-              [{"sums": {"count": 10000}}]);
+          [{"sums": {"count": 10000}}]);
 
 // Test basic group + $near that does a count
 assert.eq(t.group({
     reduce: function(obj, prev) {
-        prev.sums = {
-            count: prev.sums.count + 1
-        };
+        prev.sums = {count: prev.sums.count + 1};
     },
     initial: {sums: {count: 0}},
     cond: {loc: {$near: [56, 8, 10]}}
 }),
-              [{"sums": {"count": 81}}]);
+          [{"sums": {"count": 81}}]);

@@ -1,3 +1,5 @@
+// @tags: [does_not_support_stepdowns]
+
 // Test script from SERVER-1742
 
 // MongoDB test script for mapreduce with geo query
@@ -32,9 +34,7 @@ r = function(key, values) {
     for (var i = 0; i < values.length; i++) {
         total += values[i].apples;
     }
-    return {
-        "apples": total
-    };
+    return {"apples": total};
 };
 
 // mapreduce without geo query works fine

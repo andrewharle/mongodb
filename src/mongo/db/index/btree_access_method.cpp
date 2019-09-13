@@ -1,36 +1,40 @@
+
 /**
-*    Copyright (C) 2013 10gen Inc.
-*
-*    This program is free software: you can redistribute it and/or  modify
-*    it under the terms of the GNU Affero General Public License, version 3,
-*    as published by the Free Software Foundation.
-*
-*    This program is distributed in the hope that it will be useful,
-*    but WITHOUT ANY WARRANTY; without even the implied warranty of
-*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*    GNU Affero General Public License for more details.
-*
-*    You should have received a copy of the GNU Affero General Public License
-*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*
-*    As a special exception, the copyright holders give permission to link the
-*    code of portions of this program with the OpenSSL library under certain
-*    conditions as described in each individual source file and distribute
-*    linked combinations including the program with the OpenSSL library. You
-*    must comply with the GNU Affero General Public License in all respects for
-*    all of the code used other than as permitted herein. If you modify file(s)
-*    with this exception, you may extend this exception to your version of the
-*    file(s), but you are not obligated to do so. If you do not wish to do so,
-*    delete this exception statement from your version. If you delete this
-*    exception statement from all source files in the program, then also delete
-*    it in the license file.
-*/
+ *    Copyright (C) 2018-present MongoDB, Inc.
+ *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
+ *
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
+ */
 
 #include "mongo/db/index/btree_access_method.h"
 
 #include <vector>
 
 #include "mongo/base/status.h"
+#include "mongo/base/status_with.h"
+#include "mongo/db/catalog/index_catalog_entry.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/keypattern.h"
 
@@ -52,17 +56,18 @@ BtreeAccessMethod::BtreeAccessMethod(IndexCatalogEntry* btreeState, SortedDataIn
         fixed.push_back(BSONElement());
     }
 
-    if (0 == _descriptor->version()) {
-        _keyGenerator.reset(new BtreeKeyGeneratorV0(fieldNames, fixed, _descriptor->isSparse()));
-    } else if (1 == _descriptor->version()) {
-        _keyGenerator.reset(new BtreeKeyGeneratorV1(fieldNames, fixed, _descriptor->isSparse()));
-    } else {
-        massert(16745, "Invalid index version for key generation.", false);
-    }
+    _keyGenerator = BtreeKeyGenerator::make(_descriptor->version(),
+                                            fieldNames,
+                                            fixed,
+                                            _descriptor->isSparse(),
+                                            btreeState->getCollator());
+    massert(16745, "Invalid index version for key generation.", _keyGenerator);
 }
 
-void BtreeAccessMethod::getKeys(const BSONObj& obj, BSONObjSet* keys) const {
-    _keyGenerator->getKeys(obj, keys);
+void BtreeAccessMethod::doGetKeys(const BSONObj& obj,
+                                  BSONObjSet* keys,
+                                  MultikeyPaths* multikeyPaths) const {
+    _keyGenerator->getKeys(obj, keys, multikeyPaths);
 }
 
 }  // namespace mongo

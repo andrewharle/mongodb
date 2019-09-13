@@ -1,32 +1,34 @@
 // fts_matcher_test.cpp
 
+
 /**
-*    Copyright (C) 2012 10gen Inc.
-*
-*    This program is free software: you can redistribute it and/or  modify
-*    it under the terms of the GNU Affero General Public License, version 3,
-*    as published by the Free Software Foundation.
-*
-*    This program is distributed in the hope that it will be useful,
-*    but WITHOUT ANY WARRANTY; without even the implied warranty of
-*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*    GNU Affero General Public License for more details.
-*
-*    You should have received a copy of the GNU Affero General Public License
-*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*
-*    As a special exception, the copyright holders give permission to link the
-*    code of portions of this program with the OpenSSL library under certain
-*    conditions as described in each individual source file and distribute
-*    linked combinations including the program with the OpenSSL library. You
-*    must comply with the GNU Affero General Public License in all respects for
-*    all of the code used other than as permitted herein. If you modify file(s)
-*    with this exception, you may extend this exception to your version of the
-*    file(s), but you are not obligated to do so. If you do not wish to do so,
-*    delete this exception statement from your version. If you delete this
-*    exception statement from all source files in the program, then also delete
-*    it in the license file.
-*/
+ *    Copyright (C) 2018-present MongoDB, Inc.
+ *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
+ *
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
+ */
 
 #include "mongo/platform/basic.h"
 
@@ -36,6 +38,8 @@
 namespace mongo {
 namespace fts {
 
+using unittest::assertGet;
+
 TEST(FTSMatcher, NegWild1) {
     FTSQueryImpl q;
     q.setQuery("foo -bar");
@@ -44,8 +48,8 @@ TEST(FTSMatcher, NegWild1) {
     q.setDiacriticSensitive(false);
     ASSERT(q.parse(TEXT_INDEX_VERSION_3).isOK());
     FTSMatcher m(q,
-                 FTSSpec(FTSSpec::fixSpec(BSON("key" << BSON("$**"
-                                                             << "text")))));
+                 FTSSpec(assertGet(FTSSpec::fixSpec(BSON("key" << BSON("$**"
+                                                                       << "text"))))));
 
     ASSERT(m.hasNegativeTerm(BSON("x" << BSON("y"
                                               << "bar"))));
@@ -62,8 +66,8 @@ TEST(FTSMatcher, NegWild2) {
     q.setDiacriticSensitive(false);
     ASSERT(q.parse(TEXT_INDEX_VERSION_3).isOK());
     FTSMatcher m(q,
-                 FTSSpec(FTSSpec::fixSpec(BSON("key" << BSON("$**"
-                                                             << "text")))));
+                 FTSSpec(assertGet(FTSSpec::fixSpec(BSON("key" << BSON("$**"
+                                                                       << "text"))))));
 
     ASSERT(m.hasNegativeTerm(BSON("x" << BSON("y"
                                               << "pizza restaurant"))));
@@ -79,8 +83,8 @@ TEST(FTSMatcher, Phrase1) {
     q.setDiacriticSensitive(false);
     ASSERT(q.parse(TEXT_INDEX_VERSION_3).isOK());
     FTSMatcher m(q,
-                 FTSSpec(FTSSpec::fixSpec(BSON("key" << BSON("$**"
-                                                             << "text")))));
+                 FTSSpec(assertGet(FTSSpec::fixSpec(BSON("key" << BSON("$**"
+                                                                       << "text"))))));
 
     ASSERT(m.positivePhrasesMatch(BSON("x"
                                        << "table top")));
@@ -105,8 +109,8 @@ TEST(FTSMatcher, Phrase2) {
     q.setDiacriticSensitive(false);
     ASSERT(q.parse(TEXT_INDEX_VERSION_3).isOK());
     FTSMatcher m(q,
-                 FTSSpec(FTSSpec::fixSpec(BSON("key" << BSON("x"
-                                                             << "text")))));
+                 FTSSpec(assertGet(FTSSpec::fixSpec(BSON("key" << BSON("x"
+                                                                       << "text"))))));
     ASSERT(m.positivePhrasesMatch(BSON("x" << BSON_ARRAY("table top"))));
 }
 
@@ -120,8 +124,8 @@ TEST(FTSMatcher, ParsesUsingDocLanguage) {
     q.setDiacriticSensitive(false);
     ASSERT(q.parse(TEXT_INDEX_VERSION_3).isOK());
     FTSMatcher m(q,
-                 FTSSpec(FTSSpec::fixSpec(BSON("key" << BSON("x"
-                                                             << "text")))));
+                 FTSSpec(assertGet(FTSSpec::fixSpec(BSON("key" << BSON("x"
+                                                                       << "text"))))));
 
     // Even though the search language is "none", the document {x: "gladly"} should be
     // parsed using the English stemmer, and as such should match the negated term "glad".
@@ -138,8 +142,8 @@ TEST(FTSMatcher, MatcherDoesNotFilterStopWordsNeg) {
     q.setDiacriticSensitive(false);
     ASSERT(q.parse(TEXT_INDEX_VERSION_3).isOK());
     FTSMatcher m(q,
-                 FTSSpec(FTSSpec::fixSpec(BSON("key" << BSON("x"
-                                                             << "text")))));
+                 FTSSpec(assertGet(FTSSpec::fixSpec(BSON("key" << BSON("x"
+                                                                       << "text"))))));
 
     ASSERT(m.hasNegativeTerm(BSON("x"
                                   << "the")));
@@ -154,8 +158,8 @@ TEST(FTSMatcher, MatcherDoesNotFilterStopWordsPos) {
     q.setDiacriticSensitive(false);
     ASSERT(q.parse(TEXT_INDEX_VERSION_3).isOK());
     FTSMatcher m(q,
-                 FTSSpec(FTSSpec::fixSpec(BSON("key" << BSON("x"
-                                                             << "text")))));
+                 FTSSpec(assertGet(FTSSpec::fixSpec(BSON("key" << BSON("x"
+                                                                       << "text"))))));
 
     ASSERT(m.hasPositiveTerm(BSON("x"
                                   << "the")));
@@ -171,8 +175,8 @@ static bool docHasPositiveTermWithCase(const std::string& doc, const std::string
     q.setDiacriticSensitive(false);
     ASSERT(q.parse(TEXT_INDEX_VERSION_3).isOK());
     FTSMatcher m(q,
-                 FTSSpec(FTSSpec::fixSpec(BSON("key" << BSON("x"
-                                                             << "text")))));
+                 FTSSpec(assertGet(FTSSpec::fixSpec(BSON("key" << BSON("x"
+                                                                       << "text"))))));
 
     return m.hasPositiveTerm(BSON("x" << doc));
 }
@@ -202,8 +206,8 @@ static bool docHasNegativeTermWithCase(const std::string& doc, const std::string
     q.setDiacriticSensitive(false);
     ASSERT(q.parse(TEXT_INDEX_VERSION_3).isOK());
     FTSMatcher m(q,
-                 FTSSpec(FTSSpec::fixSpec(BSON("key" << BSON("x"
-                                                             << "text")))));
+                 FTSSpec(assertGet(FTSSpec::fixSpec(BSON("key" << BSON("x"
+                                                                       << "text"))))));
 
     return m.hasNegativeTerm(BSON("x" << doc));
 }
@@ -233,8 +237,8 @@ static bool docPositivePhrasesMatchWithCase(const std::string& doc, const std::s
     q.setDiacriticSensitive(false);
     ASSERT(q.parse(TEXT_INDEX_VERSION_3).isOK());
     FTSMatcher m(q,
-                 FTSSpec(FTSSpec::fixSpec(BSON("key" << BSON("x"
-                                                             << "text")))));
+                 FTSSpec(assertGet(FTSSpec::fixSpec(BSON("key" << BSON("x"
+                                                                       << "text"))))));
 
     return m.positivePhrasesMatch(BSON("x" << doc));
 }
@@ -260,8 +264,8 @@ static bool docNegativePhrasesMatchWithCase(const std::string& doc, const std::s
     q.setDiacriticSensitive(false);
     ASSERT(q.parse(TEXT_INDEX_VERSION_3).isOK());
     FTSMatcher m(q,
-                 FTSSpec(FTSSpec::fixSpec(BSON("key" << BSON("x"
-                                                             << "text")))));
+                 FTSSpec(assertGet(FTSSpec::fixSpec(BSON("key" << BSON("x"
+                                                                       << "text"))))));
 
     return m.negativePhrasesMatch(BSON("x" << doc));
 }

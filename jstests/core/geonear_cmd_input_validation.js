@@ -6,9 +6,8 @@ t.drop();
 t.ensureIndex({loc: "2dsphere"});
 
 // The test matrix. Some combinations are not supported:
-//     2d       index and minDistance.
-//     2d       index and GeoJSON
-//     2dsphere index and spherical=false
+//     2d index and GeoJSON.
+//     2dsphere index with legacy coordinate pair and spherical=false.
 var indexTypes = ['2d', '2dsphere'], pointTypes = [{type: 'Point', coordinates: [0, 0]}, [0, 0]],
     sphericalOptions = [true, false], optionNames = ['minDistance', 'maxDistance'],
     badNumbers = [-1, undefined, 'foo'];
@@ -24,18 +23,14 @@ indexTypes.forEach(function(indexType) {
                     pointDescription = (isLegacy ? "legacy coordinates" : "GeoJSON point");
 
                 function makeCommand(distance) {
-                    var command = {
-                        geoNear: t.getName(),
-                        near: pointType,
-                        spherical: spherical
-                    };
+                    var command = {geoNear: t.getName(), near: pointType, spherical: spherical};
                     command[optionName] = distance;
                     return command;
                 }
 
                 // Unsupported combinations should return errors.
-                if ((indexType == '2d' && optionName == 'minDistance') ||
-                    (indexType == '2d' && !isLegacy) || (indexType == '2dsphere' && !spherical)) {
+                if ((indexType == '2d' && !isLegacy) ||
+                    (indexType == '2dsphere' && isLegacy && !spherical)) {
                     assert.commandFailed(db.runCommand(makeCommand(1)),
                                          "geoNear with spherical=" + spherical + " and " +
                                              indexType + " index and " + pointDescription +
@@ -59,16 +54,14 @@ indexTypes.forEach(function(indexType) {
                 }
 
                 // Try several bad values for min/maxDistance.
-                badNumbers.concat(outOfRangeDistances)
-                    .forEach(function(badDistance) {
+                badNumbers.concat(outOfRangeDistances).forEach(function(badDistance) {
 
-                        var msg =
-                            ("geoNear with spherical=" + spherical + " and " + pointDescription +
-                             " and " + indexType + " index should've failed with " + optionName +
-                             " " + badDistance);
+                    var msg = ("geoNear with spherical=" + spherical + " and " + pointDescription +
+                               " and " + indexType + " index should've failed with " + optionName +
+                               " " + badDistance);
 
-                        assert.commandFailed(db.runCommand(makeCommand(badDistance)), msg);
-                    });
+                    assert.commandFailed(db.runCommand(makeCommand(badDistance)), msg);
+                });
 
                 // Bad values for limit / num.
                 ['num', 'limit'].forEach(function(limitOptionName) {

@@ -1,23 +1,25 @@
-/*
- *    Copyright (C) 2015 MongoDB Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -36,27 +38,26 @@
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/client.h"
 #include "mongo/db/service_context.h"
-#include "mongo/stdx/memory.h"
 #include "mongo/util/assert_util.h"
 
 namespace mongo {
 namespace {
 
 const auto getAuthenticationSession =
-    ClientBasic::declareDecoration<std::unique_ptr<AuthenticationSession>>();
+    Client::declareDecoration<std::unique_ptr<AuthenticationSession>>();
 
 const auto getAuthorizationManager =
     ServiceContext::declareDecoration<std::unique_ptr<AuthorizationManager>>();
 
 const auto getAuthorizationSession =
-    ClientBasic::declareDecoration<std::unique_ptr<AuthorizationSession>>();
+    Client::declareDecoration<std::unique_ptr<AuthorizationSession>>();
 
 class AuthzClientObserver final : public ServiceContext::ClientObserver {
 public:
     void onCreateClient(Client* client) override {
-        auto service = client->getServiceContext();
-        AuthorizationSession::set(client,
-                                  AuthorizationManager::get(service)->makeAuthorizationSession());
+        if (auto authzManager = AuthorizationManager::get(client->getServiceContext())) {
+            AuthorizationSession::set(client, authzManager->makeAuthorizationSession());
+        }
     }
 
     void onDestroyClient(Client* client) override {}
@@ -65,15 +66,18 @@ public:
     void onDestroyOperationContext(OperationContext* opCtx) override {}
 };
 
+ServiceContext::ConstructorActionRegisterer authzClientObserverRegisterer{
+    "AuthzClientObserver", [](ServiceContext* service) {
+        service->registerClientObserver(std::make_unique<AuthzClientObserver>());
+    }};
+
 }  // namespace
 
-void AuthenticationSession::set(ClientBasic* client,
-                                std::unique_ptr<AuthenticationSession> newSession) {
+void AuthenticationSession::set(Client* client, std::unique_ptr<AuthenticationSession> newSession) {
     getAuthenticationSession(client) = std::move(newSession);
 }
 
-void AuthenticationSession::swap(ClientBasic* client,
-                                 std::unique_ptr<AuthenticationSession>& other) {
+void AuthenticationSession::swap(Client* client, std::unique_ptr<AuthenticationSession>& other) {
     using std::swap;
     swap(getAuthenticationSession(client), other);
 }
@@ -88,28 +92,24 @@ AuthorizationManager* AuthorizationManager::get(ServiceContext& service) {
 
 void AuthorizationManager::set(ServiceContext* service,
                                std::unique_ptr<AuthorizationManager> authzManager) {
-    auto& manager = getAuthorizationManager(service);
-    invariant(authzManager);
-    invariant(!manager);
-    manager = std::move(authzManager);
-    service->registerClientObserver(stdx::make_unique<AuthzClientObserver>());
+    getAuthorizationManager(service) = std::move(authzManager);
 }
 
-AuthorizationSession* AuthorizationSession::get(ClientBasic* client) {
+AuthorizationSession* AuthorizationSession::get(Client* client) {
     return get(*client);
 }
 
-AuthorizationSession* AuthorizationSession::get(ClientBasic& client) {
+AuthorizationSession* AuthorizationSession::get(Client& client) {
     AuthorizationSession* retval = getAuthorizationSession(client).get();
     massert(16481, "No AuthorizationManager has been set up for this connection", retval);
     return retval;
 }
 
-bool AuthorizationSession::exists(ClientBasic* client) {
+bool AuthorizationSession::exists(Client* client) {
     return getAuthorizationSession(client).get();
 }
 
-void AuthorizationSession::set(ClientBasic* client,
+void AuthorizationSession::set(Client* client,
                                std::unique_ptr<AuthorizationSession> authorizationSession) {
     auto& authzSession = getAuthorizationSession(client);
     invariant(authorizationSession);

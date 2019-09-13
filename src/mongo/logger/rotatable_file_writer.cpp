@@ -1,28 +1,31 @@
-/*    Copyright 2013 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/platform/basic.h"
@@ -187,21 +190,6 @@ Win32FileStreambuf::int_type Win32FileStreambuf::overflow(int_type ch) {
     return traits_type::eof();
 }
 
-// Win32 implementation of renameFile that handles non-ascii file names.
-int renameFile(const std::string& oldName, const std::string& newName) {
-    return _wrename(utf8ToWide(oldName).c_str(), utf8ToWide(newName).c_str());
-}
-
-}  // namespace
-#else
-
-namespace {
-
-// *nix implementation of renameFile that assumes the OS is encoding file names in UTF-8.
-int renameFile(const std::string& oldName, const std::string& newName) {
-    return rename(oldName.c_str(), newName.c_str());
-}
-
 }  // namespace
 #endif
 
@@ -222,25 +210,33 @@ Status RotatableFileWriter::Use::rotate(bool renameOnRotate, const std::string& 
         if (renameOnRotate) {
             try {
                 if (boost::filesystem::exists(renameTarget)) {
-                    return Status(ErrorCodes::FileRenameFailed,
-                                  mongoutils::str::stream()
-                                      << "Renaming file " << _writer->_fileName << " to "
-                                      << renameTarget << " failed; destination already exists");
+                    return Status(
+                        ErrorCodes::FileRenameFailed,
+                        mongoutils::str::stream() << "Renaming file " << _writer->_fileName
+                                                  << " to "
+                                                  << renameTarget
+                                                  << " failed; destination already exists");
                 }
             } catch (const std::exception& e) {
-                return Status(ErrorCodes::FileRenameFailed,
-                              mongoutils::str::stream()
-                                  << "Renaming file " << _writer->_fileName << " to "
-                                  << renameTarget << " failed; Cannot verify whether destination "
-                                                     "already exists: " << e.what());
+                return Status(
+                    ErrorCodes::FileRenameFailed,
+                    mongoutils::str::stream() << "Renaming file " << _writer->_fileName << " to "
+                                              << renameTarget
+                                              << " failed; Cannot verify whether destination "
+                                                 "already exists: "
+                                              << e.what());
             }
 
-            if (0 != renameFile(_writer->_fileName, renameTarget)) {
+            boost::system::error_code ec;
+            boost::filesystem::rename(_writer->_fileName, renameTarget, ec);
+            if (ec) {
                 return Status(ErrorCodes::FileRenameFailed,
-                              mongoutils::str::stream()
-                                  << "Failed  to rename \"" << _writer->_fileName << "\" to \""
-                                  << renameTarget << "\": " << strerror(errno) << " (" << errno
-                                  << ')');
+                              mongoutils::str::stream() << "Failed  to rename \""
+                                                        << _writer->_fileName
+                                                        << "\" to \""
+                                                        << renameTarget
+                                                        << "\": "
+                                                        << ec.message());
                 // TODO(schwerin): Make errnoWithDescription() available in the logger library, and
                 // use it here.
             }

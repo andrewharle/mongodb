@@ -1,49 +1,57 @@
+
 /**
- * Copyright (c) 2011 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- * This program is free software: you can redistribute it and/or  modify
- * it under the terms of the GNU Affero General Public License, version 3,
- * as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
- * As a special exception, the copyright holders give permission to link the
- * code of portions of this program with the OpenSSL library under certain
- * conditions as described in each individual source file and distribute
- * linked combinations including the program with the OpenSSL library. You
- * must comply with the GNU Affero General Public License in all respects for
- * all of the code used other than as permitted herein. If you modify file(s)
- * with this exception, you may extend this exception to your version of the
- * file(s), but you are not obligated to do so. If you do not wish to do so,
- * delete this exception statement from your version. If you delete this
- * exception statement from all source files in the program, then also delete
- * it in the license file.
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/platform/basic.h"
 
-// This file defines functions from both of these headers
 #include "mongo/db/pipeline/pipeline.h"
-#include "mongo/db/pipeline/pipeline_optimizations.h"
 
-#include "mongo/db/auth/action_set.h"
-#include "mongo/db/auth/authorization_session.h"
-#include "mongo/db/auth/privilege.h"
+#include <algorithm>
+
+#include "mongo/base/error_codes.h"
+#include "mongo/db/bson/dotted_path_support.h"
 #include "mongo/db/catalog/document_validation.h"
-#include "mongo/db/commands.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/accumulator.h"
+#include "mongo/db/pipeline/cluster_aggregation_planner.h"
 #include "mongo/db/pipeline/document.h"
 #include "mongo/db/pipeline/document_source.h"
+#include "mongo/db/pipeline/document_source_geo_near.h"
+#include "mongo/db/pipeline/document_source_match.h"
+#include "mongo/db/pipeline/document_source_merge_cursors.h"
+#include "mongo/db/pipeline/document_source_out.h"
+#include "mongo/db/pipeline/document_source_project.h"
+#include "mongo/db/pipeline/document_source_sort.h"
+#include "mongo/db/pipeline/document_source_unwind.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/repl/read_concern_args.h"
 #include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
@@ -54,579 +62,444 @@ using std::ostringstream;
 using std::string;
 using std::vector;
 
-const char Pipeline::commandName[] = "aggregate";
-const char Pipeline::pipelineName[] = "pipeline";
-const char Pipeline::explainName[] = "explain";
-const char Pipeline::fromRouterName[] = "fromRouter";
-const char Pipeline::serverPipelineName[] = "serverPipeline";
-const char Pipeline::mongosPipelineName[] = "mongosPipeline";
+namespace dps = ::mongo::dotted_path_support;
 
-Pipeline::Pipeline(const intrusive_ptr<ExpressionContext>& pTheCtx)
-    : explain(false), pCtx(pTheCtx) {}
+using ChangeStreamRequirement = DocumentSource::StageConstraints::ChangeStreamRequirement;
+using HostTypeRequirement = DocumentSource::StageConstraints::HostTypeRequirement;
+using PositionRequirement = DocumentSource::StageConstraints::PositionRequirement;
+using DiskUseRequirement = DocumentSource::StageConstraints::DiskUseRequirement;
+using FacetRequirement = DocumentSource::StageConstraints::FacetRequirement;
+using StreamType = DocumentSource::StageConstraints::StreamType;
 
-intrusive_ptr<Pipeline> Pipeline::parseCommand(string& errmsg,
-                                               const BSONObj& cmdObj,
-                                               const intrusive_ptr<ExpressionContext>& pCtx) {
-    intrusive_ptr<Pipeline> pPipeline(new Pipeline(pCtx));
-    vector<BSONElement> pipeline;
-    repl::ReadConcernArgs readConcernArgs;
+Pipeline::Pipeline(const intrusive_ptr<ExpressionContext>& pTheCtx) : pCtx(pTheCtx) {}
 
-    /* gather the specification for the aggregation */
-    for (BSONObj::iterator cmdIterator = cmdObj.begin(); cmdIterator.more();) {
-        BSONElement cmdElement(cmdIterator.next());
-        const char* pFieldName = cmdElement.fieldName();
+Pipeline::Pipeline(SourceContainer stages, const intrusive_ptr<ExpressionContext>& expCtx)
+    : _sources(std::move(stages)), pCtx(expCtx) {}
 
-        // ignore top-level fields prefixed with $. They are for the command processor, not us.
-        if (pFieldName[0] == '$') {
-            continue;
-        }
-
-        // maxTimeMS is also for the command processor.
-        if (str::equals(pFieldName, LiteParsedQuery::cmdOptionMaxTimeMS)) {
-            continue;
-        }
-
-        if (pFieldName == repl::ReadConcernArgs::kReadConcernFieldName) {
-            uassertStatusOK(readConcernArgs.initialize(cmdElement));
-            continue;
-        }
-
-        // ignore cursor options since they are handled externally.
-        if (str::equals(pFieldName, "cursor")) {
-            continue;
-        }
-
-        /* look for the aggregation command */
-        if (!strcmp(pFieldName, commandName)) {
-            continue;
-        }
-
-        /* check for the collection name */
-        if (!strcmp(pFieldName, pipelineName)) {
-            pipeline = cmdElement.Array();
-            continue;
-        }
-
-        /* check for explain option */
-        if (!strcmp(pFieldName, explainName)) {
-            pPipeline->explain = cmdElement.Bool();
-            continue;
-        }
-
-        /* if the request came from the router, we're in a shard */
-        if (!strcmp(pFieldName, fromRouterName)) {
-            pCtx->inShard = cmdElement.Bool();
-            continue;
-        }
-
-        if (str::equals(pFieldName, "allowDiskUse")) {
-            uassert(16949,
-                    str::stream() << "allowDiskUse must be a bool, not a "
-                                  << typeName(cmdElement.type()),
-                    cmdElement.type() == Bool);
-            pCtx->extSortAllowed = cmdElement.Bool();
-            continue;
-        }
-
-        if (pFieldName == bypassDocumentValidationCommandOption()) {
-            pCtx->bypassDocumentValidation = cmdElement.trueValue();
-            continue;
-        }
-
-        /* we didn't recognize a field in the command */
-        ostringstream sb;
-        sb << "unrecognized field '" << cmdElement.fieldName() << "'";
-        errmsg = sb.str();
-        return intrusive_ptr<Pipeline>();
-    }
-
-    /*
-      If we get here, we've harvested the fields we expect for a pipeline.
-
-      Set up the specified document source pipeline.
-    */
-    SourceContainer& sources = pPipeline->sources;  // shorthand
-
-    /* iterate over the steps in the pipeline */
-    const size_t nSteps = pipeline.size();
-    for (size_t iStep = 0; iStep < nSteps; ++iStep) {
-        /* pull out the pipeline element as an object */
-        BSONElement pipeElement(pipeline[iStep]);
-        uassert(15942,
-                str::stream() << "pipeline element " << iStep << " is not an object",
-                pipeElement.type() == Object);
-
-        sources.push_back(DocumentSource::parse(pCtx, pipeElement.Obj()));
-        if (sources.back()->isValidInitialSource()) {
-            uassert(28837,
-                    str::stream() << sources.back()->getSourceName()
-                                  << " is only valid as the first stage in a pipeline.",
-                    iStep == 0);
-        }
-
-        if (dynamic_cast<DocumentSourceOut*>(sources.back().get())) {
-            uassert(16991, "$out can only be the final stage in the pipeline", iStep == nSteps - 1);
-
-            uassert(ErrorCodes::InvalidOptions,
-                    "$out can only be used with the 'local' read concern level",
-                    readConcernArgs.getLevel() == repl::ReadConcernLevel::kLocalReadConcern);
-        }
-    }
-
-    // The order in which optimizations are applied can have significant impact on the
-    // efficiency of the final pipeline. Be Careful!
-    Optimizations::Local::moveMatchBeforeSort(pPipeline.get());
-    Optimizations::Local::moveSkipAndLimitBeforeProject(pPipeline.get());
-    Optimizations::Local::moveLimitBeforeSkip(pPipeline.get());
-    Optimizations::Local::coalesceAdjacent(pPipeline.get());
-    Optimizations::Local::optimizeEachDocumentSource(pPipeline.get());
-    Optimizations::Local::duplicateMatchBeforeInitalRedact(pPipeline.get());
-
-    return pPipeline;
+Pipeline::~Pipeline() {
+    invariant(_disposed);
 }
 
-void Pipeline::Optimizations::Local::moveMatchBeforeSort(Pipeline* pipeline) {
-    // TODO Keep moving matches across multiple sorts as moveLimitBeforeSkip does below.
-    // TODO Check sort for limit. Not an issue currently due to order optimizations are applied,
-    // but should be fixed.
-    SourceContainer& sources = pipeline->sources;
-    for (size_t srcn = sources.size(), srci = 1; srci < srcn; ++srci) {
-        intrusive_ptr<DocumentSource>& pSource = sources[srci];
-        DocumentSourceMatch* match = dynamic_cast<DocumentSourceMatch*>(pSource.get());
-        if (match && !match->isTextQuery()) {
-            intrusive_ptr<DocumentSource>& pPrevious = sources[srci - 1];
-            if (dynamic_cast<DocumentSourceSort*>(pPrevious.get())) {
-                /* swap this item with the previous */
-                intrusive_ptr<DocumentSource> pTemp(pPrevious);
-                pPrevious = pSource;
-                pSource = pTemp;
-            }
-        }
-    }
+StatusWith<std::unique_ptr<Pipeline, PipelineDeleter>> Pipeline::parse(
+    const std::vector<BSONObj>& rawPipeline, const intrusive_ptr<ExpressionContext>& expCtx) {
+    return parseTopLevelOrFacetPipeline(rawPipeline, expCtx, false);
 }
 
-void Pipeline::Optimizations::Local::moveSkipAndLimitBeforeProject(Pipeline* pipeline) {
-    SourceContainer& sources = pipeline->sources;
-    if (sources.empty())
-        return;
-
-    for (int i = sources.size() - 1; i >= 1 /* not looking at 0 */; i--) {
-        // This optimization only applies when a $project comes before a $skip or $limit.
-        auto project = dynamic_cast<DocumentSourceProject*>(sources[i - 1].get());
-        if (!project)
-            continue;
-
-        auto skip = dynamic_cast<DocumentSourceSkip*>(sources[i].get());
-        auto limit = dynamic_cast<DocumentSourceLimit*>(sources[i].get());
-        if (!(skip || limit))
-            continue;
-
-        swap(sources[i], sources[i - 1]);
-
-        // Start at back again. This is needed to handle cases with more than 1 $skip or
-        // $limit (S means skip, L means limit, P means project)
-        //
-        // These would work without second pass (assuming back to front ordering)
-        // PS  -> SP
-        // PL  -> LP
-        // PPL -> LPP
-        // PPS -> SPP
-        //
-        // The following cases need a second pass to handle the second skip or limit
-        // PLL  -> LLP
-        // PPLL -> LLPP
-        // PLPL -> LLPP
-        i = sources.size();  // decremented before next pass
-    }
+StatusWith<std::unique_ptr<Pipeline, PipelineDeleter>> Pipeline::parseFacetPipeline(
+    const std::vector<BSONObj>& rawPipeline, const intrusive_ptr<ExpressionContext>& expCtx) {
+    return parseTopLevelOrFacetPipeline(rawPipeline, expCtx, true);
 }
 
-void Pipeline::Optimizations::Local::moveLimitBeforeSkip(Pipeline* pipeline) {
-    SourceContainer& sources = pipeline->sources;
-    if (sources.empty())
-        return;
+StatusWith<std::unique_ptr<Pipeline, PipelineDeleter>> Pipeline::parseTopLevelOrFacetPipeline(
+    const std::vector<BSONObj>& rawPipeline,
+    const intrusive_ptr<ExpressionContext>& expCtx,
+    const bool isFacetPipeline) {
 
-    for (int i = sources.size() - 1; i >= 1 /* not looking at 0 */; i--) {
-        DocumentSourceLimit* limit = dynamic_cast<DocumentSourceLimit*>(sources[i].get());
-        DocumentSourceSkip* skip = dynamic_cast<DocumentSourceSkip*>(sources[i - 1].get());
-        if (limit && skip) {
-            // Increase limit by skip since the skipped docs now pass through the $limit
-            limit->setLimit(limit->getLimit() + skip->getSkip());
-            swap(sources[i], sources[i - 1]);
+    SourceContainer stages;
 
-            // Start at back again. This is needed to handle cases with more than 1 $limit
-            // (S means skip, L means limit)
-            //
-            // These two would work without second pass (assuming back to front ordering)
-            // SL   -> LS
-            // SSL  -> LSS
-            //
-            // The following cases need a second pass to handle the second limit
-            // SLL  -> LLS
-            // SSLL -> LLSS
-            // SLSL -> LLSS
-            i = sources.size();  // decremented before next pass
-        }
+    for (auto&& stageObj : rawPipeline) {
+        auto parsedSources = DocumentSource::parse(expCtx, stageObj);
+        stages.insert(stages.end(), parsedSources.begin(), parsedSources.end());
     }
+
+    return createTopLevelOrFacetPipeline(std::move(stages), expCtx, isFacetPipeline);
 }
 
-void Pipeline::Optimizations::Local::coalesceAdjacent(Pipeline* pipeline) {
-    SourceContainer& sources = pipeline->sources;
-    if (sources.empty())
-        return;
-
-    // move all sources to a temporary list
-    SourceContainer tempSources;
-    sources.swap(tempSources);
-
-    // move the first one to the final list
-    sources.push_back(tempSources[0]);
-
-    // run through the sources, coalescing them or keeping them
-    for (size_t tempn = tempSources.size(), tempi = 1; tempi < tempn; ++tempi) {
-        // If we can't coalesce the source with the last, then move it
-        // to the final list, and make it the new last.  (If we succeeded,
-        // then we're still on the same last, and there's no need to move
-        // or do anything with the source -- the destruction of tempSources
-        // will take care of the rest.)
-        intrusive_ptr<DocumentSource>& pLastSource = sources.back();
-        intrusive_ptr<DocumentSource>& pTemp = tempSources[tempi];
-        verify(pTemp && pLastSource);
-        if (!pLastSource->coalesce(pTemp))
-            sources.push_back(pTemp);
-    }
+StatusWith<std::unique_ptr<Pipeline, PipelineDeleter>> Pipeline::create(
+    SourceContainer stages, const intrusive_ptr<ExpressionContext>& expCtx) {
+    return createTopLevelOrFacetPipeline(std::move(stages), expCtx, false);
 }
 
-void Pipeline::Optimizations::Local::optimizeEachDocumentSource(Pipeline* pipeline) {
-    SourceContainer& sources = pipeline->sources;
-    SourceContainer newSources;
-    for (SourceContainer::iterator it(sources.begin()); it != sources.end(); ++it) {
-        if (auto out = (*it)->optimize()) {
-            newSources.push_back(std::move(out));
-        }
-    }
-    pipeline->sources = std::move(newSources);
+StatusWith<std::unique_ptr<Pipeline, PipelineDeleter>> Pipeline::createFacetPipeline(
+    SourceContainer stages, const intrusive_ptr<ExpressionContext>& expCtx) {
+    return createTopLevelOrFacetPipeline(std::move(stages), expCtx, true);
 }
 
-void Pipeline::Optimizations::Local::duplicateMatchBeforeInitalRedact(Pipeline* pipeline) {
-    SourceContainer& sources = pipeline->sources;
-    if (sources.size() >= 2 && dynamic_cast<DocumentSourceRedact*>(sources[0].get())) {
-        if (DocumentSourceMatch* match = dynamic_cast<DocumentSourceMatch*>(sources[1].get())) {
-            const BSONObj redactSafePortion = match->redactSafePortion();
-            if (!redactSafePortion.isEmpty()) {
-                sources.push_front(DocumentSourceMatch::createFromBson(
-                    BSON("$match" << redactSafePortion).firstElement(), pipeline->pCtx));
-            }
-        }
+StatusWith<std::unique_ptr<Pipeline, PipelineDeleter>> Pipeline::createTopLevelOrFacetPipeline(
+    SourceContainer stages,
+    const intrusive_ptr<ExpressionContext>& expCtx,
+    const bool isFacetPipeline) {
+    std::unique_ptr<Pipeline, PipelineDeleter> pipeline(new Pipeline(std::move(stages), expCtx),
+                                                        PipelineDeleter(expCtx->opCtx));
+    try {
+        pipeline->validate(isFacetPipeline);
+    } catch (const DBException& ex) {
+        return ex.toStatus();
     }
+
+    pipeline->stitch();
+    return std::move(pipeline);
 }
 
-Status Pipeline::checkAuthForCommand(ClientBasic* client,
-                                     const std::string& db,
-                                     const BSONObj& cmdObj) {
-    NamespaceString inputNs(db, cmdObj.firstElement().str());
-    auto inputResource = ResourcePattern::forExactNamespace(inputNs);
-    uassert(17138,
-            mongoutils::str::stream() << "Invalid input namespace, " << inputNs.ns(),
-            inputNs.isValid());
-
-    std::vector<Privilege> privileges;
-
-    BSONElement pipelineElem = cmdObj["pipeline"];
-    if (pipelineElem.type() != BSONType::Array) {
-        return Status(ErrorCodes::TypeMismatch, "'pipeline' must be specified as an array");
-    }
-
-    BSONObj pipeline = pipelineElem.embeddedObject();
-    if (pipeline.isEmpty()) {
-        // The pipeline is empty, so we require only the find action.
-        Privilege::addPrivilegeToPrivilegeVector(&privileges,
-                                                 Privilege(inputResource, ActionType::find));
+void Pipeline::validate(bool isFacetPipeline) const {
+    if (isFacetPipeline) {
+        validateFacetPipeline();
     } else {
-        if (pipeline.firstElementType() != BSONType::Object) {
-            // The pipeline contains something that's not an object.
-            return Status(ErrorCodes::TypeMismatch,
-                          "'pipeline' cannot contain non-object elements");
+        validateTopLevelPipeline();
+    }
+
+    validateCommon();
+}
+
+void Pipeline::validateTopLevelPipeline() const {
+    // Verify that the specified namespace is valid for the initial stage of this pipeline.
+    const NamespaceString& nss = pCtx->ns;
+
+    if (_sources.empty()) {
+        if (nss.isCollectionlessAggregateNS()) {
+            uasserted(ErrorCodes::InvalidNamespace,
+                      "{aggregate: 1} is not valid for an empty pipeline.");
+        }
+    } else if ("$mergeCursors"_sd != _sources.front()->getSourceName()) {
+        // The $mergeCursors stage can take {aggregate: 1} or a normal namespace. Aside from this,
+        // {aggregate: 1} is only valid for collectionless sources, and vice-versa.
+        const auto firstStageConstraints = _sources.front()->constraints(_splitState);
+
+        if (nss.isCollectionlessAggregateNS() &&
+            !firstStageConstraints.isIndependentOfAnyCollection) {
+            uasserted(ErrorCodes::InvalidNamespace,
+                      str::stream() << "{aggregate: 1} is not valid for '"
+                                    << _sources.front()->getSourceName()
+                                    << "'; a collection is required.");
         }
 
-        // We treat the first stage in the pipeline specially, as $indexStats changes the authz
-        // requirements when appearing in this position.
-        BSONObj firstPipelineStage = pipeline.firstElement().embeddedObject();
-        if (str::equals("$indexStats", firstPipelineStage.firstElementFieldName())) {
-            Privilege::addPrivilegeToPrivilegeVector(
-                &privileges, Privilege(inputResource, ActionType::indexStats));
-        } else {
-            // If no source requiring an alternative permission scheme is specified then default to
-            // requiring find() privileges on the given namespace.
-            Privilege::addPrivilegeToPrivilegeVector(&privileges,
-                                                     Privilege(inputResource, ActionType::find));
+        if (!nss.isCollectionlessAggregateNS() &&
+            firstStageConstraints.isIndependentOfAnyCollection) {
+            uasserted(ErrorCodes::InvalidNamespace,
+                      str::stream() << "'" << _sources.front()->getSourceName()
+                                    << "' can only be run with {aggregate: 1}");
         }
 
-        BSONObj pipelineStages = cmdObj.getObjectField("pipeline");
-        BSONForEach(stageElem, pipelineStages) {
-            BSONObj stage = stageElem.embeddedObjectUserCheck();
-            StringData stageName = stage.firstElementFieldName();
-            if (stageName == "$out" && stage.firstElementType() == String) {
-                NamespaceString outputNs(db, stage.firstElement().str());
-                uassert(17139,
-                        mongoutils::str::stream() << "Invalid $out target namespace, "
-                                                  << outputNs.ns(),
-                        outputNs.isValid());
-
-                ActionSet actions;
-                actions.addAction(ActionType::remove);
-                actions.addAction(ActionType::insert);
-                if (shouldBypassDocumentValidationForCommand(cmdObj)) {
-                    actions.addAction(ActionType::bypassDocumentValidation);
-                }
-                Privilege::addPrivilegeToPrivilegeVector(
-                    &privileges, Privilege(ResourcePattern::forExactNamespace(outputNs), actions));
-            } else if (stageName == "$lookup" && stage.firstElementType() == Object) {
-                NamespaceString fromNs(db, stage.firstElement()["from"].str());
-                Privilege::addPrivilegeToPrivilegeVector(
-                    &privileges,
-                    Privilege(ResourcePattern::forExactNamespace(fromNs), ActionType::find));
+        // If the first stage is a $changeStream stage, then all stages in the pipeline must be
+        // either $changeStream stages or whitelisted as being able to run in a change stream.
+        if (firstStageConstraints.isChangeStreamStage()) {
+            for (auto&& source : _sources) {
+                uassert(ErrorCodes::IllegalOperation,
+                        str::stream() << source->getSourceName()
+                                      << " is not permitted in a $changeStream pipeline",
+                        source->constraints(_splitState).isAllowedInChangeStream());
             }
         }
     }
+}
 
-    if (AuthorizationSession::get(client)->isAuthorizedForPrivileges(privileges)) {
-        return Status::OK();
+void Pipeline::validateFacetPipeline() const {
+    if (_sources.empty()) {
+        uasserted(ErrorCodes::BadValue, "sub-pipeline in $facet stage cannot be empty");
     }
-    return Status(ErrorCodes::Unauthorized, "unauthorized");
+
+    for (auto&& stage : _sources) {
+        auto stageConstraints = stage->constraints(_splitState);
+        if (!stageConstraints.isAllowedInsideFacetStage()) {
+            uasserted(40600,
+                      str::stream() << stage->getSourceName()
+                                    << " is not allowed to be used within a $facet stage");
+        }
+        // We expect a stage within a $facet stage to have these properties.
+        invariant(stageConstraints.requiredPosition == PositionRequirement::kNone);
+        invariant(!stageConstraints.isIndependentOfAnyCollection);
+    }
+}
+
+void Pipeline::validateCommon() const {
+    size_t i = 0;
+    for (auto&& stage : _sources) {
+        auto constraints = stage->constraints(_splitState);
+
+        // Verify that all stages adhere to their PositionRequirement constraints.
+        if (constraints.requiredPosition == PositionRequirement::kFirst && i != 0) {
+            uasserted(40602,
+                      str::stream() << stage->getSourceName()
+                                    << " is only valid as the first stage in a pipeline.");
+        }
+        auto matchStage = dynamic_cast<DocumentSourceMatch*>(stage.get());
+        if (i != 0 && matchStage && matchStage->isTextQuery()) {
+            uasserted(17313, "$match with $text is only allowed as the first pipeline stage");
+        }
+
+        if (constraints.requiredPosition == PositionRequirement::kLast &&
+            i != _sources.size() - 1) {
+            uasserted(40601,
+                      str::stream() << stage->getSourceName()
+                                    << " can only be the final stage in the pipeline");
+        }
+        ++i;
+
+        // Verify that we are not attempting to run a mongoS-only stage on mongoD.
+        uassert(40644,
+                str::stream() << stage->getSourceName() << " can only be run on mongoS",
+                !(constraints.hostRequirement == HostTypeRequirement::kMongoS && !pCtx->inMongos));
+
+        if (pCtx->inMultiDocumentTransaction) {
+            uassert(ErrorCodes::OperationNotSupportedInTransaction,
+                    str::stream() << "Stage not supported inside of a multi-document transaction: "
+                                  << stage->getSourceName(),
+                    constraints.isAllowedInTransaction());
+        }
+    }
+}
+
+void Pipeline::optimizePipeline() {
+    SourceContainer optimizedSources;
+
+    SourceContainer::iterator itr = _sources.begin();
+
+    // We could be swapping around stages during this process, so disconnect the pipeline to prevent
+    // us from entering a state with dangling pointers.
+    unstitch();
+    while (itr != _sources.end()) {
+        invariant((*itr).get());
+        itr = (*itr).get()->optimizeAt(itr, &_sources);
+    }
+
+    // Once we have reached our final number of stages, optimize each individually.
+    for (auto&& source : _sources) {
+        if (auto out = source->optimize()) {
+            optimizedSources.push_back(out);
+        }
+    }
+    _sources.swap(optimizedSources);
+    stitch();
+}
+
+bool Pipeline::aggSupportsWriteConcern(const BSONObj& cmd) {
+    auto pipelineElement = cmd["pipeline"];
+    if (pipelineElement.type() != BSONType::Array) {
+        return false;
+    }
+
+    for (auto stage : pipelineElement.Obj()) {
+        if (stage.type() != BSONType::Object) {
+            return false;
+        }
+
+        if (stage.Obj().hasField("$out")) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 void Pipeline::detachFromOperationContext() {
     pCtx->opCtx = nullptr;
+    pCtx->mongoProcessInterface->setOperationContext(nullptr);
 
-    for (auto* source : sourcesNeedingMongod) {
-        source->setOperationContext(nullptr);
+    for (auto&& source : _sources) {
+        source->detachFromOperationContext();
     }
 }
 
 void Pipeline::reattachToOperationContext(OperationContext* opCtx) {
-    invariant(pCtx->opCtx == nullptr);
     pCtx->opCtx = opCtx;
+    pCtx->mongoProcessInterface->setOperationContext(opCtx);
 
-    for (auto* source : sourcesNeedingMongod) {
-        source->setOperationContext(opCtx);
+    for (auto&& source : _sources) {
+        source->reattachToOperationContext(opCtx);
     }
 }
 
-intrusive_ptr<Pipeline> Pipeline::splitForSharded() {
+void Pipeline::dispose(OperationContext* opCtx) {
+    try {
+        pCtx->opCtx = opCtx;
+
+        // Make sure all stages are connected, in case we are being disposed via an error path and
+        // were not stitched at the time of the error.
+        stitch();
+
+        if (!_sources.empty()) {
+            _sources.back()->dispose();
+        }
+        _disposed = true;
+    } catch (...) {
+        std::terminate();
+    }
+}
+
+std::unique_ptr<Pipeline, PipelineDeleter> Pipeline::splitForSharded() {
+    invariant(!isSplitForShards());
+    invariant(!isSplitForMerge());
+
     // Create and initialize the shard spec we'll return. We start with an empty pipeline on the
     // shards and all work being done in the merger. Optimizations can move operations between
     // the pipelines to be more efficient.
-    intrusive_ptr<Pipeline> shardPipeline(new Pipeline(pCtx));
-    shardPipeline->explain = explain;
+    std::unique_ptr<Pipeline, PipelineDeleter> shardPipeline(new Pipeline(pCtx),
+                                                             PipelineDeleter(pCtx->opCtx));
 
-    // The order in which optimizations are applied can have significant impact on the
-    // efficiency of the final pipeline. Be Careful!
-    Optimizations::Sharded::findSplitPoint(shardPipeline.get(), this);
-    Optimizations::Sharded::moveFinalUnwindFromShardsToMerger(shardPipeline.get(), this);
-    Optimizations::Sharded::limitFieldsSentFromShardsToMerger(shardPipeline.get(), this);
+    cluster_aggregation_planner::performSplitPipelineOptimizations(shardPipeline.get(), this);
+    shardPipeline->_splitState = SplitState::kSplitForShards;
+    _splitState = SplitState::kSplitForMerge;
+
+    stitch();
 
     return shardPipeline;
 }
 
-void Pipeline::Optimizations::Sharded::findSplitPoint(Pipeline* shardPipe, Pipeline* mergePipe) {
-    while (!mergePipe->sources.empty()) {
-        intrusive_ptr<DocumentSource> current = mergePipe->sources.front();
-        mergePipe->sources.pop_front();
-
-        // Check if this source is splittable
-        SplittableDocumentSource* splittable =
-            dynamic_cast<SplittableDocumentSource*>(current.get());
-
-        if (!splittable) {
-            // move the source from the merger sources to the shard sources
-            shardPipe->sources.push_back(current);
-        } else {
-            // split this source into Merge and Shard sources
-            intrusive_ptr<DocumentSource> shardSource = splittable->getShardSource();
-            intrusive_ptr<DocumentSource> mergeSource = splittable->getMergeSource();
-            if (shardSource)
-                shardPipe->sources.push_back(shardSource);
-            if (mergeSource)
-                mergePipe->sources.push_front(mergeSource);
-
-            break;
-        }
-    }
-}
-
-void Pipeline::Optimizations::Sharded::moveFinalUnwindFromShardsToMerger(Pipeline* shardPipe,
-                                                                         Pipeline* mergePipe) {
-    while (!shardPipe->sources.empty() &&
-           dynamic_cast<DocumentSourceUnwind*>(shardPipe->sources.back().get())) {
-        mergePipe->sources.push_front(shardPipe->sources.back());
-        shardPipe->sources.pop_back();
-    }
-}
-
-void Pipeline::Optimizations::Sharded::limitFieldsSentFromShardsToMerger(Pipeline* shardPipe,
-                                                                         Pipeline* mergePipe) {
-    DepsTracker mergeDeps = mergePipe->getDependencies(shardPipe->getInitialQuery());
-    if (mergeDeps.needWholeDocument)
-        return;  // the merge needs all fields, so nothing we can do.
-
-    // Empty project is "special" so if no fields are needed, we just ask for _id instead.
-    if (mergeDeps.fields.empty())
-        mergeDeps.fields.insert("_id");
-
-    // Remove metadata from dependencies since it automatically flows through projection and we
-    // don't want to project it in to the document.
-    mergeDeps.needTextScore = false;
-
-    // HEURISTIC: only apply optimization if none of the shard stages have an exhaustive list of
-    // field dependencies. While this may not be 100% ideal in all cases, it is simple and
-    // avoids the worst cases by ensuring that:
-    // 1) Optimization IS applied when the shards wouldn't have known their exhaustive list of
-    //    dependencies. This situation can happen when a $sort is before the first $project or
-    //    $group. Without the optimization, the shards would have to reify and transmit full
-    //    objects even though only a subset of fields are needed.
-    // 2) Optimization IS NOT applied immediately following a $project or $group since it would
-    //    add an unnecessary project (and therefore a deep-copy).
-    for (size_t i = 0; i < shardPipe->sources.size(); i++) {
-        DepsTracker dt;  // ignored
-        if (shardPipe->sources[i]->getDependencies(&dt) & DocumentSource::EXHAUSTIVE_FIELDS)
-            return;
-    }
-
-    // if we get here, add the project.
-    shardPipe->sources.push_back(DocumentSourceProject::createFromBson(
-        BSON("$project" << mergeDeps.toProjection()).firstElement(), shardPipe->pCtx));
-}
-
 BSONObj Pipeline::getInitialQuery() const {
-    if (sources.empty())
+    if (_sources.empty())
         return BSONObj();
 
     /* look for an initial $match */
-    DocumentSourceMatch* match = dynamic_cast<DocumentSourceMatch*>(sources.front().get());
-    if (!match)
-        return BSONObj();
+    DocumentSourceMatch* match = dynamic_cast<DocumentSourceMatch*>(_sources.front().get());
+    if (match) {
+        return match->getQuery();
+    }
 
-    return match->getQuery();
+    DocumentSourceGeoNear* geoNear = dynamic_cast<DocumentSourceGeoNear*>(_sources.front().get());
+    if (geoNear) {
+        return geoNear->getQuery();
+    }
+
+    return BSONObj();
 }
 
 bool Pipeline::needsPrimaryShardMerger() const {
-    for (auto&& source : sources) {
-        if (source->needsPrimaryShard()) {
+    return std::any_of(_sources.begin(), _sources.end(), [&](const auto& stage) {
+        return stage->constraints(SplitState::kSplitForMerge).hostRequirement ==
+            HostTypeRequirement::kPrimaryShard;
+    });
+}
+
+bool Pipeline::needsMongosMerger() const {
+    return std::any_of(_sources.begin(), _sources.end(), [&](const auto& stage) {
+        return stage->constraints(SplitState::kSplitForMerge).resolvedHostTypeRequirement(pCtx) ==
+            HostTypeRequirement::kMongoS;
+    });
+}
+
+bool Pipeline::needsShard() const {
+    return std::any_of(_sources.begin(), _sources.end(), [&](const auto& stage) {
+        auto hostType = stage->constraints().resolvedHostTypeRequirement(pCtx);
+        return (hostType == HostTypeRequirement::kAnyShard ||
+                hostType == HostTypeRequirement::kPrimaryShard);
+    });
+}
+
+bool Pipeline::canRunOnMongos() const {
+    return _pipelineCanRunOnMongoS().isOK();
+}
+
+bool Pipeline::requiredToRunOnMongos() const {
+    invariant(!isSplitForShards());
+
+    for (auto&& stage : _sources) {
+        // If this pipeline is capable of splitting before the mongoS-only stage, then the pipeline
+        // as a whole is not required to run on mongoS.
+        if (isUnsplit() && dynamic_cast<NeedsMergerDocumentSource*>(stage.get())) {
+            return false;
+        }
+
+        auto hostRequirement = stage->constraints(_splitState).resolvedHostTypeRequirement(pCtx);
+
+        // If a mongoS-only stage occurs before a splittable stage, or if the pipeline is already
+        // split, this entire pipeline must run on mongoS.
+        if (hostRequirement == HostTypeRequirement::kMongoS) {
+            // Verify that the remainder of this pipeline can run on mongoS.
+            auto mongosRunStatus = _pipelineCanRunOnMongoS();
+
+            uassertStatusOKWithContext(mongosRunStatus,
+                                       str::stream() << stage->getSourceName()
+                                                     << " must run on mongoS, but cannot");
+
             return true;
         }
     }
+
     return false;
 }
 
 std::vector<NamespaceString> Pipeline::getInvolvedCollections() const {
     std::vector<NamespaceString> collections;
-    for (auto&& source : sources) {
+    for (auto&& source : _sources) {
         source->addInvolvedCollections(&collections);
     }
     return collections;
 }
 
-Document Pipeline::serialize() const {
-    MutableDocument serialized;
-    // create an array out of the pipeline operations
-    vector<Value> array;
-    for (SourceContainer::const_iterator iter(sources.begin()), listEnd(sources.end());
-         iter != listEnd;
-         ++iter) {
-        intrusive_ptr<DocumentSource> pSource(*iter);
-        pSource->serializeToArray(array);
+vector<Value> Pipeline::serialize() const {
+    vector<Value> serializedSources;
+    for (auto&& source : _sources) {
+        source->serializeToArray(serializedSources);
     }
+    return serializedSources;
+}
 
-    // add the top-level items to the command
-    serialized.setField(commandName, Value(pCtx->ns.coll()));
-    serialized.setField(pipelineName, Value(array));
-
-    if (explain) {
-        serialized.setField(explainName, Value(explain));
+void Pipeline::unstitch() {
+    for (auto&& stage : _sources) {
+        stage->setSource(nullptr);
     }
-
-    if (pCtx->extSortAllowed) {
-        serialized.setField("allowDiskUse", Value(true));
-    }
-
-    if (pCtx->bypassDocumentValidation) {
-        serialized.setField(bypassDocumentValidationCommandOption(), Value(true));
-    }
-
-    return serialized.freeze();
 }
 
 void Pipeline::stitch() {
-    massert(16600, "should not have an empty pipeline", !sources.empty());
-
-    /* chain together the sources we found */
-    DocumentSource* prevSource = sources.front().get();
-    for (SourceContainer::iterator iter(sources.begin() + 1), listEnd(sources.end());
+    if (_sources.empty()) {
+        return;
+    }
+    // Chain together all the stages.
+    DocumentSource* prevSource = _sources.front().get();
+    prevSource->setSource(nullptr);
+    for (SourceContainer::iterator iter(++_sources.begin()), listEnd(_sources.end());
          iter != listEnd;
          ++iter) {
         intrusive_ptr<DocumentSource> pTemp(*iter);
         pTemp->setSource(prevSource);
         prevSource = pTemp.get();
     }
-
-    // Cache the document sources that have a MongodInterface to avoid the cost of a dynamic cast
-    // when updating the OperationContext of their DBDirectClients while executing the pipeline.
-    for (auto&& source : sources) {
-        if (auto* needsMongod = dynamic_cast<DocumentSourceNeedsMongod*>(source.get())) {
-            sourcesNeedingMongod.push_back(needsMongod);
-        }
-    }
 }
 
-void Pipeline::run(BSONObjBuilder& result) {
-    // should not get here in the explain case
-    verify(!explain);
-
-    // the array in which the aggregation results reside
-    // cant use subArrayStart() due to error handling
-    BSONArrayBuilder resultArray;
-    DocumentSource* finalSource = sources.back().get();
-    while (boost::optional<Document> next = finalSource->getNext()) {
-        // add the document to the result set
-        BSONObjBuilder documentBuilder(resultArray.subobjStart());
-        next->toBson(&documentBuilder);
-        documentBuilder.doneFast();
-        // object will be too large, assert. the extra 1KB is for headers
-        uassert(16389,
-                str::stream() << "aggregation result exceeds maximum document size ("
-                              << BSONObjMaxUserSize / (1024 * 1024) << "MB)",
-                resultArray.len() < BSONObjMaxUserSize - 1024);
+boost::optional<Document> Pipeline::getNext() {
+    invariant(!_sources.empty());
+    auto nextResult = _sources.back()->getNext();
+    while (nextResult.isPaused()) {
+        nextResult = _sources.back()->getNext();
     }
-
-    resultArray.done();
-    result.appendArray("result", resultArray.arr());
+    return nextResult.isEOF() ? boost::none
+                              : boost::optional<Document>{nextResult.releaseDocument()};
 }
 
-vector<Value> Pipeline::writeExplainOps() const {
+vector<Value> Pipeline::writeExplainOps(ExplainOptions::Verbosity verbosity) const {
     vector<Value> array;
-    for (SourceContainer::const_iterator it = sources.begin(); it != sources.end(); ++it) {
-        (*it)->serializeToArray(array, /*explain=*/true);
+    for (SourceContainer::const_iterator it = _sources.begin(); it != _sources.end(); ++it) {
+        (*it)->serializeToArray(array, verbosity);
     }
     return array;
 }
 
 void Pipeline::addInitialSource(intrusive_ptr<DocumentSource> source) {
-    sources.push_front(source);
+    if (!_sources.empty()) {
+        _sources.front()->setSource(source.get());
+    }
+    _sources.push_front(source);
 }
 
-DepsTracker Pipeline::getDependencies(const BSONObj& initialQuery) const {
-    DepsTracker deps;
+void Pipeline::addFinalSource(intrusive_ptr<DocumentSource> source) {
+    if (!_sources.empty()) {
+        source->setSource(_sources.back().get());
+    }
+    _sources.push_back(source);
+}
+
+DepsTracker Pipeline::getDependencies(DepsTracker::MetadataAvailable metadataAvailable) const {
+    DepsTracker deps(metadataAvailable);
+    const bool scopeHasVariables = pCtx->variablesParseState.hasDefinedVariables();
+    bool skipFieldsAndMetadataDeps = false;
     bool knowAllFields = false;
     bool knowAllMeta = false;
-    for (size_t i = 0; i < sources.size() && !(knowAllFields && knowAllMeta); i++) {
-        DepsTracker localDeps;
-        DocumentSource::GetDepsReturn status = sources[i]->getDependencies(&localDeps);
+    for (auto&& source : _sources) {
+        DepsTracker localDeps(deps.getMetadataAvailable());
+        DocumentSource::GetDepsReturn status = source->getDependencies(&localDeps);
 
-        if (status == DocumentSource::NOT_SUPPORTED) {
+        deps.vars.insert(localDeps.vars.begin(), localDeps.vars.end());
+
+        if ((skipFieldsAndMetadataDeps |= (status == DocumentSource::NOT_SUPPORTED))) {
             // Assume this stage needs everything. We may still know something about our
-            // dependencies if an earlier stage returned either EXHAUSTIVE_FIELDS or
-            // EXHAUSTIVE_META.
-            break;
+            // dependencies if an earlier stage returned EXHAUSTIVE_FIELDS or EXHAUSTIVE_META. If
+            // this scope has variables, we need to keep enumerating the remaining stages but will
+            // skip adding any further field or metadata dependencies.
+            if (scopeHasVariables) {
+                continue;
+            } else {
+                break;
+            }
         }
 
         if (!knowAllFields) {
@@ -637,27 +510,129 @@ DepsTracker Pipeline::getDependencies(const BSONObj& initialQuery) const {
         }
 
         if (!knowAllMeta) {
-            if (localDeps.needTextScore)
-                deps.needTextScore = true;
+            if (localDeps.getNeedTextScore())
+                deps.setNeedTextScore(true);
+
+            if (localDeps.getNeedSortKey())
+                deps.setNeedSortKey(true);
 
             knowAllMeta = status & DocumentSource::EXHAUSTIVE_META;
+        }
+
+        // If there are variables defined at this pipeline's scope, there may be dependencies upon
+        // them in subsequent stages. Keep enumerating.
+        if (knowAllMeta && knowAllFields && !scopeHasVariables) {
+            break;
         }
     }
 
     if (!knowAllFields)
         deps.needWholeDocument = true;  // don't know all fields we need
 
-    // NOTE This code assumes that textScore can only be generated by the initial query.
-    if (DocumentSourceMatch::isTextQuery(initialQuery)) {
-        // If doing a text query, assume we need the score if we can't prove we don't.
+    if (metadataAvailable & DepsTracker::MetadataAvailable::kTextScore) {
+        // If there is a text score, assume we need to keep it if we can't prove we don't. If we are
+        // the first half of a pipeline which has been split, future stages might need it.
         if (!knowAllMeta)
-            deps.needTextScore = true;
+            deps.setNeedTextScore(true);
     } else {
-        // If we aren't doing a text query, then we don't need to ask for the textScore since we
-        // know it will be missing anyway.
-        deps.needTextScore = false;
+        // If there is no text score available, then we don't need to ask for it.
+        deps.setNeedTextScore(false);
     }
 
     return deps;
 }
+
+Status Pipeline::_pipelineCanRunOnMongoS() const {
+    for (auto&& stage : _sources) {
+        auto constraints = stage->constraints(_splitState);
+        auto hostRequirement = constraints.resolvedHostTypeRequirement(pCtx);
+
+        const bool needsShard = (hostRequirement == HostTypeRequirement::kAnyShard ||
+                                 hostRequirement == HostTypeRequirement::kPrimaryShard);
+
+        const bool mustWriteToDisk =
+            (constraints.diskRequirement == DiskUseRequirement::kWritesPersistentData);
+        const bool mayWriteTmpDataAndDiskUseIsAllowed =
+            (pCtx->allowDiskUse &&
+             constraints.diskRequirement == DiskUseRequirement::kWritesTmpData);
+        const bool needsDisk = (mustWriteToDisk || mayWriteTmpDataAndDiskUseIsAllowed);
+
+        const bool needsToBlock = (constraints.streamType == StreamType::kBlocking);
+        const bool blockingIsPermitted = !internalQueryProhibitBlockingMergeOnMongoS.load();
+
+        // If nothing prevents this stage from running on mongoS, continue to the next stage.
+        if (!needsShard && !needsDisk && (!needsToBlock || blockingIsPermitted)) {
+            continue;
+        }
+
+        // Otherwise, return an error with an explanation.
+        StringBuilder ss;
+        ss << stage->getSourceName();
+
+        if (needsShard) {
+            ss << " must run on a shard";
+        } else if (needsToBlock && !blockingIsPermitted) {
+            ss << " is a blocking stage; running these stages on mongoS is disabled";
+        } else if (mustWriteToDisk) {
+            ss << " must write to disk";
+        } else if (mayWriteTmpDataAndDiskUseIsAllowed) {
+            ss << " may write to disk when 'allowDiskUse' is enabled";
+        } else {
+            MONGO_UNREACHABLE;
+        }
+
+        return {ErrorCodes::IllegalOperation, ss.str()};
+    }
+
+    return Status::OK();
+}
+
+void Pipeline::pushBack(boost::intrusive_ptr<DocumentSource> newStage) {
+    if (!_sources.empty()) {
+        newStage->setSource(_sources.back().get());
+    }
+    _sources.push_back(std::move(newStage));
+}
+
+boost::intrusive_ptr<DocumentSource> Pipeline::popBack() {
+    if (_sources.empty()) {
+        return nullptr;
+    }
+    auto targetStage = _sources.back();
+    _sources.pop_back();
+    return targetStage;
+}
+
+boost::intrusive_ptr<DocumentSource> Pipeline::popFront() {
+    if (_sources.empty()) {
+        return nullptr;
+    }
+    auto targetStage = _sources.front();
+    _sources.pop_front();
+    stitch();
+    return targetStage;
+}
+
+DocumentSource* Pipeline::peekFront() const {
+    return _sources.empty() ? nullptr : _sources.front().get();
+}
+
+boost::intrusive_ptr<DocumentSource> Pipeline::popFrontWithName(StringData targetStageName) {
+    return popFrontWithNameAndCriteria(targetStageName, nullptr);
+}
+
+boost::intrusive_ptr<DocumentSource> Pipeline::popFrontWithNameAndCriteria(
+    StringData targetStageName, stdx::function<bool(const DocumentSource* const)> predicate) {
+    if (_sources.empty() || _sources.front()->getSourceName() != targetStageName) {
+        return nullptr;
+    }
+    auto targetStage = _sources.front();
+
+    if (predicate && !predicate(targetStage.get())) {
+        return nullptr;
+    }
+
+    return popFront();
+}
+
 }  // namespace mongo

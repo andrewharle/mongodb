@@ -1,3 +1,5 @@
+// @tags: [requires_non_retryable_writes, requires_fastcount]
+
 // remove.js
 // unit test for db remove
 

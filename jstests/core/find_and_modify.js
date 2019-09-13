@@ -1,3 +1,8 @@
+// Cannot implicitly shard accessed collections because of following errmsg: A single
+// update/delete on a sharded collection must contain an exact match on _id or contain the shard
+// key.
+// @tags: [assumes_unsharded_collection, requires_fastcount]
+
 t = db.find_and_modify;
 t.drop();
 
@@ -69,7 +74,8 @@ var cmdRes = db.runCommand({
     query: {_id: "miss"},
     update: {$inc: {y: 1}},
     fields: {foo: {$pop: ["bar"]}},
-    upsert: true, new: true
+    upsert: true,
+    new: true
 });
 assert.commandFailed(cmdRes);
 
@@ -81,7 +87,8 @@ cmdRes = db.runCommand({
     query: {_id: "found"},
     update: {$inc: {y: 1}},
     fields: {foo: {$pop: ["bar"]}},
-    upsert: true, new: true
+    upsert: true,
+    new: true
 });
 assert.commandFailed(cmdRes);
 
@@ -90,7 +97,8 @@ cmdRes = db.runCommand({
     findAndModify: t.getName(),
     query: {_id: "found"},
     update: {$inc: {y: 1}},
-    fields: {foo: {$pop: ["bar"]}}, new: true
+    fields: {foo: {$pop: ["bar"]}},
+    new: true
 });
 assert.commandFailed(cmdRes);
 
@@ -128,7 +136,8 @@ cmdRes = db.runCommand({
     findAndModify: t.getName(),
     query: {_id: "missagain"},
     update: {$inc: {y: 1}},
-    upsert: true, new: true
+    upsert: true,
+    new: true
 });
 assert.commandWorked(cmdRes);
 assert("value" in cmdRes);

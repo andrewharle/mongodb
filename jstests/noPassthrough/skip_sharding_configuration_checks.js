@@ -1,7 +1,7 @@
 /**
  *  Starts standalone RS with skipShardingConfigurationChecks.
- * This test requires users to persist across a restart.
- * @tags: [requires_persistence]
+ *  @tags: [requires_persistence, requires_replication, requires_sharding,
+ * requires_majority_read_concern]
  */
 (function() {
     'use strict';
@@ -17,26 +17,24 @@
         });
     }
 
-    var configSvr = MongoRunner.runMongod(
+    let configSvr = MongoRunner.runMongod(
         {configsvr: "", setParameter: 'skipShardingConfigurationChecks=true'});
     assert.eq(configSvr, null);
 
-    var shardSvr = MongoRunner.runMongod(
-        {shardsvr: "", setParameter: 'skipShardingConfigurationChecks=true'});
+    let shardSvr =
+        MongoRunner.runMongod({shardsvr: "", setParameter: 'skipShardingConfigurationChecks=true'});
     assert.eq(shardSvr, null);
 
-    var st =
-        new ShardingTest({name: "skipConfig", shards: {rs0: {nodes: 1}}, other: {sync: false}});
+    var st = new ShardingTest({name: "skipConfig", shards: {rs0: {nodes: 1}}});
     var configRS = st.configRS;
     var shardRS = st.rs0;
 
-    st.stopAllMongos();
     shardRS.stopSet(15, true);
     configRS.stopSet(undefined, true);
 
     jsTestLog("Restarting configRS as a standalone ReplicaSet");
 
-    for (var i = 0; i < configRS.nodes.length; i++) {
+    for (let i = 0; i < configRS.nodes.length; i++) {
         delete configRS.nodes[i].fullOptions.configsvr;
         configRS.nodes[i].fullOptions.setParameter = 'skipShardingConfigurationChecks=true';
     }
@@ -45,11 +43,12 @@
     configRS.stopSet();
 
     jsTestLog("Restarting shardRS as a standalone ReplicaSet");
-    for (var i = 0; i < shardRS.nodes.length; i++) {
+    for (let i = 0; i < shardRS.nodes.length; i++) {
         delete shardRS.nodes[i].fullOptions.shardsvr;
         shardRS.nodes[i].fullOptions.setParameter = 'skipShardingConfigurationChecks=true';
     }
     shardRS.startSet({}, true);
     expectState(shardRS, ReplSetTest.State.PRIMARY);
     shardRS.stopSet();
+    MongoRunner.stopMongos(st.s);
 })();

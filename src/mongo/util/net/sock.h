@@ -1,30 +1,33 @@
 // @file sock.h
 
-/*    Copyright 2009 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
@@ -33,10 +36,10 @@
 
 #ifndef _WIN32
 
+#include <errno.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/un.h>
-#include <errno.h>
 
 #ifdef __OpenBSD__
 #include <sys/uio.h>
@@ -45,6 +48,7 @@
 #endif  // not _WIN32
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -54,36 +58,20 @@
 #include "mongo/logger/log_severity.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/net/sockaddr.h"
 
 namespace mongo {
 
 #ifdef MONGO_CONFIG_SSL
 class SSLManagerInterface;
-class SSLConnection;
+class SSLConnectionInterface;
 #endif
+struct SSLPeerInfo;
 
 extern const int portSendFlags;
 extern const int portRecvFlags;
 
-const int SOCK_FAMILY_UNKNOWN_ERROR = 13078;
-
-void disableNagle(int sock);
-
-// Generate a string representation for getaddrinfo return codes
-std::string getAddrInfoStrError(int code);
-
-#if defined(_WIN32)
-
-typedef short sa_family_t;
-typedef int socklen_t;
-
-// This won't actually be used on windows
-struct sockaddr_un {
-    short sun_family;
-    char sun_path[108];  // length from unix header
-};
-
-#else  // _WIN32
+#if !defined(_WIN32)
 
 inline void closesocket(int s) {
     close(s);
@@ -93,146 +81,8 @@ typedef int SOCKET;
 
 #endif  // _WIN32
 
-std::string makeUnixSockPath(int port);
-
-// If an ip address is passed in, just return that.  If a hostname is passed
-// in, look up its ip and return that.  Returns "" on failure.
-std::string hostbyname(const char* hostname);
-
-void enableIPv6(bool state = true);
-bool IPv6Enabled();
-void setSockTimeouts(int sock, double secs);
-
 /**
- * wrapped around os representation of network address
- */
-struct SockAddr {
-    SockAddr();
-    explicit SockAddr(int sourcePort); /* listener side */
-    SockAddr(
-        const char* ip,
-        int port); /* EndPoint (remote) side, or if you want to specify which interface locally */
-
-    template <typename T>
-    T& as() {
-        return *(T*)(&sa);
-    }
-    template <typename T>
-    const T& as() const {
-        return *(const T*)(&sa);
-    }
-
-    std::string toString(bool includePort = true) const;
-
-    bool isValid() const {
-        return _isValid;
-    }
-
-    /**
-     * @return one of AF_INET, AF_INET6, or AF_UNIX
-     */
-    sa_family_t getType() const;
-
-    unsigned getPort() const;
-
-    std::string getAddr() const;
-
-    bool isLocalHost() const;
-
-    bool operator==(const SockAddr& r) const;
-
-    bool operator!=(const SockAddr& r) const;
-
-    bool operator<(const SockAddr& r) const;
-
-    const sockaddr* raw() const {
-        return (sockaddr*)&sa;
-    }
-    sockaddr* raw() {
-        return (sockaddr*)&sa;
-    }
-
-    socklen_t addressSize;
-
-private:
-    struct sockaddr_storage sa;
-    bool _isValid;
-};
-
-/** this is not cache and does a syscall */
-std::string getHostName();
-
-/** this is cached, so if changes during the process lifetime
- * will be stale */
-std::string getHostNameCached();
-
-std::string prettyHostName();
-
-/**
- * thrown by Socket and SockAddr
- */
-class SocketException : public DBException {
-public:
-    const enum Type {
-        CLOSED,
-        RECV_ERROR,
-        SEND_ERROR,
-        RECV_TIMEOUT,
-        SEND_TIMEOUT,
-        FAILED_STATE,
-        CONNECT_ERROR
-    } _type;
-
-    SocketException(Type t,
-                    const std::string& server,
-                    int code = 9001,
-                    const std::string& extra = "")
-        : DBException(std::string("socket exception [") + _getStringType(t) + "] for " + server,
-                      code),
-          _type(t),
-          _server(server),
-          _extra(extra) {}
-
-    virtual ~SocketException() throw() {}
-
-    bool shouldPrint() const {
-        return _type != CLOSED;
-    }
-    virtual std::string toString() const;
-    virtual const std::string* server() const {
-        return &_server;
-    }
-
-private:
-    // TODO: Allow exceptions better control over their messages
-    static std::string _getStringType(Type t) {
-        switch (t) {
-            case CLOSED:
-                return "CLOSED";
-            case RECV_ERROR:
-                return "RECV_ERROR";
-            case SEND_ERROR:
-                return "SEND_ERROR";
-            case RECV_TIMEOUT:
-                return "RECV_TIMEOUT";
-            case SEND_TIMEOUT:
-                return "SEND_TIMEOUT";
-            case FAILED_STATE:
-                return "FAILED_STATE";
-            case CONNECT_ERROR:
-                return "CONNECT_ERROR";
-            default:
-                return "UNKNOWN";  // should never happen
-        }
-    }
-
-    std::string _server;
-    std::string _extra;
-};
-
-
-/**
- * thin wrapped around file descriptor and system calls
+ * thin wrapper around file descriptor and system calls
  * todo: ssl
  */
 class Socket {
@@ -306,6 +156,17 @@ public:
         return _fd;
     }
 
+    /**
+     * This sets the Sock's socket descriptor to be invalid and returns the old descriptor. This
+     * only gets called in listen.cpp in Listener::_accepted(). This gets called on the listener
+     * thread immediately after the thread creates the Sock, so it doesn't need to be thread-safe.
+     */
+    int stealSD() {
+        int tmp = _fd;
+        _fd = -1;
+        return tmp;
+    }
+
     void setTimeout(double secs);
     bool isStillConnected();
 
@@ -338,7 +199,7 @@ public:
      *
      * This function may throw SocketException.
      */
-    std::string doSSLHandshake(const char* firstBytes = NULL, int len = 0);
+    SSLPeerInfo doSSLHandshake(const char* firstBytes = NULL, int len = 0);
 
     /**
      * @return the time when the socket was opened.
@@ -349,6 +210,8 @@ public:
 
     void handleRecvError(int ret, int len);
     void handleSendError(int ret, const char* context);
+
+    std::string getSNIServerName() const;
 
 private:
     void _init();
@@ -362,7 +225,7 @@ private:
     /** raw recv, same semantics as ::recv */
     int _recv(char* buf, int max);
 
-    int _fd;
+    SOCKET _fd;
     uint64_t _fdCreationMicroSec;
     SockAddr _local;
     SockAddr _remote;
@@ -373,7 +236,7 @@ private:
     time_t _lastValidityCheckAtSecs;
 
 #ifdef MONGO_CONFIG_SSL
-    std::unique_ptr<SSLConnection> _sslConnection;
+    std::unique_ptr<SSLConnectionInterface> _sslConnection;
     SSLManagerInterface* _sslManager;
 #endif
     logger::LogSeverity _logLevel;  // passed to log() when logging errors
@@ -381,6 +244,5 @@ private:
     /** true until the first packet has been received or an outgoing connect has been made */
     bool _awaitingHandshake;
 };
-
 
 }  // namespace mongo

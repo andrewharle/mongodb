@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -26,16 +28,15 @@
  *    it in the license file.
  */
 
-#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kNetwork
-
 #include "mongo/platform/basic.h"
 
 #include "mongo/client/mongo_uri.h"
 
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/client/authenticate.h"
 #include "mongo/client/dbclientinterface.h"
-#include "mongo/client/sasl_client_authenticate.h"
+#include "mongo/db/auth/sasl_command_constants.h"
 #include "mongo/util/mongoutils/str.h"
 #include "mongo/util/password_digest.h"
 
@@ -55,8 +56,6 @@ const char kAuthMechanismPropertiesKey[] = "mechanism_properties";
 const char kAuthServiceName[] = "SERVICE_NAME";
 const char kAuthServiceRealm[] = "SERVICE_REALM";
 
-const char kAuthMechMongoCR[] = "MONGODB-CR";
-const char kAuthMechScramSha1[] = "SCRAM-SHA-1";
 const char kAuthMechDefault[] = "DEFAULT";
 
 const char* const kSupportedAuthMechanismProperties[] = {kAuthServiceName, kAuthServiceRealm};
@@ -101,44 +100,63 @@ std::string authKeyCopyDBMongoCR(const std::string& username,
 
 }  // namespace
 
-BSONObj MongoURI::_makeAuthObjFromOptions(int maxWireVersion) const {
+boost::optional<BSONObj> MongoURI::_makeAuthObjFromOptions(
+    int maxWireVersion, const std::vector<std::string>& saslMechsForAuth) const {
+    // Usually, a username is required to authenticate.
+    // However X509 based authentication may, and typically does,
+    // omit the username, inferring it from the client certificate instead.
+    bool usernameRequired = true;
+
     BSONObjBuilder bob;
-
-    // Add the username and optional password
-    invariant(!_user.empty());
-    std::string username(_user);  // may have to tack on service realm before we append
-
-    if (!_password.empty())
+    if (!_password.empty()) {
         bob.append(saslCommandPasswordFieldName, _password);
+    }
 
-    BSONElement elt = _options.getField("authSource");
-    if (!elt.eoo()) {
-        bob.appendAs(elt, saslCommandUserDBFieldName);
+    auto it = _options.find("authSource");
+    if (it != _options.end()) {
+        bob.append(saslCommandUserDBFieldName, it->second);
     } else if (!_database.empty()) {
         bob.append(saslCommandUserDBFieldName, _database);
     } else {
         bob.append(saslCommandUserDBFieldName, "admin");
     }
 
-    elt = _options.getField("authMechanism");
-    if (!elt.eoo()) {
-        bob.appendAs(elt, saslCommandMechanismFieldName);
+    it = _options.find("authMechanism");
+    if (it != _options.end()) {
+        bob.append(saslCommandMechanismFieldName, it->second);
+        if (it->second == auth::kMechanismMongoX509) {
+            usernameRequired = false;
+        }
+    } else if (!saslMechsForAuth.empty()) {
+        if (std::find(saslMechsForAuth.begin(),
+                      saslMechsForAuth.end(),
+                      auth::kMechanismScramSha256) != saslMechsForAuth.end()) {
+            bob.append(saslCommandMechanismFieldName, auth::kMechanismScramSha256);
+        } else {
+            bob.append(saslCommandMechanismFieldName, auth::kMechanismScramSha1);
+        }
     } else if (maxWireVersion >= 3) {
-        bob.append(saslCommandMechanismFieldName, kAuthMechScramSha1);
+        bob.append(saslCommandMechanismFieldName, auth::kMechanismScramSha1);
     } else {
-        bob.append(saslCommandMechanismFieldName, kAuthMechMongoCR);
+        bob.append(saslCommandMechanismFieldName, auth::kMechanismMongoCR);
     }
 
-    elt = _options.getField("authMechanismProperties");
-    if (!elt.eoo()) {
-        BSONObj parsed(parseAuthMechanismProperties(elt.String()));
+    if (usernameRequired && _user.empty()) {
+        return boost::none;
+    }
+
+    std::string username(_user);  // may have to tack on service realm before we append
+
+    it = _options.find("authMechanismProperties");
+    if (it != _options.end()) {
+        BSONObj parsed(parseAuthMechanismProperties(it->second));
 
         bool hasNameProp = parsed.hasField(kAuthServiceName);
         bool hasRealmProp = parsed.hasField(kAuthServiceRealm);
 
         uassert(ErrorCodes::FailedToParse,
                 "Cannot specify both gssapiServiceName and SERVICE_NAME",
-                !(hasNameProp && _options.hasField("gssapiServiceName")));
+                !(hasNameProp && _options.count("gssapiServiceName")));
         // we append the parsed object so that mechanisms that don't accept it can assert.
         bob.append(kAuthMechanismPropertiesKey, parsed);
         // we still append using the old way the SASL code expects it
@@ -148,28 +166,53 @@ BSONObj MongoURI::_makeAuthObjFromOptions(int maxWireVersion) const {
         // if we specified a realm, we just append it to the username as the SASL code
         // expects it that way.
         if (hasRealmProp) {
+            if (username.empty()) {
+                // In practice, this won't actually occur since
+                // this block corresponds to GSSAPI, while username
+                // may only be omitted with MOGNODB-X509.
+                return boost::none;
+            }
             username.append("@").append(parsed[kAuthServiceRealm].String());
         }
     }
 
-    elt = _options.getField("gssapiServiceName");
-    if (!elt.eoo())
-        bob.appendAs(elt, saslCommandServiceNameFieldName);
+    it = _options.find("gssapiServiceName");
+    if (it != _options.end()) {
+        bob.append(saslCommandServiceNameFieldName, it->second);
+    }
 
-    bob.append("user", username);
+    if (!username.empty()) {
+        bob.append("user", username);
+    }
 
     return bob.obj();
 }
 
-DBClientBase* MongoURI::connect(std::string& errmsg, double socketTimeout) const {
-    auto ret = std::unique_ptr<DBClientBase>(_connectString.connect(errmsg, socketTimeout));
+DBClientBase* MongoURI::connect(StringData applicationName,
+                                std::string& errmsg,
+                                boost::optional<double> socketTimeoutSecs) const {
+    OptionsMap::const_iterator it = _options.find("socketTimeoutMS");
+    if (it != _options.end() && !socketTimeoutSecs) {
+        try {
+            socketTimeoutSecs = std::stod(it->second) / 1000;
+        } catch (const std::exception& e) {
+            uasserted(ErrorCodes::BadValue,
+                      str::stream() << "Unable to parse socketTimeoutMS value" << causedBy(e));
+        }
+    }
+
+    auto ret = std::unique_ptr<DBClientBase>(
+        _connectString.connect(applicationName, errmsg, socketTimeoutSecs.value_or(0.0), this));
     if (!ret) {
         return nullptr;
     }
 
-    if (!_user.empty()) {
-        ret->auth(_makeAuthObjFromOptions(ret->getMaxWireVersion()));
+    auto optAuthObj =
+        _makeAuthObjFromOptions(ret->getMaxWireVersion(), ret->getIsMasterSaslMechanisms());
+    if (optAuthObj) {
+        ret->auth(optAuthObj.get());
     }
+
     return ret.release();
 }
 

@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -28,8 +30,8 @@
 
 #pragma once
 
-#include <set>
 #include <boost/optional/optional.hpp>
+#include <set>
 
 #include "mongo/db/exec/plan_stats.h"
 #include "mongo/db/query/canonical_query.h"
@@ -86,7 +88,20 @@ typedef std::string PlanID;
  *   This is done by QueryPlanner::tagAccordingToCache.
  */
 struct PlanCacheIndexTree {
-    PlanCacheIndexTree() : entry(nullptr), index_pos(0) {}
+
+    /**
+     * An OrPushdown is the cached version of an OrPushdownTag::Destination. It indicates that this
+     * node is a predicate that can be used inside of a sibling indexed OR, to tighten index bounds
+     * or satisfy the first field in the index.
+     */
+    struct OrPushdown {
+        std::string indexName;
+        size_t position;
+        bool canCombineBounds;
+        std::deque<size_t> route;
+    };
+
+    PlanCacheIndexTree() : entry(nullptr), index_pos(0), canCombineBounds(true) {}
 
     ~PlanCacheIndexTree() {
         for (std::vector<PlanCacheIndexTree*>::const_iterator it = children.begin();
@@ -118,6 +133,13 @@ struct PlanCacheIndexTree {
     std::unique_ptr<IndexEntry> entry;
 
     size_t index_pos;
+
+    // The value for this member is taken from the IndexTag of the corresponding match expression
+    // and is used to ensure that bounds are correctly intersected and/or compounded when a query is
+    // planned from the plan cache.
+    bool canCombineBounds;
+
+    std::vector<OrPushdown> orPushdowns;
 };
 
 /**
@@ -196,6 +218,7 @@ public:
     BSONObj query;
     BSONObj sort;
     BSONObj projection;
+    BSONObj collation;
 
     // The number of work cycles taken to decide on a winning plan when the plan was first
     // cached.
@@ -245,6 +268,8 @@ public:
     BSONObj query;
     BSONObj sort;
     BSONObj projection;
+    BSONObj collation;
+    Date_t timeOfCreation;
 
     //
     // Performance stats
@@ -290,7 +315,9 @@ public:
      * Record solutions for query. Best plan is first element in list.
      * Each query in the cache will have more than 1 plan because we only
      * add queries which are considered by the multi plan runner (which happens
-     * only when the query planner generates multiple candidate plans).
+     * only when the query planner generates multiple candidate plans). Callers are responsible
+     * for passing the current time so that the time the plan cache entry was created is stored
+     * in the plan cache.
      *
      * Takes ownership of 'why'.
      *
@@ -299,7 +326,8 @@ public:
      */
     Status add(const CanonicalQuery& query,
                const std::vector<QuerySolution*>& solns,
-               PlanRankingDecision* why);
+               PlanRankingDecision* why,
+               Date_t now);
 
     /**
      * Look up the cached data access for the provided 'query'.  Used by the query planner
@@ -397,10 +425,6 @@ private:
 
     // Protects _cache.
     mutable stdx::mutex _cacheMutex;
-
-    // Counter for write notifications since initialization or last clear() invocation.  Starts
-    // at 0.
-    AtomicInt32 _writeOperations;
 
     // Full namespace of collection.
     std::string _ns;

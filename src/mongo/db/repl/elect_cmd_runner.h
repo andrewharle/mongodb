@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -32,9 +34,9 @@
 
 #include "mongo/base/disallow_copying.h"
 #include "mongo/bson/oid.h"
-#include "mongo/db/repl/replica_set_config.h"
-#include "mongo/db/repl/replication_executor.h"
+#include "mongo/db/repl/repl_set_config.h"
 #include "mongo/db/repl/scatter_gather_algorithm.h"
+#include "mongo/executor/task_executor.h"
 
 namespace mongo {
 
@@ -42,7 +44,7 @@ class Status;
 
 namespace repl {
 
-class ReplicaSetConfig;
+class ReplSetConfig;
 class ScatterGatherRunner;
 
 class ElectCmdRunner {
@@ -51,7 +53,7 @@ class ElectCmdRunner {
 public:
     class Algorithm : public ScatterGatherAlgorithm {
     public:
-        Algorithm(const ReplicaSetConfig& rsConfig,
+        Algorithm(const ReplSetConfig& rsConfig,
                   int selfIndex,
                   const std::vector<HostAndPort>& targets,
                   OID round);
@@ -59,7 +61,7 @@ public:
         virtual ~Algorithm();
         virtual std::vector<executor::RemoteCommandRequest> getRequests() const;
         virtual void processResponse(const executor::RemoteCommandRequest& request,
-                                     const ResponseStatus& response);
+                                     const executor::RemoteCommandResponse& response);
         virtual bool hasReceivedSufficientResponses() const;
 
         int getReceivedVotes() const {
@@ -75,7 +77,7 @@ public:
 
         bool _sufficientResponsesReceived;
 
-        const ReplicaSetConfig _rsConfig;
+        const ReplSetConfig _rsConfig;
         const int _selfIndex;
         const std::vector<HostAndPort> _targets;
         const OID _round;
@@ -90,20 +92,15 @@ public:
      *
      * Returned handle can be used to schedule a callback when the process is complete.
      */
-    StatusWith<ReplicationExecutor::EventHandle> start(
-        ReplicationExecutor* executor,
-        const ReplicaSetConfig& currentConfig,
-        int selfIndex,
-        const std::vector<HostAndPort>& targets,
-        const stdx::function<void()>& onCompletion = stdx::function<void()>());
+    StatusWith<executor::TaskExecutor::EventHandle> start(executor::TaskExecutor* executor,
+                                                          const ReplSetConfig& currentConfig,
+                                                          int selfIndex,
+                                                          const std::vector<HostAndPort>& targets);
 
     /**
-     * Informs the ElectCmdRunner to cancel further processing.  The "executor"
-     * argument must point to the same executor passed to "start()".
-     *
-     * Like start(), this method must run in the executor context.
+     * Informs the ElectCmdRunner to cancel further processing.
      */
-    void cancel(ReplicationExecutor* executor);
+    void cancel();
 
     /**
      * Returns the number of received votes.  Only valid to call after
@@ -120,7 +117,7 @@ public:
     }
 
 private:
-    std::unique_ptr<Algorithm> _algorithm;
+    std::shared_ptr<Algorithm> _algorithm;
     std::unique_ptr<ScatterGatherRunner> _runner;
     bool _isCanceled;
 };

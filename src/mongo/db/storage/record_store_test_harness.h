@@ -1,25 +1,27 @@
 // record_store_test_harness.h
 
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -33,7 +35,8 @@
 #include <cstdint>
 
 #include "mongo/db/operation_context_noop.h"
-#include "mongo/db/service_context_noop.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/storage/test_harness_helper.h"
 #include "mongo/stdx/memory.h"
 
 namespace mongo {
@@ -41,24 +44,19 @@ namespace mongo {
 class RecordStore;
 class RecoveryUnit;
 
-class HarnessHelper {
+class RecordStoreHarnessHelper : public HarnessHelper {
 public:
-    HarnessHelper() : _serviceContext(), _client(_serviceContext.makeClient("hh")) {}
-    virtual ~HarnessHelper() {}
-
     virtual std::unique_ptr<RecordStore> newNonCappedRecordStore() = 0;
+
+    virtual std::unique_ptr<RecordStore> newNonCappedRecordStore(const std::string& ns) = 0;
 
     static const int64_t kDefaultCapedSizeBytes = 16 * 1024 * 1024;
     virtual std::unique_ptr<RecordStore> newCappedRecordStore(
         int64_t cappedSizeBytes = kDefaultCapedSizeBytes, int64_t cappedMaxDocs = -1) = 0;
 
-    virtual std::unique_ptr<OperationContext> newOperationContext(Client* client) {
-        return stdx::make_unique<OperationContextNoop>(client, 1, newRecoveryUnit());
-    }
-
-    std::unique_ptr<OperationContext> newOperationContext() {
-        return newOperationContext(nullptr);
-    }
+    virtual std::unique_ptr<RecordStore> newCappedRecordStore(const std::string& ns,
+                                                              int64_t cappedSizeBytes,
+                                                              int64_t cappedMaxDocs) = 0;
 
     /**
      * Currently this requires that it is possible to have two independent open write operations
@@ -66,20 +64,9 @@ public:
      * RecoveryUnits).
      */
     virtual bool supportsDocLocking() = 0;
-
-    Client* client() {
-        return _client.get();
-    }
-    ServiceContext* serviceContext() {
-        return &_serviceContext;
-    }
-
-private:
-    virtual RecoveryUnit* newRecoveryUnit() = 0;
-
-    ServiceContextNoop _serviceContext;
-    ServiceContext::UniqueClient _client;
 };
 
-std::unique_ptr<HarnessHelper> newHarnessHelper();
+inline std::unique_ptr<RecordStoreHarnessHelper> newRecordStoreHarnessHelper() {
+    return dynamic_ptr_cast<RecordStoreHarnessHelper>(newHarnessHelper());
 }
+}  // namespace mongo

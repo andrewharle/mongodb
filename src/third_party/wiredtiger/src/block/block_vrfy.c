@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -20,10 +20,8 @@ static int __verify_set_file_size(WT_SESSION_IMPL *, WT_BLOCK *, WT_CKPT *);
 /* The bit list ignores the first block: convert to/from a frag/offset. */
 #define	WT_wt_off_TO_FRAG(block, off)					\
 	((off) / (block)->allocsize - 1)
-#ifdef HAVE_VERBOSE
 #define	WT_FRAG_TO_OFF(block, frag)					\
 	(((wt_off_t)((frag) + 1)) * (block)->allocsize)
-#endif
 
 /*
  * __wt_block_verify_start --
@@ -33,7 +31,7 @@ int
 __wt_block_verify_start(WT_SESSION_IMPL *session,
     WT_BLOCK *block, WT_CKPT *ckptbase, const char *cfg[])
 {
-	WT_CKPT *ckpt;
+	WT_CKPT *ckpt, *t;
 	WT_CONFIG_ITEM cval;
 	wt_off_t size;
 
@@ -50,14 +48,12 @@ __wt_block_verify_start(WT_SESSION_IMPL *session,
 	 * checkpoint we have is fake, there's no work to do.  Don't complain,
 	 * that's not our problem to solve.
 	 */
-	WT_CKPT_FOREACH(ckptbase, ckpt)
-		;
-	for (;; --ckpt) {
-		if (ckpt->name != NULL && !F_ISSET(ckpt, WT_CKPT_FAKE))
-			break;
-		if (ckpt == ckptbase)
-			return (0);
-	}
+	ckpt = NULL;
+	WT_CKPT_FOREACH(ckptbase, t)
+		if (t->name != NULL && !F_ISSET(t, WT_CKPT_FAKE))
+			ckpt = t;
+	if (ckpt == NULL)
+		return (0);
 
 	/* Set the size of the file to the size of the last checkpoint. */
 	WT_RET(__verify_set_file_size(session, block, ckpt));
@@ -158,8 +154,8 @@ static int
 __verify_set_file_size(WT_SESSION_IMPL *session, WT_BLOCK *block, WT_CKPT *ckpt)
 {
 	WT_BLOCK_CKPT *ci, _ci;
-	WT_DECL_RET;
 	WT_DECL_ITEM(tmp);
+	WT_DECL_RET;
 
 	ci = &_ci;
 	WT_RET(__wt_block_ckpt_init(session, ci, ckpt->name));
@@ -223,8 +219,8 @@ int
 __wt_verify_ckpt_load(
     WT_SESSION_IMPL *session, WT_BLOCK *block, WT_BLOCK_CKPT *ci)
 {
-	WT_EXTLIST *el;
 	WT_EXT *ext;
+	WT_EXTLIST *el;
 	uint64_t frag, frags;
 
 	/* Set the maximum file size for this checkpoint. */
@@ -464,7 +460,6 @@ __verify_filefrag_chk(WT_SESSION_IMPL *session, WT_BLOCK *block)
 			__bit_set(block->fragfile, last);
 		}
 
-#ifdef HAVE_VERBOSE
 		if (!WT_VERBOSE_ISSET(session, WT_VERB_VERIFY))
 			continue;
 
@@ -472,7 +467,6 @@ __verify_filefrag_chk(WT_SESSION_IMPL *session, WT_BLOCK *block)
 		    "file range %" PRIuMAX "-%" PRIuMAX " never verified",
 		    (uintmax_t)WT_FRAG_TO_OFF(block, first),
 		    (uintmax_t)WT_FRAG_TO_OFF(block, last));
-#endif
 	}
 	if (count == 0)
 		return (0);
@@ -557,7 +551,6 @@ __verify_ckptfrag_chk(WT_SESSION_IMPL *session, WT_BLOCK *block)
 			__bit_clear(block->fragckpt, last);
 		}
 
-#ifdef HAVE_VERBOSE
 		if (!WT_VERBOSE_ISSET(session, WT_VERB_VERIFY))
 			continue;
 
@@ -565,7 +558,6 @@ __verify_ckptfrag_chk(WT_SESSION_IMPL *session, WT_BLOCK *block)
 		    "checkpoint range %" PRIuMAX "-%" PRIuMAX " never verified",
 		    (uintmax_t)WT_FRAG_TO_OFF(block, first),
 		    (uintmax_t)WT_FRAG_TO_OFF(block, last));
-#endif
 	}
 
 	if (count == 0)

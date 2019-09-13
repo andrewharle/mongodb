@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -25,6 +27,8 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
+
+#include "mongo/platform/basic.h"
 
 #include "mongo/db/jsobj.h"
 #include "mongo/rpc/metadata/repl_set_metadata.h"
@@ -50,7 +54,7 @@ TEST(ReplResponseMetadataTest, Roundtrip) {
     ASSERT_TRUE(metadata.hasReplicaSetId());
 
     BSONObjBuilder builder;
-    metadata.writeToMetadata(&builder);
+    metadata.writeToMetadata(&builder).transitional_ignore();
 
     BSONObj expectedObj(
         BSON(kReplSetMetadataFieldName
@@ -58,11 +62,17 @@ TEST(ReplResponseMetadataTest, Roundtrip) {
                             << BSON("ts" << opTime.getTimestamp() << "t" << opTime.getTerm())
                             << "lastOpVisible"
                             << BSON("ts" << opTime2.getTimestamp() << "t" << opTime2.getTerm())
-                            << "configVersion" << 6 << "replicaSetId" << metadata.getReplicaSetId()
-                            << "primaryIndex" << 12 << "syncSourceIndex" << -1)));
+                            << "configVersion"
+                            << 6
+                            << "replicaSetId"
+                            << metadata.getReplicaSetId()
+                            << "primaryIndex"
+                            << 12
+                            << "syncSourceIndex"
+                            << -1)));
 
     BSONObj serializedObj = builder.obj();
-    ASSERT_EQ(expectedObj, serializedObj);
+    ASSERT_BSONOBJ_EQ(expectedObj, serializedObj);
 
     auto cloneStatus = ReplSetMetadata::readFromMetadata(serializedObj);
     ASSERT_OK(cloneStatus.getStatus());
@@ -74,10 +84,24 @@ TEST(ReplResponseMetadataTest, Roundtrip) {
     ASSERT_EQ(metadata.getReplicaSetId(), clonedMetadata.getReplicaSetId());
 
     BSONObjBuilder clonedBuilder;
-    clonedMetadata.writeToMetadata(&clonedBuilder);
+    clonedMetadata.writeToMetadata(&clonedBuilder).transitional_ignore();
 
     BSONObj clonedSerializedObj = clonedBuilder.obj();
-    ASSERT_EQ(expectedObj, clonedSerializedObj);
+    ASSERT_BSONOBJ_EQ(expectedObj, clonedSerializedObj);
+}
+
+TEST(ReplResponseMetadataTest, MetadataCanBeConstructedWhenMissingOplogQueryMetadataFields) {
+    auto id = OID::gen();
+    BSONObj obj(BSON(kReplSetMetadataFieldName
+                     << BSON("term" << 3 << "configVersion" << 6 << "replicaSetId" << id)));
+
+    auto status = ReplSetMetadata::readFromMetadata(obj);
+    ASSERT_OK(status.getStatus());
+
+    const auto& metadata = status.getValue();
+    ASSERT_EQ(metadata.getConfigVersion(), 6);
+    ASSERT_EQ(metadata.getReplicaSetId(), id);
+    ASSERT_EQ(metadata.getTerm(), 3);
 }
 
 }  // unnamed namespace

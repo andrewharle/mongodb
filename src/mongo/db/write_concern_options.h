@@ -1,22 +1,25 @@
-/*    Copyright (C) 2014 MongoDB Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -39,15 +42,21 @@ struct WriteConcernOptions {
 public:
     enum class SyncMode { UNSET, NONE, FSYNC, JOURNAL };
 
-    static const int kNoTimeout = 0;
-    static const int kNoWaiting = -1;
+    static const int kNoTimeout;
+    static const int kNoWaiting;
 
     static const BSONObj Default;
     static const BSONObj Acknowledged;
     static const BSONObj Unacknowledged;
     static const BSONObj Majority;
 
+    static const StringData kWriteConcernField;
     static const char kMajority[];  // = "majority"
+
+    static const Seconds kWriteConcernTimeoutSystem;
+    static const Seconds kWriteConcernTimeoutMigration;
+    static const Seconds kWriteConcernTimeoutSharding;
+    static const Seconds kWriteConcernTimeoutUserCommand;
 
     WriteConcernOptions() {
         reset();
@@ -64,36 +73,17 @@ public:
     Status parse(const BSONObj& obj);
 
     /**
-     * Extracts the write concern settings from the BSONObj. The BSON object should have
-     * the format:
-     *
-     * {
-     *     ...
-     *     secondaryThrottle: <bool>, // optional
-     *     _secondaryThrottle: <bool>, // optional
-     *     writeConcern: <BSONObj> // optional
-     * }
-     *
-     * Note: secondaryThrottle takes precedence over _secondaryThrottle.
-     *
-     * Also sets output parameter rawWriteConcernObj if the writeCocnern field exists.
-     *
-     * Returns OK if the parse was successful. Also returns ErrorCodes::WriteConcernNotDefined
-     * when secondary throttle is true but write concern was not specified.
+     * Attempts to extract a writeConcern from cmdObj.
+     * Verifies that the writeConcern is of type Object (BSON type).
      */
-    Status parseSecondaryThrottle(const BSONObj& doc, BSONObj* rawWriteConcernObj);
+    static StatusWith<WriteConcernOptions> extractWCFromCommand(
+        const BSONObj& cmdObj, const WriteConcernOptions& defaultWC = WriteConcernOptions());
 
     /**
      * Return true if the server needs to wait for other secondary nodes to satisfy this
      * write concern setting. Errs on the false positive for non-empty wMode.
      */
     bool shouldWaitForOtherNodes() const;
-
-    /**
-     * Returns true if this is a valid write concern to use against a config server.
-     * TODO(spencer): Once we stop supporting SCCC config servers, forbid this from allowing w:1
-     */
-    bool validForConfigServers() const;
 
     void reset() {
         syncMode = SyncMode::UNSET;
@@ -115,5 +105,15 @@ public:
 
     // Timeout in milliseconds.
     int wTimeout;
+    // Deadline. If this is set to something other than Date_t::max(), this takes precedence over
+    // wTimeout.
+    Date_t wDeadline = Date_t::max();
+
+    // True if the default write concern was used.
+    bool usedDefault = false;
+
+    // True if the default 'w' value of w:1 was used.
+    bool usedDefaultW = false;
 };
-}
+
+}  // namespace mongo

@@ -1,32 +1,36 @@
 // parameters.cpp
 
+
 /**
-*    Copyright (C) 2012 10gen Inc.
-*
-*    This program is free software: you can redistribute it and/or  modify
-*    it under the terms of the GNU Affero General Public License, version 3,
-*    as published by the Free Software Foundation.
-*
-*    This program is distributed in the hope that it will be useful,
-*    but WITHOUT ANY WARRANTY; without even the implied warranty of
-*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*    GNU Affero General Public License for more details.
-*
-*    You should have received a copy of the GNU Affero General Public License
-*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*
-*    As a special exception, the copyright holders give permission to link the
-*    code of portions of this program with the OpenSSL library under certain
-*    conditions as described in each individual source file and distribute
-*    linked combinations including the program with the OpenSSL library. You
-*    must comply with the GNU Affero General Public License in all respects for
-*    all of the code used other than as permitted herein. If you modify file(s)
-*    with this exception, you may extend this exception to your version of the
-*    file(s), but you are not obligated to do so. If you do not wish to do so,
-*    delete this exception statement from your version. If you delete this
-*    exception statement from all source files in the program, then also delete
-*    it in the license file.
-*/
+ *    Copyright (C) 2018-present MongoDB, Inc.
+ *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
+ *
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
+ */
+
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kCommand
 
 #include "mongo/platform/basic.h"
 
@@ -35,17 +39,17 @@
 #include "mongo/bson/json.h"
 #include "mongo/bson/mutable/document.h"
 #include "mongo/client/replica_set_monitor.h"
-#include "mongo/client/sasl_client_authenticate.h"
 #include "mongo/config.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/internal_user_auth.h"
+#include "mongo/db/command_generic_argument.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/server_parameters.h"
 #include "mongo/db/storage/storage_options.h"
+#include "mongo/logger/logger.h"
 #include "mongo/logger/parse_log_component_settings.h"
+#include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
-#include "mongo/util/net/ssl_manager.h"
-#include "mongo/util/net/ssl_options.h"
 
 using std::string;
 using std::stringstream;
@@ -53,46 +57,48 @@ using std::stringstream;
 namespace mongo {
 
 namespace {
-void appendParameterNames(stringstream& help) {
-    help << "supported:\n";
-    const ServerParameter::Map& m = ServerParameterSet::getGlobal()->getMap();
-    for (ServerParameter::Map::const_iterator i = m.begin(); i != m.end(); ++i) {
-        help << "  " << i->first << "\n";
+void appendParameterNames(std::string* help) {
+    *help += "supported:\n";
+    for (const auto& kv : ServerParameterSet::getGlobal()->getMap()) {
+        *help += "  ";
+        *help += kv.first;
+        *help += '\n';
     }
 }
-}
+}  // namespace
 
-class CmdGet : public Command {
+class CmdGet : public ErrmsgCommandDeprecated {
 public:
-    CmdGet() : Command("getParameter") {}
-    virtual bool slaveOk() const {
-        return true;
+    CmdGet() : ErrmsgCommandDeprecated("getParameter") {}
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
     virtual bool adminOnly() const {
         return true;
     }
-    virtual bool isWriteCommandForConfigServer() const {
+    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
+                                       std::vector<Privilege>* out) const {
         ActionSet actions;
         actions.addAction(ActionType::getParameter);
         out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
     }
-    virtual void help(stringstream& help) const {
-        help << "get administrative option(s)\nexample:\n";
-        help << "{ getParameter:1, notablescan:1 }\n";
-        appendParameterNames(help);
-        help << "{ getParameter:'*' } to get everything\n";
+    std::string help() const override {
+        std::string h =
+            "get administrative option(s)\nexample:\n"
+            "{ getParameter:1, notablescan:1 }\n";
+        appendParameterNames(&h);
+        h += "{ getParameter:'*' } to get everything\n";
+        return h;
     }
-    bool run(OperationContext* txn,
-             const string& dbname,
-             BSONObj& cmdObj,
-             int,
-             string& errmsg,
-             BSONObjBuilder& result) {
+    bool errmsgRun(OperationContext* opCtx,
+                   const string& dbname,
+                   const BSONObj& cmdObj,
+                   string& errmsg,
+                   BSONObjBuilder& result) {
         bool all = *cmdObj.firstElement().valuestrsafe() == '*';
 
         int before = result.len();
@@ -100,7 +106,7 @@ public:
         const ServerParameter::Map& m = ServerParameterSet::getGlobal()->getMap();
         for (ServerParameter::Map::const_iterator i = m.begin(); i != m.end(); ++i) {
             if (all || cmdObj.hasElement(i->first.c_str())) {
-                i->second->append(txn, result, i->second->name());
+                i->second->append(opCtx, result, i->second->name());
             }
         }
 
@@ -112,36 +118,37 @@ public:
     }
 } cmdGet;
 
-class CmdSet : public Command {
+class CmdSet : public ErrmsgCommandDeprecated {
 public:
-    CmdSet() : Command("setParameter") {}
-    virtual bool slaveOk() const {
-        return true;
+    CmdSet() : ErrmsgCommandDeprecated("setParameter") {}
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
     virtual bool adminOnly() const {
         return true;
     }
-    virtual bool isWriteCommandForConfigServer() const {
+    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
+                                       std::vector<Privilege>* out) const {
         ActionSet actions;
         actions.addAction(ActionType::setParameter);
         out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
     }
-    virtual void help(stringstream& help) const {
-        help << "set administrative option(s)\n";
-        help << "{ setParameter:1, <param>:<value> }\n";
-        appendParameterNames(help);
+    std::string help() const override {
+        std::string h =
+            "set administrative option(s)\n"
+            "{ setParameter:1, <param>:<value> }\n";
+        appendParameterNames(&h);
+        return h;
     }
-    bool run(OperationContext* txn,
-             const string& dbname,
-             BSONObj& cmdObj,
-             int,
-             string& errmsg,
-             BSONObjBuilder& result) {
+    bool errmsgRun(OperationContext* opCtx,
+                   const string& dbname,
+                   const BSONObj& cmdObj,
+                   string& errmsg,
+                   BSONObjBuilder& result) {
         int numSet = 0;
         bool found = false;
 
@@ -163,6 +170,8 @@ public:
         while (parameterCheckIterator.more()) {
             BSONElement parameter = parameterCheckIterator.next();
             std::string parameterName = parameter.fieldName();
+            if (isGenericArgument(parameterName))
+                continue;
 
             ServerParameter::Map::const_iterator foundParameter = parameterMap.find(parameterName);
 
@@ -211,19 +220,35 @@ public:
                 return false;
             }
 
-            if (numSet == 0) {
-                foundParameter->second->append(txn, result, "was");
+            auto oldValueObj = ([&] {
+                BSONObjBuilder bb;
+                if (numSet == 0) {
+                    foundParameter->second->append(opCtx, bb, "was");
+                }
+                return bb.obj();
+            })();
+            auto oldValue = oldValueObj.firstElement();
+
+            if (oldValue) {
+                result.append(oldValue);
             }
 
-            Status status = foundParameter->second->set(parameter);
-            if (status.isOK()) {
-                numSet++;
-                continue;
+            try {
+                uassertStatusOK(foundParameter->second->set(parameter));
+            } catch (const DBException& ex) {
+                log() << "error setting parameter " << parameterName << " to "
+                      << redact(parameter.toString(false)) << " errMsg: " << redact(ex);
+                throw;
             }
 
-            errmsg = status.reason();
-            result.append("code", status.code());
-            return false;
+            log() << "successfully set parameter " << parameterName << " to "
+                  << redact(parameter.toString(false))
+                  << (oldValue ? std::string(str::stream() << " (was "
+                                                           << redact(oldValue.toString(false))
+                                                           << ")")
+                               : "");
+
+            numSet++;
         }
 
         if (numSet == 0 && !found) {
@@ -246,7 +271,7 @@ class LogLevelSetting : public ServerParameter {
 public:
     LogLevelSetting() : ServerParameter(ServerParameterSet::getGlobal(), "logLevel") {}
 
-    virtual void append(OperationContext* txn, BSONObjBuilder& b, const std::string& name) {
+    virtual void append(OperationContext* opCtx, BSONObjBuilder& b, const std::string& name) {
         b << name << globalLogDomain()->getMinimumLogSeverity().toInt();
     }
 
@@ -254,8 +279,8 @@ public:
         int newValue;
         if (!newValueElement.coerce(&newValue) || newValue < 0)
             return Status(ErrorCodes::BadValue,
-                          mongoutils::str::stream()
-                              << "Invalid value for logLevel: " << newValueElement);
+                          mongoutils::str::stream() << "Invalid value for logLevel: "
+                                                    << newValueElement);
         LogSeverity newSeverity =
             (newValue > 0) ? LogSeverity::Debug(newValue) : LogSeverity::Log();
         globalLogDomain()->setMinimumLoggedSeverity(newSeverity);
@@ -289,7 +314,7 @@ public:
     LogComponentVerbositySetting()
         : ServerParameter(ServerParameterSet::getGlobal(), "logComponentVerbosity") {}
 
-    virtual void append(OperationContext* txn, BSONObjBuilder& b, const std::string& name) {
+    virtual void append(OperationContext* opCtx, BSONObjBuilder& b, const std::string& name) {
         BSONObj currentSettings;
         _get(&currentSettings);
         b << name << currentSettings;
@@ -334,15 +359,15 @@ private:
 
             // Save LogComponent::kDefault LogSeverity at root
             if (component == LogComponent::kDefault) {
-                doc.root().appendInt("verbosity", severity);
+                doc.root().appendInt("verbosity", severity).transitional_ignore();
                 continue;
             }
 
             mutablebson::Element element = doc.makeElementObject(component.getShortName());
-            element.appendInt("verbosity", severity);
+            element.appendInt("verbosity", severity).transitional_ignore();
 
             mutablebson::Element parentElement = _getParentElement(doc, component);
-            parentElement.pushBack(element);
+            parentElement.pushBack(element).transitional_ignore();
         }
 
         BSONObj result = doc.getObject();
@@ -431,165 +456,59 @@ private:
     }
 } logComponentVerbositySetting;
 
-}  // namespace
-
-namespace {
-class SSLModeSetting : public ServerParameter {
-public:
-    SSLModeSetting()
-        : ServerParameter(ServerParameterSet::getGlobal(),
-                          "sslMode",
-                          false,  // allowedToChangeAtStartup
-                          true    // allowedToChangeAtRuntime
-                          ) {}
-
-    std::string sslModeStr() {
-        switch (sslGlobalParams.sslMode.load()) {
-            case SSLParams::SSLMode_disabled:
-                return "disabled";
-            case SSLParams::SSLMode_allowSSL:
-                return "allowSSL";
-            case SSLParams::SSLMode_preferSSL:
-                return "preferSSL";
-            case SSLParams::SSLMode_requireSSL:
-                return "requireSSL";
-            default:
-                return "undefined";
-        }
-    }
-
-    virtual void append(OperationContext* txn, BSONObjBuilder& b, const std::string& name) {
-        b << name << sslModeStr();
-    }
-
-    virtual Status set(const BSONElement& newValueElement) {
-        try {
-            return setFromString(newValueElement.String());
-        } catch (MsgAssertionException msg) {
-            return Status(ErrorCodes::BadValue,
-                          mongoutils::str::stream()
-                              << "Invalid value for sslMode via setParameter command: "
-                              << newValueElement);
-        }
-    }
-
-    virtual Status setFromString(const std::string& str) {
-#ifndef MONGO_CONFIG_SSL
-        return Status(ErrorCodes::IllegalOperation,
-                      mongoutils::str::stream()
-                          << "Unable to set sslMode, SSL support is not compiled into server");
-#endif
-        if (str != "disabled" && str != "allowSSL" && str != "preferSSL" && str != "requireSSL") {
-            return Status(ErrorCodes::BadValue,
-                          mongoutils::str::stream()
-                              << "Invalid value for sslMode via setParameter command: " << str);
-        }
-
-        int oldMode = sslGlobalParams.sslMode.load();
-        if (str == "preferSSL" && oldMode == SSLParams::SSLMode_allowSSL) {
-            sslGlobalParams.sslMode.store(SSLParams::SSLMode_preferSSL);
-        } else if (str == "requireSSL" && oldMode == SSLParams::SSLMode_preferSSL) {
-            sslGlobalParams.sslMode.store(SSLParams::SSLMode_requireSSL);
-        } else {
-            return Status(ErrorCodes::BadValue,
-                          mongoutils::str::stream()
-                              << "Illegal state transition for sslMode, attempt to change from "
-                              << sslModeStr() << " to " << str);
-        }
-        return Status::OK();
-    }
-} sslModeSetting;
-
-class ClusterAuthModeSetting : public ServerParameter {
-public:
-    ClusterAuthModeSetting()
-        : ServerParameter(ServerParameterSet::getGlobal(),
-                          "clusterAuthMode",
-                          false,  // allowedToChangeAtStartup
-                          true    // allowedToChangeAtRuntime
-                          ) {}
-
-    std::string clusterAuthModeStr() {
-        switch (serverGlobalParams.clusterAuthMode.load()) {
-            case ServerGlobalParams::ClusterAuthMode_keyFile:
-                return "keyFile";
-            case ServerGlobalParams::ClusterAuthMode_sendKeyFile:
-                return "sendKeyFile";
-            case ServerGlobalParams::ClusterAuthMode_sendX509:
-                return "sendX509";
-            case ServerGlobalParams::ClusterAuthMode_x509:
-                return "x509";
-            default:
-                return "undefined";
-        }
-    }
-
-    virtual void append(OperationContext* txn, BSONObjBuilder& b, const std::string& name) {
-        b << name << clusterAuthModeStr();
-    }
-
-    virtual Status set(const BSONElement& newValueElement) {
-        try {
-            return setFromString(newValueElement.String());
-        } catch (MsgAssertionException msg) {
-            return Status(ErrorCodes::BadValue,
-                          mongoutils::str::stream()
-                              << "Invalid value for clusterAuthMode via setParameter command: "
-                              << newValueElement);
-        }
-    }
-
-    virtual Status setFromString(const std::string& str) {
-#ifndef MONGO_CONFIG_SSL
-        return Status(ErrorCodes::IllegalOperation,
-                      mongoutils::str::stream() << "Unable to set clusterAuthMode, "
-                                                << "SSL support is not compiled into server");
-#endif
-        if (str != "keyFile" && str != "sendKeyFile" && str != "sendX509" && str != "x509") {
-            return Status(ErrorCodes::BadValue,
-                          mongoutils::str::stream()
-                              << "Invalid value for clusterAuthMode via setParameter command: "
-                              << str);
-        }
-
-        int oldMode = serverGlobalParams.clusterAuthMode.load();
-        int sslMode = sslGlobalParams.sslMode.load();
-        if (str == "sendX509" && oldMode == ServerGlobalParams::ClusterAuthMode_sendKeyFile) {
-            if (sslMode == SSLParams::SSLMode_disabled || sslMode == SSLParams::SSLMode_allowSSL) {
-                return Status(ErrorCodes::BadValue,
-                              mongoutils::str::stream()
-                                  << "Illegal state transition for clusterAuthMode, "
-                                  << "need to enable SSL for outgoing connections");
-            }
-            serverGlobalParams.clusterAuthMode.store(ServerGlobalParams::ClusterAuthMode_sendX509);
-#ifdef MONGO_CONFIG_SSL
-            setInternalUserAuthParams(
-                BSON(saslCommandMechanismFieldName
-                     << "MONGODB-X509" << saslCommandUserDBFieldName << "$external"
-                     << saslCommandUserFieldName
-                     << getSSLManager()->getSSLConfiguration().clientSubjectName));
-#endif
-        } else if (str == "x509" && oldMode == ServerGlobalParams::ClusterAuthMode_sendX509) {
-            serverGlobalParams.clusterAuthMode.store(ServerGlobalParams::ClusterAuthMode_x509);
-        } else {
-            return Status(ErrorCodes::BadValue,
-                          mongoutils::str::stream()
-                              << "Illegal state transition for clusterAuthMode, change from "
-                              << clusterAuthModeStr() << " to " << str);
-        }
-        return Status::OK();
-    }
-} clusterAuthModeSetting;
-
 ExportedServerParameter<bool, ServerParameterType::kStartupAndRuntime> QuietSetting(
     ServerParameterSet::getGlobal(), "quiet", &serverGlobalParams.quiet);
 
-ExportedServerParameter<int, ServerParameterType::kRuntimeOnly> MaxConsecutiveFailedChecksSetting(
-    ServerParameterSet::getGlobal(),
-    "replMonitorMaxFailedChecks",
-    &ReplicaSetMonitor::maxConsecutiveFailedChecks);
-
 ExportedServerParameter<bool, ServerParameterType::kRuntimeOnly> TraceExceptionsSetting(
     ServerParameterSet::getGlobal(), "traceExceptions", &DBException::traceExceptions);
-}
-}
+
+class AutomationServiceDescriptor final : public ServerParameter {
+public:
+    static constexpr auto kName = "automationServiceDescriptor"_sd;
+    static constexpr auto kMaxSize = 64U;
+
+    AutomationServiceDescriptor()
+        : ServerParameter(ServerParameterSet::getGlobal(), kName.toString(), true, true) {}
+
+    virtual void append(OperationContext* opCtx,
+                        BSONObjBuilder& builder,
+                        const std::string& name) override {
+        const stdx::lock_guard<stdx::mutex> lock(_mutex);
+        if (!_value.empty())
+            builder << name << _value;
+    }
+
+    virtual Status set(const BSONElement& newValueElement) override {
+        if (newValueElement.type() != mongo::String)
+            return {ErrorCodes::TypeMismatch,
+                    mongoutils::str::stream() << "Value for parameter " << kName
+                                              << " must be of type 'string'"};
+        return setFromString(newValueElement.String());
+    }
+
+    virtual Status setFromString(const std::string& str) override {
+        if (str.size() > kMaxSize)
+            return {ErrorCodes::Overflow,
+                    mongoutils::str::stream() << "Value for parameter " << kName
+                                              << " must be no more than "
+                                              << kMaxSize
+                                              << " bytes"};
+
+        {
+            const stdx::lock_guard<stdx::mutex> lock(_mutex);
+            _value = str;
+        }
+
+        return Status::OK();
+    }
+
+private:
+    stdx::mutex _mutex;
+    std::string _value;
+} automationServiceDescriptor;
+
+constexpr decltype(AutomationServiceDescriptor::kName) AutomationServiceDescriptor::kName;
+constexpr decltype(AutomationServiceDescriptor::kMaxSize) AutomationServiceDescriptor::kMaxSize;
+
+}  // namespace
+}  // namespace mongo

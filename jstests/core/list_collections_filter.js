@@ -19,8 +19,8 @@
             filter = {};
         }
 
-        var cursor = new DBCommandCursor(mydb.getMongo(),
-                                         mydb.runCommand("listCollections", {filter: filter}));
+        var cursor =
+            new DBCommandCursor(mydb, mydb.runCommand("listCollections", {filter: filter}));
         function stripToName(result) {
             return result.name;
         }
@@ -67,10 +67,49 @@
     // Filter with $and and $in.
     testListCollections({name: {$in: ["lists", /.*_sets$/]}, options: {}},
                         ["lists", "ordered_sets", "unordered_sets"]);
-    testListCollections(
-        {$and: [{name: {$in: ["lists", /.*_sets$/]}}, {name: "lists"}, {options: {}}, ]},
-        ["lists"]);
-    testListCollections(
-        {$and: [{name: {$in: ["lists", /.*_sets$/]}}, {name: "non-existent"}, {options: {}}, ]},
-        []);
+    testListCollections({
+        $and: [
+            {name: {$in: ["lists", /.*_sets$/]}},
+            {name: "lists"},
+            {options: {}},
+        ]
+    },
+                        ["lists"]);
+    testListCollections({
+        $and: [
+            {name: {$in: ["lists", /.*_sets$/]}},
+            {name: "non-existent"},
+            {options: {}},
+        ]
+    },
+                        []);
+
+    // Filter with $expr.
+    testListCollections({$expr: {$eq: ["$name", "lists"]}}, ["lists"]);
+
+    // Filter with $expr with an unbound variable.
+    assert.throws(function() {
+        mydb.getCollectionInfos({$expr: {$eq: ["$name", "$$unbound"]}});
+    });
+
+    // Filter with $expr with a runtime error.
+    assert.throws(function() {
+        mydb.getCollectionInfos({$expr: {$abs: "$name"}});
+    });
+
+    // No extensions are allowed in filters.
+    assert.throws(function() {
+        mydb.getCollectionInfos({$text: {$search: "str"}});
+    });
+    assert.throws(function() {
+        mydb.getCollectionInfos({
+            $where: function() {
+                return true;
+            }
+        });
+    });
+    assert.throws(function() {
+        mydb.getCollectionInfos(
+            {a: {$nearSphere: {$geometry: {type: "Point", coordinates: [0, 0]}}}});
+    });
 }());

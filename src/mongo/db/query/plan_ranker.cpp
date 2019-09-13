@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -32,8 +34,8 @@
 
 #include <algorithm>
 #include <cmath>
-#include <vector>
 #include <utility>
+#include <vector>
 
 #include "mongo/db/query/plan_ranker.h"
 
@@ -76,14 +78,14 @@ size_t PlanRanker::pickBestPlan(const vector<CandidatePlan>& candidates, PlanRan
     double eofBonus = 1.0;
 
     // Each plan will have a stat tree.
-    vector<PlanStageStats*> statTrees;
+    std::vector<std::unique_ptr<PlanStageStats>> statTrees;
 
     // Get stat trees from each plan.
     // Copy stats trees instead of transferring ownership
     // because multi plan runner will need its own stats
     // trees for explain.
     for (size_t i = 0; i < candidates.size(); ++i) {
-        statTrees.push_back(candidates[i].root->getStats().release());
+        statTrees.push_back(candidates[i].root->getStats());
     }
 
     // Holds (score, candidateInndex).
@@ -93,15 +95,15 @@ size_t PlanRanker::pickBestPlan(const vector<CandidatePlan>& candidates, PlanRan
     // Compute score for each tree.  Record the best.
     for (size_t i = 0; i < statTrees.size(); ++i) {
         LOG(5) << "Scoring plan " << i << ":" << endl
-               << candidates[i].solution->toString() << "Stats:\n"
-               << Explain::statsToBSON(*statTrees[i]).jsonString(Strict, true);
+               << redact(candidates[i].solution->toString()) << "Stats:\n"
+               << redact(Explain::statsToBSON(*statTrees[i]).jsonString(Strict, true));
         LOG(2) << "Scoring query plan: " << Explain::getPlanSummary(candidates[i].root)
                << " planHitEOF=" << statTrees[i]->common.isEOF;
 
-        double score = scoreTree(statTrees[i]);
-        LOG(5) << "score = " << score << endl;
+        double score = scoreTree(statTrees[i].get());
+        LOG(5) << "score = " << score;
         if (statTrees[i]->common.isEOF) {
-            LOG(5) << "Adding +" << eofBonus << " EOF bonus to score." << endl;
+            LOG(5) << "Adding +" << eofBonus << " EOF bonus to score.";
             score += 1;
         }
         scoresAndCandidateindices.push_back(std::make_pair(score, i));
@@ -151,7 +153,7 @@ size_t PlanRanker::pickBestPlan(const vector<CandidatePlan>& candidates, PlanRan
             score -= eofBonus;
         }
 
-        why->stats.mutableVector().push_back(statTrees[candidateIndex]);
+        why->stats.push_back(std::move(statTrees[candidateIndex]));
         why->scores.push_back(score);
         why->candidateOrder.push_back(candidateIndex);
     }
@@ -196,6 +198,7 @@ double PlanRanker::scoreTree(const PlanStageStats* stats) {
     // How many "units of work" did the plan perform. Each call to work(...)
     // counts as one unit.
     size_t workUnits = stats->common.works;
+    invariant(workUnits != 0);
 
     // How much did a plan produce?
     // Range: [0, 1]
@@ -248,12 +251,12 @@ double PlanRanker::scoreTree(const PlanStageStats* stats) {
     std::string scoreStr = ss;
     LOG(2) << scoreStr;
 
-    if (internalQueryForceIntersectionPlans) {
+    if (internalQueryForceIntersectionPlans.load()) {
         if (hasStage(STAGE_AND_HASH, stats) || hasStage(STAGE_AND_SORTED, stats)) {
             // The boost should be >2.001 to make absolutely sure the ixisect plan will win due
             // to the combination of 1) productivity, 2) eof bonus, and 3) no ixisect bonus.
             score += 3;
-            LOG(5) << "Score boosted to " << score << " due to intersection forcing." << endl;
+            LOG(5) << "Score boosted to " << score << " due to intersection forcing.";
         }
     }
 

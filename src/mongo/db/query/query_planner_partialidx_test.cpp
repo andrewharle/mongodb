@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -28,6 +30,7 @@
 
 #include "mongo/platform/basic.h"
 
+#include "mongo/db/query/collation/collator_interface_mock.h"
 #include "mongo/db/query/query_planner.h"
 #include "mongo/db/query/query_planner_test_fixture.h"
 
@@ -440,6 +443,51 @@ TEST_F(QueryPlannerTest, PartialIndexNor) {
     assertNumSolutions(0U);
 
     runQuery(fromjson("{$nor: [{a: 1, f: -1}, {_id: 1}]}"));
+    assertNumSolutions(0U);
+}
+
+TEST_F(QueryPlannerTest, PartialIndexStringComparisonMatchingCollators) {
+    params.options = QueryPlannerParams::NO_TABLE_SCAN;
+    BSONObj filterObj(fromjson("{a: {$gt: 'cba'}}"));
+    CollatorInterfaceMock collator(CollatorInterfaceMock::MockType::kReverseString);
+    std::unique_ptr<MatchExpression> filterExpr = parseMatchExpression(filterObj, &collator);
+    addIndex(fromjson("{a: 1}"), filterExpr.get(), &collator);
+
+    runQueryAsCommand(
+        fromjson("{find: 'testns', filter: {a: 'abc'}, collation: {locale: 'reverse'}}"));
+    assertNumSolutions(1U);
+    assertSolutionExists(
+        "{fetch: {filter: null, collation: {locale: 'reverse'}, node: {ixscan: "
+        "{filter: null, pattern: {a: 1}, "
+        "bounds: {a: [['cba', 'cba', true, true]]}}}}}");
+
+    runQueryAsCommand(
+        fromjson("{find: 'testns', filter: {a: 'zaa'}, collation: {locale: 'reverse'}}"));
+    assertNumSolutions(0U);
+}
+
+TEST_F(QueryPlannerTest, PartialIndexNoStringComparisonNonMatchingCollators) {
+    params.options = QueryPlannerParams::NO_TABLE_SCAN;
+    BSONObj filterObj(fromjson("{a: {$gt: 0}}"));
+    CollatorInterfaceMock collator(CollatorInterfaceMock::MockType::kAlwaysEqual);
+    std::unique_ptr<MatchExpression> filterExpr = parseMatchExpression(filterObj, &collator);
+    addIndex(fromjson("{a: 1}"), filterExpr.get(), &collator);
+
+    runQueryAsCommand(fromjson("{find: 'testns', filter: {a: 1}, collation: {locale: 'reverse'}}"));
+    assertNumSolutions(1U);
+    assertSolutionExists(
+        "{fetch: {filter: null, node: {ixscan: "
+        "{filter: null, pattern: {a: 1}, "
+        "bounds: {a: [[1, 1, true, true]]}}}}}");
+}
+
+TEST_F(QueryPlannerTest, InternalExprEqCannotUsePartialIndex) {
+    params.options = QueryPlannerParams::NO_TABLE_SCAN;
+    BSONObj filterObj(fromjson("{a: {$gte: 0}}"));
+    auto filterExpr = parseMatchExpression(filterObj);
+    addIndex(fromjson("{a: 1}"), filterExpr.get());
+
+    runQueryAsCommand(fromjson("{find: 'testns', filter: {a: {$_internalExprEq: 1}}}"));
     assertNumSolutions(0U);
 }
 

@@ -1,23 +1,25 @@
-/*
- *    Copyright (C) 2010 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -30,7 +32,14 @@
 
 #pragma once
 
+#include <ostream>
 #include <string>
+#include <type_traits>
+
+#include "mongo/base/error_codes.h"
+#include "mongo/base/static_assert.h"
+#include "mongo/base/status_with.h"
+#include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
 namespace repl {
@@ -60,6 +69,18 @@ struct MemberState {
         RS_REMOVED = 10, /* node removed from replica set */
         RS_MAX = 10
     } s;
+
+    template <typename T>
+    static StatusWith<MemberState> create(T t) {
+        MONGO_STATIC_ASSERT_MSG(std::is_integral<T>::value, "T must be an integral type");
+        using UnderlyingType = std::underlying_type<MS>::type;
+        if (std::is_signed<T>::value && (t < 0))
+            return {ErrorCodes::BadValue, str::stream() << "MemberState cannot be negative"};
+        auto asUnderlying = static_cast<UnderlyingType>(t);
+        if (asUnderlying > RS_MAX)
+            return {ErrorCodes::BadValue, str::stream() << "Unrecognized numerical state"};
+        return {static_cast<MemberState>(asUnderlying)};
+    }
 
     MemberState(MS ms = RS_UNKNOWN) : s(ms) {}
     explicit MemberState(int ms) : s((MS)ms) {}
@@ -126,6 +147,14 @@ inline std::string MemberState::toString() const {
             return "REMOVED";
     }
     return "";
+}
+
+/**
+ * Insertion operator for MemberState. Formats member state for output stream.
+ * For testing only.
+ */
+inline std::ostream& operator<<(std::ostream& os, const MemberState& state) {
+    return os << state.toString();
 }
 
 }  // namespace repl

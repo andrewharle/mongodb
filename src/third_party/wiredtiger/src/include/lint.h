@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -84,8 +84,8 @@ __wt_atomic_cas_ptr(void *vp, void *orig, void *new) {
 	return (false);
 }
 
-static inline void WT_BARRIER(void) { return; }
-static inline void WT_FULL_BARRIER(void) { return; }
-static inline void WT_PAUSE(void) { return; }
-static inline void WT_READ_BARRIER(void) { return; }
-static inline void WT_WRITE_BARRIER(void) { return; }
+static inline void WT_BARRIER(void) {}
+static inline void WT_FULL_BARRIER(void) {}
+static inline void WT_PAUSE(void) {}
+static inline void WT_READ_BARRIER(void) {}
+static inline void WT_WRITE_BARRIER(void) {}

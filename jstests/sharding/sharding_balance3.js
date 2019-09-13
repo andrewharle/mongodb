@@ -1,4 +1,4 @@
-// Simple test to make sure things get balanced
+// Waits for the balancer to run once, then stops it and checks that it is no longer running.
 
 (function() {
 
@@ -10,7 +10,7 @@
     });
 
     s.adminCommand({enablesharding: "test"});
-    s.ensurePrimaryShard('test', 'shard0001');
+    s.ensurePrimaryShard('test', s.shard1.shardName);
 
     s.config.settings.find().forEach(printjson);
 
@@ -30,12 +30,13 @@
     assert.writeOK(bulk.execute());
 
     s.adminCommand({shardcollection: "test.foo", key: {_id: 1}});
-    assert.lt(20, s.config.chunks.count(), "setup2");
+    assert.lt(20, s.config.chunks.count({"ns": "test.foo"}), "setup2");
 
     function diff1() {
         var x = s.chunkCounts("foo");
         printjson(x);
-        return Math.max(x.shard0000, x.shard0001) - Math.min(x.shard0000, x.shard0001);
+        return Math.max(x[s.shard0.shardName], x[s.shard1.shardName]) -
+            Math.min(x[s.shard0.shardName], x[s.shard1.shardName]);
     }
 
     assert.lt(10, diff1());
@@ -44,21 +45,25 @@
     var initialDiff = diff1();
     assert.soon(function() {
         return diff1() != initialDiff;
-    }, "Balancer did not kick in");
+    }, "Balancer did not kick in", 5 * 60 * 1000, 1000);
 
     print("* A");
     print("disabling the balancer");
-    s.config.settings.update({_id: "balancer"}, {$set: {stopped: true}}, true);
+    s.stopBalancer();
     s.config.settings.find().forEach(printjson);
     print("* B");
 
     print(diff1());
 
     var currDiff = diff1();
-    assert.repeat(function() {
-        var d = diff1();
-        return d != currDiff;
-    }, "balance with stopped flag should not have happened", 1000 * 60, 5000);
+    var waitTime = 0;
+    var startTime = Date.now();
+    while (waitTime < (1000 * 60)) {
+        // Wait for 60 seconds to ensure balancer did not run
+        assert.eq(currDiff, diff1(), "balance with stopped flag should not have happened");
+        sleep(5000);
+        waitTime = Date.now() - startTime;
+    }
 
     s.stop();
 

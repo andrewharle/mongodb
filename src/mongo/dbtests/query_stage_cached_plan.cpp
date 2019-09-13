@@ -1,41 +1,46 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
+
+#include "mongo/platform/basic.h"
 
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/database_holder.h"
+#include "mongo/db/client.h"
+#include "mongo/db/db_raii.h"
 #include "mongo/db/exec/cached_plan.h"
 #include "mongo/db/exec/queued_data_stage.h"
-#include "mongo/db/db_raii.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/json.h"
-#include "mongo/db/operation_context_impl.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/get_executor.h"
 #include "mongo/db/query/plan_cache.h"
@@ -59,7 +64,7 @@ public:
         addIndex(BSON("a" << 1));
         addIndex(BSON("b" << 1));
 
-        OldClientWriteContext ctx(&_txn, nss.ns());
+        OldClientWriteContext ctx(&_opCtx, nss.ns());
         Collection* collection = ctx.getCollection();
         ASSERT(collection);
 
@@ -70,32 +75,38 @@ public:
     }
 
     void addIndex(const BSONObj& obj) {
-        ASSERT_OK(dbtests::createIndex(&_txn, nss.ns(), obj));
+        ASSERT_OK(dbtests::createIndex(&_opCtx, nss.ns(), obj));
     }
 
     void dropCollection() {
-        ScopedTransaction transaction(&_txn, MODE_X);
-        Lock::DBLock dbLock(_txn.lockState(), nss.db(), MODE_X);
-        Database* database = dbHolder().get(&_txn, nss.db());
+        Lock::DBLock dbLock(&_opCtx, nss.db(), MODE_X);
+        Database* database = DatabaseHolder::getDatabaseHolder().get(&_opCtx, nss.db());
         if (!database) {
             return;
         }
 
-        WriteUnitOfWork wuow(&_txn);
-        database->dropCollection(&_txn, nss.ns());
+        WriteUnitOfWork wuow(&_opCtx);
+        database->dropCollection(&_opCtx, nss.ns()).transitional_ignore();
         wuow.commit();
     }
 
     void insertDocument(Collection* collection, BSONObj obj) {
-        WriteUnitOfWork wuow(&_txn);
+        WriteUnitOfWork wuow(&_opCtx);
 
         const bool enforceQuota = false;
-        ASSERT_OK(collection->insertDocument(&_txn, obj, enforceQuota));
+        OpDebug* const nullOpDebug = nullptr;
+        ASSERT_OK(
+            collection->insertDocument(&_opCtx, InsertStatement(obj), nullOpDebug, enforceQuota));
         wuow.commit();
     }
 
+    OperationContext* opCtx() {
+        return &_opCtx;
+    }
+
 protected:
-    OperationContextImpl _txn;
+    const ServiceContext::UniqueOperationContext _opCtxPtr = cc().makeOperationContext();
+    OperationContext& _opCtx = *_opCtxPtr;
     WorkingSet _ws;
 };
 
@@ -106,12 +117,14 @@ protected:
 class QueryStageCachedPlanFailure : public QueryStageCachedPlanBase {
 public:
     void run() {
-        AutoGetCollectionForRead ctx(&_txn, nss.ns());
+        AutoGetCollectionForReadCommand ctx(&_opCtx, nss);
         Collection* collection = ctx.getCollection();
         ASSERT(collection);
 
         // Query can be answered by either index on "a" or index on "b".
-        auto statusWithCQ = CanonicalQuery::canonicalize(nss, fromjson("{a: {$gte: 8}, b: 1}"));
+        auto qr = stdx::make_unique<QueryRequest>(nss);
+        qr->setFilter(fromjson("{a: {$gte: 8}, b: 1}"));
+        auto statusWithCQ = CanonicalQuery::canonicalize(opCtx(), std::move(qr));
         ASSERT_OK(statusWithCQ.getStatus());
         const std::unique_ptr<CanonicalQuery> cq = std::move(statusWithCQ.getValue());
 
@@ -123,19 +136,20 @@ public:
 
         // Get planner params.
         QueryPlannerParams plannerParams;
-        fillOutPlannerParams(&_txn, collection, cq.get(), &plannerParams);
+        fillOutPlannerParams(&_opCtx, collection, cq.get(), &plannerParams);
 
         // Queued data stage will return a failure during the cached plan trial period.
-        auto mockChild = stdx::make_unique<QueuedDataStage>(&_txn, &_ws);
+        auto mockChild = stdx::make_unique<QueuedDataStage>(&_opCtx, &_ws);
         mockChild->pushBack(PlanStage::FAILURE);
 
         // High enough so that we shouldn't trigger a replan based on works.
         const size_t decisionWorks = 50;
         CachedPlanStage cachedPlanStage(
-            &_txn, collection, &_ws, cq.get(), plannerParams, decisionWorks, mockChild.release());
+            &_opCtx, collection, &_ws, cq.get(), plannerParams, decisionWorks, mockChild.release());
 
         // This should succeed after triggering a replan.
-        PlanYieldPolicy yieldPolicy(nullptr, PlanExecutor::YIELD_MANUAL);
+        PlanYieldPolicy yieldPolicy(PlanExecutor::NO_YIELD,
+                                    _opCtx.getServiceContext()->getFastClockSource());
         ASSERT_OK(cachedPlanStage.pickBestPlan(&yieldPolicy));
 
         // Make sure that we get 2 legit results back.
@@ -170,12 +184,14 @@ public:
 class QueryStageCachedPlanHitMaxWorks : public QueryStageCachedPlanBase {
 public:
     void run() {
-        AutoGetCollectionForRead ctx(&_txn, nss.ns());
+        AutoGetCollectionForReadCommand ctx(&_opCtx, nss);
         Collection* collection = ctx.getCollection();
         ASSERT(collection);
 
         // Query can be answered by either index on "a" or index on "b".
-        auto statusWithCQ = CanonicalQuery::canonicalize(nss, fromjson("{a: {$gte: 8}, b: 1}"));
+        auto qr = stdx::make_unique<QueryRequest>(nss);
+        qr->setFilter(fromjson("{a: {$gte: 8}, b: 1}"));
+        auto statusWithCQ = CanonicalQuery::canonicalize(opCtx(), std::move(qr));
         ASSERT_OK(statusWithCQ.getStatus());
         const std::unique_ptr<CanonicalQuery> cq = std::move(statusWithCQ.getValue());
 
@@ -187,23 +203,24 @@ public:
 
         // Get planner params.
         QueryPlannerParams plannerParams;
-        fillOutPlannerParams(&_txn, collection, cq.get(), &plannerParams);
+        fillOutPlannerParams(&_opCtx, collection, cq.get(), &plannerParams);
 
         // Set up queued data stage to take a long time before returning EOF. Should be long
         // enough to trigger a replan.
         const size_t decisionWorks = 10;
         const size_t mockWorks =
             1U + static_cast<size_t>(internalQueryCacheEvictionRatio * decisionWorks);
-        auto mockChild = stdx::make_unique<QueuedDataStage>(&_txn, &_ws);
+        auto mockChild = stdx::make_unique<QueuedDataStage>(&_opCtx, &_ws);
         for (size_t i = 0; i < mockWorks; i++) {
             mockChild->pushBack(PlanStage::NEED_TIME);
         }
 
         CachedPlanStage cachedPlanStage(
-            &_txn, collection, &_ws, cq.get(), plannerParams, decisionWorks, mockChild.release());
+            &_opCtx, collection, &_ws, cq.get(), plannerParams, decisionWorks, mockChild.release());
 
         // This should succeed after triggering a replan.
-        PlanYieldPolicy yieldPolicy(nullptr, PlanExecutor::YIELD_MANUAL);
+        PlanYieldPolicy yieldPolicy(PlanExecutor::NO_YIELD,
+                                    _opCtx.getServiceContext()->getFastClockSource());
         ASSERT_OK(cachedPlanStage.pickBestPlan(&yieldPolicy));
 
         // Make sure that we get 2 legit results back.

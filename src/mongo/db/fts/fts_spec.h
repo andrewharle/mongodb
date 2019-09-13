@@ -1,45 +1,46 @@
-// fts_spec.h
 
 /**
-*    Copyright (C) 2012 10gen Inc.
-*
-*    This program is free software: you can redistribute it and/or  modify
-*    it under the terms of the GNU Affero General Public License, version 3,
-*    as published by the Free Software Foundation.
-*
-*    This program is distributed in the hope that it will be useful,
-*    but WITHOUT ANY WARRANTY; without even the implied warranty of
-*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*    GNU Affero General Public License for more details.
-*
-*    You should have received a copy of the GNU Affero General Public License
-*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*
-*    As a special exception, the copyright holders give permission to link the
-*    code of portions of this program with the OpenSSL library under certain
-*    conditions as described in each individual source file and distribute
-*    linked combinations including the program with the OpenSSL library. You
-*    must comply with the GNU Affero General Public License in all respects for
-*    all of the code used other than as permitted herein. If you modify file(s)
-*    with this exception, you may extend this exception to your version of the
-*    file(s), but you are not obligated to do so. If you do not wish to do so,
-*    delete this exception statement from your version. If you delete this
-*    exception statement from all source files in the program, then also delete
-*    it in the license file.
-*/
+ *    Copyright (C) 2018-present MongoDB, Inc.
+ *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
+ *
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
+ */
 
 #pragma once
 
 #include <map>
-#include <vector>
 #include <string>
+#include <vector>
 
+#include "mongo/base/status_with.h"
 #include "mongo/db/fts/fts_language.h"
 #include "mongo/db/fts/fts_util.h"
 #include "mongo/db/fts/stemmer.h"
 #include "mongo/db/fts/stop_words.h"
 #include "mongo/db/fts/tokenizer.h"
-#include "mongo/platform/unordered_map.h"
+#include "mongo/stdx/unordered_map.h"
 #include "mongo/util/string_map.h"
 
 namespace mongo {
@@ -51,7 +52,7 @@ extern const double MAX_WORD_WEIGHT;
 extern const double DEFAULT_WEIGHT;
 
 typedef std::map<std::string, double> Weights;  // TODO cool map
-typedef unordered_map<std::string, double> TermFrequencyMap;
+typedef stdx::unordered_map<std::string, double> TermFrequencyMap;
 
 struct ScoreHelperStruct {
     ScoreHelperStruct() : freq(0), count(0), exp(0) {}
@@ -113,7 +114,7 @@ public:
     const Weights& weights() const {
         return _weights;
     }
-    static BSONObj fixSpec(const BSONObj& spec);
+    static StatusWith<BSONObj> fixSpec(const BSONObj& spec);
 
     /**
      * Returns text index version.
@@ -164,7 +165,7 @@ private:
 
     const FTSLanguage& _getLanguageToUseV1(const BSONObj& userDoc) const;
 
-    static BSONObj _fixSpecV1(const BSONObj& spec);
+    static StatusWith<BSONObj> _fixSpecV1(const BSONObj& spec);
 
     //
     // Instance variables.
@@ -185,5 +186,5 @@ private:
     // Suffix compound key - used for covering index behavior
     std::vector<std::string> _extraAfter;
 };
-}
-}
+}  // namespace fts
+}  // namespace mongo

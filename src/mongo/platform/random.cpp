@@ -1,30 +1,33 @@
 // random.cpp
 
-/*    Copyright 2012 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kDefault
@@ -43,13 +46,13 @@
 
 #define _CRT_RAND_S
 #include <cstdlib>
-#include <iostream>
 #include <fstream>
+#include <iostream>
 #include <limits>
 
-#include <mongo/stdx/memory.h>
-#include <mongo/util/log.h>
-#include <mongo/util/assert_util.h>
+#include "mongo/stdx/memory.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/log.h"
 
 namespace mongo {
 
@@ -112,7 +115,8 @@ public:
             &_algHandle, BCRYPT_RNG_ALGORITHM, MS_PRIMITIVE_PROVIDER, 0);
         if (ntstatus != STATUS_SUCCESS) {
             error() << "Failed to open crypto algorithm provider while creating secure random "
-                       "object; NTSTATUS: " << ntstatus;
+                       "object; NTSTATUS: "
+                    << ntstatus;
             fassertFailed(28815);
         }
     }
@@ -121,7 +125,8 @@ public:
         auto ntstatus = ::BCryptCloseAlgorithmProvider(_algHandle, 0);
         if (ntstatus != STATUS_SUCCESS) {
             warning() << "Failed to close crypto algorithm provider destroying secure random "
-                         "object; NTSTATUS: " << ntstatus;
+                         "object; NTSTATUS: "
+                      << ntstatus;
         }
     }
 
@@ -141,8 +146,8 @@ private:
     BCRYPT_ALG_HANDLE _algHandle;
 };
 
-SecureRandom* SecureRandom::create() {
-    return new WinSecureRandom();
+std::unique_ptr<SecureRandom> SecureRandom::create() {
+    return stdx::make_unique<WinSecureRandom>();
 }
 
 #elif defined(__linux__) || defined(__sun) || defined(__APPLE__) || defined(__FreeBSD__)
@@ -171,8 +176,8 @@ private:
     std::unique_ptr<std::ifstream> _in;
 };
 
-SecureRandom* SecureRandom::create() {
-    return new InputStreamSecureRandom("/dev/urandom");
+std::unique_ptr<SecureRandom> SecureRandom::create() {
+    return stdx::make_unique<InputStreamSecureRandom>("/dev/urandom");
 }
 
 #elif defined(__OpenBSD__)
@@ -186,8 +191,8 @@ public:
     }
 };
 
-SecureRandom* SecureRandom::create() {
-    return new Arc4SecureRandom();
+std::unique_ptr<SecureRandom> SecureRandom::create() {
+    return stdx::make_unique<Arc4SecureRandom>();
 }
 
 #else

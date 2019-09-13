@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -42,13 +44,13 @@ using stdx::make_unique;
 
 const char* IndexIteratorStage::kStageType = "INDEX_ITERATOR";
 
-IndexIteratorStage::IndexIteratorStage(OperationContext* txn,
+IndexIteratorStage::IndexIteratorStage(OperationContext* opCtx,
                                        WorkingSet* ws,
                                        Collection* collection,
                                        IndexAccessMethod* iam,
                                        BSONObj keyPattern,
                                        unique_ptr<SortedDataInterface::Cursor> cursor)
-    : PlanStage(kStageType, txn),
+    : PlanStage(kStageType, opCtx),
       _collection(collection),
       _ws(ws),
       _iam(iam),
@@ -57,24 +59,18 @@ IndexIteratorStage::IndexIteratorStage(OperationContext* txn,
     invariant(_collection);  // It is illegal to use this stage without a collection.
 }
 
-PlanStage::StageState IndexIteratorStage::work(WorkingSetID* out) {
-    ++_commonStats.works;
-
-    // Adds the amount of time taken by work() to executionTimeMillis.
-    ScopedTimer timer(&_commonStats.executionTimeMillis);
-
+PlanStage::StageState IndexIteratorStage::doWork(WorkingSetID* out) {
     if (auto entry = _cursor->next()) {
         if (!entry->key.isOwned())
             entry->key = entry->key.getOwned();
 
         WorkingSetID id = _ws->allocate();
         WorkingSetMember* member = _ws->get(id);
-        member->loc = entry->loc;
+        member->recordId = entry->loc;
         member->keyData.push_back(IndexKeyDatum(_keyPattern, entry->key, _iam));
-        _ws->transitionToLocAndIdx(id);
+        _ws->transitionToRecordIdAndIdx(id);
 
         *out = id;
-        ++_commonStats.advanced;
         return PlanStage::ADVANCED;
     }
 

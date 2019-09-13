@@ -1,18 +1,14 @@
+// @tags: [requires_non_retryable_writes]
+
 // Test index key generation with duplicate values addressed by array index and
 // object field.  SERVER-2902
 
 t = db.jstests_indexu;
 t.drop();
 
-var dupDoc = {
-    a: [{'0': 1}]
-};  // There are two 'a.0' fields in this doc.
-var dupDoc2 = {
-    a: [{'1': 1}, 'c']
-};
-var noDupDoc = {
-    a: [{'1': 1}]
-};
+var dupDoc = {a: [{'0': 1}]};  // There are two 'a.0' fields in this doc.
+var dupDoc2 = {a: [{'1': 1}, 'c']};
+var noDupDoc = {a: [{'1': 1}]};
 
 // Test that we can't index dupDoc.
 assert.writeOK(t.save(dupDoc));

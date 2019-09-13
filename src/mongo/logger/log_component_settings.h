@@ -1,28 +1,31 @@
-/*    Copyright 2014 MongoDB Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
@@ -30,6 +33,8 @@
 #include "mongo/base/disallow_copying.h"
 #include "mongo/logger/log_component.h"
 #include "mongo/logger/log_severity.h"
+#include "mongo/platform/atomic_word.h"
+#include "mongo/stdx/mutex.h"
 
 namespace mongo {
 namespace logger {
@@ -79,17 +84,23 @@ public:
     bool shouldLog(LogComponent component, LogSeverity severity) const;
 
 private:
+    void _setMinimumLoggedSeverityInLock(LogComponent component, LogSeverity severity);
+
+    // A mutex to synchronize writes to the severity arrays. This mutex is to synchronize changes to
+    // the entire array, and the atomics are to synchronize individual elements.
+    stdx::mutex _mtx;
+
     // True if a log severity is explicitly set for a component.
     // This differentiates between unconfigured components and components that happen to have
     // the same severity as kDefault.
     // This is also used to update the severities of unconfigured components when the severity
     // for kDefault is modified.
-    bool _hasMinimumLoggedSeverity[LogComponent::kNumLogComponents];
+    AtomicBool _hasMinimumLoggedSeverity[LogComponent::kNumLogComponents];
 
     // Log severities for components.
     // Store numerical values of severities to be cache-line friendly.
     // Set to kDefault minimum logged severity if _hasMinimumLoggedSeverity[i] is false.
-    signed char _minimumLoggedSeverity[LogComponent::kNumLogComponents];
+    AtomicInt32 _minimumLoggedSeverity[LogComponent::kNumLogComponents];
 };
 
 }  // namespace logger

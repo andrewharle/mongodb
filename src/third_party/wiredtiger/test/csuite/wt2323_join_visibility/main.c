@@ -1,5 +1,5 @@
 /*-
- * Public Domain 2014-2016 MongoDB, Inc.
+ * Public Domain 2014-2019 MongoDB, Inc.
  * Public Domain 2008-2014 WiredTiger, Inc.
  *
  * This is free and unencumbered software released into the public domain.
@@ -92,9 +92,6 @@ main(int argc, char *argv[])
 	TEST_OPTS *opts, _opts;
 	const char *tablename;
 
-	if (!testutil_enable_long_tests())	/* Ignore unless requested */
-		return (EXIT_SUCCESS);
-
 	opts = &_opts;
 	sharedopts = &_sharedopts;
 	memset(opts, 0, sizeof(*opts));
@@ -185,8 +182,8 @@ test_join(TEST_OPTS *opts, SHARED_OPTS *sharedopts, bool bloom,
 		insert_args[i].nthread = N_INSERT_THREAD;
 		insert_args[i].testopts = opts;
 		insert_args[i].sharedopts = sharedopts;
-		testutil_check(pthread_create(&insert_tid[i], NULL,
-		    thread_insert, (void *)&insert_args[i]));
+		testutil_check(pthread_create(
+		    &insert_tid[i], NULL, thread_insert, &insert_args[i]));
 	}
 
 	for (i = 0; i < N_JOIN_THREAD; ++i) {
@@ -194,8 +191,8 @@ test_join(TEST_OPTS *opts, SHARED_OPTS *sharedopts, bool bloom,
 		join_args[i].nthread = N_JOIN_THREAD;
 		join_args[i].testopts = opts;
 		join_args[i].sharedopts = sharedopts;
-		testutil_check(pthread_create(&join_tid[i], NULL,
-		    thread_join, (void *)&join_args[i]));
+		testutil_check(pthread_create(
+		    &join_tid[i], NULL, thread_join, &join_args[i]));
 	}
 
 	/*
@@ -317,12 +314,13 @@ thread_insert(void *arg)
 	return (NULL);
 }
 
-static void *thread_join(void *arg)
+static void *
+thread_join(void *arg)
 {
 	SHARED_OPTS *sharedopts;
 	TEST_OPTS *opts;
 	THREAD_ARGS *threadargs;
-	WT_CURSOR *postcur, *balcur, *flagcur, *joincur;
+	WT_CURSOR *balcur, *flagcur, *joincur, *postcur;
 	WT_SESSION *session;
 	int bal, flag, key, key2, post, ret;
 	char cfg[128];

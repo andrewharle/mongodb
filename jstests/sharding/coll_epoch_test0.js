@@ -9,7 +9,7 @@ var coll = st.s.getCollection("foo.bar");
 
 // First enable sharding
 admin.runCommand({enableSharding: coll.getDB() + ""});
-st.ensurePrimaryShard(coll.getDB().getName(), 'shard0001');
+st.ensurePrimaryShard(coll.getDB().getName(), st.shard1.shardName);
 admin.runCommand({shardCollection: coll + "", key: {_id: 1}});
 
 var primary = config.databases.find({_id: coll.getDB() + ""}).primary;
@@ -21,19 +21,18 @@ config.shards.find().forEach(function(doc) {
 
 var createdEpoch = null;
 var checkEpochs = function() {
-    config.chunks.find({ns: coll + ""})
-        .forEach(function(chunk) {
+    config.chunks.find({ns: coll + ""}).forEach(function(chunk) {
 
-            // Make sure the epochs exist, are non-zero, and are consistent
-            assert(chunk.lastmodEpoch);
-            print(chunk.lastmodEpoch + "");
-            assert.neq(chunk.lastmodEpoch + "", "000000000000000000000000");
-            if (createdEpoch == null)
-                createdEpoch = chunk.lastmodEpoch;
-            else
-                assert.eq(createdEpoch, chunk.lastmodEpoch);
+        // Make sure the epochs exist, are non-zero, and are consistent
+        assert(chunk.lastmodEpoch);
+        print(chunk.lastmodEpoch + "");
+        assert.neq(chunk.lastmodEpoch + "", "000000000000000000000000");
+        if (createdEpoch == null)
+            createdEpoch = chunk.lastmodEpoch;
+        else
+            assert.eq(createdEpoch, chunk.lastmodEpoch);
 
-        });
+    });
 };
 
 checkEpochs();

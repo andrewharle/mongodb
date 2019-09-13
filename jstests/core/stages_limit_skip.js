@@ -1,3 +1,8 @@
+// @tags: [
+//   does_not_support_stepdowns,
+//   uses_testing_only_commands,
+// ]
+
 // Test limit and skip
 t = db.stages_limit_skip;
 t.drop();
@@ -18,6 +23,7 @@ ixscan1 = {
             keyPattern: {foo: 1},
             startKey: {"": 20},
             endKey: {},
+            startKeyInclusive: true,
             endKeyInclusive: true,
             direction: -1
         }

@@ -1,3 +1,8 @@
+// @tags: [
+//   does_not_support_stepdowns,
+//   uses_testing_only_commands,
+// ]
+
 // Test basic OR functionality
 t = db.stages_or;
 t.drop();
@@ -19,6 +24,7 @@ ixscan1 = {
             keyPattern: {baz: 1},
             startKey: {"": 40},
             endKey: {},
+            startKeyInclusive: true,
             endKeyInclusive: true,
             direction: 1
         }
@@ -31,6 +37,7 @@ ixscan2 = {
             keyPattern: {foo: 1},
             startKey: {"": 40},
             endKey: {},
+            startKeyInclusive: true,
             endKeyInclusive: true,
             direction: 1
         }

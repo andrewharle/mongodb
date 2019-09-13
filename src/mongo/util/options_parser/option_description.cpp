@@ -1,28 +1,31 @@
-/* Copyright 2013 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/util/options_parser/option_description.h"
@@ -128,14 +131,14 @@ OptionDescription::OptionDescription(const std::string& dottedName,
     if (std::count(_deprecatedDottedNames.begin(), _deprecatedDottedNames.end(), "")) {
         StringBuilder sb;
         sb << "Attempted to register option with empty string for deprecated dotted name";
-        throw DBException(sb.str(), ErrorCodes::BadValue);
+        uasserted(ErrorCodes::BadValue, sb.str());
     }
     // Should not be the same as _dottedName.
     if (std::count(_deprecatedDottedNames.begin(), _deprecatedDottedNames.end(), dottedName)) {
         StringBuilder sb;
         sb << "Attempted to register option with conflict between dottedName and deprecated "
            << "dotted name: " << _dottedName;
-        throw DBException(sb.str(), ErrorCodes::BadValue);
+        uasserted(ErrorCodes::BadValue, sb.str());
     }
 }
 
@@ -151,7 +154,7 @@ OptionDescription& OptionDescription::setDefault(Value defaultValue) {
         StringBuilder sb;
         sb << "Could not register option \"" << _dottedName << "\": "
            << "Cannot register a default value for a composing option";
-        throw DBException(sb.str(), ErrorCodes::InternalError);
+        uasserted(ErrorCodes::InternalError, sb.str());
     }
 
     // Make sure the type of our default value matches our declared type
@@ -160,15 +163,7 @@ OptionDescription& OptionDescription::setDefault(Value defaultValue) {
         StringBuilder sb;
         sb << "Could not register option \"" << _dottedName << "\": "
            << "mismatch between declared type and type of default value: " << ret.toString();
-        throw DBException(sb.str(), ErrorCodes::InternalError);
-    }
-
-    // It doesn't make sense to set a "default value" for switch options, so disallow it here
-    if (_type == Switch) {
-        StringBuilder sb;
-        sb << "Could not register option \"" << _dottedName << "\": "
-           << "the default value of a Switch option is false and cannot be changed";
-        throw DBException(sb.str(), ErrorCodes::InternalError);
+        uasserted(ErrorCodes::InternalError, sb.str());
     }
 
     _default = defaultValue;
@@ -182,7 +177,7 @@ OptionDescription& OptionDescription::setImplicit(Value implicitValue) {
         StringBuilder sb;
         sb << "Could not register option \"" << _dottedName << "\": "
            << "Cannot register an implicit value for a composing option";
-        throw DBException(sb.str(), ErrorCodes::InternalError);
+        uasserted(ErrorCodes::InternalError, sb.str());
     }
 
     // Make sure the type of our implicit value matches our declared type
@@ -191,7 +186,7 @@ OptionDescription& OptionDescription::setImplicit(Value implicitValue) {
         StringBuilder sb;
         sb << "Could not register option \"" << _dottedName << "\": "
            << "mismatch between declared type and type of implicit value: " << ret.toString();
-        throw DBException(sb.str(), ErrorCodes::InternalError);
+        uasserted(ErrorCodes::InternalError, sb.str());
     }
 
     // It doesn't make sense to set an "implicit value" for switch options since they can never
@@ -200,7 +195,7 @@ OptionDescription& OptionDescription::setImplicit(Value implicitValue) {
         StringBuilder sb;
         sb << "Could not register option \"" << _dottedName << "\": "
            << "the implicit value of a Switch option is true and cannot be changed";
-        throw DBException(sb.str(), ErrorCodes::InternalError);
+        uasserted(ErrorCodes::InternalError, sb.str());
     }
 
     _implicit = implicitValue;
@@ -212,7 +207,7 @@ OptionDescription& OptionDescription::composing() {
         StringBuilder sb;
         sb << "Could not register option \"" << _dottedName << "\": "
            << "only options registered as StringVector or StringMap can be composing";
-        throw DBException(sb.str(), ErrorCodes::InternalError);
+        uasserted(ErrorCodes::InternalError, sb.str());
     }
 
     // Disallow registering a default value for a composing option since the interaction
@@ -221,7 +216,7 @@ OptionDescription& OptionDescription::composing() {
         StringBuilder sb;
         sb << "Could not register option \"" << _dottedName << "\": "
            << "Cannot make an option with an default value composing";
-        throw DBException(sb.str(), ErrorCodes::InternalError);
+        uasserted(ErrorCodes::InternalError, sb.str());
     }
 
     // Disallow registering an implicit value for a composing option since the interaction
@@ -230,7 +225,7 @@ OptionDescription& OptionDescription::composing() {
         StringBuilder sb;
         sb << "Could not register option \"" << _dottedName << "\": "
            << "Cannot make an option with an implicit value composing";
-        throw DBException(sb.str(), ErrorCodes::InternalError);
+        uasserted(ErrorCodes::InternalError, sb.str());
     }
 
     _isComposing = true;
@@ -247,7 +242,7 @@ OptionDescription& OptionDescription::positional(int start, int end) {
         StringBuilder sb;
         sb << "Could not register option \"" << _dottedName << "\": "
            << "Invalid positional specification:  \"start\": " << start << ", \"end\": " << end;
-        throw DBException(sb.str(), ErrorCodes::InternalError);
+        uasserted(ErrorCodes::InternalError, sb.str());
     }
 
     if ((end - start) > 0) {
@@ -256,7 +251,7 @@ OptionDescription& OptionDescription::positional(int start, int end) {
             sb << "Could not register option \"" << _dottedName << "\": "
                << "Positional range implies that multiple values are allowed, "
                << "but option is not registered as type StringVector";
-            throw DBException(sb.str(), ErrorCodes::InternalError);
+            uasserted(ErrorCodes::InternalError, sb.str());
         }
     }
 
@@ -277,7 +272,7 @@ OptionDescription& OptionDescription::validRange(long min, long max) {
         sb << "Could not register option \"" << _dottedName << "\": "
            << "only options registered as a numeric type can have a valid range, "
            << "but option has type: " << _type;
-        throw DBException(sb.str(), ErrorCodes::InternalError);
+        uasserted(ErrorCodes::InternalError, sb.str());
     }
 
     return addConstraint(new NumericKeyConstraint(_dottedName, min, max));
@@ -298,7 +293,7 @@ OptionDescription& OptionDescription::format(const std::string& regexFormat,
         sb << "Could not register option \"" << _dottedName << "\": "
            << "only options registered as a string type can have a required format, "
            << "but option has type: " << _type;
-        throw DBException(sb.str(), ErrorCodes::InternalError);
+        uasserted(ErrorCodes::InternalError, sb.str());
     }
 
     return addConstraint(new StringFormatKeyConstraint(_dottedName, regexFormat, displayFormat));

@@ -1,6 +1,10 @@
+// @tags: [
+//   requires_fastcount,
+//   requires_non_retryable_writes,
+//   uses_multiple_connections,
+// ]
+
 // Test db.loadServerScripts()
-//
-// @tags: [requires_parallel_shell]
 
 var testdb = db.getSisterDB("loadserverscripts");
 

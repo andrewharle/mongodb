@@ -22,12 +22,7 @@ load("jstests/replsets/rslib.js");
     var rst = new ReplSetTest({name: name, nodes: 2});
 
     rst.startSet();
-    // Initiate the replset in protocol version 1.
-    var conf = rst.getReplSetConfig();
-    conf.settings = conf.settings || {};
-    conf.settings.electionTimeoutMillis = 2000;
-    conf.protocolVersion = 1;
-    rst.initiate(conf);
+    rst.initiate();
     rst.awaitSecondaryNodes();
 
     var primary = rst.getPrimary();
@@ -65,4 +60,5 @@ load("jstests/replsets/rslib.js");
     // After restart, the new primary stands up with the newer term.
     assert.gte(getCurrentTerm(primary), firstSuccessfulTerm + 1);
 
+    rst.stopSet();
 })();

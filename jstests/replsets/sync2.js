@@ -30,13 +30,11 @@
     assert.soon(function() {
         master = replTest.getPrimary();
         return master === conns[0];
-    }, replTest.kDefaultTimeoutMS, "node 0 did not become primary quickly enough");
+    }, "node 0 should become primary before timeout", replTest.kDefaultTimeoutMS);
 
     replTest.awaitReplication();
     jsTestLog("Checking that ops still replicate correctly");
-    var option = {
-        writeConcern: {w: conns.length - 1, wtimeout: replTest.kDefaultTimeoutMS}
-    };
+    var option = {writeConcern: {w: conns.length - 1, wtimeout: replTest.kDefaultTimeoutMS}};
     // In PV0, this write can fail as a result of a bad spanning tree. If 2 was syncing from 4 prior
     // to bridging, it will not change sync sources and receive the write in time. This was not a
     // problem in 3.0 because the old version of mongobridge caused all the nodes to restart during

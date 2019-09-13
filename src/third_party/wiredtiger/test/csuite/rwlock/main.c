@@ -1,5 +1,5 @@
 /*-
- * Public Domain 2014-2017 MongoDB, Inc.
+ * Public Domain 2014-2019 MongoDB, Inc.
  * Public Domain 2008-2014 WiredTiger, Inc.
  *
  * This is free and unencumbered software released into the public domain.
@@ -50,13 +50,10 @@ void *thread_dump(void *);
 int
 main(int argc, char *argv[])
 {
-	TEST_OPTS *opts, _opts;
 	struct timespec te, ts;
+	TEST_OPTS *opts, _opts;
 	pthread_t dump_id, id[MAX_THREADS];
 	int i;
-
-	if (!testutil_enable_long_tests())	/* Ignore unless requested */
-		return (EXIT_SUCCESS);
 
 	opts = &_opts;
 	memset(opts, 0, sizeof(*opts));
@@ -72,13 +69,12 @@ main(int argc, char *argv[])
 	testutil_check(__wt_rwlock_init(NULL, &rwlock));
 	testutil_check(pthread_rwlock_init(&p_rwlock, NULL));
 
-	testutil_check(pthread_create(
-	    &dump_id, NULL, thread_dump, (void *)opts));
+	testutil_check(pthread_create(&dump_id, NULL, thread_dump, opts));
 
 	__wt_epoch(NULL, &ts);
 	for (i = 0; i < (int)opts->nthreads; ++i)
-		testutil_check(pthread_create(
-		    &id[i], NULL, thread_rwlock, (void *)opts));
+		testutil_check(
+		    pthread_create(&id[i], NULL, thread_rwlock, opts));
 
 	while (--i >= 0)
 		testutil_check(pthread_join(id[i], NULL));
@@ -110,7 +106,8 @@ thread_rwlock(void *arg)
 	    opts->conn->open_session(opts->conn, NULL, NULL, &wt_session));
 	session = (WT_SESSION_IMPL *)wt_session;
 
-	printf("Running rwlock thread\n");
+	if (opts->verbose)
+		printf("Running rwlock thread\n");
 	for (i = 1; i <= opts->nops; ++i) {
 		writelock = (i % READS_PER_WRITE == 0);
 
@@ -152,7 +149,7 @@ thread_rwlock(void *arg)
 			__wt_readunlock(session, &rwlock);
 #endif
 
-		if (i % 10000 == 0) {
+		if (opts->verbose && i % 10000 == 0) {
 			printf("%s", session->id == 20 ? ".\n" : ".");
 			fflush(stdout);
 		}
@@ -164,20 +161,24 @@ thread_rwlock(void *arg)
 }
 
 void *
-thread_dump(void *arg) {
-	WT_UNUSED(arg);
+thread_dump(void *arg)
+{
+	TEST_OPTS *opts;
+
+	opts = arg;
 
 	while (running) {
 		sleep(1);
-		printf("\n"
-		    "rwlock { current %" PRIu8 ", next %" PRIu8
-		    ", reader %" PRIu8 ", readers_active %" PRIu16
-		    ", readers_queued %" PRIu16 " }\n",
-		    rwlock.u.s.current,
-		    rwlock.u.s.next,
-		    rwlock.u.s.reader,
-		    rwlock.u.s.readers_active,
-		    rwlock.u.s.readers_queued);
+		if (opts->verbose)
+			printf("\n"
+			    "rwlock { current %" PRIu8 ", next %" PRIu8
+			    ", reader %" PRIu8 ", readers_active %" PRIu32
+			    ", readers_queued %" PRIu8 " }\n",
+			    rwlock.u.s.current,
+			    rwlock.u.s.next,
+			    rwlock.u.s.reader,
+			    rwlock.u.s.readers_active,
+			    rwlock.u.s.readers_queued);
 	}
 
 	return (NULL);

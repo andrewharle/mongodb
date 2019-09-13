@@ -1,34 +1,38 @@
 // fts_query_impl_test.cpp
 
+
 /**
-*    Copyright (C) 2012 10gen Inc.
-*
-*    This program is free software: you can redistribute it and/or  modify
-*    it under the terms of the GNU Affero General Public License, version 3,
-*    as published by the Free Software Foundation.
-*
-*    This program is distributed in the hope that it will be useful,
-*    but WITHOUT ANY WARRANTY; without even the implied warranty of
-*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*    GNU Affero General Public License for more details.
-*
-*    You should have received a copy of the GNU Affero General Public License
-*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*
-*    As a special exception, the copyright holders give permission to link the
-*    code of portions of this program with the OpenSSL library under certain
-*    conditions as described in each individual source file and distribute
-*    linked combinations including the program with the OpenSSL library. You
-*    must comply with the GNU Affero General Public License in all respects for
-*    all of the code used other than as permitted herein. If you modify file(s)
-*    with this exception, you may extend this exception to your version of the
-*    file(s), but you are not obligated to do so. If you do not wish to do so,
-*    delete this exception statement from your version. If you delete this
-*    exception statement from all source files in the program, then also delete
-*    it in the license file.
-*/
+ *    Copyright (C) 2018-present MongoDB, Inc.
+ *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
+ *
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
+ */
 
+#include "mongo/platform/basic.h"
 
+#include "mongo/bson/json.h"
 #include "mongo/db/fts/fts_query_impl.h"
 #include "mongo/unittest/unittest.h"
 
@@ -70,9 +74,9 @@ TEST(FTSQueryImpl, ParsePunctuation) {
     ASSERT_TRUE(q.getTermsForBounds() == q.getPositiveTerms());
 }
 
-TEST(FTSQueryImpl, Neg1) {
+TEST(FTSQueryImpl, HyphenBeforeWordShouldNegateTerm) {
     FTSQueryImpl q;
-    q.setQuery("this is -really fun");
+    q.setQuery("-really fun");
     q.setLanguage("english");
     q.setCaseSensitive(false);
     q.setDiacriticSensitive(false);
@@ -85,6 +89,69 @@ TEST(FTSQueryImpl, Neg1) {
     ASSERT_TRUE(q.getTermsForBounds() == q.getPositiveTerms());
 }
 
+TEST(FTSQueryImpl, HyphenFollowedByWhitespaceShouldNotNegate) {
+    FTSQueryImpl q;
+    q.setQuery("- really fun");
+    q.setLanguage("english");
+    q.setCaseSensitive(false);
+    q.setDiacriticSensitive(false);
+    ASSERT(q.parse(TEXT_INDEX_VERSION_3).isOK());
+
+    auto positiveTerms = q.getPositiveTerms();
+    ASSERT_EQUALS(2U, positiveTerms.size());
+    ASSERT_EQUALS(1U, positiveTerms.count("fun"));
+    ASSERT_EQUALS(1U, positiveTerms.count("realli"));
+    ASSERT_EQUALS(0U, q.getNegatedTerms().size());
+    ASSERT_TRUE(q.getTermsForBounds() == q.getPositiveTerms());
+}
+
+TEST(FTSQueryImpl, TwoHyphensShouldNegate) {
+    FTSQueryImpl q;
+    q.setQuery("--really fun");
+    q.setLanguage("english");
+    q.setCaseSensitive(false);
+    q.setDiacriticSensitive(false);
+    ASSERT(q.parse(TEXT_INDEX_VERSION_3).isOK());
+
+    ASSERT_EQUALS(1U, q.getPositiveTerms().size());
+    ASSERT_EQUALS("fun", *q.getPositiveTerms().begin());
+    ASSERT_EQUALS(1U, q.getNegatedTerms().size());
+    ASSERT_EQUALS("realli", *q.getNegatedTerms().begin());
+    ASSERT_TRUE(q.getTermsForBounds() == q.getPositiveTerms());
+}
+
+TEST(FTSQueryImpl, HyphenWithNoSurroundingWhitespaceShouldBeTreatedAsDelimiter) {
+    FTSQueryImpl q;
+    q.setQuery("really-fun");
+    q.setLanguage("english");
+    q.setCaseSensitive(false);
+    q.setDiacriticSensitive(false);
+    ASSERT(q.parse(TEXT_INDEX_VERSION_3).isOK());
+
+    auto positiveTerms = q.getPositiveTerms();
+    ASSERT_EQUALS(2U, positiveTerms.size());
+    ASSERT_EQUALS(1U, positiveTerms.count("fun"));
+    ASSERT_EQUALS(1U, positiveTerms.count("realli"));
+    ASSERT_EQUALS(0U, q.getNegatedTerms().size());
+    ASSERT_TRUE(q.getTermsForBounds() == q.getPositiveTerms());
+}
+
+TEST(FTSQueryImpl, HyphenShouldNegateAllSucceedingTermsSeparatedByHyphens) {
+    FTSQueryImpl q;
+    q.setQuery("-really-fun-stuff");
+    q.setLanguage("english");
+    q.setCaseSensitive(false);
+    q.setDiacriticSensitive(false);
+    ASSERT(q.parse(TEXT_INDEX_VERSION_3).isOK());
+
+    auto negatedTerms = q.getNegatedTerms();
+    ASSERT_EQUALS(3U, negatedTerms.size());
+    ASSERT_EQUALS(1U, negatedTerms.count("realli"));
+    ASSERT_EQUALS(1U, negatedTerms.count("fun"));
+    ASSERT_EQUALS(1U, negatedTerms.count("stuff"));
+    ASSERT_EQUALS(0U, q.getPositiveTerms().size());
+}
+
 TEST(FTSQueryImpl, Phrase1) {
     FTSQueryImpl q;
     q.setQuery("doing a \"phrase test\" for fun");
@@ -93,14 +160,11 @@ TEST(FTSQueryImpl, Phrase1) {
     q.setDiacriticSensitive(false);
     ASSERT(q.parse(TEXT_INDEX_VERSION_3).isOK());
 
-    ASSERT_EQUALS(3U, q.getPositiveTerms().size());
-    ASSERT_EQUALS(0U, q.getNegatedTerms().size());
-    ASSERT_EQUALS(1U, q.getPositivePhr().size());
-    ASSERT_EQUALS(0U, q.getNegatedPhr().size());
+    ASSERT_BSONOBJ_EQ(
+        q.toBSON(),
+        fromjson("{terms: ['fun', 'phrase', 'test'], negatedTerms: [], phrases: ['phrase "
+                 "test'], negatedPhrases: []}"));
     ASSERT_TRUE(q.getTermsForBounds() == q.getPositiveTerms());
-
-    ASSERT_EQUALS("phrase test", q.getPositivePhr()[0]);
-    ASSERT_EQUALS("fun|phrase|test||||phrase test||", q.debugString());
 }
 
 TEST(FTSQueryImpl, Phrase2) {
@@ -114,14 +178,55 @@ TEST(FTSQueryImpl, Phrase2) {
     ASSERT_EQUALS("phrase-test", q.getPositivePhr()[0]);
 }
 
-TEST(FTSQueryImpl, NegPhrase1) {
+TEST(FTSQueryImpl, HyphenDirectlyBeforePhraseShouldNegateEntirePhrase) {
     FTSQueryImpl q;
     q.setQuery("doing a -\"phrase test\" for fun");
     q.setLanguage("english");
     q.setCaseSensitive(false);
     q.setDiacriticSensitive(false);
     ASSERT(q.parse(TEXT_INDEX_VERSION_3).isOK());
-    ASSERT_EQUALS("fun||||||phrase test", q.debugString());
+    ASSERT_BSONOBJ_EQ(
+        q.toBSON(),
+        fromjson(
+            "{terms: ['fun'], negatedTerms: [], phrases: [], negatedPhrases: ['phrase test']}"));
+}
+
+TEST(FTSQueryImpl, HyphenSurroundedByWhitespaceBeforePhraseShouldNotNegateEntirePhrase) {
+    FTSQueryImpl q;
+    q.setQuery("doing a - \"phrase test\" for fun");
+    q.setLanguage("english");
+    q.setCaseSensitive(false);
+    q.setDiacriticSensitive(false);
+    ASSERT(q.parse(TEXT_INDEX_VERSION_3).isOK());
+    ASSERT_BSONOBJ_EQ(
+        q.toBSON(),
+        fromjson("{terms: ['fun', 'phrase', 'test'], negatedTerms: [], phrases: ['phrase "
+                 "test'], negatedPhrases: []}"));
+}
+
+TEST(FTSQueryImpl, HyphenBetweenTermAndPhraseShouldBeTreatedAsDelimiter) {
+    FTSQueryImpl q;
+    q.setQuery("doing a-\"phrase test\" for fun");
+    q.setLanguage("english");
+    q.setCaseSensitive(false);
+    q.setDiacriticSensitive(false);
+    ASSERT(q.parse(TEXT_INDEX_VERSION_3).isOK());
+    ASSERT_BSONOBJ_EQ(
+        q.toBSON(),
+        fromjson("{terms: ['fun', 'phrase', 'test'], negatedTerms: [], phrases: ['phrase "
+                 "test'], negatedPhrases: []}"));
+}
+
+TEST(FTSQueryImpl, HyphenShouldNegateAllSucceedingPhrasesSeparatedByHyphens) {
+    FTSQueryImpl q;
+    q.setQuery("-\"really fun\"-\"stuff here\" \"another phrase\"");
+    q.setLanguage("english");
+    q.setCaseSensitive(false);
+    q.setDiacriticSensitive(false);
+    ASSERT(q.parse(TEXT_INDEX_VERSION_3).isOK());
+    ASSERT_BSONOBJ_EQ(q.toBSON(),
+                      fromjson("{terms: ['anoth', 'phrase'], negatedTerms: [], phrases: ['another "
+                               "phrase'], negatedPhrases: ['really fun', 'stuff here']}"));
 }
 
 TEST(FTSQueryImpl, CaseSensitiveOption) {
@@ -204,7 +309,10 @@ TEST(FTSQueryImpl, Mix1) {
     q.setCaseSensitive(false);
     q.setDiacriticSensitive(false);
     ASSERT(q.parse(TEXT_INDEX_VERSION_3).isOK());
-    ASSERT_EQUALS("industri||melbourn|physic||industry||", q.debugString());
+    ASSERT_BSONOBJ_EQ(
+        q.toBSON(),
+        fromjson("{terms: ['industri'], negatedTerms: ['melbourn', 'physic'], phrases: "
+                 "['industry'], negatedPhrases: []}"));
 }
 
 TEST(FTSQueryImpl, NegPhrase2) {

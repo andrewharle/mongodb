@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2012 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -30,13 +32,13 @@
  * This file contains tests for mongo/db/geo/geoparser.cpp.
  */
 
-#include <string>
 #include <sstream>
+#include <string>
 
 #include "mongo/db/geo/geoparser.h"
 #include "mongo/db/geo/shapes.h"
-#include "mongo/db/json.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/db/json.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 
@@ -148,16 +150,14 @@ TEST(GeoParser, parseGeoJSONPolygon) {
         &polygon));
     // And one with a hole.
     ASSERT_OK(GeoParser::parseGeoJSONPolygon(
-        fromjson(
-            "{'type':'Polygon', 'coordinates':[ [[0,0],[5,0],[5,5],[0,5],[0,0]],"
-            " [[1,1],[4,1],[4,4],[1,4],[1,1]] ]}"),
+        fromjson("{'type':'Polygon', 'coordinates':[ [[0,0],[5,0],[5,5],[0,5],[0,0]],"
+                 " [[1,1],[4,1],[4,4],[1,4],[1,1]] ]}"),
         false,
         &polygon));
     // Latitudes must be OK
     ASSERT_NOT_OK(GeoParser::parseGeoJSONPolygon(
-        fromjson(
-            "{'type':'Polygon', 'coordinates':[ [[0,0],[5,0],[5,91],[0,91],[0,0]],"
-            " [[1,1],[4,1],[4,4],[1,4],[1,1]] ]}"),
+        fromjson("{'type':'Polygon', 'coordinates':[ [[0,0],[5,0],[5,91],[0,91],[0,0]],"
+                 " [[1,1],[4,1],[4,4],[1,4],[1,1]] ]}"),
         false,
         &polygon));
     // First point must be the same as the last.
@@ -165,9 +165,8 @@ TEST(GeoParser, parseGeoJSONPolygon) {
         fromjson("{'type':'Polygon', 'coordinates':[ [[1,2],[3,4],[5,6]] ]}"), false, &polygon));
     // Extra elements are allowed
     ASSERT_OK(GeoParser::parseGeoJSONPolygon(
-        fromjson(
-            "{'type':'Polygon', 'coordinates':[ [[0,0,0,0],[5,0,0],[5,5,1],"
-            " [0,5],[0,0]] ]}"),
+        fromjson("{'type':'Polygon', 'coordinates':[ [[0,0,0,0],[5,0,0],[5,5,1],"
+                 " [0,5],[0,0]] ]}"),
         false,
         &polygon));
 
@@ -185,9 +184,8 @@ TEST(GeoParser, parseGeoJSONPolygon) {
 
     PolygonWithCRS polygonB;
     ASSERT_OK(GeoParser::parseGeoJSONPolygon(
-        fromjson(
-            "{'type':'Polygon', 'coordinates':[ [[0,0],[5,0],[5,5],[0,5],[0,0]],"
-            " [[1,1],[1,4],[4,4],[4,1],[1,1]] ]}"),
+        fromjson("{'type':'Polygon', 'coordinates':[ [[0,0],[5,0],[5,5],[0,5],[0,0]],"
+                 " [[1,1],[1,4],[4,4],[4,1],[1,1]] ]}"),
         false,
         &polygonB));
     // We removed this in the hole.
@@ -204,9 +202,8 @@ TEST(GeoParser, parseGeoJSONPolygon) {
 
     PolygonWithCRS polygonD;
     ASSERT_OK(GeoParser::parseGeoJSONPolygon(
-        fromjson(
-            "{'type':'Polygon', 'coordinates':[ [[0,0],[0,5],[5,5],[5,0],[0,0]],"
-            " [[1,1],[1,4],[4,4],[4,1],[1,1]] ]}"),
+        fromjson("{'type':'Polygon', 'coordinates':[ [[0,0],[0,5],[5,5],[5,0],[0,0]],"
+                 " [[1,1],[1,4],[4,4],[4,1],[1,1]] ]}"),
         false,
         &polygonD));
     // Also removed in the loop.
@@ -324,31 +321,28 @@ TEST(GeoParser, parseMultiLine) {
     mongo::MultiLineWithCRS ml;
 
     ASSERT_OK(GeoParser::parseMultiLine(
-        fromjson(
-            "{'type':'MultiLineString','coordinates':[ [[1,1],[2,2],[3,3]],"
-            "[[4,5],[6,7]]]}"),
+        fromjson("{'type':'MultiLineString','coordinates':[ [[1,1],[2,2],[3,3]],"
+                 "[[4,5],[6,7]]]}"),
         false,
         &ml));
     ASSERT_EQUALS(ml.lines.size(), (size_t)2);
 
-    ASSERT_OK(
-        GeoParser::parseMultiLine(fromjson(
-                                      "{'type':'MultiLineString','coordinates':[ [[1,1],[2,2]],"
-                                      "[[4,5],[6,7]]]}"),
-                                  false,
-                                  &ml));
+    ASSERT_OK(GeoParser::parseMultiLine(
+        fromjson("{'type':'MultiLineString','coordinates':[ [[1,1],[2,2]],"
+                 "[[4,5],[6,7]]]}"),
+        false,
+        &ml));
     ASSERT_EQUALS(ml.lines.size(), (size_t)2);
 
     ASSERT_OK(GeoParser::parseMultiLine(
         fromjson("{'type':'MultiLineString','coordinates':[ [[1,1],[2,2]]]}"), false, &ml));
     ASSERT_EQUALS(ml.lines.size(), (size_t)1);
 
-    ASSERT_OK(
-        GeoParser::parseMultiLine(fromjson(
-                                      "{'type':'MultiLineString','coordinates':[ [[1,1],[2,2]],"
-                                      "[[2,2],[1,1]]]}"),
-                                  false,
-                                  &ml));
+    ASSERT_OK(GeoParser::parseMultiLine(
+        fromjson("{'type':'MultiLineString','coordinates':[ [[1,1],[2,2]],"
+                 "[[2,2],[1,1]]]}"),
+        false,
+        &ml));
     ASSERT_EQUALS(ml.lines.size(), (size_t)2);
 
     ASSERT_NOT_OK(GeoParser::parseMultiLine(
@@ -365,22 +359,20 @@ TEST(GeoParser, parseMultiPolygon) {
     mongo::MultiPolygonWithCRS mp;
 
     ASSERT_OK(GeoParser::parseMultiPolygon(
-        fromjson(
-            "{'type':'MultiPolygon','coordinates':["
-            "[[[102.0, 2.0], [103.0, 2.0], [103.0, 3.0], [102.0, 3.0], [102.0, 2.0]]],"
-            "[[[100.0, 0.0], [101.0, 0.0], [101.0, 1.0], [100.0, 1.0], [100.0, 0.0]],"
-            "[[100.2, 0.2], [100.8, 0.2], [100.8, 0.8], [100.2, 0.8], [100.2, 0.2]]]"
-            "]}"),
+        fromjson("{'type':'MultiPolygon','coordinates':["
+                 "[[[102.0, 2.0], [103.0, 2.0], [103.0, 3.0], [102.0, 3.0], [102.0, 2.0]]],"
+                 "[[[100.0, 0.0], [101.0, 0.0], [101.0, 1.0], [100.0, 1.0], [100.0, 0.0]],"
+                 "[[100.2, 0.2], [100.8, 0.2], [100.8, 0.8], [100.2, 0.8], [100.2, 0.2]]]"
+                 "]}"),
         false,
         &mp));
     ASSERT_EQUALS(mp.polygons.size(), (size_t)2);
 
     ASSERT_OK(GeoParser::parseMultiPolygon(
-        fromjson(
-            "{'type':'MultiPolygon','coordinates':["
-            "[[[100.0, 0.0], [101.0, 0.0], [101.0, 1.0], [100.0, 1.0], [100.0, 0.0]],"
-            "[[100.2, 0.2], [100.8, 0.2], [100.8, 0.8], [100.2, 0.8], [100.2, 0.2]]]"
-            "]}"),
+        fromjson("{'type':'MultiPolygon','coordinates':["
+                 "[[[100.0, 0.0], [101.0, 0.0], [101.0, 1.0], [100.0, 1.0], [100.0, 0.0]],"
+                 "[[100.2, 0.2], [100.8, 0.2], [100.8, 0.8], [100.2, 0.8], [100.2, 0.2]]]"
+                 "]}"),
         false,
         &mp));
     ASSERT_EQUALS(mp.polygons.size(), (size_t)1);

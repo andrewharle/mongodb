@@ -1,29 +1,31 @@
+
 /**
- *    Copyright (C) 2012 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/platform/basic.h"
@@ -32,8 +34,8 @@
 #include <vector>
 
 #include "mongo/client/connpool.h"
-#include "mongo/client/dbclientinterface.h"
 #include "mongo/client/dbclient_rs.h"
+#include "mongo/client/dbclientinterface.h"
 #include "mongo/client/replica_set_monitor.h"
 #include "mongo/client/replica_set_monitor_internal.h"
 #include "mongo/dbtests/mock/mock_conn_registry.h"
@@ -92,29 +94,30 @@ TEST_F(ReplicaSetMonitorTest, SeedWithPriOnlySecDown) {
     const string replSetName(replSet->getSetName());
     set<HostAndPort> seedList;
     seedList.insert(HostAndPort(replSet->getPrimary()));
-    ReplicaSetMonitor::createIfNeeded(replSetName, seedList);
+    auto monitor = ReplicaSetMonitor::createIfNeeded(replSetName, seedList);
 
     replSet->kill(replSet->getPrimary());
 
-    ReplicaSetMonitorPtr monitor = ReplicaSetMonitor::get(replSet->getSetName());
     // Trigger calls to Node::getConnWithRefresh
     monitor->startOrContinueRefresh().refreshAll();
+    monitor.reset();
 }
 
 namespace {
 /**
- * Takes a repl::ReplicaSetConfig and a node to remove and returns a new config with equivalent
+ * Takes a repl::ReplSetConfig and a node to remove and returns a new config with equivalent
  * members minus the one specified to be removed.  NOTE: Does not copy over properties of the
  * members other than their id and host.
  */
-repl::ReplicaSetConfig _getConfigWithMemberRemoved(const repl::ReplicaSetConfig& oldConfig,
-                                                   const HostAndPort& toRemove) {
+repl::ReplSetConfig _getConfigWithMemberRemoved(const repl::ReplSetConfig& oldConfig,
+                                                const HostAndPort& toRemove) {
     BSONObjBuilder newConfigBuilder;
     newConfigBuilder.append("_id", oldConfig.getReplSetName());
     newConfigBuilder.append("version", oldConfig.getConfigVersion());
+    newConfigBuilder.append("protocolVersion", oldConfig.getProtocolVersion());
 
     BSONArrayBuilder membersBuilder(newConfigBuilder.subarrayStart("members"));
-    for (repl::ReplicaSetConfig::MemberIterator member = oldConfig.membersBegin();
+    for (repl::ReplSetConfig::MemberIterator member = oldConfig.membersBegin();
          member != oldConfig.membersEnd();
          ++member) {
         if (member->getHostAndPort() == toRemove) {
@@ -126,7 +129,7 @@ repl::ReplicaSetConfig _getConfigWithMemberRemoved(const repl::ReplicaSetConfig&
     }
 
     membersBuilder.done();
-    repl::ReplicaSetConfig newConfig;
+    repl::ReplSetConfig newConfig;
     ASSERT_OK(newConfig.initialize(newConfigBuilder.obj()));
     ASSERT_OK(newConfig.validate());
     return newConfig;
@@ -146,10 +149,9 @@ TEST(ReplicaSetMonitorTest, PrimaryRemovedFromSetStress) {
     const string replSetName(replSet.getSetName());
     set<HostAndPort> seedList;
     seedList.insert(HostAndPort(replSet.getPrimary()));
-    ReplicaSetMonitor::createIfNeeded(replSetName, seedList);
+    auto replMonitor = ReplicaSetMonitor::createIfNeeded(replSetName, seedList);
 
-    const repl::ReplicaSetConfig& origConfig = replSet.getReplConfig();
-    mongo::ReplicaSetMonitorPtr replMonitor = ReplicaSetMonitor::get(replSetName);
+    const repl::ReplSetConfig& origConfig = replSet.getReplConfig();
 
     for (size_t idxToRemove = 0; idxToRemove < NODE_COUNT; idxToRemove++) {
         replSet.setConfig(origConfig);
@@ -162,7 +164,8 @@ TEST(ReplicaSetMonitorTest, PrimaryRemovedFromSetStress) {
             replMonitor->appendInfo(monitorStateBuilder);
             BSONObj monitorState = monitorStateBuilder.done();
 
-            BSONElement hostsElem = monitorState["hosts"];
+            // Stats are under the replica set name, "test".
+            BSONElement hostsElem = monitorState["test"]["hosts"];
             BSONElement addrElem = hostsElem[mongo::str::stream() << idxToRemove]["addr"];
             hostToRemove = addrElem.String();
         }
@@ -171,7 +174,7 @@ TEST(ReplicaSetMonitorTest, PrimaryRemovedFromSetStress) {
         // Make sure the monitor sees the new primary
         replMonitor->startOrContinueRefresh().refreshAll();
 
-        repl::ReplicaSetConfig newConfig =
+        repl::ReplSetConfig newConfig =
             _getConfigWithMemberRemoved(origConfig, HostAndPort(hostToRemove));
         replSet.setConfig(newConfig);
         replSet.setPrimary(newConfig.getMemberAt(0).getHostAndPort().toString());
@@ -179,6 +182,7 @@ TEST(ReplicaSetMonitorTest, PrimaryRemovedFromSetStress) {
         replMonitor->startOrContinueRefresh().refreshAll();
     }
 
+    replMonitor.reset();
     ReplicaSetMonitor::cleanup();
     ConnectionString::setConnectionHook(originalConnHook);
     mongo::ScopedDbConnection::clearPool();
@@ -195,11 +199,12 @@ protected:
         _originalConnectionHook = ConnectionString::getConnectionHook();
         ConnectionString::setConnectionHook(mongo::MockConnRegistry::get()->getConnStrHook());
 
-        repl::ReplicaSetConfig oldConfig = _replSet->getReplConfig();
+        repl::ReplSetConfig oldConfig = _replSet->getReplConfig();
 
         mongo::BSONObjBuilder newConfigBuilder;
         newConfigBuilder.append("_id", oldConfig.getReplSetName());
         newConfigBuilder.append("version", oldConfig.getConfigVersion());
+        newConfigBuilder.append("protocolVersion", oldConfig.getProtocolVersion());
 
         mongo::BSONArrayBuilder membersBuilder(newConfigBuilder.subarrayStart("members"));
 
@@ -227,7 +232,7 @@ protected:
 
         membersBuilder.done();
 
-        repl::ReplicaSetConfig newConfig;
+        repl::ReplSetConfig newConfig;
         fassert(28572, newConfig.initialize(newConfigBuilder.done()));
         fassert(28571, newConfig.validate());
         _replSet->setConfig(newConfig);
@@ -256,12 +261,11 @@ TEST_F(TwoNodeWithTags, SecDownRetryNoTag) {
 
     set<HostAndPort> seedList;
     seedList.insert(HostAndPort(replSet->getPrimary()));
-    ReplicaSetMonitor::createIfNeeded(replSet->getSetName(), seedList);
+    auto monitor = ReplicaSetMonitor::createIfNeeded(replSet->getSetName(), seedList);
 
     const string secHost(replSet->getSecondaries().front());
     replSet->kill(secHost);
 
-    ReplicaSetMonitorPtr monitor = ReplicaSetMonitor::get(replSet->getSetName());
     // Make sure monitor sees the dead secondary
     monitor->startOrContinueRefresh().refreshAll();
 
@@ -272,6 +276,7 @@ TEST_F(TwoNodeWithTags, SecDownRetryNoTag) {
 
     ASSERT_FALSE(monitor->isPrimary(node));
     ASSERT_EQUALS(secHost, node.toString());
+    monitor.reset();
 }
 
 // Tests the case where the connection to secondary went bad and the replica set
@@ -282,12 +287,11 @@ TEST_F(TwoNodeWithTags, SecDownRetryWithTag) {
 
     set<HostAndPort> seedList;
     seedList.insert(HostAndPort(replSet->getPrimary()));
-    ReplicaSetMonitor::createIfNeeded(replSet->getSetName(), seedList);
+    auto monitor = ReplicaSetMonitor::createIfNeeded(replSet->getSetName(), seedList);
 
     const string secHost(replSet->getSecondaries().front());
     replSet->kill(secHost);
 
-    ReplicaSetMonitorPtr monitor = ReplicaSetMonitor::get(replSet->getSetName());
     // Make sure monitor sees the dead secondary
     monitor->startOrContinueRefresh().refreshAll();
 
@@ -300,6 +304,7 @@ TEST_F(TwoNodeWithTags, SecDownRetryWithTag) {
 
     ASSERT_FALSE(monitor->isPrimary(node));
     ASSERT_EQUALS(secHost, node.toString());
+    monitor.reset();
 }
 
 }  // namespace

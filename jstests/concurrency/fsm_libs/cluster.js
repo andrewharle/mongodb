@@ -3,41 +3,73 @@
 /**
  * Represents a MongoDB cluster.
  */
-load('jstests/hooks/check_repl_dbhash.js');  // Loads the checkDBHashes function.
+load('jstests/hooks/validate_collections.js');          // For validateCollections.
+load('jstests/concurrency/fsm_libs/shard_fixture.js');  // For FSMShardingTest.
 
 var Cluster = function(options) {
     if (!(this instanceof Cluster)) {
         return new Cluster(options);
     }
 
+    function getObjectKeys(obj) {
+        var values = [];
+        if (typeof obj !== "object") {
+            return values;
+        }
+        Object.keys(obj).forEach(key => {
+            if (key.indexOf('.') > -1) {
+                throw new Error('illegal key specified ' + key);
+            }
+            var subKeys = getObjectKeys(obj[key]);
+            if (subKeys.length === 0) {
+                values.push(key);
+            } else {
+                subKeys.forEach(subKey => {
+                    values.push(key + "." + subKey);
+                });
+            }
+        });
+        return values;
+    }
+
     function validateClusterOptions(options) {
         var allowedKeys = [
-            'enableBalancer',
-            'masterSlave',
-            'replication',
+            'replication.enabled',
+            'replication.numNodes',
             'sameCollection',
             'sameDB',
             'setupFunctions',
-            'sharded',
+            'sharded.enabled',
+            'sharded.enableAutoSplit',
+            'sharded.enableBalancer',
+            'sharded.numMongos',
+            'sharded.numShards',
+            'sharded.stepdownOptions',
+            'sharded.stepdownOptions.configStepdown',
+            'sharded.stepdownOptions.shardStepdown',
             'teardownFunctions',
-            'useLegacyConfigServers'
         ];
 
-        Object.keys(options).forEach(function(option) {
+        getObjectKeys(options).forEach(function(option) {
             assert.contains(option,
                             allowedKeys,
                             'invalid option: ' + tojson(option) + '; valid options are: ' +
                                 tojson(allowedKeys));
         });
 
-        options.enableBalancer = options.enableBalancer || false;
-        assert.eq('boolean', typeof options.enableBalancer);
+        options.replication = options.replication || {};
+        assert.eq('object', typeof options.replication);
 
-        options.masterSlave = options.masterSlave || false;
-        assert.eq('boolean', typeof options.masterSlave);
+        options.replication.enabled = options.replication.enabled || false;
+        assert.eq('boolean', typeof options.replication.enabled);
 
-        options.replication = options.replication || false;
-        assert.eq('boolean', typeof options.replication);
+        if (typeof options.replication.numNodes !== 'undefined') {
+            assert(options.replication.enabled,
+                   "Must have replication.enabled be true if 'replication.numNodes' is specified");
+        }
+
+        options.replication.numNodes = options.replication.numNodes || 3;
+        assert.eq('number', typeof options.replication.numNodes);
 
         options.sameCollection = options.sameCollection || false;
         assert.eq('boolean', typeof options.sameCollection);
@@ -45,15 +77,43 @@ var Cluster = function(options) {
         options.sameDB = options.sameDB || false;
         assert.eq('boolean', typeof options.sameDB);
 
-        options.sharded = options.sharded || false;
-        assert.eq('boolean', typeof options.sharded);
+        options.sharded = options.sharded || {};
+        assert.eq('object', typeof options.sharded);
 
-        if (typeof options.useLegacyConfigServers !== 'undefined') {
-            assert(options.sharded, "Must be sharded if 'useLegacyConfigServers' is specified");
+        options.sharded.enabled = options.sharded.enabled || false;
+        assert.eq('boolean', typeof options.sharded.enabled);
+
+        if (typeof options.sharded.enableAutoSplit !== 'undefined') {
+            assert(options.sharded.enabled,
+                   "Must have sharded.enabled be true if 'sharded.enableAutoSplit' is specified");
         }
 
-        options.useLegacyConfigServers = options.useLegacyConfigServers || false;
-        assert.eq('boolean', typeof options.useLegacyConfigServers);
+        options.sharded.enableAutoSplit = options.sharded.enableAutoSplit || false;
+        assert.eq('boolean', typeof options.sharded.enableAutoSplit);
+
+        if (typeof options.sharded.enableBalancer !== 'undefined') {
+            assert(options.sharded.enabled,
+                   "Must have sharded.enabled be true if 'sharded.enableBalancer' is specified");
+        }
+
+        options.sharded.enableBalancer = options.sharded.enableBalancer || false;
+        assert.eq('boolean', typeof options.sharded.enableBalancer);
+
+        if (typeof options.sharded.numMongos !== 'undefined') {
+            assert(options.sharded.enabled,
+                   "Must have sharded.enabled be true if 'sharded.numMongos' is specified");
+        }
+
+        options.sharded.numMongos = options.sharded.numMongos || 2;
+        assert.eq('number', typeof options.sharded.numMongos);
+
+        if (typeof options.sharded.numShards !== 'undefined') {
+            assert(options.sharded.enabled,
+                   "Must have sharded.enabled be true if 'sharded.numShards' is specified");
+        }
+
+        options.sharded.numShards = options.sharded.numShards || 2;
+        assert.eq('number', typeof options.sharded.numShards);
 
         options.setupFunctions = options.setupFunctions || {};
         assert.eq('object', typeof options.setupFunctions);
@@ -65,7 +125,8 @@ var Cluster = function(options) {
                'Expected setupFunctions.mongod to be an array of functions');
 
         if (typeof options.setupFunctions.mongos !== 'undefined') {
-            assert(options.sharded, "Must be sharded if 'setupFunctions.mongos' is specified");
+            assert(options.sharded.enabled,
+                   "Must have sharded.enabled be true if 'setupFunctions.mongos' is specified");
         }
 
         options.setupFunctions.mongos = options.setupFunctions.mongos || [];
@@ -73,6 +134,12 @@ var Cluster = function(options) {
                'Expected setupFunctions.mongos to be an array');
         assert(options.setupFunctions.mongos.every(f => (typeof f === 'function')),
                'Expected setupFunctions.mongos to be an array of functions');
+
+        options.setupFunctions.config = options.setupFunctions.config || [];
+        assert(Array.isArray(options.setupFunctions.config),
+               'Expected setupFunctions.config to be an array');
+        assert(options.setupFunctions.config.every(f => (typeof f === 'function')),
+               'Expected setupFunctions.config to be an array of functions');
 
         options.teardownFunctions = options.teardownFunctions || {};
         assert.eq('object', typeof options.teardownFunctions);
@@ -84,7 +151,8 @@ var Cluster = function(options) {
                'Expected teardownFunctions.mongod to be an array of functions');
 
         if (typeof options.teardownFunctions.mongos !== 'undefined') {
-            assert(options.sharded, "Must be sharded if 'teardownFunctions.mongos' is specified");
+            assert(options.sharded.enabled,
+                   "Must have sharded.enabled be true if 'teardownFunctions.mongos' is specified");
         }
 
         options.teardownFunctions.mongos = options.teardownFunctions.mongos || [];
@@ -93,150 +161,88 @@ var Cluster = function(options) {
         assert(options.teardownFunctions.mongos.every(f => (typeof f === 'function')),
                'Expected teardownFunctions.mongos to be an array of functions');
 
-        assert(!options.masterSlave || !options.replication,
-               "Both 'masterSlave' and " + "'replication' cannot be true");
-        assert(!options.masterSlave || !options.sharded,
-               "Both 'masterSlave' and 'sharded' cannot" + "be true");
+        options.teardownFunctions.config = options.teardownFunctions.config || [];
+        assert(Array.isArray(options.teardownFunctions.config),
+               'Expected teardownFunctions.config to be an array');
+        assert(options.teardownFunctions.config.every(f => (typeof f === 'function')),
+               'Expected teardownFunctions.config to be an array of functions');
     }
 
     var conn;
+    var secondaryConns;
 
     var st;
 
     var initialized = false;
     var clusterStartTime;
 
-    var _conns = {
-        mongos: [],
-        mongod: []
-    };
+    var _conns = {mongos: [], mongod: []};
     var nextConn = 0;
     var replSets = [];
-
-    // TODO: Define size of replica set from options
-    var replSetNodes = 3;
+    var rst;
 
     validateClusterOptions(options);
     Object.freeze(options);
 
     this.setup = function setup() {
         var verbosityLevel = 0;
-        const REPL_SET_INITIATE_TIMEOUT_MS = 5 * 60 * 1000;
 
         if (initialized) {
             throw new Error('cluster has already been initialized');
         }
 
-        if (options.sharded) {
-            // TODO: allow 'options' to specify the number of shards and mongos processes
-            var shardConfig = {
-                shards: 2,
-                mongos: 2,
-                // Legacy config servers are pre-3.2 style, 3-node non-replica-set config servers
-                sync: options.useLegacyConfigServers,
-                verbose: verbosityLevel,
-                other: {enableBalancer: options.enableBalancer}
-            };
+        if (options.sharded.enabled) {
+            st = new FSMShardingTest(`mongodb://${db.getMongo().host}`);
 
-            // TODO: allow 'options' to specify an 'rs' config
-            if (options.replication) {
-                shardConfig.rs = {
-                    nodes: replSetNodes,
-                    // Increase the oplog size (in MB) to prevent rollover
-                    // during write-heavy workloads
-                    oplogSize: 1024,
-                    verbose: verbosityLevel
-                };
-                shardConfig.rsOptions = {
-                    // Specify a longer timeout for replSetInitiate, to ensure that
-                    // slow hardware has sufficient time for file pre-allocation.
-                    initiateTimeout: REPL_SET_INITIATE_TIMEOUT_MS,
-                };
-            }
-
-            st = new ShardingTest(shardConfig);
-
-            conn = st.s;  // mongos
+            conn = st.s(0);  // First mongos
 
             this.teardown = function teardown() {
                 options.teardownFunctions.mongod.forEach(this.executeOnMongodNodes);
                 options.teardownFunctions.mongos.forEach(this.executeOnMongosNodes);
-
-                st.stop();
+                options.teardownFunctions.config.forEach(this.executeOnConfigNodes);
             };
 
-            // Save all mongos and mongod connections
-            var i = 0;
-            var mongos = st.s0;
-            var mongod = st.d0;
-            while (mongos) {
-                _conns.mongos.push(mongos);
-                ++i;
-                mongos = st['s' + i];
-            }
-            if (options.replication) {
-                var rsTest = st.rs0;
-
-                i = 0;
-                while (rsTest) {
-                    this._addReplicaSetConns(rsTest);
-                    replSets.push(rsTest);
-                    ++i;
-                    rsTest = st['rs' + i];
+            this.reestablishConnectionsAfterFailover = function() {
+                // Call getPrimary() to re-establish the connections in FSMShardingTest
+                // as it is not a transparent proxy for ShardingTest.
+                st._configsvr.getPrimary();
+                for (let rst of st._shard_rsts) {
+                    rst.getPrimary();
                 }
-            }
-            i = 0;
-            while (mongod) {
-                _conns.mongod.push(mongod);
-                ++i;
-                mongod = st['d' + i];
-            }
-        } else if (options.replication) {
-            // TODO: allow 'options' to specify the number of nodes
-            var replSetConfig = {
-                nodes: replSetNodes,
-                // Increase the oplog size (in MB) to prevent rollover during write-heavy workloads
-                oplogSize: 1024,
-                nodeOptions: {verbose: verbosityLevel}
             };
 
-            var rst = new ReplSetTest(replSetConfig);
-            rst.startSet();
+            // Save all mongos, mongod, and ReplSet connections (if any).
+            var i;
 
-            // Send the replSetInitiate command and wait for initialization, with an increased
-            // timeout. This should provide sufficient time for slow hardware, where files may need
-            // to be pre-allocated.
-            rst.initiate(null, null, REPL_SET_INITIATE_TIMEOUT_MS);
-            rst.awaitSecondaryNodes();
+            i = 0;
+            while (st.s(i)) {
+                _conns.mongos.push(st.s(i++));
+            }
+
+            i = 0;
+            while (st.d(i)) {
+                _conns.mongod.push(st.d(i++));
+            }
+
+            i = 0;
+            while (st.rs(i)) {
+                var rs = st.rs(i++);
+                this._addReplicaSetConns(rs);
+                replSets.push(rs);
+            }
+
+        } else if (options.replication.enabled) {
+            rst = new ReplSetTest(db.getMongo().host);
 
             conn = rst.getPrimary();
+            secondaryConns = rst.getSecondaries();
             replSets = [rst];
 
             this.teardown = function teardown() {
                 options.teardownFunctions.mongod.forEach(this.executeOnMongodNodes);
-
-                rst.stopSet();
             };
 
             this._addReplicaSetConns(rst);
-
-        } else if (options.masterSlave) {
-            var rt = new ReplTest('replTest');
-
-            var master = rt.start(true);
-            var slave = rt.start(false);
-            conn = master;
-
-            master.adminCommand({setParameter: 1, logLevel: verbosityLevel});
-            slave.adminCommand({setParameter: 1, logLevel: verbosityLevel});
-
-            this.teardown = function teardown() {
-                options.teardownFunctions.mongod.forEach(this.executeOnMongodNodes);
-
-                rt.stop();
-            };
-
-            _conns.mongod = [master, slave];
 
         } else {  // standalone server
             conn = db.getMongo();
@@ -249,6 +255,7 @@ var Cluster = function(options) {
         clusterStartTime = new Date();
 
         options.setupFunctions.mongod.forEach(this.executeOnMongodNodes);
+        options.setupFunctions.config.forEach(this.executeOnConfigNodes);
         if (options.sharded) {
             options.setupFunctions.mongos.forEach(this.executeOnMongosNodes);
         }
@@ -279,7 +286,18 @@ var Cluster = function(options) {
             throw new Error('mongos function must be a function that takes a db as an argument');
         }
         _conns.mongos.forEach(function(mongosConn) {
-            fn(mongosConn.getDB('admin'));
+            fn(mongosConn.getDB('admin'), true /* isMongos */);
+        });
+    };
+
+    this.executeOnConfigNodes = function executeOnConfigNodes(fn) {
+        assert(initialized, 'cluster must be initialized first');
+
+        if (!fn || typeof(fn) !== 'function' || fn.length !== 1) {
+            throw new Error('config function must be a function that takes a db as an argument');
+        }
+        st._configServers.forEach(function(conn) {
+            fn(conn.getDB('admin'));
         });
     };
 
@@ -303,22 +321,70 @@ var Cluster = function(options) {
         return conn.host;
     };
 
+    this.getSecondaryHost = function getSecondaryHost(dbName) {
+        assert(initialized, 'cluster must be initialized first');
+
+        if (this.isReplication() && !this.isSharded()) {
+            return secondaryConns[nextConn++ % secondaryConns.length].host;
+        }
+        return undefined;
+    };
+
+    this.getReplSetName = function getReplSetName() {
+        if (this.isReplication() && !this.isSharded()) {
+            return rst.name;
+        }
+        return undefined;
+    };
+
+    this.getReplSetNumNodes = function getReplSetNumNodes() {
+        assert(this.isReplication() && !this.isSharded(), 'cluster must be a replica set');
+        return options.replication.numNodes;
+    };
+
     this.isSharded = function isSharded() {
-        return options.sharded;
+        return Cluster.isSharded(options);
     };
 
     this.isReplication = function isReplication() {
-        return options.replication;
+        return Cluster.isReplication(options);
     };
 
-    this.isUsingLegacyConfigServers = function isUsingLegacyConfigServers() {
-        assert(this.isSharded(), 'cluster is not sharded');
-        return options.useLegacyConfigServers;
+    this.isStandalone = function isStandalone() {
+        return Cluster.isStandalone(options);
     };
 
     this.shardCollection = function shardCollection() {
         assert(initialized, 'cluster must be initialized first');
         assert(this.isSharded(), 'cluster is not sharded');
+
+        // If we are continuously stepping down shards, the config server may have stale view of the
+        // cluster, so retry on retryable errors, e.g. NotMaster.
+        if (this.shouldPerformContinuousStepdowns()) {
+            assert.soon(() => {
+                try {
+                    st.shardColl.apply(st, arguments);
+                    return true;
+                } catch (e) {
+                    // The shardCollection command requires the config server primary to call
+                    // listCollections and listIndexes on shards before sharding the collection,
+                    // both of which can fail with a retryable error if the config server's view of
+                    // the cluster is stale. This is safe to retry because no actual work has been
+                    // done.
+                    //
+                    // TODO SERVER-30949: Remove this try catch block once listCollections and
+                    // listIndexes automatically retry on NotMaster errors.
+                    if (e.code === 18630 ||  // listCollections failure
+                        e.code === 18631) {  // listIndexes failure
+                        print("Caught retryable error from shardCollection, retrying: " +
+                              tojson(e));
+                        return false;
+                    }
+                    throw e;
+                }
+            });
+        }
+
         st.shardColl.apply(st, arguments);
     };
 
@@ -358,119 +424,84 @@ var Cluster = function(options) {
             return '';
         }
 
-        var cluster = {
-            mongos: [],
-            config: [],
-            shards: {}
-        };
+        var cluster = {mongos: [], config: [], shards: {}};
 
         var i = 0;
-        var mongos = st.s0;
+        var mongos = st.s(0);
         while (mongos) {
             cluster.mongos.push(mongos.name);
             ++i;
-            mongos = st['s' + i];
+            mongos = st.s(i);
         }
 
         i = 0;
-        var config = st.c0;
+        var config = st.c(0);
         while (config) {
             cluster.config.push(config.name);
             ++i;
-            config = st['c' + i];
+            config = st.c(i);
         }
 
         i = 0;
-        var shard = st.shard0;
+        var shard = st.shard(0);
         while (shard) {
             if (shard.name.includes('/')) {
-                // If the shard is a replica set, the format of st.shard0.name in ShardingTest is
+                // If the shard is a replica set, the format of st.shard(0).name in ShardingTest is
                 // "test-rs0/localhost:20006,localhost:20007,localhost:20008".
                 var [setName, shards] = shard.name.split('/');
                 cluster.shards[setName] = shards.split(',');
             } else {
-                // If the shard is a standalone mongod, the format of st.shard0.name in ShardingTest
-                // is "localhost:20006".
-                cluster.shards[i] = [shard.name];
+                // If the shard is a standalone mongod, the format of st.shard(0).name in
+                // ShardingTest is "localhost:20006".
+                cluster.shards[shard.shardName] = [shard.name];
             }
             ++i;
-            shard = st['shard' + i];
+            shard = st.shard(i);
         }
         return cluster;
     };
 
-    this.startBalancer = function startBalancer() {
-        assert(initialized, 'cluster must be initialized first');
-        assert(this.isSharded(), 'cluster is not sharded');
-        st.startBalancer();
-    };
-
-    this.stopBalancer = function stopBalancer() {
-        assert(initialized, 'cluster must be initialized first');
-        assert(this.isSharded(), 'cluster is not sharded');
-        st.stopBalancer();
-    };
-
     this.isBalancerEnabled = function isBalancerEnabled() {
-        return this.isSharded() && options.enableBalancer;
+        return this.isSharded() && options.sharded.enableBalancer;
     };
 
-    this.checkDBHashes = function checkDBHashes(rst, dbBlacklist, phase) {
+    this.isAutoSplitEnabled = function isAutoSplitEnabled() {
+        return this.isSharded() && options.sharded.enableAutoSplit;
+    };
+
+    this.validateAllCollections = function validateAllCollections(phase) {
         assert(initialized, 'cluster must be initialized first');
-        assert(this.isReplication(), 'cluster is not a replica set');
 
-        // Use liveNodes.master instead of getPrimary() to avoid the detection of a new primary.
-        var primary = rst.liveNodes.master;
+        const isSteppingDownConfigServers = this.isSteppingDownConfigServers();
+        var _validateCollections = function _validateCollections(db, isMongos = false) {
+            // Validate all the collections on each node.
+            var res = db.adminCommand({listDatabases: 1});
+            assert.commandWorked(res);
+            res.databases.forEach(dbInfo => {
+                // Don't perform listCollections on the admin or config database through a mongos
+                // connection when stepping down the config server primary, because both are stored
+                // on the config server, and listCollections may return a not master error if the
+                // mongos is stale.
+                //
+                // TODO SERVER-30949: listCollections through mongos should automatically retry on
+                // NotMaster errors. Once that is true, remove this check.
+                if (isSteppingDownConfigServers && isMongos &&
+                    (dbInfo.name === "admin" || dbInfo.name === "config")) {
+                    return;
+                }
 
-        var res = primary.adminCommand({listDatabases: 1});
-        assert.commandWorked(res);
-
-        res.databases.forEach(dbInfo => {
-            var dbName = dbInfo.name;
-            if (Array.contains(dbBlacklist, dbName)) {
-                return;
-            }
-
-            var dbHashes = rst.getHashes(dbName);
-            var primaryDBHash = dbHashes.master;
-            assert.commandWorked(primaryDBHash);
-
-            dbHashes.slaves.forEach(secondaryDBHash => {
-                assert.commandWorked(secondaryDBHash);
-
-                var primaryNumCollections = Object.keys(primaryDBHash.collections).length;
-                var secondaryNumCollections = Object.keys(secondaryDBHash.collections).length;
-
-                assert.eq(primaryNumCollections,
-                          secondaryNumCollections,
-                          phase + ', the primary and secondary have a different number of' +
-                              ' collections: ' + tojson(dbHashes));
-
-                // Only compare the dbhashes of non-capped collections because capped collections
-                // are not necessarily truncated at the same points across replica set members.
-                var collNames =
-                    Object.keys(primaryDBHash.collections)
-                        .filter(collName => !primary.getDB(dbName)[collName].isCapped());
-
-                collNames.forEach(collName => {
-                    assert.eq(primaryDBHash.collections[collName],
-                              secondaryDBHash.collections[collName],
-                              phase + ', the primary and secondary have a different hash for the' +
-                                  ' collection ' + dbName + '.' + collName + ': ' +
-                                  tojson(dbHashes));
-                });
-
-                if (collNames.length === primaryNumCollections) {
-                    // If the primary and secondary have the same hashes for all the collections on
-                    // the database and there aren't any capped collections, then the hashes for the
-                    // whole database should match.
-                    assert.eq(primaryDBHash.md5,
-                              secondaryDBHash.md5,
-                              phase + ', the primary and secondary have a different hash for the ' +
-                                  dbName + ' database: ' + tojson(dbHashes));
+                if (!validateCollections(db.getSiblingDB(dbInfo.name), {full: true})) {
+                    throw new Error(phase + ' collection validation failed');
                 }
             });
-        });
+        };
+
+        var startTime = Date.now();
+        jsTest.log('Starting to validate collections ' + phase);
+        this.executeOnMongodNodes(_validateCollections);
+        this.executeOnMongosNodes(_validateCollections);
+        var totalTime = Date.now() - startTime;
+        jsTest.log('Finished validating collections in ' + totalTime + ' ms, ' + phase);
     };
 
     this.checkReplicationConsistency = function checkReplicationConsistency(dbBlacklist, phase) {
@@ -486,15 +517,15 @@ var Cluster = function(options) {
             var startTime = Date.now();
             var res;
 
-            // Use liveNodes.master instead of getPrimary() to avoid the detection of a new primary.
-            var primary = rst.liveNodes.master;
+            // Use '_master' instead of getPrimary() to avoid the detection of a new primary.
+            var primary = rst._master;
 
             if (shouldCheckDBHashes) {
                 jsTest.log('Starting consistency checks for replica set with ' + primary.host +
                            ' assumed to still be primary, ' + phase);
 
                 // Compare the dbhashes of the primary and secondaries.
-                checkDBHashes(rst, dbBlacklist, phase);
+                rst.checkReplicatedDataHashes(phase, dbBlacklist);
                 var totalTime = Date.now() - startTime;
                 jsTest.log('Finished consistency checks of replica set with ' + primary.host +
                            ' as primary in ' + totalTime + ' ms, ' + phase);
@@ -515,12 +546,13 @@ var Cluster = function(options) {
                 // Wait for all previous workload operations to complete, with "getLastError".
                 res = primary.getDB('test').runCommand({
                     getLastError: 1,
-                    w: replSetNodes,
+                    w: options.replication.numNodes,
                     wtimeout: 5 * 60 * 1000,
                     wOpTime: primaryInfo.optime
                 });
                 assert.commandWorked(res, phase + ', error awaiting replication');
             }
+
         });
     };
 
@@ -552,6 +584,49 @@ var Cluster = function(options) {
 
         return data;
     };
+
+    this.isRunningWiredTigerLSM = function isRunningWiredTigerLSM() {
+        var adminDB = this.getDB('admin');
+
+        if (this.isSharded()) {
+            // Get the storage engine the sharded cluster is configured to use from one of the
+            // shards since mongos won't report it.
+            adminDB = st.shard(0).getDB('admin');
+        }
+
+        var res = adminDB.runCommand({getCmdLineOpts: 1});
+        assert.commandWorked(res, 'failed to get command line options');
+
+        var wiredTigerOptions = {};
+        if (res.parsed && res.parsed.storage) {
+            wiredTigerOptions = res.parsed.storage.wiredTiger || {};
+        }
+        var wiredTigerCollectionConfig = wiredTigerOptions.collectionConfig || {};
+        var wiredTigerConfigString = wiredTigerCollectionConfig.configString || '';
+
+        return wiredTigerConfigString === 'type=lsm';
+    };
+
+    this.shouldPerformContinuousStepdowns = function shouldPerformContinuousStepdowns() {
+        return this.isSharded() && (typeof options.sharded.stepdownOptions !== 'undefined');
+    };
+
+    this.isSteppingDownConfigServers = function isSteppingDownConfigServers() {
+        return this.shouldPerformContinuousStepdowns() &&
+            options.sharded.stepdownOptions.configStepdown;
+    };
+
+    this.isSteppingDownShards = function isSteppingDownShards() {
+        return this.shouldPerformContinuousStepdowns() &&
+            options.sharded.stepdownOptions.shardStepdown;
+    };
+
+    this.awaitReplication = () => {
+        assert(this.isReplication(), 'cluster does not contain replica sets');
+        for (let rst of replSets) {
+            rst.awaitReplication();
+        }
+    };
 };
 
 /**
@@ -559,5 +634,19 @@ var Cluster = function(options) {
  * and false otherwise.
  */
 Cluster.isStandalone = function isStandalone(clusterOptions) {
-    return !clusterOptions.sharded && !clusterOptions.replication && !clusterOptions.masterSlave;
+    return !clusterOptions.sharded.enabled && !clusterOptions.replication.enabled;
+};
+
+/**
+ * Returns true if 'clusterOptions' represents a replica set, and returns false otherwise.
+ */
+Cluster.isReplication = function isReplication(clusterOptions) {
+    return clusterOptions.replication.enabled;
+};
+
+/**
+ * Returns true if 'clusterOptions' represents a sharded configuration, and returns false otherwise.
+ */
+Cluster.isSharded = function isSharded(clusterOptions) {
+    return clusterOptions.sharded.enabled;
 };

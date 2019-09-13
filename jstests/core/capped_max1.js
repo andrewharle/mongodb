@@ -1,4 +1,6 @@
-// test max docs in capped collection
+// Test max docs in capped collection
+//
+// @tags: [requires_fastcount, requires_collstats, requires_capped]
 
 var t = db.capped_max1;
 t.drop();

@@ -1,5 +1,5 @@
 /*-
- * Public Domain 2014-2016 MongoDB, Inc.
+ * Public Domain 2014-2019 MongoDB, Inc.
  * Public Domain 2008-2014 WiredTiger, Inc.
  *
  * This is free and unencumbered software released into the public domain.
@@ -36,20 +36,26 @@ extern char *__wt_optarg;		/* argument associated with option */
 int
 testutil_parse_opts(int argc, char * const *argv, TEST_OPTS *opts)
 {
-	int ch;
 	size_t len;
+	int ch;
 
+	opts->do_data_ops = false;
 	opts->preserve = false;
 	opts->running = true;
 	opts->verbose = false;
 
 	opts->progname = testutil_set_progname(argv);
 
+	testutil_print_command_line(argc, argv);
+
 	while ((ch = __wt_getopt(opts->progname,
-		argc, argv, "A:h:n:o:pR:T:t:vW:")) != EOF)
+		argc, argv, "A:dh:n:o:pR:T:t:vW:")) != EOF)
 		switch (ch) {
 		case 'A': /* Number of append threads */
 			opts->n_append_threads = (uint64_t)atoll(__wt_optarg);
+			break;
+		case 'd': /* Use data in multi-threaded test programs */
+			opts->do_data_ops = true;
 			break;
 		case 'h': /* Home directory */
 			opts->home = dstrdup(__wt_optarg);
@@ -95,6 +101,7 @@ testutil_parse_opts(int argc, char * const *argv, TEST_OPTS *opts)
 		default:
 			(void)fprintf(stderr, "usage: %s "
 			    "[-A append thread count] "
+			    "[-d add data] "
 			    "[-h home] "
 			    "[-n record count] "
 			    "[-o op count] "
@@ -118,6 +125,14 @@ testutil_parse_opts(int argc, char * const *argv, TEST_OPTS *opts)
 		testutil_check(__wt_snprintf(
 		    opts->home, len, "WT_TEST.%s", opts->progname));
 	}
+
+	/*
+	 * Setup the progress file name.
+	 */
+	len = strlen(opts->home) + 20;
+	opts->progress_file_name = dmalloc(len);
+	testutil_check(__wt_snprintf(opts->progress_file_name, len,
+	    "%s/progress.txt", opts->home));
 
 	/* Setup the default URI string */
 	len = strlen("table:") + strlen(opts->progname) + 10;

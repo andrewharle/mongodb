@@ -2,25 +2,24 @@
 // Tests that zero results are correctly returned with returnPartial and shards down
 //
 
-var st = new ShardingTest({shards: 3, mongos: 1, other: {mongosOptions: {verbose: 2}}});
+// Checking UUID consistency involves talking to shards, but this test shuts down shards.
+TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
+
+// TODO: SERVER-33597 remove shardAsReplicaSet: false
+var st = new ShardingTest(
+    {shards: 3, mongos: 1, other: {mongosOptions: {verbose: 2}, shardAsReplicaSet: false}});
 
 // Stop balancer, we're doing our own manual chunk distribution
 st.stopBalancer();
 
 var mongos = st.s;
-var config = mongos.getDB("config");
 var admin = mongos.getDB("admin");
-var shards = config.shards.find().toArray();
-
-for (var i = 0; i < shards.length; i++) {
-    shards[i].conn = new Mongo(shards[i].host);
-}
 
 var collOneShard = mongos.getCollection("foo.collOneShard");
 var collAllShards = mongos.getCollection("foo.collAllShards");
 
 printjson(admin.runCommand({enableSharding: collOneShard.getDB() + ""}));
-printjson(admin.runCommand({movePrimary: collOneShard.getDB() + "", to: shards[0]._id}));
+printjson(admin.runCommand({movePrimary: collOneShard.getDB() + "", to: st.shard0.shardName}));
 
 printjson(admin.runCommand({shardCollection: collOneShard + "", key: {_id: 1}}));
 printjson(admin.runCommand({shardCollection: collAllShards + "", key: {_id: 1}}));
@@ -29,8 +28,10 @@ printjson(admin.runCommand({shardCollection: collAllShards + "", key: {_id: 1}})
 
 printjson(admin.runCommand({split: collAllShards + "", middle: {_id: 0}}));
 printjson(admin.runCommand({split: collAllShards + "", middle: {_id: 1000}}));
-printjson(admin.runCommand({moveChunk: collAllShards + "", find: {_id: 0}, to: shards[1]._id}));
-printjson(admin.runCommand({moveChunk: collAllShards + "", find: {_id: 1000}, to: shards[2]._id}));
+printjson(
+    admin.runCommand({moveChunk: collAllShards + "", find: {_id: 0}, to: st.shard1.shardName}));
+printjson(
+    admin.runCommand({moveChunk: collAllShards + "", find: {_id: 1000}, to: st.shard2.shardName}));
 
 // Collections are now distributed correctly
 jsTest.log("Collections now distributed correctly.");

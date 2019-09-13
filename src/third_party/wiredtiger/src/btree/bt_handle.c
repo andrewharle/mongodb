@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -68,7 +68,7 @@ __wt_btree_open(WT_SESSION_IMPL *session, const char *op_cfg[])
 	size_t root_addr_size;
 	uint8_t root_addr[WT_BTREE_MAX_ADDR_COOKIE];
 	const char *filename;
-	bool creation, forced_salvage, readonly;
+	bool creation, forced_salvage;
 
 	btree = S2BT(session);
 	dhandle = session->dhandle;
@@ -86,9 +86,10 @@ __wt_btree_open(WT_SESSION_IMPL *session, const char *op_cfg[])
 	/* Set the data handle first, our called functions reasonably use it. */
 	btree->dhandle = dhandle;
 
-	/* Checkpoint files are readonly. */
-	readonly = dhandle->checkpoint != NULL ||
-	    F_ISSET(S2C(session), WT_CONN_READONLY);
+	/* Checkpoint and verify files are readonly. */
+	if (dhandle->checkpoint != NULL || F_ISSET(btree, WT_BTREE_VERIFY) ||
+	    F_ISSET(S2C(session), WT_CONN_READONLY))
+		F_SET(btree, WT_BTREE_READONLY);
 
 	/* Get the checkpoint information for this name/checkpoint pair. */
 	WT_CLEAR(ckpt);
@@ -114,13 +115,20 @@ __wt_btree_open(WT_SESSION_IMPL *session, const char *op_cfg[])
 	/* Initialize and configure the WT_BTREE structure. */
 	WT_ERR(__btree_conf(session, &ckpt));
 
+	/*
+	 * We could be a re-open of a table that was put in the lookaside
+	 * dropped list. Remove our id from that list.
+	 */
+	__wt_las_remove_dropped(session);
+
 	/* Connect to the underlying block manager. */
 	filename = dhandle->name;
 	if (!WT_PREFIX_SKIP(filename, "file:"))
 		WT_ERR_MSG(session, EINVAL, "expected a 'file:' URI");
 
 	WT_ERR(__wt_block_manager_open(session, filename, dhandle->cfg,
-	    forced_salvage, readonly, btree->allocsize, &btree->bm));
+	    forced_salvage, F_ISSET(btree, WT_BTREE_READONLY),
+	    btree->allocsize, &btree->bm));
 	bm = btree->bm;
 
 	/*
@@ -150,7 +158,8 @@ __wt_btree_open(WT_SESSION_IMPL *session, const char *op_cfg[])
 		 */
 		WT_ERR(bm->checkpoint_load(bm, session,
 		    ckpt.raw.data, ckpt.raw.size,
-		    root_addr, &root_addr_size, readonly));
+		    root_addr, &root_addr_size,
+		    F_ISSET(btree, WT_BTREE_READONLY)));
 		if (creation || root_addr_size == 0)
 			WT_ERR(__btree_tree_open_empty(session, creation));
 		else {
@@ -233,6 +242,16 @@ __wt_btree_close(WT_SESSION_IMPL *session)
 	F_SET(btree, WT_BTREE_CLOSED);
 
 	/*
+	 * If closing a tree let sweep drop lookaside entries for it.
+	 */
+	if (F_ISSET(S2C(session), WT_CONN_LOOKASIDE_OPEN) &&
+	    btree->lookaside_entries) {
+		WT_ASSERT(session, !WT_IS_METADATA(btree->dhandle) &&
+		    !F_ISSET(btree, WT_BTREE_LOOKASIDE));
+		WT_TRET(__wt_las_save_dropped(session));
+	}
+
+	/*
 	 * If we turned eviction off and never turned it back on, do that now,
 	 * otherwise the counter will be off.
 	 */
@@ -289,8 +308,8 @@ __btree_conf(WT_SESSION_IMPL *session, WT_CKPT *ckpt)
 	WT_DECL_RET;
 	int64_t maj_version, min_version;
 	uint32_t bitcnt;
-	bool fixed;
 	const char **cfg, *enc_cfg[] = { NULL, NULL };
+	bool fixed;
 
 	btree = S2BT(session);
 	cfg = btree->dhandle->cfg;
@@ -303,7 +322,7 @@ __btree_conf(WT_SESSION_IMPL *session, WT_CKPT *ckpt)
 		WT_RET(__wt_config_gets(session, cfg, "version.minor", &cval));
 		min_version = cval.val;
 		__wt_verbose(session, WT_VERB_VERSION,
-		    "%" PRIu64 ".%" PRIu64, maj_version, min_version);
+		    "%" PRId64 ".%" PRId64, maj_version, min_version);
 	}
 
 	/* Get the file ID. */
@@ -395,6 +414,22 @@ __btree_conf(WT_SESSION_IMPL *session, WT_CKPT *ckpt)
 	else
 		btree->checksum = CKSUM_UNCOMPRESSED;
 
+	/* Debugging information */
+	WT_RET(__wt_config_gets(session,
+	    cfg, "assert.commit_timestamp", &cval));
+	btree->assert_flags = 0;
+	if (WT_STRING_MATCH("always", cval.str, cval.len))
+		FLD_SET(btree->assert_flags, WT_ASSERT_COMMIT_TS_ALWAYS);
+	else if (WT_STRING_MATCH("key_consistent", cval.str, cval.len))
+		FLD_SET(btree->assert_flags, WT_ASSERT_COMMIT_TS_KEYS);
+	else if (WT_STRING_MATCH("never", cval.str, cval.len))
+		FLD_SET(btree->assert_flags, WT_ASSERT_COMMIT_TS_NEVER);
+	WT_RET(__wt_config_gets(session, cfg, "assert.read_timestamp", &cval));
+	if (WT_STRING_MATCH("always", cval.str, cval.len))
+		FLD_SET(btree->assert_flags, WT_ASSERT_READ_TS_ALWAYS);
+	else if (WT_STRING_MATCH("never", cval.str, cval.len))
+		FLD_SET(btree->assert_flags, WT_ASSERT_READ_TS_NEVER);
+
 	/* Huffman encoding */
 	WT_RET(__wt_btree_huffman_open(session));
 
@@ -431,15 +466,55 @@ __btree_conf(WT_SESSION_IMPL *session, WT_CKPT *ckpt)
 	WT_RET(__wt_compressor_config(session, &cval, &btree->compressor));
 
 	/*
-	 * We do not use __wt_config_gets_none here because "none"
-	 * and the empty string have different meanings.  The
-	 * empty string means inherit the system encryption setting
-	 * and "none" means this table is in the clear even if the
-	 * database is encrypted.  If this is the metadata handle
-	 * always inherit from the connection.
+	 * Configure compression adjustment.
+	 * When doing compression, assume compression rates that will result in
+	 * pages larger than the maximum in-memory images allowed. If we're
+	 * wrong, we adjust downward (but we're almost certainly correct, the
+	 * maximum in-memory images allowed are only 4x the maximum page size,
+	 * and compression always gives us more than 4x).
+	 *	Don't do compression adjustment for fixed-size column store, the
+	 * leaf page sizes don't change. (We could adjust internal pages but not
+	 * internal pages, but that seems an unlikely use case.)
+	 * 	XXX
+	 * 	Don't do compression adjustment of snappy-compressed blocks.
+	 */
+	btree->intlpage_compadjust = false;
+	btree->maxintlpage_precomp = btree->maxintlpage;
+	btree->leafpage_compadjust = false;
+	btree->maxleafpage_precomp = btree->maxleafpage;
+	if (btree->compressor != NULL && btree->compressor->compress != NULL &&
+	    !WT_STRING_MATCH("snappy", cval.str, cval.len) &&
+	    btree->type != BTREE_COL_FIX) {
+		/*
+		 * Don't do compression adjustment when on-disk page sizes are
+		 * less than 16KB. There's not enough compression going on to
+		 * fine-tune the size, all we end up doing is hammering shared
+		 * memory.
+		 *
+		 * Don't do compression adjustment when on-disk page sizes are
+		 * equal to the maximum in-memory page image, the bytes taken
+		 * for compression can't grow past the base value.
+		 */
+		if (btree->maxintlpage >= 16 * 1024 &&
+		    btree->maxmempage_image > btree->maxintlpage) {
+			btree->intlpage_compadjust = true;
+			btree->maxintlpage_precomp = btree->maxmempage_image;
+		}
+		if (btree->maxleafpage >= 16 * 1024 &&
+		    btree->maxmempage_image > btree->maxleafpage) {
+			btree->leafpage_compadjust = true;
+			btree->maxleafpage_precomp = btree->maxmempage_image;
+		}
+	}
+
+	/*
+	 * We do not use __wt_config_gets_none here because "none" and the empty
+	 * string have different meanings. The empty string means inherit the
+	 * system encryption setting and "none" means this table is in the clear
+	 * even if the database is encrypted.
 	 */
 	WT_RET(__wt_config_gets(session, cfg, "encryption.name", &cval));
-	if (WT_IS_METADATA(btree->dhandle) || cval.len == 0)
+	if (cval.len == 0)
 		btree->kencryptor = conn->kencryptor;
 	else if (WT_STRING_MATCH("none", cval.str, cval.len))
 		btree->kencryptor = NULL;
@@ -460,9 +535,11 @@ __btree_conf(WT_SESSION_IMPL *session, WT_CKPT *ckpt)
 	WT_RET(__wt_rwlock_init(session, &btree->ovfl_lock));
 	WT_RET(__wt_spin_init(session, &btree->flush_lock, "btree flush"));
 
-	btree->checkpointing = WT_CKPT_OFF;		/* Not checkpointing */
 	btree->modified = false;			/* Clean */
-	btree->write_gen = ckpt->write_gen;		/* Write generation */
+
+	btree->syncing = WT_BTREE_SYNC_OFF;	/* Not syncing */
+	btree->write_gen = ckpt->write_gen;	/* Write generation */
+	btree->checkpoint_gen = __wt_gen(session, WT_GEN_CHECKPOINT);
 
 	return (0);
 }
@@ -472,12 +549,14 @@ __btree_conf(WT_SESSION_IMPL *session, WT_CKPT *ckpt)
  *	Initialize a tree root reference, and link in the root page.
  */
 void
-__wt_root_ref_init(WT_REF *root_ref, WT_PAGE *root, bool is_recno)
+__wt_root_ref_init(WT_SESSION_IMPL *session,
+    WT_REF *root_ref, WT_PAGE *root, bool is_recno)
 {
+	WT_UNUSED(session);	/* Used in a macro for diagnostic builds */
 	memset(root_ref, 0, sizeof(*root_ref));
 
 	root_ref->page = root;
-	root_ref->state = WT_REF_MEM;
+	WT_REF_SET_STATE(root_ref, WT_REF_MEM);
 
 	root_ref->ref_recno = is_recno ? 1 : WT_RECNO_OOB;
 
@@ -546,13 +625,14 @@ __wt_btree_tree_open(
 	 * the allocated copy of the disk image on return, the in-memory object
 	 * steals it.
 	 */
-	WT_ERR(__wt_page_inmem(session, NULL, dsk.data, dsk.memsize,
+	WT_ERR(__wt_page_inmem(session, NULL, dsk.data,
 	    WT_DATA_IN_ITEM(&dsk) ?
 	    WT_PAGE_DISK_ALLOC : WT_PAGE_DISK_MAPPED, &page));
 	dsk.mem = NULL;
 
 	/* Finish initializing the root, root reference links. */
-	__wt_root_ref_init(&btree->root, page, btree->type != BTREE_ROW);
+	__wt_root_ref_init(session,
+	    &btree->root, page, btree->type != BTREE_ROW);
 
 err:	__wt_buf_free(session, &dsk);
 	__wt_scr_free(session, &tmp);
@@ -608,7 +688,7 @@ __btree_tree_open_empty(WT_SESSION_IMPL *session, bool creation)
 		ref->home = root;
 		ref->page = NULL;
 		ref->addr = NULL;
-		ref->state = WT_REF_DELETED;
+		WT_REF_SET_STATE(ref, WT_REF_DELETED);
 		ref->ref_recno = 1;
 		break;
 	case BTREE_ROW:
@@ -621,7 +701,7 @@ __btree_tree_open_empty(WT_SESSION_IMPL *session, bool creation)
 		ref->home = root;
 		ref->page = NULL;
 		ref->addr = NULL;
-		ref->state = WT_REF_DELETED;
+		WT_REF_SET_STATE(ref, WT_REF_DELETED);
 		WT_ERR(__wt_row_ikey_incr(session, root, 0, "", 1, ref));
 		break;
 	}
@@ -630,13 +710,14 @@ __btree_tree_open_empty(WT_SESSION_IMPL *session, bool creation)
 	if (F_ISSET(btree, WT_BTREE_BULK)) {
 		WT_ERR(__wt_btree_new_leaf_page(session, &leaf));
 		ref->page = leaf;
-		ref->state = WT_REF_MEM;
+		WT_REF_SET_STATE(ref, WT_REF_MEM);
 		WT_ERR(__wt_page_modify_init(session, leaf));
 		__wt_page_only_modify_set(session, leaf);
 	}
 
 	/* Finish initializing the root, root reference links. */
-	__wt_root_ref_init(&btree->root, root, btree->type != BTREE_ROW);
+	__wt_root_ref_init(session,
+	    &btree->root, root, btree->type != BTREE_ROW);
 
 	return (0);
 
@@ -737,7 +818,7 @@ __btree_page_sizes(WT_SESSION_IMPL *session)
 	WT_CONFIG_ITEM cval;
 	WT_CONNECTION_IMPL *conn;
 	uint64_t cache_size;
-	uint32_t intl_split_size, leaf_split_size;
+	uint32_t intl_split_size, leaf_split_size, max;
 	const char **cfg;
 
 	btree = S2BT(session);
@@ -771,6 +852,22 @@ __btree_page_sizes(WT_SESSION_IMPL *session)
 		    "size (%" PRIu32 "B)", btree->allocsize);
 
 	/*
+	 * Default in-memory page image size for compression is 4x the maximum
+	 * internal or leaf page size, and enforce the on-disk page sizes as a
+	 * lower-limit for the in-memory image size.
+	 */
+	WT_RET(__wt_config_gets(session, cfg, "memory_page_image_max", &cval));
+	btree->maxmempage_image = (uint32_t)cval.val;
+	max = WT_MAX(btree->maxintlpage, btree->maxleafpage);
+	if (btree->maxmempage_image == 0)
+		btree->maxmempage_image = 4 * max;
+	else if (btree->maxmempage_image < max)
+		WT_RET_MSG(session, EINVAL,
+		    "in-memory page image size must be larger than the maximum "
+		    "page size (%" PRIu32 "B < %" PRIu32 "B)",
+		    btree->maxmempage_image, max);
+
+	/*
 	 * Don't let pages grow large compared to the cache size or we can end
 	 * up in a situation where nothing can be evicted.  Make sure at least
 	 * 10 pages fit in cache when it is at the dirty trigger where threads
@@ -784,7 +881,7 @@ __btree_page_sizes(WT_SESSION_IMPL *session)
 	btree->maxmempage = (uint64_t)cval.val;
 	if (!F_ISSET(conn, WT_CONN_CACHE_POOL) &&
 	    (cache_size = conn->cache_size) > 0)
-		btree->maxmempage = WT_MIN(btree->maxmempage,
+		btree->maxmempage = (uint64_t)WT_MIN(btree->maxmempage,
 		    (conn->cache->eviction_dirty_trigger * cache_size) / 1000);
 
 	/* Enforce a lower bound of a single disk leaf page */
@@ -795,7 +892,7 @@ __btree_page_sizes(WT_SESSION_IMPL *session)
 	 * size.  This gives multi-threaded append workloads a better chance of
 	 * not stalling.
 	 */
-	btree->splitmempage = 8 * btree->maxmempage / 10;
+	btree->splitmempage = (8 * btree->maxmempage) / 10;
 
 	/*
 	 * Get the split percentage (reconciliation splits pages into smaller
@@ -811,8 +908,10 @@ __btree_page_sizes(WT_SESSION_IMPL *session)
 		    "%d%%.", session->dhandle->name, WT_BTREE_MIN_SPLIT_PCT));
 	} else
 		btree->split_pct = (int)cval.val;
-	intl_split_size = __wt_split_page_size(btree, btree->maxintlpage);
-	leaf_split_size = __wt_split_page_size(btree, btree->maxleafpage);
+	intl_split_size = __wt_split_page_size(
+	    btree->split_pct, btree->maxintlpage, btree->allocsize);
+	leaf_split_size = __wt_split_page_size(
+	    btree->split_pct, btree->maxleafpage, btree->allocsize);
 
 	/*
 	 * In-memory split configuration.
@@ -877,11 +976,33 @@ __btree_page_sizes(WT_SESSION_IMPL *session)
 	 * reset it to the default.
 	 */
 	if (btree->maxintlkey == 0 || btree->maxintlkey > intl_split_size / 10)
-		    btree->maxintlkey = intl_split_size / 10;
+		btree->maxintlkey = intl_split_size / 10;
 	if (btree->maxleafkey == 0)
-		    btree->maxleafkey = leaf_split_size / 10;
+		btree->maxleafkey = leaf_split_size / 10;
 	if (btree->maxleafvalue == 0)
-		    btree->maxleafvalue = leaf_split_size / 2;
+		btree->maxleafvalue = leaf_split_size / 2;
 
 	return (0);
+}
+
+/*
+ * __wt_btree_immediately_durable --
+ *	Check whether this btree is configured for immediate durability.
+ */
+bool
+__wt_btree_immediately_durable(WT_SESSION_IMPL *session)
+{
+	WT_BTREE *btree;
+
+	btree = S2BT(session);
+
+	/*
+	 * This is used to determine whether timestamp updates should
+	 * be rolled back for this btree. With in-memory, the logging
+	 * setting on tables is still important and when enabled they
+	 * should be considered "durable".
+	 */
+	return ((FLD_ISSET(S2C(session)->log_flags, WT_CONN_LOG_ENABLED) ||
+	    (F_ISSET(S2C(session), WT_CONN_IN_MEMORY))) &&
+	    !F_ISSET(btree, WT_BTREE_NO_LOGGING));
 }

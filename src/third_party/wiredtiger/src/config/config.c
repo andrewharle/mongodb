@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -340,15 +340,18 @@ static const int8_t goesc[256] = {
 static int
 __config_next(WT_CONFIG *conf, WT_CONFIG_ITEM *key, WT_CONFIG_ITEM *value)
 {
-	WT_CONFIG_ITEM *out = key;
-	int utf8_remain = 0;
+	WT_CONFIG_ITEM *out;
+	int utf8_remain;
 	static const WT_CONFIG_ITEM true_value = {
 		"", 0, 1, WT_CONFIG_ITEM_BOOL
 	};
 
-	key->len = 0;
 	/* Keys with no value default to true. */
 	*value = true_value;
+
+	out = key;
+	utf8_remain = 0;
+	key->len = 0;
 
 	if (conf->go == NULL)
 		conf->go = gostruct;
@@ -482,22 +485,24 @@ __config_next(WT_CONFIG *conf, WT_CONFIG_ITEM *key, WT_CONFIG_ITEM *value)
  */
 #define	WT_SHIFT_INT64(v, s) do {					\
 	if ((v) < 0)							\
-		goto range;						\
+		goto nonum;						\
 	(v) = (int64_t)(((uint64_t)(v)) << (s));			\
+	if ((v) < 0)							\
+		goto nonum;						\
 } while (0)
 
 /*
  * __config_process_value --
  *	Deal with special config values like true / false.
  */
-static int
-__config_process_value(WT_CONFIG *conf, WT_CONFIG_ITEM *value)
+static void
+__config_process_value(WT_CONFIG_ITEM *value)
 {
 	char *endptr;
 
 	/* Empty values are okay: we can't do anything interesting with them. */
 	if (value->len == 0)
-		return (0);
+		return;
 
 	if (value->type == WT_CONFIG_ITEM_ID) {
 		if (WT_STRING_MATCH("false", value->str, value->len)) {
@@ -510,6 +515,14 @@ __config_process_value(WT_CONFIG *conf, WT_CONFIG_ITEM *value)
 	} else if (value->type == WT_CONFIG_ITEM_NUM) {
 		errno = 0;
 		value->val = strtoll(value->str, &endptr, 10);
+
+		/*
+		 * If we parsed the string but the number is out of range,
+		 * treat the value as an identifier.  If an integer is
+		 * expected, that will be caught by __wt_config_check.
+		 */
+		if (value->type == WT_CONFIG_ITEM_NUM && errno == ERANGE)
+			goto nonum;
 
 		/* Check any leftover characters. */
 		while (endptr < value->str + value->len)
@@ -539,28 +552,17 @@ __config_process_value(WT_CONFIG *conf, WT_CONFIG_ITEM *value)
 				WT_SHIFT_INT64(value->val, 50);
 				break;
 			default:
-				/*
-				 * We didn't get a well-formed number.  That
-				 * might be okay, the required type will be
-				 * checked by __wt_config_check.
-				 */
-				value->type = WT_CONFIG_ITEM_ID;
-				break;
+				goto nonum;
 			}
-
-		/*
-		 * If we parsed the whole string but the number is out of range,
-		 * report an error.  Don't report an error for strings that
-		 * aren't well-formed integers: if an integer is expected, that
-		 * will be caught by __wt_config_check.
-		 */
-		if (value->type == WT_CONFIG_ITEM_NUM && errno == ERANGE)
-			goto range;
 	}
 
-	return (0);
-
-range:	return (__config_err(conf, "Number out of range", ERANGE));
+	if (0) {
+nonum:		/*
+		 * We didn't get a well-formed number.  That might be okay, the
+		 * required type will be checked by __wt_config_check.
+		 */
+		value->type = WT_CONFIG_ITEM_ID;
+	}
 }
 
 /*
@@ -571,7 +573,8 @@ int
 __wt_config_next(WT_CONFIG *conf, WT_CONFIG_ITEM *key, WT_CONFIG_ITEM *value)
 {
 	WT_RET(__config_next(conf, key, value));
-	return (__config_process_value(conf, value));
+	__config_process_value(value);
+	return (0);
 }
 
 /*
@@ -611,7 +614,9 @@ __config_getraw(
 
 	if (!found)
 		return (WT_NOTFOUND);
-	return (top ? __config_process_value(cparser, value) : 0);
+	if (top)
+		__config_process_value(value);
+	return (0);
 }
 
 /*
@@ -739,23 +744,37 @@ int
 __wt_config_gets_def(WT_SESSION_IMPL *session,
     const char **cfg, const char *key, int def, WT_CONFIG_ITEM *value)
 {
-	static const WT_CONFIG_ITEM false_value = {
-		"", 0, 0, WT_CONFIG_ITEM_NUM
-	};
+	WT_CONFIG_ITEM_STATIC_INIT(false_value);
+	const char **end;
 
 	*value = false_value;
 	value->val = def;
 
-	if (cfg == NULL || cfg[0] == NULL || cfg[1] == NULL)
+	if (cfg == NULL)
 		return (0);
 
-	if (cfg[2] == NULL) {
+	/*
+	 * Checking the "length" of the pointer array is a little odd, but it's
+	 * deliberate. The reason is because we pass variable length arrays of
+	 * pointers as the configuration argument, some of which have only one
+	 * element and the NULL termination. Static analyzers (like Coverity)
+	 * complain if we read from an offset past the end of the array, even
+	 * if we check there's no NULL slots before the offset.
+	 */
+	for (end = cfg; *end != NULL; ++end)
+		;
+	switch ((int)(end - cfg)) {
+	case 0:				/* cfg[0] == NULL */
+	case 1:				/* cfg[1] == NULL */
+		return (0);
+	case 2:				/* cfg[2] == NULL */
 		WT_RET_NOTFOUND_OK(
 		    __wt_config_getones(session, cfg[1], key, value));
 		return (0);
+	default:
+		return (__wt_config_gets(session, cfg, key, value));
 	}
-
-	return (__wt_config_gets(session, cfg, key, value));
+	/* NOTREACHED */
 }
 
 /*

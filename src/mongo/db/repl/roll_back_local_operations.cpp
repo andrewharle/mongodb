@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -26,7 +28,7 @@
  *    it in the license file.
  */
 
-#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kReplication
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kReplicationRollback
 
 #include "mongo/platform/basic.h"
 
@@ -39,10 +41,23 @@
 namespace mongo {
 namespace repl {
 
+// After the release of MongoDB 3.8, these fail point declarations can
+// be moved into the rs_rollback.cpp file, as we no longer need to maintain
+// functionality for rs_rollback_no_uuid.cpp. See SERVER-29766.
+
+// Failpoint which causes rollback to hang before finishing.
+MONGO_FAIL_POINT_DEFINE(rollbackHangBeforeFinish);
+
+// Failpoint which causes rollback to hang and then fail after minValid is written.
+MONGO_FAIL_POINT_DEFINE(rollbackHangThenFailAfterWritingMinValid);
+
+
 namespace {
 
+constexpr int kMaxConnectionAttempts = 3;
+
 OpTime getOpTime(const OplogInterface::Iterator::Value& oplogValue) {
-    return fassertStatusOK(40298, OpTime::parseFromOplogEntry(oplogValue.first));
+    return fassert(40298, OpTime::parseFromOplogEntry(oplogValue.first));
 }
 
 Timestamp getTimestamp(const BSONObj& operation) {
@@ -73,32 +88,27 @@ RollBackLocalOperations::RollBackLocalOperations(const OplogInterface& localOplo
     uassert(ErrorCodes::BadValue, "null roll back operation function", rollbackOperation);
 }
 
+RollBackLocalOperations::RollbackCommonPoint::RollbackCommonPoint(BSONObj oplogBSON,
+                                                                  RecordId recordId)
+    : _recordId(std::move(recordId)) {
+    auto oplogEntry = uassertStatusOK(repl::OplogEntry::parse(oplogBSON));
+    _opTime = oplogEntry.getOpTime();
+    _wallClockTime = oplogEntry.getWallClockTime();
+}
+
 StatusWith<RollBackLocalOperations::RollbackCommonPoint> RollBackLocalOperations::onRemoteOperation(
     const BSONObj& operation) {
     if (_scanned == 0) {
         auto result = _localOplogIterator->next();
         if (!result.isOK()) {
-            return StatusWith<RollbackCommonPoint>(ErrorCodes::OplogStartMissing,
-                                                   "no oplog during initsync");
+            return Status(ErrorCodes::OplogStartMissing, "no oplog during rollback");
         }
         _localOplogValue = result.getValue();
-
-        long long diff = static_cast<long long>(getTimestamp(_localOplogValue).getSecs()) -
-            getTimestamp(operation).getSecs();
-        // diff could be positive, negative, or zero
-        log() << "rollback our last optime:   " << getTimestamp(_localOplogValue).toStringPretty();
-        log() << "rollback their last optime: " << getTimestamp(operation).toStringPretty();
-        log() << "rollback diff in end of log times: " << diff << " seconds";
-        if (diff > 1800) {
-            severe() << "rollback too long a time period for a rollback.";
-            return StatusWith<RollbackCommonPoint>(
-                ErrorCodes::ExceededTimeLimit,
-                "rollback error: not willing to roll back more than 30 minutes of data");
-        }
     }
 
     while (getTimestamp(_localOplogValue) > getTimestamp(operation)) {
         _scanned++;
+        LOG(2) << "Local oplog entry to roll back: " << redact(_localOplogValue.first);
         auto status = _rollbackOperation(_localOplogValue.first);
         if (!status.isOK()) {
             invariant(ErrorCodes::NoSuchKey != status.code());
@@ -106,12 +116,15 @@ StatusWith<RollBackLocalOperations::RollbackCommonPoint> RollBackLocalOperations
         }
         auto result = _localOplogIterator->next();
         if (!result.isOK()) {
-            severe() << "rollback error RS101 reached beginning of local oplog";
-            log() << "    scanned: " << _scanned;
-            log() << "  theirTime: " << getTimestamp(operation).toStringLong();
-            log() << "  ourTime:   " << getTimestamp(_localOplogValue).toStringLong();
-            return StatusWith<RollbackCommonPoint>(ErrorCodes::NoMatchingDocument,
-                                                   "RS101 reached beginning of local oplog [2]");
+            return Status(ErrorCodes::NoMatchingDocument,
+                          str::stream() << "reached beginning of local oplog: {"
+                                        << "scanned: "
+                                        << _scanned
+                                        << ", theirTime: "
+                                        << getTimestamp(operation).toString()
+                                        << ", ourTime: "
+                                        << getTimestamp(_localOplogValue).toString()
+                                        << "}");
         }
         _localOplogValue = result.getValue();
     }
@@ -119,9 +132,10 @@ StatusWith<RollBackLocalOperations::RollbackCommonPoint> RollBackLocalOperations
     if (getTimestamp(_localOplogValue) == getTimestamp(operation)) {
         _scanned++;
         if (getHash(_localOplogValue) == getHash(operation)) {
-            return StatusWith<RollbackCommonPoint>(
-                std::make_pair(getOpTime(_localOplogValue), _localOplogValue.second));
+            return RollbackCommonPoint(_localOplogValue.first, _localOplogValue.second);
         }
+
+        LOG(2) << "Local oplog entry to roll back: " << redact(_localOplogValue.first);
         auto status = _rollbackOperation(_localOplogValue.first);
         if (!status.isOK()) {
             invariant(ErrorCodes::NoSuchKey != status.code());
@@ -129,36 +143,52 @@ StatusWith<RollBackLocalOperations::RollbackCommonPoint> RollBackLocalOperations
         }
         auto result = _localOplogIterator->next();
         if (!result.isOK()) {
-            severe() << "rollback error RS101 reached beginning of local oplog";
-            log() << "    scanned: " << _scanned;
-            log() << "  theirTime: " << getTimestamp(operation).toStringLong();
-            log() << "  ourTime:   " << getTimestamp(_localOplogValue).toStringLong();
-            return StatusWith<RollbackCommonPoint>(ErrorCodes::NoMatchingDocument,
-                                                   "RS101 reached beginning of local oplog [1]");
+            return Status(ErrorCodes::NoMatchingDocument,
+                          str::stream() << "reached beginning of local oplog: {"
+                                        << "scanned: "
+                                        << _scanned
+                                        << ", theirTime: "
+                                        << getTimestamp(operation).toString()
+                                        << ", ourTime: "
+                                        << getTimestamp(_localOplogValue).toString()
+                                        << "}");
         }
         _localOplogValue = result.getValue();
-        return StatusWith<RollbackCommonPoint>(
-            ErrorCodes::NoSuchKey,
-            "Unable to determine common point - same timestamp but different hash. "
-            "Need to process additional remote operations.");
+        return Status(ErrorCodes::NoSuchKey,
+                      "Unable to determine common point - same timestamp but different hash. "
+                      "Need to process additional remote operations.");
     }
 
     invariant(getTimestamp(_localOplogValue) < getTimestamp(operation));
     _scanned++;
-    return StatusWith<RollbackCommonPoint>(ErrorCodes::NoSuchKey,
-                                           "Unable to determine common point. "
-                                           "Need to process additional remote operations.");
+    return Status(ErrorCodes::NoSuchKey,
+                  "Unable to determine common point. "
+                  "Need to process additional remote operations.");
 }
 
 StatusWith<RollBackLocalOperations::RollbackCommonPoint> syncRollBackLocalOperations(
     const OplogInterface& localOplog,
     const OplogInterface& remoteOplog,
     const RollBackLocalOperations::RollbackOperationFn& rollbackOperation) {
-    auto remoteIterator = remoteOplog.makeIterator();
+
+    std::unique_ptr<OplogInterface::Iterator> remoteIterator;
+
+    // Retry in case of network errors.
+    for (int attemptsLeft = kMaxConnectionAttempts - 1; attemptsLeft >= 0; attemptsLeft--) {
+        try {
+            remoteIterator = remoteOplog.makeIterator();
+        } catch (DBException&) {
+            if (attemptsLeft == 0) {
+                throw;
+            }
+        }
+    }
+
+    invariant(remoteIterator);
     auto remoteResult = remoteIterator->next();
     if (!remoteResult.isOK()) {
-        return StatusWith<RollBackLocalOperations::RollbackCommonPoint>(
-            ErrorCodes::InvalidSyncSource, "remote oplog empty or unreadable");
+        return Status(ErrorCodes::InvalidSyncSource, remoteResult.getStatus().reason())
+            .withContext("remote oplog empty or unreadable");
     }
 
     RollBackLocalOperations finder(localOplog, rollbackOperation);
@@ -174,12 +204,13 @@ StatusWith<RollBackLocalOperations::RollbackCommonPoint> syncRollBackLocalOperat
         }
         remoteResult = remoteIterator->next();
     }
-
-    severe() << "rollback error RS100 reached beginning of remote oplog";
-    log() << "  them:      " << remoteOplog.toString();
-    log() << "  theirTime: " << theirTime.toStringLong();
-    return StatusWith<RollBackLocalOperations::RollbackCommonPoint>(
-        ErrorCodes::NoMatchingDocument, "RS100 reached beginning of remote oplog [1]");
+    return Status(ErrorCodes::NoMatchingDocument,
+                  str::stream() << "reached beginning of remote oplog: {"
+                                << "them: "
+                                << remoteOplog.toString()
+                                << ", theirTime: "
+                                << theirTime.toString()
+                                << "}");
 }
 
 }  // namespace repl

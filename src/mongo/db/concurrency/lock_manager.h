@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -30,15 +32,18 @@
 
 #include <cstdint>
 #include <deque>
+#include <map>
+#include <vector>
 
+#include "mongo/bson/bsonobj.h"
 #include "mongo/config.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/concurrency/lock_request_list.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/compiler.h"
-#include "mongo/platform/unordered_map.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
+#include "mongo/stdx/unordered_map.h"
 #include "mongo/util/concurrency/mutex.h"
 
 namespace mongo {
@@ -74,7 +79,7 @@ public:
       *                 lock becomes granted, the notification will not be invoked.
       *
       *                 If the return value is LOCK_WAITING, the notification object *must*
-      *                 live at least until the notfy method has been invoked or unlock has
+      *                 live at least until the notify method has been invoked or unlock has
       *                 been called for the resource it was assigned to. Failure to do so will
       *                 cause the lock manager to call into an invalid memory location.
       * @param mode Mode in which the resource should be locked. Lock upgrades are allowed.
@@ -121,6 +126,13 @@ public:
      */
     void dump() const;
 
+    /**
+     * Dumps the contents of all locks into a BSON object
+     * to be used in lockInfo command in the shell.
+     */
+    void getLockInfoBSON(const std::map<LockerId, BSONObj>& lockToClientMap,
+                         BSONObjBuilder* result);
+
 private:
     // The deadlock detector needs to access the buckets and locks directly
     friend class DeadlockDetector;
@@ -132,7 +144,7 @@ private:
 
     struct LockBucket {
         SimpleMutex mutex;
-        typedef unordered_map<ResourceId, LockHead*> Map;
+        typedef stdx::unordered_map<ResourceId, LockHead*> Map;
         Map data;
         LockHead* findOrInsert(ResourceId resId);
     };
@@ -143,7 +155,7 @@ private:
     struct Partition {
         PartitionedLockHead* find(ResourceId resId);
         PartitionedLockHead* findOrInsert(ResourceId resId);
-        typedef unordered_map<ResourceId, PartitionedLockHead*> Map;
+        typedef stdx::unordered_map<ResourceId, PartitionedLockHead*> Map;
         SimpleMutex mutex;
         Map data;
     };
@@ -166,6 +178,23 @@ private:
     void _dumpBucket(const LockBucket* bucket) const;
 
     /**
+     * Dump the contents of a bucket to the BSON.
+     */
+    void _dumpBucketToBSON(const std::map<LockerId, BSONObj>& lockToClientMap,
+                           const LockBucket* bucket,
+                           BSONObjBuilder* result);
+
+    /**
+     * Build the BSON object containing the lock info for a particular
+     * bucket. The lockToClientMap is used to map the lockerId to
+     * more useful client information.
+     */
+    void _buildBucketBSON(const LockRequest* iter,
+                          const std::map<LockerId, BSONObj>& lockToClientMap,
+                          const LockBucket* bucket,
+                          BSONArrayBuilder* locks);
+
+    /**
      * Should be invoked when the state of a lock changes in a way, which could potentially
      * allow other blocked requests to proceed.
      *
@@ -177,6 +206,12 @@ private:
      *          granted modes, which was conflicting before became zero.
      */
     void _onLockModeChanged(LockHead* lock, bool checkConflictQueue);
+
+    /**
+     * Helper function to delete all locks that have no request on them on a single bucket.
+     * Called by cleanupUnusedLocks()
+     */
+    void _cleanupUnusedLocksInBucket(LockBucket* bucket);
 
     static const unsigned _numLockBuckets;
     LockBucket* _lockBuckets;

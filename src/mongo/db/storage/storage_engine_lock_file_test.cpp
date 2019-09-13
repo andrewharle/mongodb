@@ -1,23 +1,25 @@
+
 /**
- *    Copyright 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -36,6 +38,12 @@
 #include "mongo/platform/process_id.h"
 #include "mongo/unittest/temp_dir.h"
 #include "mongo/unittest/unittest.h"
+
+#ifndef _WIN32
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
+#endif
 
 namespace {
 
@@ -167,6 +175,99 @@ TEST(StorageEngineLockFileTest, ClearPidAndUnlock) {
     lockFile.clearPidAndUnlock();
     ASSERT_TRUE(boost::filesystem::exists(lockFile.getFilespec()));
     ASSERT_EQUALS(0U, boost::filesystem::file_size(lockFile.getFilespec()));
+}
+
+class ScopedReadOnlyDirectory {
+public:
+    ScopedReadOnlyDirectory(const std::string& path) : _path(std::move(path)) {
+        _applyToPathRecursive(_path, makePathReadOnly);
+    }
+
+    ~ScopedReadOnlyDirectory() {
+        _applyToPathRecursive(_path, makePathWritable);
+    }
+
+private:
+    const std::string& _path;
+
+    static void makePathReadOnly(const boost::filesystem::path& path) {
+#ifdef _WIN32
+        ::SetFileAttributes(path.c_str(), FILE_ATTRIBUTE_READONLY);
+#else
+        ::chmod(path.c_str(), 0544);
+#endif
+    }
+
+    static void makePathWritable(const boost::filesystem::path& path) {
+#ifdef _WIN32
+        ::SetFileAttributes(path.c_str(), FILE_ATTRIBUTE_NORMAL);
+#else
+        ::chmod(path.c_str(), 0777);
+#endif
+    }
+
+    template <typename Func>
+    static void _applyToPathRecursive(const boost::filesystem::path& path, Func func) {
+        func(path);
+
+        using rdi = boost::filesystem::recursive_directory_iterator;
+        for (auto iter = rdi{path}; iter != rdi(); ++iter) {
+            func(*iter);
+        }
+    }
+};
+
+#ifndef _WIN32
+
+// Windows has no concept of read only directories - only read only files.
+TEST(StorageEngineLockFileTest, ReadOnlyDirectory) {
+    // If we are running as root, do not run this test as read only permissions will not be
+    // respected.
+    if (::getuid() == 0) {
+        return;
+    }
+
+    TempDir tempDir("StorageEngineLockFileTest_ReadOnlyDirectory");
+
+    // Make tempDir read-only.
+    ScopedReadOnlyDirectory srod(tempDir.path());
+
+    StorageEngineLockFile lockFile(tempDir.path());
+
+    auto openStatus = lockFile.open();
+
+    ASSERT_NOT_OK(openStatus);
+    ASSERT_EQ(openStatus, ErrorCodes::IllegalOperation);
+}
+
+#endif
+
+TEST(StorageEngineLockFileTest, ReadOnlyDirectoryWithLockFile) {
+#ifndef _WIN32
+    // If we are running as root, do not run this test as read only permissions will not be
+    // respected.
+    if (::getuid() == 0) {
+        return;
+    }
+#endif
+
+    TempDir tempDir("StorageEngineLockFileTest_ReadOnlyDirectoryWithLockFile");
+
+
+    StorageEngineLockFile lockFile(tempDir.path());
+    ASSERT_OK(lockFile.open());
+    ASSERT_OK(lockFile.writePid());
+
+    // Make tempDir read-only.
+    ScopedReadOnlyDirectory srod(tempDir.path());
+
+    // Try to create a new lock file.
+    StorageEngineLockFile lockFile2(tempDir.path());
+
+    auto openStatus = lockFile2.open();
+
+    ASSERT_NOT_OK(openStatus);
+    ASSERT_EQ(openStatus, ErrorCodes::IllegalOperation);
 }
 
 }  // namespace

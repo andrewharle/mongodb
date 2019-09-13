@@ -1,17 +1,13 @@
 var st = new ShardingTest({shards: 2});
 
 st.adminCommand({enablesharding: "test"});
-st.ensurePrimaryShard('test', 'shard0001');
+st.ensurePrimaryShard('test', st.shard1.shardName);
 st.adminCommand(
     {shardcollection: "test.offerChange", key: {"categoryId": 1, "store": 1, "_id": 1}});
 
 var db = st.s.getDB('test');
 var offerChange = db.getCollection('offerChange');
-var testDoc = {
-    "_id": 123,
-    "categoryId": 9881,
-    "store": "NEW"
-};
+var testDoc = {"_id": 123, "categoryId": 9881, "store": "NEW"};
 
 offerChange.remove({}, false);
 offerChange.insert(testDoc);

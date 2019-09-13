@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2013-2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -34,6 +36,9 @@
 
 
 #include "mongo/base/status.h"
+#include "mongo/db/bson/dotted_path_support.h"
+#include "mongo/db/catalog/index_catalog.h"
+#include "mongo/db/exec/working_set_common.h"
 #include "mongo/db/geo/hash.h"
 #include "mongo/db/index/expression_keys_private.h"
 #include "mongo/db/index/expression_params.h"
@@ -45,6 +50,8 @@
 namespace mongo {
 
 using std::unique_ptr;
+
+namespace dps = ::mongo::dotted_path_support;
 
 HaystackAccessMethod::HaystackAccessMethod(IndexCatalogEntry* btreeState,
                                            SortedDataInterface* btree)
@@ -58,11 +65,13 @@ HaystackAccessMethod::HaystackAccessMethod(IndexCatalogEntry* btreeState,
     uassert(16774, "no non-geo fields specified", _otherFields.size());
 }
 
-void HaystackAccessMethod::getKeys(const BSONObj& obj, BSONObjSet* keys) const {
+void HaystackAccessMethod::doGetKeys(const BSONObj& obj,
+                                     BSONObjSet* keys,
+                                     MultikeyPaths* multikeyPaths) const {
     ExpressionKeysPrivate::getHaystackKeys(obj, _geoField, _otherFields, _bucketSize, keys);
 }
 
-void HaystackAccessMethod::searchCommand(OperationContext* txn,
+void HaystackAccessMethod::searchCommand(OperationContext* opCtx,
                                          Collection* collection,
                                          const BSONObj& nearObj,
                                          double maxDistance,
@@ -71,8 +80,8 @@ void HaystackAccessMethod::searchCommand(OperationContext* txn,
                                          unsigned limit) {
     Timer t;
 
-    LOG(1) << "SEARCH near:" << nearObj << " maxDistance:" << maxDistance << " search: " << search
-           << endl;
+    LOG(1) << "SEARCH near:" << redact(nearObj) << " maxDistance:" << maxDistance
+           << " search: " << redact(search);
     int x, y;
     {
         BSONObjIterator i(nearObj);
@@ -81,7 +90,7 @@ void HaystackAccessMethod::searchCommand(OperationContext* txn,
     }
     int scale = static_cast<int>(ceil(maxDistance / _bucketSize));
 
-    GeoHaystackSearchHopper hopper(txn, nearObj, maxDistance, limit, _geoField, collection);
+    GeoHaystackSearchHopper hopper(opCtx, nearObj, maxDistance, limit, _geoField, collection);
 
     long long btreeMatches = 0;
 
@@ -92,7 +101,7 @@ void HaystackAccessMethod::searchCommand(OperationContext* txn,
 
             for (unsigned i = 0; i < _otherFields.size(); i++) {
                 // See if the non-geo field we're indexing on is in the provided search term.
-                BSONElement e = search.getFieldDotted(_otherFields[i]);
+                BSONElement e = dps::extractElementAtPath(search, _otherFields[i]);
                 if (e.eoo())
                     bb.appendNull("");
                 else
@@ -101,23 +110,24 @@ void HaystackAccessMethod::searchCommand(OperationContext* txn,
 
             BSONObj key = bb.obj();
 
-            unordered_set<RecordId, RecordId::Hasher> thisPass;
+            stdx::unordered_set<RecordId, RecordId::Hasher> thisPass;
 
 
-            unique_ptr<PlanExecutor> exec(InternalPlanner::indexScan(txn,
-                                                                     collection,
-                                                                     _descriptor,
-                                                                     key,
-                                                                     key,
-                                                                     true,  // endKeyInclusive
-                                                                     PlanExecutor::YIELD_MANUAL));
+            auto exec = InternalPlanner::indexScan(opCtx,
+                                                   collection,
+                                                   _descriptor,
+                                                   key,
+                                                   key,
+                                                   BoundInclusion::kIncludeBothStartAndEndKeys,
+                                                   PlanExecutor::NO_YIELD);
             PlanExecutor::ExecState state;
+            BSONObj obj;
             RecordId loc;
-            while (PlanExecutor::ADVANCED == (state = exec->getNext(NULL, &loc))) {
+            while (PlanExecutor::ADVANCED == (state = exec->getNext(&obj, &loc))) {
                 if (hopper.limitReached()) {
                     break;
                 }
-                pair<unordered_set<RecordId, RecordId::Hasher>::iterator, bool> p =
+                pair<stdx::unordered_set<RecordId, RecordId::Hasher>::iterator, bool> p =
                     thisPass.insert(loc);
                 // If a new element was inserted (haven't seen the RecordId before), p.second
                 // is true.
@@ -126,6 +136,9 @@ void HaystackAccessMethod::searchCommand(OperationContext* txn,
                     btreeMatches++;
                 }
             }
+
+            // Non-yielding collection scans from InternalPlanner will never error.
+            invariant(PlanExecutor::ADVANCED == state || PlanExecutor::IS_EOF == state);
         }
     }
 

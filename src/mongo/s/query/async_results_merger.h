@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -37,8 +39,10 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/cursor_id.h"
 #include "mongo/executor/task_executor.h"
-#include "mongo/s/query/cluster_client_cursor_params.h"
+#include "mongo/s/query/async_results_merger_params_gen.h"
+#include "mongo/s/query/cluster_query_result.h"
 #include "mongo/stdx/mutex.h"
+#include "mongo/util/concurrency/with_lock.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/time_support.h"
 
@@ -47,11 +51,12 @@ namespace mongo {
 class CursorResponse;
 
 /**
- * AsyncResultsMerger is used to generate results from cursor-generating commands on one or more
- * remote hosts. A cursor-generating command (e.g. the find command) is one that establishes a
- * ClientCursor and a matching cursor id on the remote host. In order to retrieve all command
- * results, getMores must be issued against each of the remote cursors until they are exhausted. The
- * results from the remote nodes are merged to present either a single sorted or unsorted stream.
+ * Given a set of cursorIds across one or more shards, the AsyncResultsMerger calls getMore on the
+ * cursors to present a single sorted or unsorted stream of documents.
+ *
+ * (A cursor-generating command (e.g. the find command) is one that establishes a ClientCursor and a
+ * matching cursorId on the remote host. In order to retrieve all document results, getMores must be
+ * issued against each of the remote cursors until they are exhausted).
  *
  * The ARM offers a non-blocking interface: if no results are immediately available on this host for
  * retrieval, calling nextEvent() schedules work on the remote hosts in order to generate further
@@ -72,19 +77,36 @@ class AsyncResultsMerger {
     MONGO_DISALLOW_COPYING(AsyncResultsMerger);
 
 public:
-    /**
-     * Constructs a new AsyncResultsMerger. The TaskExecutor* must remain valid for the lifetime of
-     * the ARM.
-     */
-    AsyncResultsMerger(executor::TaskExecutor* executor, ClusterClientCursorParams&& params);
+    // When mongos has to do a merge in order to return results to the client in the correct sort
+    // order, it requests a sortKey meta-projection using this field name.
+    static constexpr StringData kSortKeyField = "$sortKey"_sd;
+
+    // The expected sort key pattern when 'compareWholeSortKey' is true.
+    static const BSONObj kWholeSortKeySortPattern;
 
     /**
-     * In order to be destroyed, either
-     *   --the cursor must have been kill()'ed and the event return from kill() must have been
-     *   signaled, or
-     *   --all cursors must have been exhausted.
+     * Takes ownership of the cursors from ClusterClientCursorParams by storing their cursorIds and
+     * the hosts on which they exist in _remotes.
+     *
+     * Additionally copies each remote's first batch of results, if one exists, into that remote's
+     * docBuffer. If a sort is specified in the ClusterClientCursorParams, places the remotes with
+     * buffered results onto _mergeQueue.
+     *
+     * The TaskExecutor* must remain valid for the lifetime of the ARM.
+     *
+     * If 'opCtx' may be deleted before this AsyncResultsMerger, the caller must call
+     * detachFromOperationContext() before deleting 'opCtx', and call reattachToOperationContext()
+     * with a new, valid OperationContext before the next use.
      */
-    virtual ~AsyncResultsMerger();
+    AsyncResultsMerger(OperationContext* opCtx,
+                       executor::TaskExecutor* executor,
+                       AsyncResultsMergerParams params);
+
+    /**
+     * In order to be destroyed, either the ARM must have been kill()'ed or all cursors must have
+     * been exhausted. This is so that any unexhausted cursors are cleaned up by the ARM.
+     */
+    ~AsyncResultsMerger();
 
     /**
      * Returns true if all of the remote cursors are exhausted.
@@ -99,6 +121,18 @@ public:
      * the cursor is not tailable + awaitData).
      */
     Status setAwaitDataTimeout(Milliseconds awaitDataTimeout);
+
+    /**
+     * Signals to the AsyncResultsMerger that the caller is finished using it in the current
+     * context.
+     */
+    void detachFromOperationContext();
+
+    /**
+     * Provides a new OperationContext to be used by the AsyncResultsMerger - the caller must call
+     * detachFromOperationContext() before 'opCtx' is deleted.
+     */
+    void reattachToOperationContext(OperationContext* opCtx);
 
     /**
      * Returns true if there is no need to schedule remote work in order to take the next action.
@@ -121,10 +155,10 @@ public:
      * status.
      *
      * If this AsyncResultsMerger is fetching results from a remote cursor tailing a capped
-     * collection, may return boost::none before end-of-stream. (Tailable cursors remain open even
-     * when there are no further results, and may subsequently return more results when they become
-     * available.) The calling code is responsible for handling multiple boost::none return values,
-     * keeping the cursor open in the tailable case.
+     * collection, may return an empty ClusterQueryResult before end-of-stream. (Tailable cursors
+     * remain open even when there are no further results, and may subsequently return more results
+     * when they become available.) The calling code is responsible for handling multiple empty,
+     * ClusterQueryResult return values, keeping the cursor open in the tailable case.
      *
      * If there has been an error received from one of the shards, or there is an error in
      * processing results from a shard, then a non-ok status is returned.
@@ -132,7 +166,13 @@ public:
      * Invalid to call unless ready() has returned true (i.e., invalid to call if getting the next
      * result requires scheduling remote work).
      */
-    StatusWith<boost::optional<BSONObj>> nextReady();
+    StatusWith<ClusterQueryResult> nextReady();
+
+    /**
+     * Blocks until the next result is ready, all remote cursors are exhausted, or there is an
+     * error.
+     */
+    StatusWith<ClusterQueryResult> blockingNext();
 
     /**
      * Schedules remote work as required in order to make further results available. If there is an
@@ -147,28 +187,71 @@ public:
      * function, that has not yet been signaled. If there is an outstanding unsignaled event,
      * returns an error.
      *
-     * Conditions when event can be signaled:
-     * - Finished collecting results from all remotes.
-     * - One of the host failed with a retriable error. In this case, if ready() is false, then
-     *   the caller should call nextEvent() to retry the request on the hosts that errored. If
-     *   ready() is true, then either the error was not retriable or it has exhausted max retries.
+     * If there is a sort, the event is signaled when there are buffered results for all
+     * non-exhausted remotes.
+     * If there is no sort, the event is signaled when some remote has a buffered result.
      */
     StatusWith<executor::TaskExecutor::EventHandle> nextEvent();
 
     /**
-     * Starts shutting down this ARM. Returns a handle to an event which is signaled when this
-     * cursor is safe to destroy.
+     * Schedules a getMore on any remote hosts which:
+     *  - Do not have an error status set already.
+     *  - Don't already have a request outstanding.
+     *  - We don't currently have any results buffered.
+     *  - Are not exhausted (have a non-zero cursor id).
+     * Returns an error if any of the remotes responded with an error, or if we encounter an error
+     * while scheduling the getMore requests..
+     *
+     * In most cases users should call nextEvent() instead of this method, but this can be necessary
+     * if the caller of nextEvent() calls detachFromOperationContext() before the event is signaled.
+     * In such cases, the ARM cannot schedule getMores itself, and will need to be manually prompted
+     * after calling reattachToOperationContext().
+     *
+     * It is illegal to call this method if the ARM is not attached to an OperationContext.
+     */
+    Status scheduleGetMores();
+
+    /**
+     * Adds the specified shard cursors to the set of cursors to be merged.  The results from the
+     * new cursors will be returned as normal through nextReady().
+     */
+    void addNewShardCursors(std::vector<RemoteCursor>&& newCursors);
+
+    std::size_t getNumRemotes() const {
+        return _remotes.size();
+    }
+
+    /**
+     * For sorted tailable cursors, returns the most recent available sort key. This guarantees that
+     * we will never return any future results which precede this key. If no results are ready to be
+     * returned, this method may cause the high water mark to advance to the lowest promised sortkey
+     * received from the shards. Returns an empty BSONObj if no such sort key is available.
+     */
+    BSONObj getHighWaterMark();
+
+    /**
+     * Starts shutting down this ARM by canceling all pending requests and scheduling killCursors
+     * on all of the unexhausted remotes. Returns a handle to an event that is signaled when this
+     * ARM is safe to destroy.
+     *
+     * If there are no pending requests, schedules killCursors and signals the event immediately.
+     * Otherwise, the last callback that runs after kill() is called signals the event.
      *
      * Returns an invalid handle if the underlying task executor is shutting down. In this case,
      * killing is considered complete and the ARM may be destroyed immediately.
      *
-     * When the underlying task executor is *not* shutting down, an ARM can only be destroyed if
-     * either 1) all its results have been exhausted or 2) the kill event returned by this method
-     * has been signaled.
-     *
      * May be called multiple times (idempotent).
+     *
+     * Note that 'opCtx' may or may not be the same as the operation context to which this cursor is
+     * currently attached. This is so that a killing thread may call this method with its own
+     * operation context.
      */
-    executor::TaskExecutor::EventHandle kill();
+    executor::TaskExecutor::EventHandle kill(OperationContext* opCtx);
+
+    /**
+     * A blocking version of kill() that will not return until this is safe to destroy.
+     */
+    void blockingKill(OperationContext*);
 
 private:
     /**
@@ -177,18 +260,9 @@ private:
      * reported from the remote.
      */
     struct RemoteCursorData {
-        /**
-         * Creates a new uninitialized remote cursor state, which will have to send a command in
-         * order to establish its cursor id. Must only be used if the remote cursor ids are not yet
-         * known.
-         */
-        RemoteCursorData(ShardId shardId, BSONObj cmdObj);
-
-        /**
-         * Instantiates a new initialized remote cursor, which has an established cursor id. It may
-         * only be used for getMore operations.
-         */
-        RemoteCursorData(HostAndPort hostAndPort, CursorId establishedCursorId);
+        RemoteCursorData(HostAndPort hostAndPort,
+                         NamespaceString cursorNss,
+                         CursorId establishedCursorId);
 
         /**
          * Returns the resolved host and port on which the remote cursor resides.
@@ -206,75 +280,80 @@ private:
          */
         bool exhausted() const;
 
-        /**
-         * Given the shard id with which the cursor was initialized and a read preference, selects
-         * a host on which the cursor should be created.
-         *
-         * May not be called once a cursor has already been established.
-         */
-        Status resolveShardIdToHostAndPort(const ReadPreferenceSetting& readPref);
+        // Used when merging tailable awaitData cursors in sorted order. In order to return any
+        // result to the client we have to know that no shard will ever return anything that sorts
+        // before it. This object represents a promise from the remote that it will never return a
+        // result with a sort key lower than this.
+        boost::optional<BSONObj> promisedMinSortKey;
 
-        // ShardId on which a cursor will be created.
-        const boost::optional<ShardId> shardId;
+        // The cursor id for the remote cursor. If a remote cursor is not yet exhausted, this member
+        // will be set to a valid non-zero cursor id. If a remote cursor is now exhausted, this
+        // member will be set to zero.
+        CursorId cursorId;
 
-        // The command object for sending to the remote to establish the cursor. If a remote cursor
-        // has not been established yet, this member will be set to a valid command object. If a
-        // remote cursor has already been established, this member will be unset.
-        boost::optional<BSONObj> initialCmdObj;
+        // The namespace this cursor belongs to - note this may be different than the namespace of
+        // the operation if there is a view.
+        NamespaceString cursorNss;
 
-        // The cursor id for the remote cursor. If a remote cursor has not been established yet,
-        // this member will be unset. If a remote cursor has been established and is not yet
-        // exhausted, this member will be set to a valid non-zero cursor id. If a remote cursor was
-        // established but is now exhausted, this member will be set to zero.
-        boost::optional<CursorId> cursorId;
+        // The exact host in the shard on which the cursor resides.
+        HostAndPort shardHostAndPort;
 
-        std::queue<BSONObj> docBuffer;
+        // The buffer of results that have been retrieved but not yet returned to the caller.
+        std::queue<ClusterQueryResult> docBuffer;
+
+        // Is valid if there is currently a pending request to this remote.
         executor::TaskExecutor::CallbackHandle cbHandle;
-        Status status = Status::OK();
 
-        // Counts how many times we retried the initial cursor establishment command. It is used to
-        // make a decision based on the error type and the retry count about whether we are allowed
-        // to retry sending the request to another host from this shard.
-        int retryCount = 0;
+        // Set to an error status if there is an error retrieving a response from this remote or if
+        // the command result contained an error.
+        Status status = Status::OK();
 
         // Count of fetched docs during ARM processing of the current batch. Used to reduce the
         // batchSize in getMore when mongod returned less docs than the requested batchSize.
         long long fetchedCount = 0;
-
-    private:
-        // For a cursor, which has shard id associated contains the exact host on which the remote
-        // cursor resides.
-        boost::optional<HostAndPort> _shardHostAndPort;
     };
 
     class MergingComparator {
     public:
-        MergingComparator(const std::vector<RemoteCursorData>& remotes, const BSONObj& sort)
-            : _remotes(remotes), _sort(sort) {}
+        MergingComparator(const std::vector<RemoteCursorData>& remotes,
+                          const BSONObj& sort,
+                          bool compareWholeSortKey)
+            : _remotes(remotes), _sort(sort), _compareWholeSortKey(compareWholeSortKey) {}
 
         bool operator()(const size_t& lhs, const size_t& rhs);
 
     private:
         const std::vector<RemoteCursorData>& _remotes;
 
-        const BSONObj& _sort;
+        const BSONObj _sort;
+
+        // When '_compareWholeSortKey' is true, $sortKey is a scalar value, rather than an object.
+        // We extract the sort key {$sortKey: <value>}. The sort key pattern '_sort' is verified to
+        // be {$sortKey: 1}.
+        const bool _compareWholeSortKey;
+    };
+
+    using MinSortKeyRemoteIdPair = std::pair<BSONObj, size_t>;
+
+    class PromisedMinSortKeyComparator {
+    public:
+        PromisedMinSortKeyComparator(BSONObj sort) : _sort(std::move(sort)) {}
+
+        bool operator()(const MinSortKeyRemoteIdPair& lhs, const MinSortKeyRemoteIdPair& rhs) const;
+
+    private:
+        BSONObj _sort;
     };
 
     enum LifecycleState { kAlive, kKillStarted, kKillComplete };
-
-    /**
-     * Callback run to handle a response from a killCursors command.
-     */
-    static void handleKillCursorsResponse(
-        const executor::TaskExecutor::RemoteCommandCallbackArgs& cbData);
 
     /**
      * Parses the find or getMore command response object to a CursorResponse.
      *
      * Returns a non-OK response if the response fails to parse or if there is a cursor id mismatch.
      */
-    static StatusWith<CursorResponse> parseCursorResponse(const BSONObj& responseObj,
-                                                          const RemoteCursorData& remote);
+    static StatusWith<CursorResponse> _parseCursorResponse(const BSONObj& responseObj,
+                                                           const RemoteCursorData& remote);
 
     /**
      * Helper to schedule a command asking the remote node for another batch of results.
@@ -284,69 +363,103 @@ private:
      *
      * Returns success if the command to retrieve the next batch was scheduled successfully.
      */
-    Status askForNextBatch_inlock(size_t remoteIndex);
+    Status _askForNextBatch(WithLock, size_t remoteIndex);
 
     /**
      * Checks whether or not the remote cursors are all exhausted.
      */
-    bool remotesExhausted_inlock();
+    bool _remotesExhausted(WithLock);
 
     //
     // Helpers for ready().
     //
 
-    bool ready_inlock();
-    bool readySorted_inlock();
-    bool readyUnsorted_inlock();
+    bool _ready(WithLock);
+    bool _readySorted(WithLock);
+    bool _readySortedTailable(WithLock);
+    bool _readyUnsorted(WithLock);
 
     //
     // Helpers for nextReady().
     //
 
-    boost::optional<BSONObj> nextReadySorted();
-    boost::optional<BSONObj> nextReadyUnsorted();
+    ClusterQueryResult _nextReadySorted(WithLock);
+    ClusterQueryResult _nextReadyUnsorted(WithLock);
+
+    using CbData = executor::TaskExecutor::RemoteCommandCallbackArgs;
+    using CbResponse = executor::TaskExecutor::ResponseStatus;
 
     /**
-     * When nextEvent() schedules remote work, it passes this method as a callback. The TaskExecutor
-     * will call this function, passing the response from the remote.
+     * When nextEvent() schedules remote work, the callback uses this function to process results.
      *
      * 'remoteIndex' is the position of the relevant remote node in '_remotes', and therefore
      * indicates which node the response came from and where the new result documents should be
      * buffered.
      */
-    void handleBatchResponse(const executor::TaskExecutor::RemoteCommandCallbackArgs& cbData,
-                             size_t remoteIndex);
+    void _handleBatchResponse(WithLock, CbData const&, size_t remoteIndex);
 
     /**
-     * If there is a valid unsignaled event that has been requested via nextReady() and there are
+     * Cleans up if the remote cursor was killed while waiting for a response.
+     */
+    void _cleanUpKilledBatch(WithLock);
+
+    /**
+     * Cleans up after remote query failure.
+     */
+    void _cleanUpFailedBatch(WithLock lk, Status status, size_t remoteIndex);
+
+    /**
+     * Processes results from a remote query.
+     */
+    void _processBatchResults(WithLock, CbResponse const&, size_t remoteIndex);
+
+    /**
+     * Adds the batch of results to the RemoteCursorData. Returns false if there was an error
+     * parsing the batch.
+     */
+    bool _addBatchToBuffer(WithLock, size_t remoteIndex, const CursorResponse& response);
+
+    /**
+     * If there is a valid unsignaled event that has been requested via nextEvent() and there are
      * buffered results that are ready to return, signals that event.
      *
      * Invalidates the current event, as we must signal the event exactly once and we only keep a
      * handle to a valid event if it is unsignaled.
      */
-    void signalCurrentEventIfReady_inlock();
+    void _signalCurrentEventIfReady(WithLock);
 
     /**
      * Returns true if this async cursor is waiting to receive another batch from a remote.
      */
-    bool haveOutstandingBatchRequests_inlock();
+    bool _haveOutstandingBatchRequests(WithLock);
+
+    /**
+     * If a promisedMinSortKey has been obtained from all remotes, returns the lowest such key.
+     * Otherwise, returns an empty BSONObj.
+     */
+    BSONObj _getMinPromisedSortKey(WithLock);
+
+    /**
+     * Schedules a getMore on any remote hosts which we need another batch from.
+     */
+    Status _scheduleGetMores(WithLock);
 
     /**
      * Schedules a killCursors command to be run on all remote hosts that have open cursors.
      */
-    void scheduleKillCursors_inlock();
+    void _scheduleKillCursors(WithLock, OperationContext* opCtx);
 
-    // Not owned here.
+    /**
+     * Updates the given remote's metadata (e.g. the cursor id) based on information in 'response'.
+     */
+    void _updateRemoteMetadata(WithLock, size_t remoteIndex, const CursorResponse& response);
+
+    OperationContext* _opCtx;
     executor::TaskExecutor* _executor;
-
-    ClusterClientCursorParams _params;
-
-    // The metadata obj to pass along with the command request. Used to indicate that the command is
-    // ok to run on secondaries.
-    BSONObj _metadataObj;
+    TailableModeEnum _tailableMode;
+    AsyncResultsMergerParams _params;
 
     // Must be acquired before accessing any data members (other than _params, which is read-only).
-    // Must also be held when calling any of the '_inlock()' helper functions.
     stdx::mutex _mutex;
 
     // Data tracking the state of our communication with each of the remote nodes.
@@ -370,15 +483,22 @@ private:
 
     boost::optional<Milliseconds> _awaitDataTimeout;
 
+    // An ordered set of (promisedMinSortKey, remoteIndex) pairs received from the shards. The first
+    // element in the set will be the lowest sort key across all shards.
+    std::set<MinSortKeyRemoteIdPair, PromisedMinSortKeyComparator> _promisedMinSortKeys;
+
+    // For sorted tailable cursors, records the current high-water-mark sort key. Empty otherwise.
+    BSONObj _highWaterMark;
+
     //
     // Killing
     //
 
     LifecycleState _lifecycleState = kAlive;
 
-    // Signaled when all outstanding batch request callbacks have run, and all killCursors commands
-    // have been scheduled. This means that the ARM is safe to delete.
-    executor::TaskExecutor::EventHandle _killCursorsScheduledEvent;
+    // Signaled when all outstanding batch request callbacks have run after kill() has been
+    // called. This means that the ARM is safe to delete.
+    executor::TaskExecutor::EventHandle _killCompleteEvent;
 };
 
 }  // namespace mongo

@@ -39,8 +39,7 @@ createCollectionWithData = function(db, collectionName, dataGenerator) {
         print("collection.ensureIndex(" + JSON.stringify(nextIndex.spec) + ", " +
               JSON.stringify(nextIndex.options) + ");");
         var ensureIndexResult = collection.ensureIndex(nextIndex.spec, nextIndex.options);
-        // XXX: Is this the real way to check for errors?
-        assert(ensureIndexResult === undefined, tojson(ensureIndexResult));
+        assert.commandWorked(ensureIndexResult);
         numIndexes++;
     }
 
@@ -71,6 +70,7 @@ function CollectionDataValidator() {
     var _collectionInfo = {};
     var _indexData = [];
     var _collectionData = [];
+    var _dbVersion = "";
 
     // Returns the options of the specified collection.
     this.getCollectionInfo = function(collection) {
@@ -95,20 +95,26 @@ function CollectionDataValidator() {
         // Save the data for this collection for later comparison
         _collectionData = collection.find().sort({"_id": 1}).toArray();
 
+        _dbVersion = collection.getDB().version();
+
         _initialized = true;
 
         return collection;
     };
 
-    this.validateCollectionData = function(collection) {
+    this.validateCollectionData = function(
+        collection, dbVersionForCollection, options = {indexSpecFieldsToSkip: []}) {
 
         if (!_initialized) {
             throw Error("validateCollectionWithAllData called, but data is not initialized");
         }
 
+        if (!Array.isArray(options.indexSpecFieldsToSkip)) {
+            throw new Error("Option 'indexSpecFieldsToSkip' must be an array");
+        }
+
         // Get the metadata for this collection
         var newCollectionInfo = this.getCollectionInfo(collection);
-
         assert.docEq(_collectionInfo, newCollectionInfo, "collection metadata not equal");
 
         // Get the indexes for this collection
@@ -119,7 +125,15 @@ function CollectionDataValidator() {
                 return -1;
         });
         for (var i = 0; i < newIndexData.length; i++) {
-            assert.docEq(_indexData[i], newIndexData[i], "indexes not equal");
+            let recordedIndex = Object.extend({}, _indexData[i]);
+            let newIndex = Object.extend({}, newIndexData[i]);
+
+            options.indexSpecFieldsToSkip.forEach(fieldName => {
+                delete recordedIndex[fieldName];
+                delete newIndex[fieldName];
+            });
+
+            assert.docEq(recordedIndex, newIndex, "indexes not equal");
         }
 
         // Save the data for this collection for later comparison

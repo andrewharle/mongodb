@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -29,6 +31,7 @@
 #pragma once
 
 #include "mongo/base/disallow_copying.h"
+#include "mongo/util/net/hostandport.h"
 #include "mongo/util/time_support.h"
 
 namespace mongo {
@@ -58,19 +61,38 @@ public:
     virtual ConnectionString connectionString() = 0;
 
     /**
-     * Obtains a host, which matches the read preferences specified by readPref, blocking for the
+     * Finds a host matching readPref blocking up to 20 seconds or until the given operation is
+     * interrupted or its deadline expires.
+     *
+     * TODO(schwerin): Once operation max-time behavior is more uniformly integrated into sharding,
+     * remove the 20-second ceiling on wait time.
+     */
+    virtual StatusWith<HostAndPort> findHost(OperationContext* opCtx,
+                                             const ReadPreferenceSetting& readPref) = 0;
+
+
+    /**
+     * Finds a host that matches the read preference specified by readPref, blocking for up to
      * specified maxWait milliseconds, if a match cannot be found immediately.
      *
-     * Specifying a maxWait of zero means non-blocking. I.e., the call will just check the in-memory
-     * cached view of the replica set's host state and won't wait for it to be refreshed if it is
-     * found to be stale.
-     *
-     * Returns OK and a host and port to use for the specified read preference or an ErrorCode.
-     * Known error codes are:
-     *   All error codes which can be returned by ReplicaSetMonitor::getHostOrRefresh.
+     * DEPRECATED. Prefer findHost(OperationContext*, const ReadPreferenceSetting&), whenever
+     * an OperationContext is available.
      */
-    virtual StatusWith<HostAndPort> findHost(const ReadPreferenceSetting& readPref,
-                                             Milliseconds maxWait = Milliseconds(0)) = 0;
+    virtual StatusWith<HostAndPort> findHostWithMaxWait(const ReadPreferenceSetting& readPref,
+                                                        Milliseconds maxWait) = 0;
+
+    /**
+     * Finds a host matching the given read preference, giving up if a match is not found promptly.
+     *
+     * This method may still engage in blocking networking calls, but will attempt contact every
+     * member of the replica set at most one time.
+     *
+     * TODO(schwerin): Change this implementation to not perform any networking, once existing
+     * callers have been shown to be safe with this behavior or changed to call findHost.
+     */
+    StatusWith<HostAndPort> findHostNoWait(const ReadPreferenceSetting& readPref) {
+        return findHostWithMaxWait(readPref, Milliseconds::zero());
+    }
 
     /**
      * Reports to the targeter that a 'status' indicating a not master error was received when
@@ -85,14 +107,6 @@ public:
      * host again on a subsequent request for the primary.
      */
     virtual void markHostUnreachable(const HostAndPort& host, const Status& status) = 0;
-
-    /**
-     * Based on the remaining time of the operation and the default max wait time for findHost,
-     * selects an appropriate value to pass to the maxWait argument of the findHost method, so it
-     * has high likelyhood in returning on time and also leaving time for the rest of the call to
-     * complete.
-     */
-    static Milliseconds selectFindHostMaxWaitTime(OperationContext* txn);
 
 protected:
     RemoteCommandTargeter() = default;

@@ -1,37 +1,42 @@
-/*    Copyright 2012 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kDefault
 
+#include "mongo/platform/basic.h"
+
 #include "mongo/base/data_view.h"
-#include "mongo/db/jsobj.h"
-#include "mongo/unittest/unittest.h"
-#include "mongo/platform/random.h"
 #include "mongo/bson/bson_validate.h"
+#include "mongo/db/jsobj.h"
+#include "mongo/platform/random.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/log.h"
 
 namespace {
@@ -50,10 +55,10 @@ void appendInvalidStringElement(const char* fieldName, BufBuilder* bb) {
 
 TEST(BSONValidate, Basic) {
     BSONObj x;
-    ASSERT_TRUE(x.valid());
+    ASSERT_TRUE(x.valid(BSONVersion::kLatest));
 
     x = BSON("x" << 1);
-    ASSERT_TRUE(x.valid());
+    ASSERT_TRUE(x.valid(BSONVersion::kLatest));
 }
 
 TEST(BSONValidate, RandomData) {
@@ -79,12 +84,12 @@ TEST(BSONValidate, RandomData) {
 
         ASSERT_EQUALS(size, o.objsize());
 
-        if (o.valid()) {
+        if (o.valid(BSONVersion::kLatest)) {
             numValid++;
             jsonSize += o.jsonString().size();
-            ASSERT_OK(validateBSON(o.objdata(), o.objsize()));
+            ASSERT_OK(validateBSON(o.objdata(), o.objsize(), BSONVersion::kLatest));
         } else {
-            ASSERT_NOT_OK(validateBSON(o.objdata(), o.objsize()));
+            ASSERT_NOT_OK(validateBSON(o.objdata(), o.objsize(), BSONVersion::kLatest));
         }
 
         delete[] x;
@@ -127,12 +132,12 @@ TEST(BSONValidate, MuckingData1) {
         data[i] = 0xc8U;
 
         numToRun++;
-        if (mine.valid()) {
+        if (mine.valid(BSONVersion::kLatest)) {
             numValid++;
             jsonSize += mine.jsonString().size();
-            ASSERT_OK(validateBSON(mine.objdata(), mine.objsize()));
+            ASSERT_OK(validateBSON(mine.objdata(), mine.objsize(), BSONVersion::kLatest));
         } else {
-            ASSERT_NOT_OK(validateBSON(mine.objdata(), mine.objsize()));
+            ASSERT_NOT_OK(validateBSON(mine.objdata(), mine.objsize(), BSONVersion::kLatest));
         }
     }
 
@@ -146,15 +151,23 @@ TEST(BSONValidate, Fuzz) {
     log() << "BSONValidate Fuzz random seed: " << seed << endl;
     PseudoRandom randomSource(seed);
 
-    BSONObj original =
-        BSON("one" << 3 << "two" << 5 << "three" << BSONObj() << "four"
-                   << BSON("five" << BSON("six" << 11)) << "seven" << BSON_ARRAY("a"
-                                                                                 << "bb"
-                                                                                 << "ccc" << 5)
-                   << "eight" << BSONDBRef("rrr", OID("01234567890123456789aaaa")) << "_id"
-                   << OID("deadbeefdeadbeefdeadbeef") << "nine"
-                   << BSONBinData("\x69\xb7", 2, BinDataGeneral) << "ten"
-                   << Date_t::fromMillisSinceEpoch(44) << "eleven" << BSONRegEx("foooooo", "i"));
+    BSONObj original = BSON("one" << 3 << "two" << 5 << "three" << BSONObj() << "four"
+                                  << BSON("five" << BSON("six" << 11))
+                                  << "seven"
+                                  << BSON_ARRAY("a"
+                                                << "bb"
+                                                << "ccc"
+                                                << 5)
+                                  << "eight"
+                                  << BSONDBRef("rrr", OID("01234567890123456789aaaa"))
+                                  << "_id"
+                                  << OID("deadbeefdeadbeefdeadbeef")
+                                  << "nine"
+                                  << BSONBinData("\x69\xb7", 2, BinDataGeneral)
+                                  << "ten"
+                                  << Date_t::fromMillisSinceEpoch(44)
+                                  << "eleven"
+                                  << BSONRegEx("foooooo", "i"));
 
     int32_t fuzzFrequencies[] = {2, 10, 20, 100, 1000};
     for (size_t i = 0; i < sizeof(fuzzFrequencies) / sizeof(int32_t); ++i) {
@@ -176,30 +189,33 @@ TEST(BSONValidate, Fuzz) {
         }
         BSONObj fuzzed(buffer.get());
 
-        // Check that the two validation implementations agree (and neither crashes).
-        ASSERT_EQUALS(fuzzed.valid(), validateBSON(fuzzed.objdata(), fuzzed.objsize()).isOK());
+        // There is no assert here because there is no other BSON validator oracle
+        // to compare outputs against (BSONObj::valid() is a wrapper for validateBSON()).
+        // Thus, the reason for this test is to ensure that validateBSON() doesn't trip
+        // any ASAN or UBSAN check when fed fuzzed input.
+        validateBSON(fuzzed.objdata(), fuzzed.objsize(), BSONVersion::kLatest).isOK();
     }
 }
 
 TEST(BSONValidateFast, Empty) {
     BSONObj x;
-    ASSERT_OK(validateBSON(x.objdata(), x.objsize()));
+    ASSERT_OK(validateBSON(x.objdata(), x.objsize(), BSONVersion::kLatest));
 }
 
 TEST(BSONValidateFast, RegEx) {
     BSONObjBuilder b;
     b.appendRegex("foo", "i");
     BSONObj x = b.obj();
-    ASSERT_OK(validateBSON(x.objdata(), x.objsize()));
+    ASSERT_OK(validateBSON(x.objdata(), x.objsize(), BSONVersion::kLatest));
 }
 
 TEST(BSONValidateFast, Simple0) {
     BSONObj x;
-    ASSERT_OK(validateBSON(x.objdata(), x.objsize()));
+    ASSERT_OK(validateBSON(x.objdata(), x.objsize(), BSONVersion::kLatest));
 
     x = BSON("foo" << 17 << "bar"
                    << "eliot");
-    ASSERT_OK(validateBSON(x.objdata(), x.objsize()));
+    ASSERT_OK(validateBSON(x.objdata(), x.objsize(), BSONVersion::kLatest));
 }
 
 TEST(BSONValidateFast, Simple2) {
@@ -211,7 +227,7 @@ TEST(BSONValidateFast, Simple2) {
         sprintf(buf, "bar%d", i);
         b.appendMaxForType(buf, i);
         BSONObj x = b.obj();
-        ASSERT_OK(validateBSON(x.objdata(), x.objsize()));
+        ASSERT_OK(validateBSON(x.objdata(), x.objsize(), BSONVersion::kLatest));
     }
 }
 
@@ -226,14 +242,14 @@ TEST(BSONValidateFast, Simple3) {
         b.appendMaxForType(buf, i);
     }
     BSONObj x = b.obj();
-    ASSERT_OK(validateBSON(x.objdata(), x.objsize()));
+    ASSERT_OK(validateBSON(x.objdata(), x.objsize(), BSONVersion::kLatest));
 }
 
 TEST(BSONValidateFast, NestedObject) {
     BSONObj x = BSON("a" << 1 << "b" << BSON("c" << 2 << "d" << BSONArrayBuilder().obj() << "e"
                                                  << BSON_ARRAY("1" << 2 << 3)));
-    ASSERT_OK(validateBSON(x.objdata(), x.objsize()));
-    ASSERT_NOT_OK(validateBSON(x.objdata(), x.objsize() / 2));
+    ASSERT_OK(validateBSON(x.objdata(), x.objsize(), BSONVersion::kLatest));
+    ASSERT_NOT_OK(validateBSON(x.objdata(), x.objsize() / 2, BSONVersion::kLatest));
 }
 
 TEST(BSONValidateFast, ErrorWithId) {
@@ -242,9 +258,11 @@ TEST(BSONValidateFast, ErrorWithId) {
     ob.append("_id", 1);
     appendInvalidStringElement("not_id", &bb);
     const BSONObj x = ob.done();
-    const Status status = validateBSON(x.objdata(), x.objsize());
+    const Status status = validateBSON(x.objdata(), x.objsize(), BSONVersion::kLatest);
     ASSERT_NOT_OK(status);
-    ASSERT_EQUALS(status.reason(), "not null terminated string in object with _id: 1");
+    ASSERT_EQUALS(
+        status.reason(),
+        "not null terminated string in element with field name 'not_id' in object with _id: 1");
 }
 
 TEST(BSONValidateFast, ErrorBeforeId) {
@@ -253,9 +271,11 @@ TEST(BSONValidateFast, ErrorBeforeId) {
     appendInvalidStringElement("not_id", &bb);
     ob.append("_id", 1);
     const BSONObj x = ob.done();
-    const Status status = validateBSON(x.objdata(), x.objsize());
+    const Status status = validateBSON(x.objdata(), x.objsize(), BSONVersion::kLatest);
     ASSERT_NOT_OK(status);
-    ASSERT_EQUALS(status.reason(), "not null terminated string in object with unknown _id");
+    ASSERT_EQUALS(status.reason(),
+                  "not null terminated string in element with field name 'not_id' in object with "
+                  "unknown _id");
 }
 
 TEST(BSONValidateFast, ErrorNoId) {
@@ -263,9 +283,11 @@ TEST(BSONValidateFast, ErrorNoId) {
     BSONObjBuilder ob(bb);
     appendInvalidStringElement("not_id", &bb);
     const BSONObj x = ob.done();
-    const Status status = validateBSON(x.objdata(), x.objsize());
+    const Status status = validateBSON(x.objdata(), x.objsize(), BSONVersion::kLatest);
     ASSERT_NOT_OK(status);
-    ASSERT_EQUALS(status.reason(), "not null terminated string in object with unknown _id");
+    ASSERT_EQUALS(status.reason(),
+                  "not null terminated string in element with field name 'not_id' in object with "
+                  "unknown _id");
 }
 
 TEST(BSONValidateFast, ErrorIsInId) {
@@ -273,9 +295,11 @@ TEST(BSONValidateFast, ErrorIsInId) {
     BSONObjBuilder ob(bb);
     appendInvalidStringElement("_id", &bb);
     const BSONObj x = ob.done();
-    const Status status = validateBSON(x.objdata(), x.objsize());
+    const Status status = validateBSON(x.objdata(), x.objsize(), BSONVersion::kLatest);
     ASSERT_NOT_OK(status);
-    ASSERT_EQUALS(status.reason(), "not null terminated string in object with unknown _id");
+    ASSERT_EQUALS(
+        status.reason(),
+        "not null terminated string in element with field name '_id' in object with unknown _id");
 }
 
 TEST(BSONValidateFast, NonTopLevelId) {
@@ -286,9 +310,11 @@ TEST(BSONValidateFast, NonTopLevelId) {
                    << "not the real _id"));
     appendInvalidStringElement("not_id2", &bb);
     const BSONObj x = ob.done();
-    const Status status = validateBSON(x.objdata(), x.objsize());
+    const Status status = validateBSON(x.objdata(), x.objsize(), BSONVersion::kLatest);
     ASSERT_NOT_OK(status);
-    ASSERT_EQUALS(status.reason(), "not null terminated string in object with unknown _id");
+    ASSERT_EQUALS(status.reason(),
+                  "not null terminated string in element with field name 'not_id2' in object with "
+                  "unknown _id");
 }
 
 TEST(BSONValidateFast, StringHasSomething) {
@@ -307,14 +333,14 @@ TEST(BSONValidateFast, StringHasSomething) {
                       4  // size
                   ,
                   x.objsize());
-    ASSERT_NOT_OK(validateBSON(x.objdata(), x.objsize()));
+    ASSERT_NOT_OK(validateBSON(x.objdata(), x.objsize(), BSONVersion::kLatest));
 }
 
 TEST(BSONValidateBool, BoolValuesAreValidated) {
     BSONObjBuilder bob;
     bob.append("x", false);
     const BSONObj obj = bob.done();
-    ASSERT_OK(validateBSON(obj.objdata(), obj.objsize()));
+    ASSERT_OK(validateBSON(obj.objdata(), obj.objsize(), BSONVersion::kLatest));
     const BSONElement x = obj["x"];
     // Legal, because we know that the BufBuilder gave
     // us back some heap memory, which isn't oringinally const.
@@ -324,9 +350,9 @@ TEST(BSONValidateBool, BoolValuesAreValidated) {
          ++val) {
         *writable = static_cast<char>(val);
         if ((val == 0) || (val == 1)) {
-            ASSERT_OK(validateBSON(obj.objdata(), obj.objsize()));
+            ASSERT_OK(validateBSON(obj.objdata(), obj.objsize(), BSONVersion::kLatest));
         } else {
-            ASSERT_NOT_OK(validateBSON(obj.objdata(), obj.objsize()));
+            ASSERT_NOT_OK(validateBSON(obj.objdata(), obj.objsize(), BSONVersion::kLatest));
         }
     }
 }

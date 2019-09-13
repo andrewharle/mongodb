@@ -1,31 +1,33 @@
 // @file mmaptests.cpp
 
+
 /**
- *    Copyright (C) 2008 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/platform/basic.h"
@@ -33,6 +35,7 @@
 #include <boost/filesystem/operations.hpp>
 #include <iostream>
 
+#include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/lock_state.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/mmap_v1/data_file.h"
@@ -43,6 +46,7 @@
 #include "mongo/db/storage/mmap_v1/mmap_v1_options.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/dbtests/dbtests.h"
+#include "mongo/util/scopeguard.h"
 #include "mongo/util/timer.h"
 
 namespace MMapTests {
@@ -73,13 +77,17 @@ public:
         } catch (...) {
         }
 
-        MMAPV1LockerImpl lockState;
-        Lock::GlobalWrite lk(&lockState);
+        auto opCtx = cc().makeOperationContext();
+        Lock::GlobalWrite lk(opCtx.get());
 
         {
-            DurableMappedFile f;
+            DurableMappedFile f(opCtx.get());
+            ON_BLOCK_EXIT([&f, &opCtx] {
+                LockMongoFilesExclusive lock(opCtx.get());
+                f.close(opCtx.get());
+            });
             unsigned long long len = 256 * 1024 * 1024;
-            verify(f.create(fn, len, /*sequential*/ false));
+            verify(f.create(opCtx.get(), fn, len));
             {
                 char* p = (char*)f.getView();
                 verify(p);
@@ -92,12 +100,12 @@ public:
                 char* w = (char*)f.view_write();
                 strcpy(w + 6, "world");
             }
-            MongoFileFinder ff;
+            MongoFileFinder ff(opCtx.get());
             ASSERT(ff.findByPath(fn));
             ASSERT(ff.findByPath("asdf") == 0);
         }
         {
-            MongoFileFinder ff;
+            MongoFileFinder ff(opCtx.get());
             ASSERT(ff.findByPath(fn) == 0);
         }
 
@@ -110,8 +118,15 @@ public:
         // we make a lot here -- if we were leaking, presumably it would fail doing this many.
         Timer t;
         for (int i = 0; i < N; i++) {
-            DurableMappedFile f;
-            verify(f.open(fn, i % 4 == 1));
+            // Every 4 iterations we pass the sequential hint.
+            DurableMappedFile f{opCtx.get(),
+                                i % 4 == 1 ? MongoFile::Options::SEQUENTIAL
+                                           : MongoFile::Options::NONE};
+            ON_BLOCK_EXIT([&f, &opCtx] {
+                LockMongoFilesExclusive lock(opCtx.get());
+                f.close(opCtx.get());
+            });
+            verify(f.open(opCtx.get(), fn));
             {
                 char* p = (char*)f.getView();
                 verify(p);
@@ -180,7 +195,7 @@ class All : public Suite {
 public:
     All() : Suite("mmap") {}
     void setupTests() {
-        if (!getGlobalServiceContext()->getGlobalStorageEngine()->isMmapV1())
+        if (!getGlobalServiceContext()->getStorageEngine()->isMmapV1())
             return;
 
         add<LeakTest>();
@@ -296,4 +311,4 @@ SuiteInstance<All> myall;
     } myall;
 
 #endif
-}
+}  // namespace MMapTests

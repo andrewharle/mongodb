@@ -32,25 +32,27 @@ var exitStatus = runMongoProgram('mongo',
 
 assert.eq(exitStatus, 0, "authentication via MONGODB-X509 without CA succeeded");
 
-MongoRunner.stopMongod(conn.port);
+MongoRunner.stopMongod(conn);
 
 jsTest.log("Assert mongod doesn\'t start with CA file missing and clusterAuthMode=x509.");
 
-var sslParams = {
-    clusterAuthMode: 'x509',
-    sslMode: 'requireSSL',
-    sslPEMKeyFile: SERVER_CERT
-};
+var sslParams = {clusterAuthMode: 'x509', sslMode: 'requireSSL', sslPEMKeyFile: SERVER_CERT};
 var conn = MongoRunner.runMongod(sslParams);
 assert.isnull(conn, "server started with x509 clusterAuthMode but no CA file");
 
 jsTest.log("Assert mongos doesn\'t start with CA file missing and clusterAuthMode=x509.");
 
+// TODO: Remove 'shardAsReplicaSet: false' when SERVER-32672 is fixed.
 assert.throws(function() {
     new ShardingTest({
         shards: 1,
         mongos: 1,
         verbose: 2,
-        other: {configOptions: sslParams, mongosOptions: sslParams, shardOptions: sslParams}
+        other: {
+            configOptions: sslParams,
+            mongosOptions: sslParams,
+            shardOptions: sslParams,
+            shardAsReplicaSet: false
+        }
     });
-}, null, "mongos started with x509 clusterAuthMode but no CA file");
+}, [], "mongos started with x509 clusterAuthMode but no CA file");

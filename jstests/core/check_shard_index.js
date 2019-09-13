@@ -1,3 +1,5 @@
+// @tags: [requires_non_retryable_writes, requires_fastcount, requires_sharding]
+
 // -------------------------
 //  CHECKSHARDINGINDEX TEST UTILS
 // -------------------------

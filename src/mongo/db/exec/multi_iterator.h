@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -47,11 +49,11 @@ namespace mongo {
  */
 class MultiIteratorStage final : public PlanStage {
 public:
-    MultiIteratorStage(OperationContext* txn, WorkingSet* ws, Collection* collection);
+    MultiIteratorStage(OperationContext* opCtx, WorkingSet* ws, Collection* collection);
 
     void addIterator(std::unique_ptr<RecordCursor> it);
 
-    PlanStage::StageState work(WorkingSetID* out) final;
+    PlanStage::StageState doWork(WorkingSetID* out) final;
 
     bool isEOF() final;
 
@@ -61,7 +63,7 @@ public:
     void doRestoreState() final;
     void doDetachFromOperationContext() final;
     void doReattachToOperationContext() final;
-    void doInvalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) final;
+    void doInvalidate(OperationContext* opCtx, const RecordId& dl, InvalidationType type) final;
 
     // Returns empty PlanStageStats object
     std::unique_ptr<PlanStageStats> getStats() final;
@@ -79,7 +81,7 @@ public:
     static const char* kStageType;
 
 private:
-    OperationContext* _txn;
+    OperationContext* _opCtx;
     Collection* _collection;
     std::vector<std::unique_ptr<RecordCursor>> _iterators;
 

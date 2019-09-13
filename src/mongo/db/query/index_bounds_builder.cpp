@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -35,25 +37,94 @@
 
 #include "mongo/base/string_data.h"
 #include "mongo/db/geo/geoconstants.h"
+#include "mongo/db/geo/s2.h"
 #include "mongo/db/index/expression_params.h"
 #include "mongo/db/index/s2_common.h"
 #include "mongo/db/matcher/expression_geo.h"
+#include "mongo/db/matcher/expression_internal_expr_eq.h"
+#include "mongo/db/query/collation/collation_index_key.h"
+#include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/expression_index.h"
 #include "mongo/db/query/expression_index_knobs.h"
 #include "mongo/db/query/indexability.h"
 #include "mongo/db/query/query_knobs.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
-#include "mongo/db/geo/s2.h"
 #include "third_party/s2/s2cell.h"
 #include "third_party/s2/s2regioncoverer.h"
 
 namespace mongo {
 
+namespace {
+
+// Helper for checking that an OIL "appears" to be ascending given one interval.
+void assertOILIsAscendingLocally(const vector<Interval>& intervals, size_t idx) {
+    // Each individual interval being examined should be ascending or none.
+    const auto dir = intervals[idx].getDirection();
+
+    // Should be either ascending, or have no direction (be a point/null/empty interval).
+    invariant(dir == Interval::Direction::kDirectionAscending ||
+              dir == Interval::Direction::kDirectionNone);
+
+    // The previous OIL's end value should be <= the next OIL's start value.
+    if (idx > 0) {
+        // Pass 'false' to avoid comparing the field names.
+        const int res = intervals[idx - 1].end.woCompare(intervals[idx].start, false);
+        invariant(res <= 0);
+    }
+}
+
+// Tightness rules are shared for $lt, $lte, $gt, $gte.
+IndexBoundsBuilder::BoundsTightness getInequalityPredicateTightness(const BSONElement& dataElt,
+                                                                    const IndexEntry& index) {
+    return Indexability::isExactBoundsGenerating(dataElt) ? IndexBoundsBuilder::EXACT
+                                                          : IndexBoundsBuilder::INEXACT_FETCH;
+}
+
+/**
+ * Returns true if 'str' contains a non-escaped pipe character '|' on a best-effort basis. This
+ * function reports no false negatives, but will return false positives. For example, a pipe
+ * character inside of a character class or the \Q...\E escape sequence has no special meaning but
+ * may still be reported by this function as being non-escaped.
+ */
+bool stringMayHaveUnescapedPipe(StringData str) {
+    if (str.size() > 0 && str[0] == '|') {
+        return true;
+    }
+    if (str.size() > 1 && str[1] == '|' && str[0] != '\\') {
+        return true;
+    }
+
+    for (size_t i = 2U; i < str.size(); ++i) {
+        auto probe = str[i];
+        auto prev = str[i - 1];
+        auto tail = str[i - 2];
+
+        // We consider the pipe to have a special meaning if it is not preceded by a backslash, or
+        // preceded by a backslash that is itself escaped.
+        if (probe == '|' && (prev != '\\' || (prev == '\\' && tail == '\\'))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+}  // namespace
+
 string IndexBoundsBuilder::simpleRegex(const char* regex,
                                        const char* flags,
+                                       const IndexEntry& index,
                                        BoundsTightness* tightnessOut) {
-    string r = "";
+    if (index.collator) {
+        // Bounds building for simple regular expressions assumes that the index is in ASCII order,
+        // which is not necessarily true for an index with a collator.  Therefore, a regex can never
+        // use tight bounds if the index has a non-null collator. In this case, the regex must be
+        // applied to the fetched document rather than the index key, so the tightness is
+        // INEXACT_FETCH.
+        *tightnessOut = IndexBoundsBuilder::INEXACT_FETCH;
+        return "";
+    }
+
     *tightnessOut = IndexBoundsBuilder::INEXACT_COVERED;
 
     bool multilineOK;
@@ -64,41 +135,42 @@ string IndexBoundsBuilder::simpleRegex(const char* regex,
         multilineOK = false;
         regex += 1;
     } else {
-        return r;
+        return "";
     }
 
-    // A regex with the "|" character is never considered a simple regular expression.
-    if (StringData(regex).find('|') != std::string::npos) {
+    // A regex with an unescaped pipe character is not considered a simple regex.
+    if (stringMayHaveUnescapedPipe(StringData(regex))) {
         return "";
     }
 
     bool extended = false;
     while (*flags) {
         switch (*(flags++)) {
-            case 'm':  // multiline
+            case 'm':
+                // Multiline mode.
                 if (multilineOK)
                     continue;
                 else
-                    return r;
+                    return "";
             case 's':
                 // Single-line mode specified. This just changes the behavior of the '.'
                 // character to match every character instead of every character except '\n'.
                 continue;
-            case 'x':  // extended
+            case 'x':
+                // Extended free-spacing mode.
                 extended = true;
                 break;
             default:
-                return r;  // cant use index
+                // Cannot use the index.
+                return "";
         }
     }
 
     mongoutils::str::stream ss;
 
+    string r = "";
     while (*regex) {
         char c = *(regex++);
-
-        // We should have bailed out early above if '|' is in the regex.
-        invariant(c != '|');
 
         if (c == '*' || c == '?') {
             // These are the only two symbols that make the last char optional
@@ -118,7 +190,7 @@ string IndexBoundsBuilder::simpleRegex(const char* regex,
                         ss << c;  // character should match itself
                     }
                 }
-            } else if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '0') ||
+            } else if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
                        (c == '\0')) {
                 // don't know what to do with these
                 r = ss;
@@ -159,14 +231,15 @@ void IndexBoundsBuilder::allValuesForField(const BSONElement& elt, OrderedInterv
     bob.appendMinKey("");
     bob.appendMaxKey("");
     out->name = elt.fieldName();
-    out->intervals.push_back(makeRangeInterval(bob.obj(), true, true));
+    out->intervals.push_back(
+        makeRangeInterval(bob.obj(), BoundInclusion::kIncludeBothStartAndEndKeys));
 }
 
 Interval IndexBoundsBuilder::allValues() {
     BSONObjBuilder bob;
     bob.appendMinKey("");
     bob.appendMaxKey("");
-    return makeRangeInterval(bob.obj(), true, true);
+    return makeRangeInterval(bob.obj(), BoundInclusion::kIncludeBothStartAndEndKeys);
 }
 
 bool IntervalComparison(const Interval& lhs, const Interval& rhs) {
@@ -224,6 +297,14 @@ bool typeMatch(const BSONObj& obj) {
     return first.canonicalType() == second.canonicalType();
 }
 
+bool IndexBoundsBuilder::canUseCoveredMatching(const MatchExpression* expr,
+                                               const IndexEntry& index) {
+    IndexBoundsBuilder::BoundsTightness tightness;
+    OrderedIntervalList oil;
+    translate(expr, BSONElement{}, index, &oil, &tightness);
+    return tightness >= IndexBoundsBuilder::INEXACT_COVERED;
+}
+
 // static
 void IndexBoundsBuilder::translate(const MatchExpression* expr,
                                    const BSONElement& elt,
@@ -241,8 +322,8 @@ void IndexBoundsBuilder::translate(const MatchExpression* expr,
     }
 
     if (isHashed) {
-        verify(MatchExpression::EQ == expr->matchType() ||
-               MatchExpression::MATCH_IN == expr->matchType());
+        invariant(MatchExpression::MATCH_IN == expr->matchType() ||
+                  ComparisonMatchExpressionBase::isEquality(expr->matchType()));
     }
 
     if (MatchExpression::ELEM_MATCH_VALUE == expr->matchType()) {
@@ -283,7 +364,8 @@ void IndexBoundsBuilder::translate(const MatchExpression* expr,
             bob.appendNull("");
             bob.appendNull("");
             BSONObj dataObj = bob.obj();
-            oilOut->intervals.push_back(makeRangeInterval(dataObj, true, true));
+            oilOut->intervals.push_back(
+                makeRangeInterval(dataObj, BoundInclusion::kIncludeBothStartAndEndKeys));
 
             *tightnessOut = IndexBoundsBuilder::INEXACT_FETCH;
             return;
@@ -292,15 +374,20 @@ void IndexBoundsBuilder::translate(const MatchExpression* expr,
         translate(child, elt, index, oilOut, tightnessOut);
         oilOut->complement();
 
-        // If the index is multikey, it doesn't matter what the tightness
-        // of the child is, we must return INEXACT_FETCH. Consider a multikey
-        // index on 'a' with document {a: [1, 2, 3]} and query {a: {$ne: 3}}.
-        // If we treated the bounds [MinKey, 3), (3, MaxKey] as exact, then
-        // we would erroneously return the document!
+        // TODO SERVER-27646: We cannot assume this invariant is true unless we build exact bounds
+        // for $ne: null queries.
+        // invariant(*tightnessOut == IndexBoundsBuilder::EXACT);
+
+        // If the index is multikey, it doesn't matter what the tightness of the child is, we must
+        // return INEXACT_FETCH. Consider a multikey index on 'a' with document {a: [1, 2, 3]} and
+        // query {a: {$ne: 3}}.  If we treated the bounds [MinKey, 3), (3, MaxKey] as exact, then we
+        // would erroneously return the document!
         if (index.multikey) {
             *tightnessOut = INEXACT_FETCH;
         }
     } else if (MatchExpression::EXISTS == expr->matchType()) {
+        oilOut->intervals.push_back(allValues());
+
         // We only handle the {$exists:true} case, as {$exists:false}
         // will have been translated to {$not:{ $exists:true }}.
         //
@@ -320,7 +407,6 @@ void IndexBoundsBuilder::translate(const MatchExpression* expr,
         //
         // Noted in SERVER-12869, in case this ever changes some day.
         if (index.sparse) {
-            oilOut->intervals.push_back(allValues());
             // A sparse, compound index on { a:1, b:1 } will include entries
             // for all of the following documents:
             //    { a:1 }, { b:1 }, { a:1, b:1 }
@@ -331,12 +417,11 @@ void IndexBoundsBuilder::translate(const MatchExpression* expr,
                 *tightnessOut = IndexBoundsBuilder::EXACT;
             }
         } else {
-            oilOut->intervals.push_back(allValues());
             *tightnessOut = IndexBoundsBuilder::INEXACT_FETCH;
         }
-    } else if (MatchExpression::EQ == expr->matchType()) {
-        const EqualityMatchExpression* node = static_cast<const EqualityMatchExpression*>(expr);
-        translateEquality(node->getData(), isHashed, oilOut, tightnessOut);
+    } else if (ComparisonMatchExpressionBase::isEquality(expr->matchType())) {
+        const auto* node = static_cast<const ComparisonMatchExpressionBase*>(expr);
+        translateEquality(node->getData(), index, isHashed, oilOut, tightnessOut);
     } else if (MatchExpression::LTE == expr->matchType()) {
         const LTEMatchExpression* node = static_cast<const LTEMatchExpression*>(expr);
         BSONElement dataElt = node->getData();
@@ -344,7 +429,8 @@ void IndexBoundsBuilder::translate(const MatchExpression* expr,
         // Everything is <= MaxKey.
         if (MaxKey == dataElt.type()) {
             oilOut->intervals.push_back(allValues());
-            *tightnessOut = IndexBoundsBuilder::EXACT;
+            *tightnessOut =
+                index.collator ? IndexBoundsBuilder::INEXACT_FETCH : IndexBoundsBuilder::EXACT;
             return;
         }
 
@@ -363,16 +449,13 @@ void IndexBoundsBuilder::translate(const MatchExpression* expr,
         } else {
             bob.appendMinForType("", dataElt.type());
         }
-        bob.appendAs(dataElt, "");
+        CollationIndexKey::collationAwareIndexKeyAppend(dataElt, index.collator, &bob);
         BSONObj dataObj = bob.obj();
         verify(dataObj.isOwned());
-        oilOut->intervals.push_back(makeRangeInterval(dataObj, typeMatch(dataObj), true));
+        oilOut->intervals.push_back(makeRangeInterval(
+            dataObj, IndexBounds::makeBoundInclusionFromBoundBools(typeMatch(dataObj), true)));
 
-        if (dataElt.isSimpleType() || dataElt.type() == BSONType::BinData) {
-            *tightnessOut = IndexBoundsBuilder::EXACT;
-        } else {
-            *tightnessOut = IndexBoundsBuilder::INEXACT_FETCH;
-        }
+        *tightnessOut = getInequalityPredicateTightness(dataElt, index);
     } else if (MatchExpression::LT == expr->matchType()) {
         const LTMatchExpression* node = static_cast<const LTMatchExpression*>(expr);
         BSONElement dataElt = node->getData();
@@ -380,7 +463,8 @@ void IndexBoundsBuilder::translate(const MatchExpression* expr,
         // Everything is <= MaxKey.
         if (MaxKey == dataElt.type()) {
             oilOut->intervals.push_back(allValues());
-            *tightnessOut = IndexBoundsBuilder::EXACT;
+            *tightnessOut =
+                index.collator ? IndexBoundsBuilder::INEXACT_FETCH : IndexBoundsBuilder::EXACT;
             return;
         }
 
@@ -397,10 +481,11 @@ void IndexBoundsBuilder::translate(const MatchExpression* expr,
         } else {
             bob.appendMinForType("", dataElt.type());
         }
-        bob.appendAs(dataElt, "");
+        CollationIndexKey::collationAwareIndexKeyAppend(dataElt, index.collator, &bob);
         BSONObj dataObj = bob.obj();
         verify(dataObj.isOwned());
-        Interval interval = makeRangeInterval(dataObj, typeMatch(dataObj), false);
+        Interval interval = makeRangeInterval(
+            dataObj, IndexBounds::makeBoundInclusionFromBoundBools(typeMatch(dataObj), false));
 
         // If the operand to LT is equal to the lower bound X, the interval [X, X) is invalid
         // and should not be added to the bounds.
@@ -408,11 +493,7 @@ void IndexBoundsBuilder::translate(const MatchExpression* expr,
             oilOut->intervals.push_back(interval);
         }
 
-        if (dataElt.isSimpleType() || dataElt.type() == BSONType::BinData) {
-            *tightnessOut = IndexBoundsBuilder::EXACT;
-        } else {
-            *tightnessOut = IndexBoundsBuilder::INEXACT_FETCH;
-        }
+        *tightnessOut = getInequalityPredicateTightness(dataElt, index);
     } else if (MatchExpression::GT == expr->matchType()) {
         const GTMatchExpression* node = static_cast<const GTMatchExpression*>(expr);
         BSONElement dataElt = node->getData();
@@ -420,7 +501,8 @@ void IndexBoundsBuilder::translate(const MatchExpression* expr,
         // Everything is > MinKey.
         if (MinKey == dataElt.type()) {
             oilOut->intervals.push_back(allValues());
-            *tightnessOut = IndexBoundsBuilder::EXACT;
+            *tightnessOut =
+                index.collator ? IndexBoundsBuilder::INEXACT_FETCH : IndexBoundsBuilder::EXACT;
             return;
         }
 
@@ -431,7 +513,7 @@ void IndexBoundsBuilder::translate(const MatchExpression* expr,
         }
 
         BSONObjBuilder bob;
-        bob.appendAs(node->getData(), "");
+        CollationIndexKey::collationAwareIndexKeyAppend(dataElt, index.collator, &bob);
         if (dataElt.isNumber()) {
             bob.appendNumber("", std::numeric_limits<double>::infinity());
         } else {
@@ -439,7 +521,8 @@ void IndexBoundsBuilder::translate(const MatchExpression* expr,
         }
         BSONObj dataObj = bob.obj();
         verify(dataObj.isOwned());
-        Interval interval = makeRangeInterval(dataObj, false, typeMatch(dataObj));
+        Interval interval = makeRangeInterval(
+            dataObj, IndexBounds::makeBoundInclusionFromBoundBools(false, typeMatch(dataObj)));
 
         // If the operand to GT is equal to the upper bound X, the interval (X, X] is invalid
         // and should not be added to the bounds.
@@ -447,11 +530,7 @@ void IndexBoundsBuilder::translate(const MatchExpression* expr,
             oilOut->intervals.push_back(interval);
         }
 
-        if (dataElt.isSimpleType() || dataElt.type() == BSONType::BinData) {
-            *tightnessOut = IndexBoundsBuilder::EXACT;
-        } else {
-            *tightnessOut = IndexBoundsBuilder::INEXACT_FETCH;
-        }
+        *tightnessOut = getInequalityPredicateTightness(dataElt, index);
     } else if (MatchExpression::GTE == expr->matchType()) {
         const GTEMatchExpression* node = static_cast<const GTEMatchExpression*>(expr);
         BSONElement dataElt = node->getData();
@@ -459,7 +538,8 @@ void IndexBoundsBuilder::translate(const MatchExpression* expr,
         // Everything is >= MinKey.
         if (MinKey == dataElt.type()) {
             oilOut->intervals.push_back(allValues());
-            *tightnessOut = IndexBoundsBuilder::EXACT;
+            *tightnessOut =
+                index.collator ? IndexBoundsBuilder::INEXACT_FETCH : IndexBoundsBuilder::EXACT;
             return;
         }
 
@@ -472,7 +552,7 @@ void IndexBoundsBuilder::translate(const MatchExpression* expr,
         }
 
         BSONObjBuilder bob;
-        bob.appendAs(dataElt, "");
+        CollationIndexKey::collationAwareIndexKeyAppend(dataElt, index.collator, &bob);
         if (dataElt.isNumber()) {
             bob.appendNumber("", std::numeric_limits<double>::infinity());
         } else {
@@ -481,69 +561,90 @@ void IndexBoundsBuilder::translate(const MatchExpression* expr,
         BSONObj dataObj = bob.obj();
         verify(dataObj.isOwned());
 
-        oilOut->intervals.push_back(makeRangeInterval(dataObj, true, typeMatch(dataObj)));
-        if (dataElt.isSimpleType() || dataElt.type() == BSONType::BinData) {
-            *tightnessOut = IndexBoundsBuilder::EXACT;
-        } else {
-            *tightnessOut = IndexBoundsBuilder::INEXACT_FETCH;
-        }
+        oilOut->intervals.push_back(makeRangeInterval(
+            dataObj, IndexBounds::makeBoundInclusionFromBoundBools(true, typeMatch(dataObj))));
+
+        *tightnessOut = getInequalityPredicateTightness(dataElt, index);
     } else if (MatchExpression::REGEX == expr->matchType()) {
         const RegexMatchExpression* rme = static_cast<const RegexMatchExpression*>(expr);
-        translateRegex(rme, oilOut, tightnessOut);
+        translateRegex(rme, index, oilOut, tightnessOut);
     } else if (MatchExpression::MOD == expr->matchType()) {
         BSONObjBuilder bob;
         bob.appendMinForType("", NumberDouble);
         bob.appendMaxForType("", NumberDouble);
         BSONObj dataObj = bob.obj();
         verify(dataObj.isOwned());
-        oilOut->intervals.push_back(makeRangeInterval(dataObj, true, true));
+        oilOut->intervals.push_back(
+            makeRangeInterval(dataObj, BoundInclusion::kIncludeBothStartAndEndKeys));
         *tightnessOut = IndexBoundsBuilder::INEXACT_COVERED;
     } else if (MatchExpression::TYPE_OPERATOR == expr->matchType()) {
         const TypeMatchExpression* tme = static_cast<const TypeMatchExpression*>(expr);
 
+        if (tme->typeSet().hasType(BSONType::Array)) {
+            // We have $type:"array". Since arrays are indexed by creating a key for each element,
+            // we have to fetch all indexed documents and check whether the full document contains
+            // an array.
+            oilOut->intervals.push_back(allValues());
+            *tightnessOut = IndexBoundsBuilder::INEXACT_FETCH;
+            return;
+        }
+
         // If we are matching all numbers, we just use the bounds for NumberInt, as these bounds
         // also include all NumberDouble and NumberLong values.
-        BSONType type = tme->matchesAllNumbers() ? BSONType::NumberInt : tme->getType();
-        BSONObjBuilder bob;
-        bob.appendMinForType("", type);
-        bob.appendMaxForType("", type);
-        BSONObj dataObj = bob.obj();
-        verify(dataObj.isOwned());
-        oilOut->intervals.push_back(makeRangeInterval(dataObj, true, true));
+        if (tme->typeSet().allNumbers) {
+            BSONObjBuilder bob;
+            bob.appendMinForType("", BSONType::NumberInt);
+            bob.appendMaxForType("", BSONType::NumberInt);
+            oilOut->intervals.push_back(
+                makeRangeInterval(bob.obj(), BoundInclusion::kIncludeBothStartAndEndKeys));
+        }
 
-        *tightnessOut = tme->matchesAllNumbers() ? IndexBoundsBuilder::EXACT
-                                                 : IndexBoundsBuilder::INEXACT_FETCH;
+        for (auto type : tme->typeSet().bsonTypes) {
+            BSONObjBuilder bob;
+            bob.appendMinForType("", type);
+            bob.appendMaxForType("", type);
+            oilOut->intervals.push_back(
+                makeRangeInterval(bob.obj(), BoundInclusion::kIncludeBothStartAndEndKeys));
+        }
+
+        // If we're only matching the "number" type, then the bounds are exact. Otherwise, the
+        // bounds may be inexact.
+        *tightnessOut = (tme->typeSet().isSingleType() && tme->typeSet().allNumbers)
+            ? IndexBoundsBuilder::EXACT
+            : IndexBoundsBuilder::INEXACT_FETCH;
+
+        // Sort the intervals, and merge redundant ones.
+        unionize(oilOut);
     } else if (MatchExpression::MATCH_IN == expr->matchType()) {
         const InMatchExpression* ime = static_cast<const InMatchExpression*>(expr);
-        const ArrayFilterEntries& afr = ime->getData();
 
         *tightnessOut = IndexBoundsBuilder::EXACT;
 
         // Create our various intervals.
 
         IndexBoundsBuilder::BoundsTightness tightness;
-        for (auto&& equality : afr.equalities()) {
-            translateEquality(equality, isHashed, oilOut, &tightness);
+        for (auto&& equality : ime->getEqualities()) {
+            translateEquality(equality, index, isHashed, oilOut, &tightness);
             if (tightness != IndexBoundsBuilder::EXACT) {
                 *tightnessOut = tightness;
             }
         }
 
-        for (size_t i = 0; i < afr.numRegexes(); ++i) {
-            translateRegex(afr.regex(i), oilOut, &tightness);
+        for (auto&& regex : ime->getRegexes()) {
+            translateRegex(regex.get(), index, oilOut, &tightness);
             if (tightness != IndexBoundsBuilder::EXACT) {
                 *tightnessOut = tightness;
             }
         }
 
-        if (afr.hasNull()) {
+        if (ime->hasNull()) {
             // A null index key does not always match a null query value so we must fetch the
             // doc and run a full comparison.  See SERVER-4529.
             // TODO: Do we already set the tightnessOut by calling translateEquality?
             *tightnessOut = INEXACT_FETCH;
         }
 
-        if (afr.hasEmptyArray()) {
+        if (ime->hasEmptyArray()) {
             // Empty arrays are indexed as undefined.
             BSONObjBuilder undefinedBob;
             undefinedBob.appendUndefined("");
@@ -559,7 +660,7 @@ void IndexBoundsBuilder::translate(const MatchExpression* expr,
             verify(gme->getGeoExpression().getGeometry().hasS2Region());
             const S2Region& region = gme->getGeoExpression().getGeometry().getS2Region();
             S2IndexingParams indexParams;
-            ExpressionParams::parse2dsphereParams(index.infoObj, &indexParams);
+            ExpressionParams::initialize2dsphereParams(index.infoObj, index.collator, &indexParams);
             ExpressionMapping::cover2dsphere(region, indexParams, oilOut);
             *tightnessOut = IndexBoundsBuilder::INEXACT_FETCH;
         } else if (mongoutils::str::equals("2d", elt.valuestrsafe())) {
@@ -567,7 +668,7 @@ void IndexBoundsBuilder::translate(const MatchExpression* expr,
             const R2Region& region = gme->getGeoExpression().getGeometry().getR2Region();
 
             ExpressionMapping::cover2d(
-                region, index.infoObj, internalGeoPredicateQuery2DMaxCoveringCells, oilOut);
+                region, index.infoObj, internalGeoPredicateQuery2DMaxCoveringCells.load(), oilOut);
 
             *tightnessOut = IndexBoundsBuilder::INEXACT_FETCH;
         } else {
@@ -576,20 +677,18 @@ void IndexBoundsBuilder::translate(const MatchExpression* expr,
             verify(0);
         }
     } else {
-        warning() << "Planner error, trying to build bounds for expression: " << expr->toString()
-                  << endl;
+        warning() << "Planner error, trying to build bounds for expression: "
+                  << redact(expr->toString());
         verify(0);
     }
 }
 
 // static
-Interval IndexBoundsBuilder::makeRangeInterval(const BSONObj& obj,
-                                               bool startInclusive,
-                                               bool endInclusive) {
+Interval IndexBoundsBuilder::makeRangeInterval(const BSONObj& obj, BoundInclusion boundInclusion) {
     Interval ret;
     ret._intervalData = obj;
-    ret.startInclusive = startInclusive;
-    ret.endInclusive = endInclusive;
+    ret.startInclusive = IndexBounds::isStartIncludedInBound(boundInclusion);
+    ret.endInclusive = IndexBounds::isEndIncludedInBound(boundInclusion);
     BSONObjIterator it(obj);
     verify(it.more());
     ret.start = it.next();
@@ -599,52 +698,57 @@ Interval IndexBoundsBuilder::makeRangeInterval(const BSONObj& obj,
 }
 
 // static
-void IndexBoundsBuilder::intersectize(const OrderedIntervalList& arg, OrderedIntervalList* oilOut) {
-    verify(arg.name == oilOut->name);
+void IndexBoundsBuilder::intersectize(const OrderedIntervalList& oilA, OrderedIntervalList* oilB) {
+    invariant(oilB);
+    invariant(oilA.name == oilB->name);
 
-    size_t argidx = 0;
-    const vector<Interval>& argiv = arg.intervals;
+    size_t oilAIdx = 0;
+    const vector<Interval>& oilAIntervals = oilA.intervals;
 
-    size_t ividx = 0;
-    vector<Interval>& iv = oilOut->intervals;
+    size_t oilBIdx = 0;
+    vector<Interval>& oilBIntervals = oilB->intervals;
 
     vector<Interval> result;
 
-    while (argidx < argiv.size() && ividx < iv.size()) {
-        Interval::IntervalComparison cmp = argiv[argidx].compare(iv[ividx]);
+    while (oilAIdx < oilAIntervals.size() && oilBIdx < oilBIntervals.size()) {
+        if (kDebugBuild) {
+            // Ensure that both OILs are ascending.
+            assertOILIsAscendingLocally(oilAIntervals, oilAIdx);
+            assertOILIsAscendingLocally(oilBIntervals, oilBIdx);
+        }
 
+        Interval::IntervalComparison cmp = oilAIntervals[oilAIdx].compare(oilBIntervals[oilBIdx]);
         verify(Interval::INTERVAL_UNKNOWN != cmp);
 
         if (cmp == Interval::INTERVAL_PRECEDES || cmp == Interval::INTERVAL_PRECEDES_COULD_UNION) {
-            // argiv is before iv.  move argiv forward.
-            ++argidx;
+            // oilAIntervals is before oilBIntervals. move oilAIntervals forward.
+            ++oilAIdx;
         } else if (cmp == Interval::INTERVAL_SUCCEEDS) {
-            // iv is before argiv.  move iv forward.
-            ++ividx;
+            // oilBIntervals is before oilAIntervals. move oilBIntervals forward.
+            ++oilBIdx;
         } else {
-            // argiv[argidx] (cmpresults) iv[ividx]
-            Interval newInt = argiv[argidx];
-            newInt.intersect(iv[ividx], cmp);
+            Interval newInt = oilAIntervals[oilAIdx];
+            newInt.intersect(oilBIntervals[oilBIdx], cmp);
             result.push_back(newInt);
 
             if (Interval::INTERVAL_EQUALS == cmp) {
-                ++argidx;
-                ++ividx;
+                ++oilAIdx;
+                ++oilBIdx;
             } else if (Interval::INTERVAL_WITHIN == cmp) {
-                ++argidx;
+                ++oilAIdx;
             } else if (Interval::INTERVAL_CONTAINS == cmp) {
-                ++ividx;
+                ++oilBIdx;
             } else if (Interval::INTERVAL_OVERLAPS_BEFORE == cmp) {
-                ++argidx;
+                ++oilAIdx;
             } else if (Interval::INTERVAL_OVERLAPS_AFTER == cmp) {
-                ++ividx;
+                ++oilBIdx;
             } else {
-                verify(0);
+                MONGO_UNREACHABLE;
             }
         }
     }
 
-    oilOut->intervals.swap(result);
+    oilB->intervals.swap(result);
 }
 
 // static
@@ -691,7 +795,8 @@ void IndexBoundsBuilder::unionize(OrderedIntervalList* oilOut) {
             bool endInclusive = iv[i + 1].endInclusive;
             iv.erase(iv.begin() + i);
             // iv[i] is now the former iv[i + 1]
-            iv[i] = makeRangeInterval(data, startInclusive, endInclusive);
+            iv[i] = makeRangeInterval(
+                data, IndexBounds::makeBoundInclusionFromBoundBools(startInclusive, endInclusive));
             // Don't increment 'i'.
         }
     }
@@ -700,12 +805,11 @@ void IndexBoundsBuilder::unionize(OrderedIntervalList* oilOut) {
 // static
 Interval IndexBoundsBuilder::makeRangeInterval(const string& start,
                                                const string& end,
-                                               bool startInclusive,
-                                               bool endInclusive) {
+                                               BoundInclusion boundInclusion) {
     BSONObjBuilder bob;
     bob.append("", start);
     bob.append("", end);
-    return makeRangeInterval(bob.obj(), startInclusive, endInclusive);
+    return makeRangeInterval(bob.obj(), boundInclusion);
 }
 
 // static
@@ -732,9 +836,10 @@ Interval IndexBoundsBuilder::makePointInterval(double d) {
 }
 
 // static
-BSONObj IndexBoundsBuilder::objFromElement(const BSONElement& elt) {
+BSONObj IndexBoundsBuilder::objFromElement(const BSONElement& elt,
+                                           const CollatorInterface* collator) {
     BSONObjBuilder bob;
-    bob.appendAs(elt, "");
+    CollationIndexKey::collationAwareIndexKeyAppend(elt, collator, &bob);
     return bob.obj();
 }
 
@@ -751,23 +856,26 @@ void IndexBoundsBuilder::reverseInterval(Interval* ival) {
 
 // static
 void IndexBoundsBuilder::translateRegex(const RegexMatchExpression* rme,
+                                        const IndexEntry& index,
                                         OrderedIntervalList* oilOut,
                                         BoundsTightness* tightnessOut) {
     const string start =
-        simpleRegex(rme->getString().c_str(), rme->getFlags().c_str(), tightnessOut);
+        simpleRegex(rme->getString().c_str(), rme->getFlags().c_str(), index, tightnessOut);
 
     // Note that 'tightnessOut' is set by simpleRegex above.
     if (!start.empty()) {
         string end = start;
         end[end.size() - 1]++;
-        oilOut->intervals.push_back(makeRangeInterval(start, end, true, false));
+        oilOut->intervals.push_back(
+            makeRangeInterval(start, end, BoundInclusion::kIncludeStartKeyOnly));
     } else {
         BSONObjBuilder bob;
         bob.appendMinForType("", String);
         bob.appendMaxForType("", String);
         BSONObj dataObj = bob.obj();
         verify(dataObj.isOwned());
-        oilOut->intervals.push_back(makeRangeInterval(dataObj, true, false));
+        oilOut->intervals.push_back(
+            makeRangeInterval(dataObj, BoundInclusion::kIncludeStartKeyOnly));
     }
 
     // Regexes are after strings.
@@ -778,17 +886,16 @@ void IndexBoundsBuilder::translateRegex(const RegexMatchExpression* rme,
 
 // static
 void IndexBoundsBuilder::translateEquality(const BSONElement& data,
+                                           const IndexEntry& index,
                                            bool isHashed,
                                            OrderedIntervalList* oil,
                                            BoundsTightness* tightnessOut) {
     // We have to copy the data out of the parse tree and stuff it into the index
     // bounds.  BSONValue will be useful here.
     if (Array != data.type()) {
-        BSONObj dataObj;
+        BSONObj dataObj = objFromElement(data, index.collator);
         if (isHashed) {
-            dataObj = ExpressionMapping::hash(data);
-        } else {
-            dataObj = objFromElement(data);
+            dataObj = ExpressionMapping::hash(dataObj.firstElement());
         }
 
         verify(dataObj.isOwned());
@@ -822,7 +929,7 @@ void IndexBoundsBuilder::translateEquality(const BSONElement& data,
     // {a: [1, 2, 3]} will match documents like {a: [[1, 2, 3], 4, 5]}.
 
     // Case 3.
-    oil->intervals.push_back(makePointInterval(objFromElement(data)));
+    oil->intervals.push_back(makePointInterval(objFromElement(data, index.collator)));
 
     if (data.Obj().isEmpty()) {
         // Case 2.
@@ -832,7 +939,7 @@ void IndexBoundsBuilder::translateEquality(const BSONElement& data,
     } else {
         // Case 1.
         BSONElement firstEl = data.Obj().firstElement();
-        oil->intervals.push_back(makePointInterval(objFromElement(firstEl)));
+        oil->intervals.push_back(makePointInterval(objFromElement(firstEl, index.collator)));
     }
 
     std::sort(oil->intervals.begin(), oil->intervals.end(), IntervalComparison);
@@ -864,22 +971,16 @@ void IndexBoundsBuilder::alignBounds(IndexBounds* bounds, const BSONObj& kp, int
         int direction = (elt.number() >= 0) ? 1 : -1;
         direction *= scanDir;
         if (-1 == direction) {
-            vector<Interval>& iv = bounds->fields[oilIdx].intervals;
-            // Step 1: reverse the list.
-            std::reverse(iv.begin(), iv.end());
-            // Step 2: reverse each interval.
-            for (size_t i = 0; i < iv.size(); ++i) {
-                iv[i].reverse();
-            }
+            bounds->fields[oilIdx].reverse();
         }
         ++oilIdx;
     }
 
     if (!bounds->isValidFor(kp, scanDir)) {
-        log() << "INVALID BOUNDS: " << bounds->toString() << endl
-              << "kp = " << kp.toString() << endl
-              << "scanDir = " << scanDir << endl;
-        invariant(0);
+        log() << "INVALID BOUNDS: " << redact(bounds->toString()) << endl
+              << "kp = " << redact(kp) << endl
+              << "scanDir = " << scanDir;
+        MONGO_UNREACHABLE;
     }
 }
 

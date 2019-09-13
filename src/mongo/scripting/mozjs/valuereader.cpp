@@ -1,29 +1,31 @@
+
 /**
- * Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- * This program is free software: you can redistribute it and/or  modify
- * it under the terms of the GNU Affero General Public License, version 3,
- * as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
- * As a special exception, the copyright holders give permission to link the
- * code of portions of this program with the OpenSSL library under certain
- * conditions as described in each individual source file and distribute
- * linked combinations including the program with the OpenSSL library. You
- * must comply with the GNU Affero General Public License in all respects
- * for all of the code used other than as permitted herein. If you modify
- * file(s) with this exception, you may extend this exception to your
- * version of the file(s), but you are not obligated to do so. If you do not
- * wish to do so, delete this exception statement from your version. If you
- * delete this exception statement from all source files in the program,
- * then also delete it in the license file.
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kQuery
@@ -35,6 +37,7 @@
 #include <cmath>
 #include <cstdio>
 #include <js/CharacterEncoding.h>
+#include <js/Date.h>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/platform/decimal128.h"
@@ -70,7 +73,7 @@ void ValueReader::fromBSONElement(const BSONElement& elem, const BSONObj& parent
             if (scope->isJavaScriptProtectionEnabled()) {
                 JS::AutoValueArray<2> args(_context);
 
-                ValueReader(_context, args[0]).fromStringData(elem.valueStringData());
+                ValueReader(_context, args[0]).fromStringData(elem.codeWScopeCode());
                 ValueReader(_context, args[1]).fromBSON(elem.codeWScopeObject(), nullptr, readOnly);
 
                 scope->getProto<CodeInfo>().newInstance(args, _value);
@@ -96,21 +99,7 @@ void ValueReader::fromBSONElement(const BSONElement& elem, const BSONObj& parent
             _value.setInt32(elem.Int());
             return;
         case mongo::Array: {
-            JS::AutoValueVector avv(_context);
-
-            BSONForEach(subElem, elem.embeddedObject()) {
-                JS::RootedValue member(_context);
-
-                ValueReader(_context, &member).fromBSONElement(subElem, parent, readOnly);
-                if (!avv.append(member)) {
-                    uasserted(ErrorCodes::JSInterpreterFailure, "Failed to append to JS array");
-                }
-            }
-            JS::RootedObject array(_context, JS_NewArrayObject(_context, avv));
-            if (!array) {
-                uasserted(ErrorCodes::JSInterpreterFailure, "Failed to JS_NewArrayObject");
-            }
-            _value.setObjectOrNull(array);
+            fromBSONArray(elem.embeddedObject(), &parent, readOnly);
             return;
         }
         case mongo::Object:
@@ -118,7 +107,7 @@ void ValueReader::fromBSONElement(const BSONElement& elem, const BSONObj& parent
             return;
         case mongo::Date:
             _value.setObjectOrNull(
-                JS_NewDateObjectMsec(_context, elem.Date().toMillisSinceEpoch()));
+                JS::NewDateObject(_context, JS::TimeClip(elem.Date().toMillisSinceEpoch())));
             return;
         case mongo::Bool:
             _value.setBoolean(elem.Bool());
@@ -172,28 +161,10 @@ void ValueReader::fromBSONElement(const BSONElement& elem, const BSONObj& parent
             return;
         }
         case mongo::NumberLong: {
-            unsigned long long nativeUnsignedLong = elem.numberLong();
-            // values above 2^53 are not accurately represented in JS
-            if (static_cast<long long>(nativeUnsignedLong) ==
-                    static_cast<long long>(
-                        static_cast<double>(static_cast<long long>(nativeUnsignedLong))) &&
-                nativeUnsignedLong < 9007199254740992ULL) {
-                JS::AutoValueArray<1> args(_context);
-                ValueReader(_context, args[0])
-                    .fromDouble(static_cast<double>(static_cast<long long>(nativeUnsignedLong)));
-
-                scope->getProto<NumberLongInfo>().newInstance(args, _value);
-            } else {
-                JS::AutoValueArray<3> args(_context);
-                ValueReader(_context, args[0])
-                    .fromDouble(static_cast<double>(static_cast<long long>(nativeUnsignedLong)));
-                ValueReader(_context, args[1]).fromDouble(nativeUnsignedLong >> 32);
-                ValueReader(_context, args[2])
-                    .fromDouble(
-                        static_cast<unsigned long>(nativeUnsignedLong & 0x00000000ffffffff));
-                scope->getProto<NumberLongInfo>().newInstance(args, _value);
-            }
-
+            JS::RootedObject thisv(_context);
+            scope->getProto<NumberLongInfo>().newObject(&thisv);
+            JS_SetPrivate(thisv, scope->trackedNew<int64_t>(elem.numberLong()));
+            _value.setObjectOrNull(thisv);
             return;
         }
         case mongo::NumberDecimal: {
@@ -235,40 +206,43 @@ void ValueReader::fromBSONElement(const BSONElement& elem, const BSONObj& parent
 }
 
 void ValueReader::fromBSON(const BSONObj& obj, const BSONObj* parent, bool readOnly) {
+    JS::RootedObject child(_context);
+
+    bool filledDBRef = false;
     if (obj.firstElementType() == String && str::equals(obj.firstElementFieldName(), "$ref")) {
         BSONObjIterator it(obj);
-        const BSONElement ref = it.next();
+        it.next();
         const BSONElement id = it.next();
 
         if (id.ok() && str::equals(id.fieldName(), "$id")) {
-            JS::AutoValueArray<2> args(_context);
-
-            ValueReader(_context, args[0]).fromBSONElement(ref, parent ? *parent : obj, readOnly);
-
-            // id can be a subobject
-            ValueReader(_context, args[1]).fromBSONElement(id, parent ? *parent : obj, readOnly);
-
-            JS::RootedObject robj(_context);
-
-            auto scope = getScope(_context);
-
-            scope->getProto<DBRefInfo>().newInstance(args, &robj);
-            ObjectWrapper o(_context, robj);
-
-            while (it.more()) {
-                BSONElement elem = it.next();
-                o.setBSONElement(elem.fieldName(), elem, parent ? *parent : obj, readOnly);
-            }
-
-            _value.setObjectOrNull(robj);
-            return;
+            DBRefInfo::make(_context, &child, obj, parent, readOnly);
+            filledDBRef = true;
         }
     }
 
-    JS::RootedObject child(_context);
-    BSONInfo::make(_context, &child, obj, parent, readOnly);
+    if (!filledDBRef) {
+        BSONInfo::make(_context, &child, obj, parent, readOnly);
+    }
 
     _value.setObjectOrNull(child);
+}
+
+void ValueReader::fromBSONArray(const BSONObj& obj, const BSONObj* parent, bool readOnly) {
+    JS::AutoValueVector avv(_context);
+
+    BSONForEach(elem, obj) {
+        JS::RootedValue member(_context);
+
+        ValueReader(_context, &member).fromBSONElement(elem, parent ? *parent : obj, readOnly);
+        if (!avv.append(member)) {
+            uasserted(ErrorCodes::JSInterpreterFailure, "Failed to append to JS array");
+        }
+    }
+    JS::RootedObject array(_context, JS_NewArrayObject(_context, avv));
+    if (!array) {
+        uasserted(ErrorCodes::JSInterpreterFailure, "Failed to JS_NewArrayObject");
+    }
+    _value.setObjectOrNull(array);
 }
 
 /**

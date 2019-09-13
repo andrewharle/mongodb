@@ -1,25 +1,27 @@
 // bson_collection_catalog_entry.h
 
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -34,6 +36,8 @@
 #include <vector>
 
 #include "mongo/db/catalog/collection_catalog_entry.h"
+#include "mongo/db/index/multikey_paths.h"
+#include "mongo/db/storage/kv/kv_prefix.h"
 
 namespace mongo {
 
@@ -47,28 +51,45 @@ public:
 
     virtual ~BSONCollectionCatalogEntry() {}
 
-    virtual CollectionOptions getCollectionOptions(OperationContext* txn) const;
+    virtual CollectionOptions getCollectionOptions(OperationContext* opCtx) const;
 
-    virtual int getTotalIndexCount(OperationContext* txn) const;
+    virtual int getTotalIndexCount(OperationContext* opCtx) const;
 
-    virtual int getCompletedIndexCount(OperationContext* txn) const;
+    virtual int getCompletedIndexCount(OperationContext* opCtx) const;
 
-    virtual BSONObj getIndexSpec(OperationContext* txn, StringData idxName) const;
+    virtual BSONObj getIndexSpec(OperationContext* opCtx, StringData idxName) const;
 
-    virtual void getAllIndexes(OperationContext* txn, std::vector<std::string>* names) const;
+    virtual void getAllIndexes(OperationContext* opCtx, std::vector<std::string>* names) const;
 
-    virtual bool isIndexMultikey(OperationContext* txn, StringData indexName) const;
+    virtual void getReadyIndexes(OperationContext* opCtx, std::vector<std::string>* names) const;
 
-    virtual RecordId getIndexHead(OperationContext* txn, StringData indexName) const;
+    virtual void getAllUniqueIndexes(OperationContext* opCtx,
+                                     std::vector<std::string>* names) const;
 
-    virtual bool isIndexReady(OperationContext* txn, StringData indexName) const;
+    virtual bool isIndexMultikey(OperationContext* opCtx,
+                                 StringData indexName,
+                                 MultikeyPaths* multikeyPaths) const;
+
+    virtual RecordId getIndexHead(OperationContext* opCtx, StringData indexName) const;
+
+    virtual bool isIndexReady(OperationContext* opCtx, StringData indexName) const;
+
+    virtual bool isIndexPresent(OperationContext* opCtx, StringData indexName) const;
+
+    virtual KVPrefix getIndexPrefix(OperationContext* opCtx, StringData indexName) const;
 
     // ------ for implementors
 
     struct IndexMetaData {
         IndexMetaData() {}
-        IndexMetaData(BSONObj s, bool r, RecordId h, bool m)
-            : spec(s), ready(r), head(h), multikey(m) {}
+        IndexMetaData(
+            BSONObj s, bool r, RecordId h, bool m, KVPrefix prefix, bool isBackgroundSecondaryBuild)
+            : spec(s),
+              ready(r),
+              head(h),
+              multikey(m),
+              prefix(prefix),
+              isBackgroundSecondaryBuild(isBackgroundSecondaryBuild) {}
 
         void updateTTLSetting(long long newExpireSeconds);
 
@@ -80,9 +101,14 @@ public:
         bool ready;
         RecordId head;
         bool multikey;
+        KVPrefix prefix = KVPrefix::kNotPrefixed;
+        bool isBackgroundSecondaryBuild;
 
-        // Set to true if the index metadata has path-level multikey information.
-        bool hasMultikeyPaths = false;
+        // If non-empty, 'multikeyPaths' is a vector with size equal to the number of elements in
+        // the index key pattern. Each element in the vector is an ordered set of positions
+        // (starting at 0) into the corresponding indexed field that represent what prefixes of the
+        // indexed field cause the index to be multikey.
+        MultikeyPaths multikeyPaths;
     };
 
     struct MetaData {
@@ -99,12 +125,15 @@ public:
 
         void rename(StringData toNS);
 
+        KVPrefix getMaxPrefix() const;
+
         std::string ns;
         CollectionOptions options;
         std::vector<IndexMetaData> indexes;
+        KVPrefix prefix = KVPrefix::kNotPrefixed;
     };
 
 protected:
-    virtual MetaData _getMetaData(OperationContext* txn) const = 0;
+    virtual MetaData _getMetaData(OperationContext* opCtx) const = 0;
 };
 }

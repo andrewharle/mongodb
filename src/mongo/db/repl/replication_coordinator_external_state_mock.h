@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -38,10 +40,14 @@
 #include "mongo/db/repl/last_vote.h"
 #include "mongo/db/repl/replication_coordinator_external_state.h"
 #include "mongo/stdx/condition_variable.h"
+#include "mongo/stdx/mutex.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/util/net/hostandport.h"
 
 namespace mongo {
+
+class ServiceContext;
+
 namespace repl {
 
 class ReplicationCoordinatorExternalStateMock : public ReplicationCoordinatorExternalState {
@@ -52,41 +58,47 @@ public:
 
     ReplicationCoordinatorExternalStateMock();
     virtual ~ReplicationCoordinatorExternalStateMock();
-    virtual void startThreads(const ReplSettings& settings,
-                              ReplicationCoordinator* replCoord) override;
-    virtual void startMasterSlave(OperationContext*);
-    virtual void shutdown(OperationContext*);
-    virtual Status initializeReplSetStorage(OperationContext* txn,
-                                            const BSONObj& config,
-                                            bool updateReplOpTime);
-    OpTime onTransitionToPrimary(OperationContext* txn, bool isV1ElectionProtocol) override;
+    virtual void startThreads(const ReplSettings& settings) override;
+    virtual void startSteadyStateReplication(OperationContext* opCtx,
+                                             ReplicationCoordinator* replCoord) override;
+    virtual void stopDataReplication(OperationContext* opCtx) override;
+    virtual bool isInitialSyncFlagSet(OperationContext* opCtx) override;
+
+    virtual void shutdown(OperationContext* opCtx);
+    virtual executor::TaskExecutor* getTaskExecutor() const override;
+    virtual ThreadPool* getDbWorkThreadPool() const override;
+    virtual Status runRepairOnLocalDB(OperationContext* opCtx) override;
+    virtual Status initializeReplSetStorage(OperationContext* opCtx, const BSONObj& config);
+    void onDrainComplete(OperationContext* opCtx) override;
+    OpTime onTransitionToPrimary(OperationContext* opCtx, bool isV1ElectionProtocol) override;
     virtual void forwardSlaveProgress();
-    virtual OID ensureMe(OperationContext*);
-    virtual bool isSelf(const HostAndPort& host);
-    virtual HostAndPort getClientHostAndPort(const OperationContext* txn);
-    virtual StatusWith<BSONObj> loadLocalConfigDocument(OperationContext* txn);
-    virtual Status storeLocalConfigDocument(OperationContext* txn, const BSONObj& config);
-    virtual StatusWith<LastVote> loadLocalLastVoteDocument(OperationContext* txn);
-    virtual Status storeLocalLastVoteDocument(OperationContext* txn, const LastVote& lastVote);
-    virtual void setGlobalTimestamp(const Timestamp& newTime);
-    virtual StatusWith<OpTime> loadLastOpTime(OperationContext* txn);
-    virtual void cleanUpLastApplyBatch(OperationContext* txn);
+    virtual bool isSelf(const HostAndPort& host, ServiceContext* service);
+    virtual HostAndPort getClientHostAndPort(const OperationContext* opCtx);
+    virtual StatusWith<BSONObj> loadLocalConfigDocument(OperationContext* opCtx);
+    virtual Status storeLocalConfigDocument(OperationContext* opCtx, const BSONObj& config);
+    virtual StatusWith<LastVote> loadLocalLastVoteDocument(OperationContext* opCtx);
+    virtual Status storeLocalLastVoteDocument(OperationContext* opCtx, const LastVote& lastVote);
+    virtual void setGlobalTimestamp(ServiceContext* service, const Timestamp& newTime);
+    virtual Timestamp getGlobalTimestamp(ServiceContext* service);
+    bool oplogExists(OperationContext* opCtx) override;
+    virtual StatusWith<OpTime> loadLastOpTime(OperationContext* opCtx);
     virtual void closeConnections();
-    virtual void killAllUserOperations(OperationContext* txn);
-    virtual void clearShardingState();
-    virtual void recoverShardingState(OperationContext* txn);
+    virtual void killAllUserOperations(OperationContext* opCtx);
+    virtual void shardingOnStepDownHook();
     virtual void signalApplierToChooseNewSyncSource();
-    virtual void signalApplierToCancelFetcher();
-    virtual OperationContext* createOperationContext(const std::string& threadName);
-    virtual void dropAllTempCollections(OperationContext* txn);
+    virtual void stopProducer();
+    virtual void startProducerIfStopped();
     virtual void dropAllSnapshots();
-    virtual void updateCommittedSnapshot(SnapshotName newCommitPoint);
-    virtual void createSnapshot(OperationContext* txn, SnapshotName name);
-    virtual void forceSnapshotCreation();
+    virtual void updateCommittedSnapshot(const OpTime& newCommitPoint);
+    virtual void updateLocalSnapshot(const OpTime& optime);
     virtual bool snapshotsEnabled() const;
-    virtual void notifyOplogMetadataWaiters();
+    virtual void notifyOplogMetadataWaiters(const OpTime& committedOpTime);
+    boost::optional<OpTime> getEarliestDropPendingOpTime() const final;
     virtual double getElectionTimeoutOffsetLimitFraction() const;
-    virtual bool isReadCommittedSupportedByStorageEngine(OperationContext* txn) const;
+    virtual bool isReadCommittedSupportedByStorageEngine(OperationContext* opCtx) const;
+    virtual bool isReadConcernSnapshotSupportedByStorageEngine(OperationContext* opCtx) const;
+    virtual std::size_t getOplogFetcherSteadyStateMaxFetcherRestarts() const override;
+    virtual std::size_t getOplogFetcherInitialSyncMaxFetcherRestarts() const override;
 
     /**
      * Adds "host" to the list of hosts that this mock will match when responding to "isSelf"
@@ -98,6 +110,11 @@ public:
      * Sets the return value for subsequent calls to loadLocalConfigDocument().
      */
     void setLocalConfigDocument(const StatusWith<BSONObj>& localConfigDocument);
+
+    /**
+     * Initializes the return value for subsequent calls to loadLocalLastVoteDocument().
+     */
+    Status createLocalLastVoteCollection(OperationContext* opCtx) final;
 
     /**
      * Sets the return value for subsequent calls to loadLocalLastVoteDocument().
@@ -121,12 +138,6 @@ public:
     void setStoreLocalConfigDocumentStatus(Status status);
 
     /**
-     * Sets whether or not subsequent calls to storeLocalConfigDocument() should hang
-     * indefinitely or not based on the value of "hang".
-     */
-    void setStoreLocalConfigDocumentToHang(bool hang);
-
-    /**
      * Sets the return value for subsequent calls to storeLocalLastVoteDocument().
      * If "status" is Status::OK(), the subsequent calls will call the underlying funtion.
      */
@@ -138,10 +149,7 @@ public:
      */
     void setStoreLocalLastVoteDocumentToHang(bool hang);
 
-    /**
-     * Returns true if applier was signaled to cancel fetcher.
-     */
-    bool isApplierSignaledToCancelFetcher() const;
+    void setFirstOpTimeOfMyTerm(const OpTime& opTime);
 
     /**
      * Returns true if startThreads() has been called.
@@ -158,6 +166,26 @@ public:
      */
     void setAreSnapshotsEnabled(bool val);
 
+    /**
+     * Sets the election timeout offset limit. Default is 0.15.
+     */
+    void setElectionTimeoutOffsetLimitFraction(double val);
+
+    /**
+     * Noop
+     */
+    virtual void setupNoopWriter(Seconds waitTime);
+
+    /**
+     * Noop
+     */
+    virtual void startNoopWriter(OpTime lastKnownOpTime);
+
+    /**
+     * Noop
+     */
+    virtual void stopNoopWriter();
+
 private:
     StatusWith<BSONObj> _localRsConfigDocument;
     StatusWith<LastVote> _localRsLastVoteDocument;
@@ -166,20 +194,18 @@ private:
     bool _canAcquireGlobalSharedLock;
     Status _storeLocalConfigDocumentStatus;
     Status _storeLocalLastVoteDocumentStatus;
-    // mutex and cond var for controlling stroeLocalConfigDocument()'s hanging
-    stdx::mutex _shouldHangConfigMutex;
-    stdx::condition_variable _shouldHangConfigCondVar;
     // mutex and cond var for controlling stroeLocalLastVoteDocument()'s hanging
     stdx::mutex _shouldHangLastVoteMutex;
     stdx::condition_variable _shouldHangLastVoteCondVar;
-    bool _storeLocalConfigDocumentShouldHang;
     bool _storeLocalLastVoteDocumentShouldHang;
-    bool _isApplierSignaledToCancelFetcher;
     bool _connectionsClosed;
     HostAndPort _clientHostAndPort;
     bool _threadsStarted;
     bool _isReadCommittedSupported = true;
     bool _areSnapshotsEnabled = true;
+    OpTime _firstOpTimeOfMyTerm;
+    double _electionTimeoutOffsetLimitFraction = 0.15;
+    Timestamp _globalTimestamp;
 };
 
 }  // namespace repl

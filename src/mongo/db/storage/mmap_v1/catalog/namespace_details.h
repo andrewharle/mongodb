@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2008 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -28,6 +30,7 @@
 
 #pragma once
 
+#include "mongo/base/static_assert.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/storage/mmap_v1/catalog/index_details.h"
 #include "mongo/db/storage/mmap_v1/catalog/namespace.h"
@@ -152,7 +155,7 @@ public:
                 return 0;
             return (Extra*)(((char*)d) + _next);
         }
-        void setNext(OperationContext* txn, long ofs);
+        void setNext(OperationContext* opCtx, long ofs);
         void copy(NamespaceDetails* d, const Extra& e) {
             memcpy(this, &e, sizeof(Extra));
             _next = 0;
@@ -164,15 +167,18 @@ public:
         return (Extra*)(((char*)this) + _extraOffset);
     }
     /* add extra space for indexes when more than 10 */
-    Extra* allocExtra(OperationContext* txn, StringData ns, NamespaceIndex& ni, int nindexessofar);
+    Extra* allocExtra(OperationContext* opCtx,
+                      StringData ns,
+                      NamespaceIndex& ni,
+                      int nindexessofar);
 
-    void copyingFrom(OperationContext* txn,
+    void copyingFrom(OperationContext* opCtx,
                      StringData thisns,
                      NamespaceIndex& ni,
                      NamespaceDetails* src);  // must be called when renaming a NS to fix up extra
 
 public:
-    void setMaxCappedDocs(OperationContext* txn, long long max);
+    void setMaxCappedDocs(OperationContext* opCtx, long long max);
 
     enum UserFlags {
         Flag_UsePowerOf2Sizes = 1 << 0,
@@ -209,12 +215,12 @@ public:
      * This fetches the IndexDetails for the next empty index slot. The caller must populate
      * returned object.  This handles allocating extra index space, if necessary.
      */
-    IndexDetails& getNextIndexDetails(OperationContext* txn, Collection* collection);
+    IndexDetails& getNextIndexDetails(OperationContext* opCtx, Collection* collection);
 
-    NamespaceDetails* writingWithoutExtra(OperationContext* txn);
+    NamespaceDetails* writingWithoutExtra(OperationContext* opCtx);
 
     /** Make all linked Extra objects writeable as well */
-    NamespaceDetails* writingWithExtra(OperationContext* txn);
+    NamespaceDetails* writingWithExtra(OperationContext* opCtx);
 
     /**
      * Returns the offset of the specified index name within the array of indexes. Must be
@@ -222,7 +228,7 @@ public:
      *
      * @return > 0 if index name was found, -1 otherwise.
      */
-    int _catalogFindIndexByName(OperationContext* txn,
+    int _catalogFindIndexByName(OperationContext* opCtx,
                                 const Collection* coll,
                                 StringData name,
                                 bool includeBackgroundInProgress) const;
@@ -233,19 +239,18 @@ private:
      * a and b are 2 index ids, whose contents will be swapped
      * must have a lock on the entire collection to do this
      */
-    void swapIndex(OperationContext* txn, int a, int b);
+    void swapIndex(OperationContext* opCtx, int a, int b);
 
     friend class IndexCatalog;
     friend class IndexCatalogEntry;
 
     /** Update cappedLastDelRecLastExtent() after capExtent changed in cappedTruncateAfter() */
     void cappedTruncateLastDelUpdate();
-    static_assert(NIndexesMax <= NIndexesBase + NIndexesExtra * 2,
-                  "NIndexesMax <= NIndexesBase + NIndexesExtra * 2");
-    static_assert(NIndexesMax <= 64, "NIndexesMax <= 64");  // multiKey bits
-    static_assert(sizeof(NamespaceDetails::Extra) == 496, "sizeof(NamespaceDetails::Extra) == 496");
+    MONGO_STATIC_ASSERT(NIndexesMax <= NIndexesBase + NIndexesExtra * 2);
+    MONGO_STATIC_ASSERT(NIndexesMax <= 64);  // multiKey bits
+    MONGO_STATIC_ASSERT(sizeof(NamespaceDetails::Extra) == 496);
 };  // NamespaceDetails
-static_assert(sizeof(NamespaceDetails) == 496, "sizeof(NamespaceDetails) == 496");
+MONGO_STATIC_ASSERT(sizeof(NamespaceDetails) == 496);
 #pragma pack()
 
 }  // namespace mongo

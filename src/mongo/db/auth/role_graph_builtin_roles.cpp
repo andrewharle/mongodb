@@ -1,29 +1,31 @@
+
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/db/auth/role_graph.h"
@@ -62,6 +64,7 @@ const std::string BUILTIN_ROLE_CLUSTER_MANAGEMENT = "clusterManager";
 const std::string BUILTIN_ROLE_BACKUP = "backup";
 const std::string BUILTIN_ROLE_RESTORE = "restore";
 const std::string BUILTIN_ROLE_ENABLE_SHARDING = "enableSharding";
+const std::string BUILTIN_ROLE_QUERYABLE_BACKUP = "__queryableBackup";
 
 /// Actions that the "read" role may perform on a normal resources of a specific database, and
 /// that the "readAnyDatabase" role may perform on normal resources of any database.
@@ -108,94 +111,160 @@ void operator+=(ActionSet& target, const ActionSet& source) {
 
 // This sets up the built-in role ActionSets.  This is what determines what actions each role
 // is authorized to perform
+// Note: we suppress clang-format for this function because we want each enum value on a separate
+// line
+// clang-format off
 MONGO_INITIALIZER(AuthorizationBuiltinRoles)(InitializerContext* context) {
     // Read role
-    readRoleActions << ActionType::collStats << ActionType::dbHash << ActionType::dbStats
-                    << ActionType::find << ActionType::killCursors << ActionType::listCollections
-                    << ActionType::listIndexes << ActionType::planCacheRead;
+    readRoleActions
+        << ActionType::changeStream
+        << ActionType::collStats
+        << ActionType::dbHash
+        << ActionType::dbStats
+        << ActionType::find
+        << ActionType::killCursors
+        << ActionType::listCollections
+        << ActionType::listIndexes
+        << ActionType::planCacheRead;
 
     // Read-write role
     readWriteRoleActions += readRoleActions;
-    readWriteRoleActions << ActionType::convertToCapped   // db admin gets this also
-                         << ActionType::createCollection  // db admin gets this also
-                         << ActionType::dropCollection << ActionType::dropIndex
-                         << ActionType::emptycapped << ActionType::createIndex << ActionType::insert
-                         << ActionType::remove
-                         << ActionType::renameCollectionSameDB  // db admin gets this also
-                         << ActionType::update;
+    readWriteRoleActions
+        << ActionType::convertToCapped  // db admin gets this also
+        << ActionType::createCollection  // db admin gets this also
+        << ActionType::dropCollection
+        << ActionType::dropIndex
+        << ActionType::emptycapped
+        << ActionType::createIndex
+        << ActionType::insert
+        << ActionType::remove
+        << ActionType::renameCollectionSameDB  // db admin gets this also
+        << ActionType::update;
 
     // User admin role
-    userAdminRoleActions << ActionType::changeCustomData << ActionType::changePassword
-                         << ActionType::createUser << ActionType::createRole << ActionType::dropUser
-                         << ActionType::dropRole << ActionType::grantRole << ActionType::revokeRole
-                         << ActionType::viewUser << ActionType::viewRole;
+    userAdminRoleActions
+        << ActionType::changeCustomData
+        << ActionType::changePassword
+        << ActionType::createUser
+        << ActionType::createRole
+        << ActionType::dropUser
+        << ActionType::dropRole
+        << ActionType::grantRole
+        << ActionType::revokeRole
+        << ActionType::setAuthenticationRestriction
+        << ActionType::viewUser
+        << ActionType::viewRole;
 
 
     // DB admin role
     dbAdminRoleActions
-        << ActionType::bypassDocumentValidation << ActionType::collMod
-        << ActionType::collStats                               // clusterMonitor gets this also
-        << ActionType::compact << ActionType::convertToCapped  // read_write gets this also
-        << ActionType::createCollection                        // read_write gets this also
-        << ActionType::dbStats                                 // clusterMonitor gets this also
+        << ActionType::bypassDocumentValidation
+        << ActionType::collMod
+        << ActionType::collStats  // clusterMonitor gets this also
+        << ActionType::compact
+        << ActionType::convertToCapped  // read_write gets this also
+        << ActionType::createCollection // read_write gets this also
+        << ActionType::dbStats  // clusterMonitor gets this also
         << ActionType::dropCollection
         << ActionType::dropDatabase  // clusterAdmin gets this also TODO(spencer): should
                                      // readWriteAnyDatabase?
-        << ActionType::dropIndex << ActionType::createIndex << ActionType::enableProfiler
-        << ActionType::listCollections << ActionType::listIndexes
-        << ActionType::planCacheIndexFilter << ActionType::planCacheRead
-        << ActionType::planCacheWrite << ActionType::reIndex
+        << ActionType::dropIndex
+        << ActionType::createIndex
+        << ActionType::enableProfiler
+        << ActionType::listCollections
+        << ActionType::listIndexes
+        << ActionType::planCacheIndexFilter
+        << ActionType::planCacheRead
+        << ActionType::planCacheWrite
+        << ActionType::reIndex
         << ActionType::renameCollectionSameDB  // read_write gets this also
-        << ActionType::repairDatabase << ActionType::storageDetails << ActionType::validate;
+        << ActionType::repairDatabase
+        << ActionType::storageDetails
+        << ActionType::validate;
 
     // clusterMonitor role actions that target the cluster resource
     clusterMonitorRoleClusterActions
-        << ActionType::connPoolStats << ActionType::getCmdLineOpts << ActionType::getLog
-        << ActionType::getParameter << ActionType::getShardMap << ActionType::hostInfo
-        << ActionType::listDatabases << ActionType::listShards  // clusterManager gets this also
-        << ActionType::netstat << ActionType::replSetGetConfig  // clusterManager gets this also
-        << ActionType::replSetGetStatus                         // clusterManager gets this also
-        << ActionType::serverStatus << ActionType::top << ActionType::inprog
+        << ActionType::checkFreeMonitoringStatus
+        << ActionType::connPoolStats
+        << ActionType::getCmdLineOpts
+        << ActionType::getLog
+        << ActionType::getParameter
+        << ActionType::getShardMap
+        << ActionType::hostInfo
+        << ActionType::listCursors // clusterManager gets this also
+        << ActionType::listDatabases
+        << ActionType::listSessions // clusterManager gets this also
+        << ActionType::listShards  // clusterManager gets this also
+        << ActionType::netstat
+        << ActionType::replSetGetConfig  // clusterManager gets this also
+        << ActionType::replSetGetStatus  // clusterManager gets this also
+        << ActionType::serverStatus 
+        << ActionType::top
+        << ActionType::useUUID
+        << ActionType::inprog
         << ActionType::shardingState;
 
     // clusterMonitor role actions that target a database (or collection) resource
-    clusterMonitorRoleDatabaseActions << ActionType::collStats  // dbAdmin gets this also
-                                      << ActionType::dbStats    // dbAdmin gets this also
-                                      << ActionType::getShardVersion << ActionType::indexStats;
+    clusterMonitorRoleDatabaseActions 
+        << ActionType::collStats  // dbAdmin gets this also
+        << ActionType::dbStats  // dbAdmin gets this also
+        << ActionType::getDatabaseVersion
+        << ActionType::getShardVersion
+        << ActionType::indexStats;
 
     // hostManager role actions that target the cluster resource
     hostManagerRoleClusterActions
         << ActionType::applicationMessage  // clusterManager gets this also
-        << ActionType::connPoolSync << ActionType::cpuProfiler << ActionType::logRotate
-        << ActionType::setParameter << ActionType::shutdown << ActionType::touch
-        << ActionType::unlock << ActionType::diagLogging
+        << ActionType::connPoolSync
+        << ActionType::cpuProfiler
+        << ActionType::logRotate
+        << ActionType::setParameter
+        << ActionType::shutdown
+        << ActionType::touch
+        << ActionType::unlock
         << ActionType::flushRouterConfig  // clusterManager gets this also
         << ActionType::fsync
-        << ActionType::invalidateUserCache            // userAdminAnyDatabase gets this also
-        << ActionType::killop << ActionType::resync;  // clusterManager gets this also
+        << ActionType::invalidateUserCache // userAdminAnyDatabase gets this also
+        << ActionType::killAnyCursor
+        << ActionType::killAnySession
+        << ActionType::killop
+        << ActionType::replSetResizeOplog
+        << ActionType::resync;  // clusterManager gets this also
 
     // hostManager role actions that target the database resource
-    hostManagerRoleDatabaseActions << ActionType::killCursors << ActionType::repairDatabase;
+    hostManagerRoleDatabaseActions
+        << ActionType::killCursors
+        << ActionType::repairDatabase;
 
 
     // clusterManager role actions that target the cluster resource
     clusterManagerRoleClusterActions
-        << ActionType::appendOplogNote     // backup gets this also
+        << ActionType::appendOplogNote  // backup gets this also
         << ActionType::applicationMessage  // hostManager gets this also
         << ActionType::replSetConfigure
-        << ActionType::replSetGetConfig                          // clusterMonitor gets this also
-        << ActionType::replSetGetStatus                          // clusterMonitor gets this also
-        << ActionType::replSetStateChange << ActionType::resync  // hostManager gets this also
-        << ActionType::addShard << ActionType::removeShard
-        << ActionType::listShards         // clusterMonitor gets this also
+        << ActionType::replSetGetConfig  // clusterMonitor gets this also
+        << ActionType::replSetGetStatus  // clusterMonitor gets this also
+        << ActionType::replSetStateChange
+        << ActionType::resync  // hostManager gets this also
+        << ActionType::addShard 
+        << ActionType::removeShard
+        << ActionType::listCursors // clusterManager gets this also
+        << ActionType::listSessions  // clusterMonitor gets this also
+        << ActionType::listShards  // clusterMonitor gets this also
         << ActionType::flushRouterConfig  // hostManager gets this also
-        << ActionType::cleanupOrphaned;
+        << ActionType::cleanupOrphaned
+        << ActionType::setFeatureCompatibilityVersion
+        << ActionType::setFreeMonitoring;
 
-    clusterManagerRoleDatabaseActions << ActionType::splitChunk << ActionType::moveChunk
-                                      << ActionType::enableSharding << ActionType::splitVector;
+    clusterManagerRoleDatabaseActions
+        << ActionType::splitChunk
+        << ActionType::moveChunk
+        << ActionType::enableSharding
+        << ActionType::splitVector;
 
     return Status::OK();
 }
+// clang-format on
 
 void addReadOnlyDbPrivileges(PrivilegeVector* privileges, StringData dbName) {
     Privilege::addPrivilegeToPrivilegeVector(
@@ -292,6 +361,10 @@ void addUserAdminAnyDbPrivileges(PrivilegeVector* privileges) {
     Privilege::addPrivilegeToPrivilegeVector(
         privileges, Privilege(ResourcePattern::forAnyNormalResource(), userAdminRoleActions));
     Privilege::addPrivilegeToPrivilegeVector(
+        privileges, Privilege(ResourcePattern::forDatabaseName("local"), userAdminRoleActions));
+    Privilege::addPrivilegeToPrivilegeVector(
+        privileges, Privilege(ResourcePattern::forDatabaseName("config"), userAdminRoleActions));
+    Privilege::addPrivilegeToPrivilegeVector(
         privileges, Privilege(ResourcePattern::forClusterResource(), ActionType::listDatabases));
     Privilege::addPrivilegeToPrivilegeVector(
         privileges,
@@ -299,6 +372,8 @@ void addUserAdminAnyDbPrivileges(PrivilegeVector* privileges) {
     Privilege::addPrivilegeToPrivilegeVector(
         privileges,
         Privilege(ResourcePattern::forClusterResource(), ActionType::invalidateUserCache));
+    Privilege::addPrivilegeToPrivilegeVector(
+        privileges, Privilege(ResourcePattern::forClusterResource(), ActionType::viewUser));
 
 
     ActionSet readRoleAndIndexActions;
@@ -394,14 +469,12 @@ void addClusterManagerPrivileges(PrivilegeVector* privileges) {
     Privilege::addPrivilegeToPrivilegeVector(
         privileges,
         Privilege(ResourcePattern::forAnyNormalResource(), clusterManagerRoleDatabaseActions));
-
     Privilege::addPrivilegeToPrivilegeVector(
         privileges,
         Privilege(ResourcePattern::forDatabaseName("config"), clusterManagerRoleDatabaseActions));
     Privilege::addPrivilegeToPrivilegeVector(
         privileges,
         Privilege(ResourcePattern::forDatabaseName("local"), clusterManagerRoleDatabaseActions));
-
     Privilege::addPrivilegeToPrivilegeVector(
         privileges,
         Privilege(ResourcePattern::forExactNamespace(NamespaceString("local", "system.replset")),
@@ -424,7 +497,8 @@ void addClusterAdminPrivileges(PrivilegeVector* privileges) {
         privileges, Privilege(ResourcePattern::forAnyNormalResource(), ActionType::dropDatabase));
 }
 
-void addBackupPrivileges(PrivilegeVector* privileges) {
+
+void addQueryableBackupPrivileges(PrivilegeVector* privileges) {
     Privilege::addPrivilegeToPrivilegeVector(
         privileges, Privilege(ResourcePattern::forAnyResource(), ActionType::collStats));
     Privilege::addPrivilegeToPrivilegeVector(
@@ -436,7 +510,7 @@ void addBackupPrivileges(PrivilegeVector* privileges) {
 
     ActionSet clusterActions;
     clusterActions << ActionType::getParameter  // To check authSchemaVersion
-                   << ActionType::listDatabases << ActionType::appendOplogNote;  // For BRS
+                   << ActionType::listDatabases << ActionType::useUUID;
     Privilege::addPrivilegeToPrivilegeVector(
         privileges, Privilege(ResourcePattern::forClusterResource(), clusterActions));
 
@@ -489,19 +563,33 @@ void addBackupPrivileges(PrivilegeVector* privileges) {
             ResourcePattern::forExactNamespace(AuthorizationManager::versionCollectionNamespace),
             ActionType::find));
 
+    Privilege::addPrivilegeToPrivilegeVector(
+        privileges,
+        Privilege(ResourcePattern::forExactNamespace(NamespaceString("config", "settings")),
+                  ActionType::find));
+}
+
+void addBackupPrivileges(PrivilegeVector* privileges) {
+    ActionSet clusterActions;
+    clusterActions << ActionType::appendOplogNote;  // For BRS
+    Privilege::addPrivilegeToPrivilegeVector(
+        privileges, Privilege(ResourcePattern::forClusterResource(), clusterActions));
+
     ActionSet configSettingsActions;
-    configSettingsActions << ActionType::insert << ActionType::update << ActionType::find;
+    configSettingsActions << ActionType::insert << ActionType::update;
     Privilege::addPrivilegeToPrivilegeVector(
         privileges,
         Privilege(ResourcePattern::forExactNamespace(NamespaceString("config", "settings")),
                   configSettingsActions));
+
+    addQueryableBackupPrivileges(privileges);
 }
 
 void addRestorePrivileges(PrivilegeVector* privileges) {
     ActionSet actions;
     actions << ActionType::bypassDocumentValidation << ActionType::collMod
-            << ActionType::createCollection << ActionType::createIndex << ActionType::dropCollection
-            << ActionType::insert;
+            << ActionType::convertToCapped << ActionType::createCollection
+            << ActionType::createIndex << ActionType::dropCollection << ActionType::insert;
 
     Privilege::addPrivilegeToPrivilegeVector(
         privileges, Privilege(ResourcePattern::forAnyNormalResource(), actions));
@@ -572,6 +660,12 @@ void addRestorePrivileges(PrivilegeVector* privileges) {
         Privilege(
             ResourcePattern::forExactNamespace(AuthorizationManager::rolesCollectionNamespace),
             ActionType::createIndex));
+
+    // Need to be able to force UUID consistency in sharded restores
+    Privilege::addPrivilegeToPrivilegeVector(
+        privileges,
+        Privilege(ResourcePattern::forClusterResource(),
+                  {ActionType::forceUUID, ActionType::useUUID}));
 }
 
 void addRootRolePrivileges(PrivilegeVector* privileges) {
@@ -622,6 +716,8 @@ bool RoleGraph::addPrivilegesForBuiltinRole(const RoleName& roleName, PrivilegeV
         addClusterManagerPrivileges(result);
     } else if (isAdminDB && roleName.getRole() == BUILTIN_ROLE_CLUSTER_ADMIN) {
         addClusterAdminPrivileges(result);
+    } else if (isAdminDB && roleName.getRole() == BUILTIN_ROLE_QUERYABLE_BACKUP) {
+        addQueryableBackupPrivileges(result);
     } else if (isAdminDB && roleName.getRole() == BUILTIN_ROLE_BACKUP) {
         addBackupPrivileges(result);
     } else if (isAdminDB && roleName.getRole() == BUILTIN_ROLE_RESTORE) {
@@ -633,6 +729,8 @@ bool RoleGraph::addPrivilegesForBuiltinRole(const RoleName& roleName, PrivilegeV
     } else {
         return false;
     }
+
+    // One of the roles has matched, otherwise we would have returned already.
     return true;
 }
 
@@ -643,7 +741,9 @@ void RoleGraph::generateUniversalPrivileges(PrivilegeVector* privileges) {
 }
 
 bool RoleGraph::isBuiltinRole(const RoleName& role) {
-    if (!NamespaceString::validDBName(role.getDB()) || role.getDB() == "$external") {
+    if (!NamespaceString::validDBName(role.getDB(),
+                                      NamespaceString::DollarInDbNameBehavior::Allow) ||
+        role.getDB() == "$external") {
         return false;
     }
 
@@ -685,6 +785,8 @@ bool RoleGraph::isBuiltinRole(const RoleName& role) {
         return true;
     } else if (isAdminDB && role.getRole() == BUILTIN_ROLE_INTERNAL) {
         return true;
+    } else if (isAdminDB && role.getRole() == BUILTIN_ROLE_QUERYABLE_BACKUP) {
+        return true;
     }
     return false;
 }
@@ -710,6 +812,7 @@ void RoleGraph::_createBuiltinRolesForDBIfNeeded(const std::string& dbname) {
         _createBuiltinRoleIfNeeded(RoleName(BUILTIN_ROLE_RESTORE, dbname));
         _createBuiltinRoleIfNeeded(RoleName(BUILTIN_ROLE_ROOT, dbname));
         _createBuiltinRoleIfNeeded(RoleName(BUILTIN_ROLE_INTERNAL, dbname));
+        _createBuiltinRoleIfNeeded(RoleName(BUILTIN_ROLE_QUERYABLE_BACKUP, dbname));
     }
 }
 

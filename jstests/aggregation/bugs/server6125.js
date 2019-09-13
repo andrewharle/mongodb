@@ -10,9 +10,7 @@
 // to make results array nested (problem 2)
 function nestArray(nstArray) {
     for (x = 0; x < nstArray.length; x++) {
-        nstArray[x].a = {
-            b: nstArray[x].a
-        };
+        nstArray[x].a = {b: nstArray[x].a};
     }
 }
 
@@ -58,8 +56,8 @@ function setupArray() {
         // Symbol not implemented in JS
         {_id: 5, a: {}, ty: "Object"},
         {_id: 6, a: new DBRef("test.s6125", ObjectId("0102030405060708090A0B0C")), ty: "DBRef"},
-        {_id: 7, a: [], ty: "Empty Array"},
-        {_id: 8, a: [1, 2, "a", "B"], ty: "Array"},
+        {_id: 7, a: [[]], ty: "Empty Array"},
+        {_id: 8, a: [[1, 2, "a", "B"]], ty: "Array"},
         {_id: 9, a: BinData(0, "77+9"), ty: "BinData"},
         {_id: 10, a: new ObjectId("0102030405060708090A0B0C"), ty: "ObjectId"},
         {_id: 11, a: true, ty: "Boolean"},
@@ -80,6 +78,8 @@ function setupArray() {
 //***
 // Begin testing for SERVER-6125
 //***
+Random.setRandomSeed();
+
 // problem 1, does aggregate $sort work with all types
 runSort({a: 1}, false, "p1");
 

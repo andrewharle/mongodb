@@ -8,8 +8,9 @@ t.drop();
 t.save({});
 
 function week(date) {
-    return t.aggregate({$project: {a: {$week: date}}},
-                       {$match: {a: {$type: 16 /* Int type expected */}}})
+    return t
+        .aggregate({$project: {a: {$week: date}}},
+                   {$match: {a: {$type: 16 /* Int type expected */}}})
         .toArray()[0]
         .a;
 }
@@ -142,11 +143,11 @@ assertErrorCode(t, {$project: {a: {$week: 'foo'}}}, 16006);
 assertWeek(8, [new Date(Date.UTC(2016, 1, 27))]);
 
 // Wrong number of arguments.
-assertErrorCode(t, {$project: {a: {$week: []}}}, 16020);
+assertErrorCode(t, {$project: {a: {$week: []}}}, 40536);
 assertErrorCode(
     t,
     {$project: {a: {$week: [new Date(Date.UTC(2020, 1, 28)), new Date(Date.UTC(2020, 1, 29))]}}},
-    16020);
+    40536);
 
 // From a field path expression.
 t.remove({});

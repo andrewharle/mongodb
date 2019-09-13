@@ -1,5 +1,5 @@
 /*-
- * Public Domain 2014-2016 MongoDB, Inc.
+ * Public Domain 2014-2019 MongoDB, Inc.
  * Public Domain 2008-2014 WiredTiger, Inc.
  *
  * This is free and unencumbered software released into the public domain.
@@ -28,9 +28,9 @@
 
 #include "cursor_order.h"
 
-static void *append_insert(void *);
+static WT_THREAD_RET append_insert(void *);
 static void  print_stats(SHARED_CONFIG *);
-static void *reverse_scan(void *);
+static WT_THREAD_RET reverse_scan(void *);
 
 typedef struct {
 	char *name;				/* object name */
@@ -45,15 +45,13 @@ typedef struct {
 
 static INFO *run_info;
 
-int
+void
 ops_start(SHARED_CONFIG *cfg)
 {
 	struct timeval start, stop;
+	wt_thread_t *tids;
 	double seconds;
-	pthread_t *tids;
 	uint64_t i, name_index, offset, total_nops;
-	int ret;
-	void *thread_ret;
 
 	tids = NULL;	/* Keep GCC 4.1 happy. */
 	total_nops = 0;
@@ -114,18 +112,15 @@ ops_start(SHARED_CONFIG *cfg)
 
 	/* Create threads. */
 	for (i = 0; i < cfg->reverse_scanners; ++i)
-		if ((ret = pthread_create(
-		    &tids[i], NULL, reverse_scan, (void *)(uintptr_t)i)) != 0)
-			testutil_die(ret, "pthread_create");
-	for (; i < cfg->reverse_scanners + cfg->append_inserters; ++i) {
-		if ((ret = pthread_create(
-		    &tids[i], NULL, append_insert, (void *)(uintptr_t)i)) != 0)
-			testutil_die(ret, "pthread_create");
-	}
+		testutil_check(__wt_thread_create(NULL,
+		    &tids[i], reverse_scan, (void *)(uintptr_t)i));
+	for (; i < cfg->reverse_scanners + cfg->append_inserters; ++i)
+		testutil_check(__wt_thread_create(NULL,
+		    &tids[i], append_insert, (void *)(uintptr_t)i));
 
 	/* Wait for the threads. */
 	for (i = 0; i < cfg->reverse_scanners + cfg->append_inserters; ++i)
-		(void)pthread_join(tids[i], &thread_ret);
+		testutil_check(__wt_thread_join(NULL, &tids[i]));
 
 	(void)gettimeofday(&stop, NULL);
 	seconds = (stop.tv_sec - start.tv_sec) +
@@ -154,8 +149,6 @@ ops_start(SHARED_CONFIG *cfg)
 
 	free(run_info);
 	free(tids);
-
-	return (0);
 }
 
 /*
@@ -177,8 +170,7 @@ reverse_scan_op(
 	prev_key = this_key = 0;
 
 	/* Reset the cursor */
-	if ((ret = cursor->reset(cursor)) != 0)
-		testutil_die(ret, "cursor.reset");
+	testutil_check(cursor->reset(cursor));
 
 	/* Save the key range. */
 	initial_key_range = cfg->key_range - cfg->append_inserters;
@@ -191,13 +183,11 @@ reverse_scan_op(
 		}
 
 		if (cfg->ftype == ROW) {
-			if ((ret = cursor->get_key(cursor, &strkey)) != 0)
-				testutil_die(ret, "cursor.get_key");
+			testutil_check(cursor->get_key(cursor, &strkey));
 			this_key = (uint64_t)atol(strkey);
 		} else
-			if ((ret = cursor->get_key(
-			    cursor, (uint64_t *)&this_key)) != 0)
-				testutil_die(ret, "cursor.get_key");
+			testutil_check(cursor->get_key(
+			    cursor, (uint64_t *)&this_key));
 
 		if (i == 0 && this_key < initial_key_range)
 			testutil_die(ret,
@@ -217,7 +207,7 @@ reverse_scan_op(
  * reverse_scan --
  *	Reader thread start function.
  */
-static void *
+static WT_THREAD_RET
 reverse_scan(void *arg)
 {
 	INFO *s;
@@ -226,13 +216,12 @@ reverse_scan(void *arg)
 	WT_SESSION *session;
 	uintmax_t id;
 	uint64_t i;
-	int ret;
 	char tid[128];
 
 	id = (uintmax_t)arg;
 	s = &run_info[id];
 	cfg = s->cfg;
-	testutil_check(__wt_thread_id(tid, sizeof(tid)));
+	testutil_check(__wt_thread_str(tid, sizeof(tid)));
 	__wt_random_init(&s->rnd);
 
 	printf(" reverse scan thread %2" PRIuMAX
@@ -241,17 +230,14 @@ reverse_scan(void *arg)
 
 	__wt_yield();		/* Get all the threads created. */
 
-	if ((ret = cfg->conn->open_session(
-	    cfg->conn, NULL, "isolation=snapshot", &session)) != 0)
-		testutil_die(ret, "conn.open_session");
-	if ((ret = session->open_cursor(
-	    session, s->name, NULL, NULL, &cursor)) != 0)
-		testutil_die(ret, "session.open_cursor");
+	testutil_check(cfg->conn->open_session(
+	    cfg->conn, NULL, "isolation=snapshot", &session));
+	testutil_check(session->open_cursor(
+	    session, s->name, NULL, NULL, &cursor));
 	for (i = 0; i < s->nops && !cfg->thread_finish;
 	    ++i, ++s->reverse_scans, __wt_yield())
 		reverse_scan_op(cfg, session, cursor, s);
-	if ((ret = session->close(session, NULL)) != 0)
-		testutil_die(ret, "session.close");
+	testutil_check(session->close(session, NULL));
 
 	printf(" reverse scan thread %2" PRIuMAX
 	    " stopping: tid: %s, file: %s\n",
@@ -260,7 +246,7 @@ reverse_scan(void *arg)
 	/* Notify all other threads to finish once the first thread is done */
 	cfg->thread_finish = true;
 
-	return (NULL);
+	return (WT_THREAD_RET_VALUE);
 }
 
 /*
@@ -272,9 +258,8 @@ append_insert_op(
     SHARED_CONFIG *cfg, WT_SESSION *session, WT_CURSOR *cursor, INFO *s)
 {
 	WT_ITEM *value, _value;
-	uint64_t keyno;
 	size_t len;
-	int ret;
+	uint64_t keyno;
 	char keybuf[64], valuebuf[64];
 
 	WT_UNUSED(session);
@@ -299,15 +284,14 @@ append_insert_op(
 		value->size = (uint32_t)len;
 		cursor->set_value(cursor, value);
 	}
-	if ((ret = cursor->insert(cursor)) != 0)
-		testutil_die(ret, "cursor.insert");
+	testutil_check(cursor->insert(cursor));
 }
 
 /*
  * append_insert --
  *	Writer thread start function.
  */
-static void *
+static WT_THREAD_RET
 append_insert(void *arg)
 {
 	INFO *s;
@@ -316,13 +300,12 @@ append_insert(void *arg)
 	WT_SESSION *session;
 	uintmax_t id;
 	uint64_t i;
-	int ret;
 	char tid[128];
 
 	id = (uintmax_t)arg;
 	s = &run_info[id];
 	cfg = s->cfg;
-	testutil_check(__wt_thread_id(tid, sizeof(tid)));
+	testutil_check(__wt_thread_str(tid, sizeof(tid)));
 	__wt_random_init(&s->rnd);
 
 	printf("write thread %2" PRIuMAX " starting: tid: %s, file: %s\n",
@@ -330,16 +313,13 @@ append_insert(void *arg)
 
 	__wt_yield();		/* Get all the threads created. */
 
-	if ((ret = cfg->conn->open_session(
-	    cfg->conn, NULL, "isolation=snapshot", &session)) != 0)
-		testutil_die(ret, "conn.open_session");
-	if ((ret = session->open_cursor(
-	    session, s->name, NULL, NULL, &cursor)) != 0)
-		testutil_die(ret, "session.open_cursor");
+	testutil_check(cfg->conn->open_session(
+	    cfg->conn, NULL, "isolation=snapshot", &session));
+	testutil_check(session->open_cursor(
+	    session, s->name, NULL, NULL, &cursor));
 	for (i = 0; i < s->nops && !cfg->thread_finish; ++i, __wt_yield())
 		append_insert_op(cfg, session, cursor, s);
-	if ((ret = session->close(session, NULL)) != 0)
-		testutil_die(ret, "session.close");
+	testutil_check(session->close(session, NULL));
 
 	printf("write thread %2" PRIuMAX " stopping: tid: %s, file: %s\n",
 	    id, tid, s->name);
@@ -347,7 +327,7 @@ append_insert(void *arg)
 	/* Notify all other threads to finish once the first thread is done */
 	cfg->thread_finish = true;
 
-	return (NULL);
+	return (WT_THREAD_RET_VALUE);
 }
 
 /*

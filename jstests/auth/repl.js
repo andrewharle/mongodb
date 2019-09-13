@@ -3,10 +3,7 @@
 var baseName = "jstests_auth_repl";
 var rsName = baseName + "_rs";
 var rtName = baseName + "_rt";
-var mongoOptions = {
-    auth: null,
-    keyFile: "jstests/libs/key1"
-};
+var mongoOptions = {auth: null, keyFile: "jstests/libs/key1"};
 var authErrCode = 13;
 
 var AuthReplTest = function(spec) {
@@ -178,11 +175,9 @@ jsTest.log("1 test replica sets");
 var rs = new ReplSetTest({name: rsName, nodes: 2});
 var nodes = rs.startSet(mongoOptions);
 rs.initiate();
-authutil.asCluster(nodes,
-                   "jstests/libs/key1",
-                   function() {
-                       rs.awaitReplication();
-                   });
+authutil.asCluster(nodes, "jstests/libs/key1", function() {
+    rs.awaitReplication();
+});
 
 var primary = rs.getPrimary();
 var secondary = rs.getSecondary();
@@ -196,11 +191,9 @@ jsTest.log("2 test initial sync");
 rs = new ReplSetTest({name: rsName, nodes: 1, nodeOptions: mongoOptions});
 nodes = rs.startSet();
 rs.initiate();
-authutil.asCluster(nodes,
-                   "jstests/libs/key1",
-                   function() {
-                       rs.awaitReplication();
-                   });
+authutil.asCluster(nodes, "jstests/libs/key1", function() {
+    rs.awaitReplication();
+});
 
 primary = rs.getPrimary();
 
@@ -216,30 +209,3 @@ secondary = rs.getSecondary();
 authReplTest.setSecondary(secondary);
 authReplTest.testAll();
 rs.stopSet();
-
-jsTest.log("3 test master/slave");
-var rt = new ReplTest(rtName);
-
-// start and stop without auth in order to ensure
-// existence of the correct dbpath
-var master = rt.start(true, {}, false, true);
-rt.stop(true);
-var slave = rt.start(false, {}, false, true);
-rt.stop(false);
-
-// start master/slave with auth
-master = rt.start(true, mongoOptions, true);
-slave = rt.start(false, mongoOptions, true);
-var masterDB = master.getDB("admin");
-
-masterDB.createUser({user: "root", pwd: "pass", roles: ["root"]});
-masterDB.auth("root", "pass");
-
-// ensure that master/slave replication is up and running
-masterDB.foo.save({}, {writeConcern: {w: 2, wtimeout: 15000}});
-masterDB.foo.drop();
-
-authReplTest = AuthReplTest({primaryConn: master, secondaryConn: slave});
-authReplTest.createUserAndRoles(2);
-authReplTest.testAll();
-rt.stop();

@@ -1,15 +1,13 @@
+// @tags: [requires_fastcount]
+
 t = db.jstests_nin;
 t.drop();
 
 function checkEqual(name, key, value) {
     var o = {};
-    o[key] = {
-        $in: [value]
-    };
+    o[key] = {$in: [value]};
     var i = t.find(o).count();
-    o[key] = {
-        $nin: [value]
-    };
+    o[key] = {$nin: [value]};
     var n = t.find(o).count();
 
     assert.eq(t.find().count(),

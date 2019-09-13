@@ -1,4 +1,6 @@
-
+// This test makes assertions about how many keys are examined during query execution, which can
+// change depending on whether/how many documents are filtered out by the SHARDING_FILTER stage.
+// @tags: [assumes_unsharded_collection]
 t = db.index_check6;
 t.drop();
 
@@ -30,10 +32,10 @@ assert.eq(29,
 assert.eq(5,
           keysExamined({age: {$gte: 29, $lte: 30}, rating: 5}, {age: 1, rating: 1}),
           "C");  // SERVER-371
-assert.eq(7,
-          keysExamined({age: {$gte: 29, $lte: 30}, rating: {$gte: 4, $lte: 5}},
-                       {age: 1, rating: 1}),
-          "D");  // SERVER-371
+assert.eq(
+    7,
+    keysExamined({age: {$gte: 29, $lte: 30}, rating: {$gte: 4, $lte: 5}}, {age: 1, rating: 1}),
+    "D");  // SERVER-371
 
 assert.eq.automsg("2",
                   "t.find( { age:30, rating:{ $gte:4, $lte:5} } )" + ".explain('executionStats')" +
@@ -91,11 +93,7 @@ for (var a = -1; a <= 1; a += 2) {
     for (var b = -1; b <= 1; b += 2) {
         for (var c = -1; c <= 1; c += 2) {
             t.dropIndexes();
-            var spec = {
-                a: a,
-                b: b,
-                c: c
-            };
+            var spec = {a: a, b: b, c: c};
             t.ensureIndex(spec);
             doTest(spec, spec);
             doTest({a: -a, b: -b, c: -c}, spec);

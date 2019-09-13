@@ -4,6 +4,7 @@
  *  - Checks that both shards have TTL index, and docs get deleted on both shards.
  *  - Run the collMod command to update the expireAfterSeconds field. Check that more docs get
  *    deleted.
+ *  @tags: [requires_sharding]
  */
 
 // start up a new sharded cluster
@@ -16,7 +17,7 @@ t = s.getDB(dbname).getCollection(coll);
 
 // enable sharding of the collection. Only 1 chunk initially
 s.adminCommand({enablesharding: dbname});
-s.ensurePrimaryShard(dbname, 'shard0001');
+s.ensurePrimaryShard(dbname, s.shard1.shardName);
 s.adminCommand({shardcollection: ns, key: {_id: 1}});
 
 // insert 24 docs, with timestamps at one hour intervals
@@ -34,7 +35,7 @@ t.ensureIndex({x: 1}, {expireAfterSeconds: 20000});
 
 // split chunk in half by _id, and move one chunk to the other shard
 s.adminCommand({split: ns, middle: {_id: 12}});
-s.adminCommand({moveChunk: ns, find: {_id: 0}, to: s.getOther(s.getServer(dbname)).name});
+s.adminCommand({moveChunk: ns, find: {_id: 0}, to: s.getOther(s.getPrimaryShard(dbname)).name});
 
 // Check that all expired documents are deleted.
 assert.soon(

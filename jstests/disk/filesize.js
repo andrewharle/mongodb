@@ -1,4 +1,7 @@
 // Test for SERVER-7430: Warning about smallfiles should include filename
+
+// `--smallfiles` is mmap only.
+// @tags: [requires_mmapv1]
 var baseName = "filesize";
 
 // Start mongod with --smallfiles
@@ -9,6 +12,7 @@ var db = m.getDB(baseName);
 // Skip on 32 bits, since 32-bit servers don't warn about small files
 if (db.serverBuildInfo().bits == 32) {
     print("Skip on 32-bit");
+    MongoRunner.stopMongod(m);
 } else {
     // Restart mongod without --smallFiles
     MongoRunner.stopMongod(m);
@@ -36,4 +40,5 @@ if (db.serverBuildInfo().bits == 32) {
     }
 
     assert(found);
+    MongoRunner.stopMongod(m);
 }

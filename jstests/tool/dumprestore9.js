@@ -21,7 +21,7 @@ if (0) {
         s.adminCommand({
             enablesharding: "aaa"
         });  // Make this db alphabetically before 'config' so it gets restored first
-        s.ensurePrimaryShard('aaa', 'shard0001');
+        s.ensurePrimaryShard('aaa', s.shard1.shardName);
         s.adminCommand({shardcollection: "aaa.foo", key: {x: 1}});
 
         db = s.getDB("aaa");
@@ -53,11 +53,10 @@ if (0) {
 
         dumpdir = MongoRunner.dataDir + "/dumprestore9-dump1/";
         resetDbpath(dumpdir);
-        var exitCode = MongoRunner.runMongoTool("mongodump",
-                                                {
-                                                  host: s.s0.host,
-                                                  out: dumpdir,
-                                                });
+        var exitCode = MongoRunner.runMongoTool("mongodump", {
+            host: s.s0.host,
+            out: dumpdir,
+        });
         assert.eq(0, exitCode, "mongodump failed to dump data through one of the mongos processes");
 
         step("Shutting down cluster");
@@ -74,13 +73,12 @@ if (0) {
 
         step("Restore data and config");
 
-        exitCode = MongoRunner.runMongoTool("mongorestore",
-                                            {
-                                              dir: dumpdir,
-                                              host: s.s1.host,
-                                              restoreShardingConfig: "",
-                                              forceConfigRestore: "",
-                                            });
+        exitCode = MongoRunner.runMongoTool("mongorestore", {
+            dir: dumpdir,
+            host: s.s1.host,
+            restoreShardingConfig: "",
+            forceConfigRestore: "",
+        });
         assert.eq(
             0, exitCode, "mongorestore failed to restore data through the other mongos process");
 

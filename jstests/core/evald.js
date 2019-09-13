@@ -1,4 +1,11 @@
-// @tags: [requires_eval_command]
+// @tags: [
+//   # Cannot implicitly shard accessed collections because unsupported use of sharded collection
+//   # from db.eval.
+//   assumes_unsharded_collection,
+//   does_not_support_stepdowns,
+//   requires_eval_command,
+//   requires_non_retryable_commands,
+// ]
 
 t = db.jstests_evald;
 t.drop();
@@ -17,12 +24,12 @@ function op(ev, where) {
     for (var i in p) {
         var o = p[i];
         if (where) {
-            if (o.active && o.query && o.query.query && o.query.query.$where &&
+            if (o.active && o.command && o.command.query && o.command.query.$where &&
                 o.ns == "test.jstests_evald") {
                 return o.opid;
             }
         } else {
-            if (o.active && o.query && o.query.$eval && o.query.$eval == ev) {
+            if (o.active && o.command && o.command.$eval && o.command.$eval == ev) {
                 return o.opid;
             }
         }

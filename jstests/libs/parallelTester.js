@@ -2,13 +2,46 @@
  * The ParallelTester class is used to test more than one test concurrently
  */
 if (typeof _threadInject != "undefined") {
+    // With --enableJavaScriptProtection functions are presented as Code objects.
+    // This function evals all the Code objects then calls the provided start function.
+    // arguments: [startFunction, startFunction args...]
+    function _threadStartWrapper() {
+        // Recursively evals all the Code objects present in arguments
+        // NOTE: This is a naive implementation that cannot handle cyclic objects.
+        function evalCodeArgs(arg) {
+            if (arg instanceof Code) {
+                return eval("(" + arg.code + ")");
+            } else if (arg !== null && isObject(arg)) {
+                var newArg = arg instanceof Array ? [] : {};
+                for (var prop in arg) {
+                    if (arg.hasOwnProperty(prop)) {
+                        newArg[prop] = evalCodeArgs(arg[prop]);
+                    }
+                }
+                return newArg;
+            }
+            return arg;
+        }
+        var realStartFn;
+        var newArgs = [];
+        for (var i = 0, l = arguments.length; i < l; i++) {
+            newArgs.push(evalCodeArgs(arguments[i]));
+        }
+        realStartFn = newArgs.shift();
+        return realStartFn.apply(this, newArgs);
+    }
+
     Thread = function() {
-        this.init.apply(this, arguments);
+        var args = Array.prototype.slice.call(arguments);
+        args.unshift(_threadStartWrapper);
+        this.init.apply(this, args);
     };
     _threadInject(Thread.prototype);
 
     ScopedThread = function() {
-        this.init.apply(this, arguments);
+        var args = Array.prototype.slice.call(arguments);
+        args.unshift(_threadStartWrapper);
+        this.init.apply(this, args);
     };
     ScopedThread.prototype = new Thread(function() {});
     _scopedThreadInject(ScopedThread.prototype);
@@ -39,6 +72,10 @@ if (typeof _threadInject != "undefined") {
         this._add("t.remove( " + tojson(obj) + " )");
     };
 
+    EventGenerator.prototype.addCurrentOp = function() {
+        this._add("db.currentOp()");
+    };
+
     EventGenerator.prototype.addUpdate = function(objOld, objNew) {
         this._add("t.update( " + tojson(objOld) + ", " + tojson(objNew) + " )");
     };
@@ -63,12 +100,16 @@ if (typeof _threadInject != "undefined") {
     };
 
     EventGenerator.dispatch = function() {
-        var args = argumentsToArray(arguments);
+        var args = Array.from(arguments);
         var me = args.shift();
         var collectionName = args.shift();
         var host = args.shift();
         var m = new Mongo(host);
-        var t = m.getDB("test")[collectionName];
+
+        // We define 'db' and 't' as local variables so that calling eval() on the stringified
+        // JavaScript expression 'args[i][1]' can take advantage of using them.
+        var db = m.getDB("test");
+        var t = db[collectionName];
         for (var i in args) {
             sleep(args[i][0]);
             eval(args[i][1]);
@@ -112,47 +153,38 @@ if (typeof _threadInject != "undefined") {
 
         // some tests can't run in parallel with most others
         var skipTests = makeKeys([
-            "repair.js",
-            "cursor8.js",
-            "recstore.js",
-            "extent.js",
             "indexb.js",
 
-            // sets a failpoint that causes the server to ignore long keys,
-            // which makes index_bigkeys.js fail
+            // Tests that set a parameter that causes the server to ignore
+            // long index keys.
             "index_bigkeys_nofail.js",
+            "index_bigkeys_validation.js",
 
-            // tests turn on profiling
-            "profile1.js",
-            "profile3.js",
-            "profile4.js",
-            "profile5.js",
-            "geo_s2cursorlimitskip.js",
-
-            "mr_drop.js",
             "mr3.js",
-            "indexh.js",
-            "apitest_db.js",
-            "evalb.js",
-            "evald.js",
-            "evalf.js",
-            "killop.js",
             "run_program1.js",
             "notablescan.js",
-            "dropdb_race.js",
-            "fsync2.js",  // May be placed in serialTestsArr once SERVER-4243 is fixed.
             "bench_test1.js",
-            "padding.js",
+
+            // These tests use the getLastError command, which is unsafe to use in this environment,
+            // since a previous test's cursors could be garbage collected in the middle of the next
+            // test, which would reset the last error associated with the shell's client.
+            "dropdb_race.js",
+            "bulk_legacy_enforce_gle.js",
+
+            // These tests use getLog to examine the logs. Tests which do so shouldn't be run in
+            // this suite because any test being run at the same time could conceivably spam the
+            // logs so much that the line they are looking for has been rotated off the server's
+            // in-memory buffer of log messages, which only stores the 1024 most recent operations.
+            "getlog2.js",
+            "logprocessdetails.js",
             "queryoptimizera.js",
-            "loglong.js",  // log might overflow before
-            // this has a chance to see the message
+
             "connections_opened.js",  // counts connections, globally
             "opcounters_write_cmd.js",
-            "set_param1.js",                  // changes global state
-            "geo_update_btree2.js",           // SERVER-11132 test disables table scans
-            "update_setOnInsert.js",          // SERVER-9982
-            "max_time_ms.js",                 // Sensitive to query execution time, by design
-            "collection_info_cache_race.js",  // Requires collection exists
+            "set_param1.js",          // changes global state
+            "geo_update_btree2.js",   // SERVER-11132 test disables table scans
+            "update_setOnInsert.js",  // SERVER-9982
+            "max_time_ms.js",         // Sensitive to query execution time, by design
 
             // This overwrites MinKey/MaxKey's singleton which breaks
             // any other test that uses MinKey/MaxKey
@@ -160,7 +192,73 @@ if (typeof _threadInject != "undefined") {
 
             // Assumes that other tests are not creating cursors.
             "kill_cursors.js",
+
+            // Views tests
+            "views/invalid_system_views.js",  // Creates invalid view definitions in system.views.
+            "views/views_all_commands.js",    // Drops test DB.
+
+            // Destroys and recreates the catalog, which will interfere with other tests.
+            "restart_catalog.js",
+
+            // Use eval command and potentially cause deadlock.
+            "constructors.js",
+            "error2.js",
+            "eval0.js",
+            "eval1.js",
+            "eval3.js",
+            "eval4.js",
+            "eval5.js",
+            "eval6.js",
+            "eval7.js",
+            "eval9.js",
+            "eval_mr.js",
+            "eval_nolock.js",
+            "evala.js",
+            "evalb.js",
+            "evald.js",
+            "evale.js",
+            "evalg.js",
+            "evalh.js",
+            "evalj.js",
+            "fsync.js",
+            "js3.js",
+            "js7.js",
+            "js9.js",
+            "json_schema/misc_validation.js",
+            "recursion.js",
+            "remove8.js",
+            "rename4.js",
+            "storefunc.js",
         ]);
+
+        // The following tests cannot run when shell readMode is legacy.
+        if (db.getMongo().readMode() === "legacy") {
+            var requires_find_command = [
+                "views/views_aggregation.js",
+                "views/views_change.js",
+                "views/views_drop.js",
+                "views/views_find.js"
+            ];
+            Object.assign(skipTests, makeKeys(requires_find_command));
+        }
+
+        // Get files, including files in subdirectories.
+        var getFilesRecursive = function(dir) {
+            var files = listFiles(dir);
+            var fileList = [];
+            files.forEach(file => {
+                if (file.isDirectory) {
+                    getFilesRecursive(file.name).forEach(subDirFile => fileList.push(subDirFile));
+                } else {
+                    fileList.push(file);
+                }
+            });
+            return fileList;
+        };
+
+        // Transactions are not supported on standalone nodes so we do not run them here.
+        let txnsTestFiles = getFilesRecursive("jstests/core/txns").map(f => ("txns/" + f.baseName));
+        Object.assign(skipTests, makeKeys(txnsTestFiles));
 
         var parallelFilesDir = "jstests/core";
 
@@ -171,18 +269,58 @@ if (typeof _threadInject != "undefined") {
             parallelFilesDir + "/currentop.js",
             parallelFilesDir + "/killop_drop_collection.js",
 
-            // These tests expect the profiler to be on or off at specific points
-            // during the test run.
-            parallelFilesDir + "/cursor6.js",
+            // These tests expect the profiler to be on or off at specific points. They should not
+            // be run in parallel with tests that perform fsyncLock. User operations skip writing to
+            // the system.profile collection while the server is fsyncLocked.
+            //
+            // Most profiler tests can be run in parallel with each other as they use test-specific
+            // databases, with the exception of tests which modify slowms or the profiler's sampling
+            // rate, since those affect profile settings globally.
+            parallelFilesDir + "/apitest_db_profile_level.js",
+            parallelFilesDir + "/evalb.js",
+            parallelFilesDir + "/geo_s2cursorlimitskip.js",
+            parallelFilesDir + "/profile1.js",
             parallelFilesDir + "/profile2.js",
-            parallelFilesDir + "/updatee.js"
+            parallelFilesDir + "/profile3.js",
+            parallelFilesDir + "/profile_agg.js",
+            parallelFilesDir + "/profile_count.js",
+            parallelFilesDir + "/profile_delete.js",
+            parallelFilesDir + "/profile_distinct.js",
+            parallelFilesDir + "/profile_find.js",
+            parallelFilesDir + "/profile_findandmodify.js",
+            parallelFilesDir + "/profile_geonear.js",
+            parallelFilesDir + "/profile_getmore.js",
+            parallelFilesDir + "/profile_group.js",
+            parallelFilesDir + "/profile_insert.js",
+            parallelFilesDir + "/profile_list_collections.js",
+            parallelFilesDir + "/profile_list_indexes.js",
+            parallelFilesDir + "/profile_mapreduce.js",
+            parallelFilesDir + "/profile_no_such_db.js",
+            parallelFilesDir + "/profile_parallel_collection_scan.js",
+            parallelFilesDir + "/profile_repair_cursor.js",
+            parallelFilesDir + "/profile_sampling.js",
+            parallelFilesDir + "/profile_update.js",
+
+            // These tests can't be run in parallel because they expect an awaitData cursor to
+            // return after maxTimeMS, however this doesn't work if a long running blocking
+            // operation is running in parallel.
+            // TODO: Remove this restriction as part of SERVER-33942.
+            parallelFilesDir + "/compact_keeps_indexes.js",
+            parallelFilesDir + "/awaitdata_getmore_cmd.js",
+
+            // These tests rely on a deterministically refreshable logical session cache. If they
+            // run in parallel, they could interfere with the cache and cause failures.
+            parallelFilesDir + "/list_all_local_sessions.js",
+            parallelFilesDir + "/list_all_sessions.js",
+            parallelFilesDir + "/list_local_sessions.js",
+            parallelFilesDir + "/list_sessions.js",
         ];
         var serialTests = makeKeys(serialTestsArr);
 
         // prefix the first thread with the serialTests
         // (which we will exclude from the rest of the threads below)
         params[0] = serialTestsArr;
-        var files = listFiles(parallelFilesDir);
+        var files = getFilesRecursive(parallelFilesDir);
         files = Array.shuffle(files);
 
         var i = 0;
@@ -211,11 +349,15 @@ if (typeof _threadInject != "undefined") {
     // runs a set of test files
     // first argument is an identifier for this tester, remaining arguments are file names
     ParallelTester.fileTester = function() {
-        var args = argumentsToArray(arguments);
+        var args = Array.from(arguments);
         var suite = args.shift();
         args.forEach(function(x) {
             print("         S" + suite + " Test : " + x + " ...");
             var time = Date.timeFunc(function() {
+                // Create a new connection to the db for each file. If tests share the same
+                // connection it can create difficult to debug issues.
+                db = new Mongo(db.getMongo().host).getDB(db.getName());
+                gc();
                 load(x);
             }, 1);
             print("         S" + suite + " Test : " + x + " " + time + "ms");
@@ -229,26 +371,32 @@ if (typeof _threadInject != "undefined") {
     // newScopes: if true, each thread starts in a fresh scope
     assert.parallelTests = function(params, msg, newScopes) {
         newScopes = newScopes || false;
-        var wrapper = function(fun, argv) {
-            eval("var z = function() {" + "TestData = " + tojson(TestData) + ";" +
-                 "var __parallelTests__fun = " + fun.toString() + ";" +
-                 "var __parallelTests__argv = " + tojson(argv) + ";" +
-                 "var __parallelTests__passed = false;" + "try {" +
-                 "__parallelTests__fun.apply( 0, __parallelTests__argv );" +
-                 "__parallelTests__passed = true;" + "} catch ( e ) {" + "print('');" +
-                 "print( '********** Parallel Test FAILED: ' + tojson(e) );" + "print('');" + "}" +
-                 "return __parallelTests__passed;" + "}");
-            return z;
-        };
+        function wrapper(fun, argv, globals) {
+            if (globals.hasOwnProperty("TestData")) {
+                TestData = globals.TestData;
+            }
+
+            try {
+                fun.apply(0, argv);
+                return {passed: true};
+            } catch (e) {
+                print("\n********** Parallel Test FAILED: " + tojson(e) + "\n");
+                return {
+                    passed: false,
+                    testName: tojson(e).match(/Error: error loading js file: (.*\.js)/)[1]
+                };
+            }
+        }
+
         var runners = new Array();
         for (var i in params) {
             var param = params[i];
             var test = param.shift();
             var t;
             if (newScopes)
-                t = new ScopedThread(wrapper(test, param));
+                t = new ScopedThread(wrapper, test, param, {TestData: TestData});
             else
-                t = new Thread(wrapper(test, param));
+                t = new Thread(wrapper, test, param, {TestData: TestData});
             runners.push(t);
         }
 
@@ -256,13 +404,16 @@ if (typeof _threadInject != "undefined") {
             x.start();
         });
         var nFailed = 0;
+        var failedTests = [];
         // SpiderMonkey doesn't like it if we exit before all threads are joined
         // (see SERVER-19615 for a similar issue).
         runners.forEach(function(x) {
-            if (!x.returnData()) {
+            if (!x.returnData().passed) {
                 ++nFailed;
+                failedTests.push(x.returnData().testName);
             }
         });
+        msg += ": " + tojsononeline(failedTests);
         assert.eq(0, nFailed, msg);
     };
 }

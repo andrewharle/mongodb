@@ -44,7 +44,7 @@
 
     function assertApplyOpsCommandWorked(res) {
         assert.eq(3, res.applied);
-        assert.commandWorked(res);
+        assert.commandWorkedIgnoringWriteConcernErrors(res);
         assert.eq([true, true, true], res.results);
     }
 
@@ -71,7 +71,10 @@
 
     var secondaries = replTest.getSecondaries();
 
-    var majorityWriteConcerns = [{w: 2, wtimeout: 30000}, {w: 'majority', wtimeout: 30000}, ];
+    var majorityWriteConcerns = [
+        {w: 2, wtimeout: 30000},
+        {w: 'majority', wtimeout: 30000},
+    ];
 
     function testMajorityWriteConcerns(wc) {
         jsTest.log("Testing " + tojson(wc));
@@ -132,4 +135,5 @@
     secondaries[0].getDB('admin').runCommand({configureFailPoint: 'rsSyncApplyStop', mode: 'off'});
     secondaries[1].getDB('admin').runCommand({configureFailPoint: 'rsSyncApplyStop', mode: 'off'});
 
+    replTest.stopSet();
 })();

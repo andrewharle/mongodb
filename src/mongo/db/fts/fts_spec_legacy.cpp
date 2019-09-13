@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -28,6 +30,7 @@
 
 #include "mongo/db/fts/fts_spec.h"
 
+#include "mongo/db/bson/dotted_path_support.h"
 #include "mongo/util/mongoutils/str.h"
 #include "mongo/util/stringutils.h"
 
@@ -43,6 +46,8 @@ namespace fts {
 using std::map;
 using std::string;
 using namespace mongoutils;
+
+namespace dps = ::mongo::dotted_path_support;
 
 namespace {
 void _addFTSStuff(BSONObjBuilder* b) {
@@ -170,7 +175,7 @@ void FTSSpec::_scoreDocumentV1(const BSONObj& obj, TermFrequencyMap* term_freqs)
     for (Weights::const_iterator i = _weights.begin(); i != _weights.end(); i++) {
         const char* leftOverName = i->first.c_str();
         // name of field
-        BSONElement e = obj.getFieldDottedOrArray(leftOverName);
+        BSONElement e = dps::extractElementAtPath(obj, leftOverName);
         // weight associated to name of field
         double weight = i->second;
 
@@ -181,7 +186,7 @@ void FTSSpec::_scoreDocumentV1(const BSONObj& obj, TermFrequencyMap* term_freqs)
             while (j.more()) {
                 BSONElement x = j.next();
                 if (leftOverName[0] && x.isABSONObj())
-                    x = x.Obj().getFieldDotted(leftOverName);
+                    x = dps::extractElementAtPath(x.Obj(), leftOverName);
                 if (x.type() == String)
                     _scoreStringV1(tools, x.valuestr(), term_freqs, weight);
             }
@@ -191,7 +196,7 @@ void FTSSpec::_scoreDocumentV1(const BSONObj& obj, TermFrequencyMap* term_freqs)
     }
 }
 
-BSONObj FTSSpec::_fixSpecV1(const BSONObj& spec) {
+StatusWith<BSONObj> FTSSpec::_fixSpecV1(const BSONObj& spec) {
     map<string, int> m;
 
     BSONObj keyPattern;
@@ -238,7 +243,13 @@ BSONObj FTSSpec::_fixSpecV1(const BSONObj& spec) {
     {
         BSONObjBuilder b;
         for (map<string, int>::iterator i = m.begin(); i != m.end(); ++i) {
-            uassert(17365, "score for word too high", i->second > 0 && i->second < MAX_WORD_WEIGHT);
+            if (i->second <= 0 || i->second >= MAX_WORD_WEIGHT) {
+                return {ErrorCodes::CannotCreateIndex,
+                        str::stream() << "text index weight must be in the exclusive interval (0,"
+                                      << MAX_WORD_WEIGHT
+                                      << ") but found: "
+                                      << i->second};
+            }
             b.append(i->first, i->second);
         }
         weights = b.obj();
@@ -274,9 +285,10 @@ BSONObj FTSSpec::_fixSpecV1(const BSONObj& spec) {
             version = e.numberInt();
         } else if (str::equals(e.fieldName(), "textIndexVersion")) {
             textIndexVersion = e.numberInt();
-            uassert(17366,
-                    str::stream() << "bad textIndexVersion: " << textIndexVersion,
-                    textIndexVersion == 1);
+            if (textIndexVersion != 1) {
+                return {ErrorCodes::CannotCreateIndex,
+                        str::stream() << "bad textIndexVersion: " << textIndexVersion};
+            }
         } else {
             b.append(e);
         }

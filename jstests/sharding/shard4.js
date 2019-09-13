@@ -5,7 +5,7 @@ s = new ShardingTest({name: "shard4", shards: 2, mongos: 2});
 s2 = s._mongos[1];
 
 s.adminCommand({enablesharding: "test"});
-s.ensurePrimaryShard('test', 'shard0001');
+s.ensurePrimaryShard('test', s.shard1.shardName);
 s.adminCommand({shardcollection: "test.foo", key: {num: 1}});
 if (s.configRS) {
     // Ensure that the second mongos will see the movePrimary
@@ -27,7 +27,7 @@ s.adminCommand({split: "test.foo", middle: {num: 4}});
 s.adminCommand({
     movechunk: "test.foo",
     find: {num: 3},
-    to: s.getOther(s.getServer("test")).name,
+    to: s.getOther(s.getPrimaryShard("test")).name,
     _waitForDelete: true
 });
 
@@ -42,8 +42,6 @@ assert.eq(7, s.getDB("test").foo.find().toArray().length, "normal B");
 assert.eq(7, s2.getDB("test").foo.find().toArray().length, "other B");
 
 s.adminCommand({split: "test.foo", middle: {num: 2}});
-// s.adminCommand( { movechunk : "test.foo" , find : { num : 3 } , to : s.getOther( s.getServer(
-// "test" ) ).name } );
 s.printChunks();
 
 print("* A");

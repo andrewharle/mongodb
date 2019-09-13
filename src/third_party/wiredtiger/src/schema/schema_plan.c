@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -97,7 +97,7 @@ __wt_schema_colcheck(WT_SESSION_IMPL *session,
 	WT_RET(__pack_init(session, &pack, key_format));
 	for (kcols = 0; (ret = __pack_next(&pack, &pv)) == 0; kcols++)
 		;
-	WT_RET_TEST(ret != WT_NOTFOUND, ret);
+	WT_RET_NOTFOUND_OK(ret);
 
 	WT_RET(__pack_init(session, &pack, value_format));
 	for (vcols = 0; (ret = __pack_next(&pack, &pv)) == 0; vcols++)
@@ -153,7 +153,7 @@ __wt_table_check(WT_SESSION_IMPL *session, WT_TABLE *table)
 			WT_RET_MSG(session, EINVAL,
 			    "Column '%.*s' in '%s' does not appear in a "
 			    "column group",
-			    (int)k.len, k.str, table->name);
+			    (int)k.len, k.str, table->iface.name);
 		/*
 		 * Column groups can't store key columns in their value:
 		 * __wt_struct_reformat should have already detected this case.
@@ -180,8 +180,8 @@ __wt_struct_plan(WT_SESSION_IMPL *session, WT_TABLE *table,
 	WT_CONFIG_ITEM k, v;
 	WT_DECL_RET;
 	u_int cg, col, current_cg, current_col, i, start_cg, start_col;
-	bool have_it;
 	char coltype, current_coltype;
+	bool have_it;
 
 	start_cg = start_col = UINT_MAX;	/* -Wuninitialized */
 
@@ -298,7 +298,7 @@ __find_column_format(WT_SESSION_IMPL *session, WT_TABLE *table,
 		if (k.len == colname->len &&
 		    strncmp(colname->str, k.str, k.len) == 0) {
 			if (value_only && inkey)
-				return (EINVAL);
+				return (__wt_set_return(session, EINVAL));
 			return (0);
 		}
 	}

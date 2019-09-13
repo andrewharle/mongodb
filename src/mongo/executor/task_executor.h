@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -28,9 +30,9 @@
 
 #pragma once
 
-#include <string>
-#include <memory>
 #include <functional>
+#include <memory>
+#include <string>
 
 #include "mongo/base/disallow_copying.h"
 #include "mongo/base/status.h"
@@ -38,7 +40,11 @@
 #include "mongo/base/string_data.h"
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/executor/remote_command_response.h"
+#include "mongo/platform/hash_namespace.h"
+#include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/functional.h"
+#include "mongo/transport/baton.h"
+#include "mongo/util/future.h"
 #include "mongo/util/time_support.h"
 
 namespace mongo {
@@ -51,7 +57,7 @@ namespace executor {
 struct ConnectionPoolStats;
 
 /**
- * Generic event loop with notions of events and callbacks.
+ * Executor with notions of events and callbacks.
  *
  * Callbacks represent work to be performed by the executor.
  * They may be scheduled by client threads or by other callbacks.  Methods that
@@ -67,9 +73,6 @@ struct ConnectionPoolStats;
  *
  * If an event is unsignaled when shutdown is called, the executor will ensure that any threads
  * blocked in waitForEvent() eventually return.
- *
- * Logically, Callbacks and Events exist for the life of the executor.  That means that while
- * the executor is in scope, no CallbackHandle or EventHandle is stale.
  */
 class TaskExecutor {
     MONGO_DISALLOW_COPYING(TaskExecutor);
@@ -82,7 +85,7 @@ public:
     class EventState;
     class EventHandle;
 
-    using ResponseStatus = StatusWith<RemoteCommandResponse>;
+    using ResponseStatus = RemoteCommandResponse;
 
     /**
      * Type of a regular callback function.
@@ -104,6 +107,10 @@ public:
      */
     using RemoteCommandCallbackFn = stdx::function<void(const RemoteCommandCallbackArgs&)>;
 
+    /**
+     * Destroys the task executor. Implicitly performs the equivalent of shutdown() and join()
+     * before returning, if necessary.
+     */
     virtual ~TaskExecutor();
 
     /**
@@ -114,28 +121,28 @@ public:
     virtual void startup() = 0;
 
     /**
-     * Signals to the executor that it should shut down. This method should not block. After
-     * calling shutdown, it is illegal to schedule more tasks on the executor and join should be
-     * called to wait for shutdown to complete.
+     * Signals to the executor that it should shut down. This method may be called from within a
+     * callback.  As such, this method must not block. After shutdown returns, attempts to schedule
+     * more tasks on the executor will return errors.
      *
-     * It is legal to call this method multiple times, but it should only be called after startup
-     * has been called.
+     * It is legal to call this method multiple times. If the task executor goes out of scope
+     * before this method is called, the destructor performs this activity.
      */
     virtual void shutdown() = 0;
 
     /**
-     * Waits for the shutdown sequence initiated by an earlier call to shutdown to complete. It is
-     * only legal to call this method if startup has been called earlier.
+     * Waits for the shutdown sequence initiated by a call to shutdown() to complete. Must not be
+     * called from within a callback.
      *
-     * If startup is ever called, the code must ensure that join is eventually called once and only
-     * once.
+     * Unlike stdx::thread::join, this method may be called from any thread that wishes to wait for
+     * shutdown to complete.
      */
     virtual void join() = 0;
 
     /**
-     * Returns diagnostic information.
+     * Writes diagnostic information into "b".
      */
-    virtual std::string getDiagnosticString() = 0;
+    virtual void appendDiagnosticBSON(BSONObjBuilder* b) const = 0;
 
     /**
      * Gets the current time.  Callbacks should use this method to read the system clock.
@@ -172,15 +179,24 @@ public:
                                                const CallbackFn& work) = 0;
 
     /**
-     * Blocks the calling thread until after "event" is signaled.  Also returns
-     * if the event is never signaled but shutdown() is called on the executor.
+     * Blocks the calling thread until "event" is signaled. Also returns if the event is never
+     * signaled but shutdown() is called on the executor.
+     *
+     * TODO(schwerin): Return ErrorCodes::ShutdownInProgress when shutdown() has been called so that
+     * the caller can know which of the two reasons led to this method returning.
      *
      * NOTE: Do not call from a callback running in the executor.
-     *
-     * TODO(schwerin): Change return type so that the caller can know which of the two reasons
-     * led to this method returning.
      */
     virtual void waitForEvent(const EventHandle& event) = 0;
+
+    /**
+     * Same as waitForEvent without an OperationContext, but if the OperationContext gets
+     * interrupted, will return the kill code, or, if the the deadline passes, will return
+     * Status::OK with cv_status::timeout.
+     */
+    virtual StatusWith<stdx::cv_status> waitForEvent(OperationContext* opCtx,
+                                                     const EventHandle& event,
+                                                     Date_t deadline = Date_t::max()) = 0;
 
     /**
      * Schedules "work" to be run by the executor ASAP.
@@ -189,6 +205,9 @@ public:
      * ErrorCodes::ShutdownInProgress.
      *
      * May be called by client threads or callbacks running in the executor.
+     *
+     * Contract: Implementations should guarantee that callback should be called *after* doing any
+     * processing related to the callback.
      */
     virtual StatusWith<CallbackHandle> scheduleWork(const CallbackFn& work) = 0;
 
@@ -201,6 +220,9 @@ public:
      * ErrorCodes::ShutdownInProgress.
      *
      * May be called by client threads or callbacks running in the executor.
+     *
+     * Contract: Implementations should guarantee that callback should be called *after* doing any
+     * processing related to the callback.
      */
     virtual StatusWith<CallbackHandle> scheduleWorkAt(Date_t when, const CallbackFn& work) = 0;
 
@@ -212,9 +234,14 @@ public:
      * ErrorCodes::ShutdownInProgress.
      *
      * May be called by client threads or callbacks running in the executor.
+     *
+     * Contract: Implementations should guarantee that callback should be called *after* doing any
+     * processing related to the callback.
      */
-    virtual StatusWith<CallbackHandle> scheduleRemoteCommand(const RemoteCommandRequest& request,
-                                                             const RemoteCommandCallbackFn& cb) = 0;
+    virtual StatusWith<CallbackHandle> scheduleRemoteCommand(
+        const RemoteCommandRequest& request,
+        const RemoteCommandCallbackFn& cb,
+        const transport::BatonHandle& baton = nullptr) = 0;
 
     /**
      * If the callback referenced by "cbHandle" hasn't already executed, marks it as
@@ -391,12 +418,12 @@ struct TaskExecutor::CallbackArgs {
     CallbackArgs(TaskExecutor* theExecutor,
                  CallbackHandle theHandle,
                  Status theStatus,
-                 OperationContext* txn = NULL);
+                 OperationContext* opCtx = NULL);
 
     TaskExecutor* executor;
     CallbackHandle myHandle;
     Status status;
-    OperationContext* txn;
+    OperationContext* opCtx;
 };
 
 /**
@@ -406,24 +433,23 @@ struct TaskExecutor::RemoteCommandCallbackArgs {
     RemoteCommandCallbackArgs(TaskExecutor* theExecutor,
                               const CallbackHandle& theHandle,
                               const RemoteCommandRequest& theRequest,
-                              const StatusWith<RemoteCommandResponse>& theResponse);
+                              const ResponseStatus& theResponse);
 
     TaskExecutor* executor;
     CallbackHandle myHandle;
     RemoteCommandRequest request;
-    StatusWith<RemoteCommandResponse> response;
+    ResponseStatus response;
 };
 
 }  // namespace executor
 }  // namespace mongo
 
-// Provide a specialization for std::hash<CallbackHandle> so it can easily
-// be stored in unordered_set.
-namespace std {
+// Provide a specialization for hash<CallbackHandle> so it can easily be stored in unordered_set.
+MONGO_HASH_NAMESPACE_START
 template <>
 struct hash<::mongo::executor::TaskExecutor::CallbackHandle> {
     size_t operator()(const ::mongo::executor::TaskExecutor::CallbackHandle& x) const {
         return x.hash();
     }
 };
-}  // namespace std
+MONGO_HASH_NAMESPACE_END

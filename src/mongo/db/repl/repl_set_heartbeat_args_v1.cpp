@@ -1,23 +1,25 @@
+
 /**
- *    Copyright 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -42,6 +44,7 @@ namespace {
 
 const std::string kCheckEmptyFieldName = "checkEmpty";
 const std::string kConfigVersionFieldName = "configVersion";
+const std::string kHeartbeatVersionFieldName = "hbv";
 const std::string kSenderHostFieldName = "from";
 const std::string kSenderIdFieldName = "fromId";
 const std::string kSetNameFieldName = "replSetHeartbeat";
@@ -49,6 +52,7 @@ const std::string kTermFieldName = "term";
 
 const std::string kLegalHeartbeatFieldNames[] = {kCheckEmptyFieldName,
                                                  kConfigVersionFieldName,
+                                                 kHeartbeatVersionFieldName,
                                                  kSenderHostFieldName,
                                                  kSenderIdFieldName,
                                                  kSetNameFieldName,
@@ -57,8 +61,8 @@ const std::string kLegalHeartbeatFieldNames[] = {kCheckEmptyFieldName,
 }  // namespace
 
 Status ReplSetHeartbeatArgsV1::initialize(const BSONObj& argsObj) {
-    Status status =
-        bsonCheckOnlyHasFields("ReplSetHeartbeatArgs", argsObj, kLegalHeartbeatFieldNames);
+    Status status = bsonCheckOnlyHasFieldsForCommand(
+        "ReplSetHeartbeatArgs", argsObj, kLegalHeartbeatFieldNames);
     if (!status.isOK())
         return status;
 
@@ -69,6 +73,22 @@ Status ReplSetHeartbeatArgsV1::initialize(const BSONObj& argsObj) {
     status = bsonExtractIntegerField(argsObj, kConfigVersionFieldName, &_configVersion);
     if (!status.isOK())
         return status;
+
+    long long tempHeartbeatVersion;
+    status = bsonExtractIntegerField(argsObj, kHeartbeatVersionFieldName, &tempHeartbeatVersion);
+    if (status.isOK()) {
+        if (tempHeartbeatVersion != 1) {
+            return Status(ErrorCodes::Error(40666),
+                          str::stream() << "Found invalid value for field "
+                                        << kHeartbeatVersionFieldName
+                                        << ": "
+                                        << tempHeartbeatVersion);
+        }
+        _heartbeatVersion = tempHeartbeatVersion;
+        _hasHeartbeatVersion = true;
+    } else if (status.code() != ErrorCodes::NoSuchKey) {
+        return status;
+    }
 
     status = bsonExtractIntegerFieldWithDefault(argsObj, kSenderIdFieldName, -1, &_senderId);
     if (!status.isOK())
@@ -102,6 +122,11 @@ bool ReplSetHeartbeatArgsV1::isInitialized() const {
 
 void ReplSetHeartbeatArgsV1::setConfigVersion(long long newVal) {
     _configVersion = newVal;
+}
+
+void ReplSetHeartbeatArgsV1::setHeartbeatVersion(long long newVal) {
+    _heartbeatVersion = newVal;
+    _hasHeartbeatVersion = true;
 }
 
 void ReplSetHeartbeatArgsV1::setSenderHost(const HostAndPort& newVal) {
@@ -138,6 +163,9 @@ void ReplSetHeartbeatArgsV1::addToBSON(BSONObjBuilder* builder) const {
         builder->append(kCheckEmptyFieldName, _checkEmpty);
     }
     builder->appendIntOrLL(kConfigVersionFieldName, _configVersion);
+    if (_hasHeartbeatVersion) {
+        builder->appendIntOrLL(kHeartbeatVersionFieldName, _hasHeartbeatVersion);
+    }
     builder->append(kSenderHostFieldName, _hasSender ? _senderHost.toString() : "");
     builder->appendIntOrLL(kSenderIdFieldName, _senderId);
     builder->appendIntOrLL(kTermFieldName, _term);

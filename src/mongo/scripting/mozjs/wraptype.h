@@ -1,29 +1,31 @@
+
 /**
- * Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- * This program is free software: you can redistribute it and/or  modify
- * it under the terms of the GNU Affero General Public License, version 3,
- * as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
- * As a special exception, the copyright holders give permission to link the
- * code of portions of this program with the OpenSSL library under certain
- * conditions as described in each individual source file and distribute
- * linked combinations including the program with the OpenSSL library. You
- * must comply with the GNU Affero General Public License in all respects
- * for all of the code used other than as permitted herein. If you modify
- * file(s) with this exception, you may extend this exception to your
- * version of the file(s), but you are not obligated to do so. If you do not
- * wish to do so, delete this exception statement from your version. If you
- * delete this exception statement from all source files in the program,
- * then also delete it in the license file.
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
@@ -101,7 +103,7 @@ bool wrapFunction(JSContext* cx, unsigned argc, JS::Value* vp) {
 
 // Now all the spidermonkey type methods
 template <typename T>
-bool addProperty(JSContext* cx, JS::HandleObject obj, JS::HandleId id, JS::MutableHandleValue v) {
+bool addProperty(JSContext* cx, JS::HandleObject obj, JS::HandleId id, JS::HandleValue v) {
     try {
         T::addProperty(cx, obj, id, v);
         return true;
@@ -134,9 +136,9 @@ bool construct(JSContext* cx, unsigned argc, JS::Value* vp) {
 };
 
 template <typename T>
-bool convert(JSContext* cx, JS::HandleObject obj, JSType type, JS::MutableHandleValue vp) {
+bool delProperty(JSContext* cx, JS::HandleObject obj, JS::HandleId id, JS::ObjectOpResult& result) {
     try {
-        T::convert(cx, obj, type, vp);
+        T::delProperty(cx, obj, id, result);
         return true;
     } catch (...) {
         mongoToJSException(cx);
@@ -145,20 +147,12 @@ bool convert(JSContext* cx, JS::HandleObject obj, JSType type, JS::MutableHandle
 };
 
 template <typename T>
-bool delProperty(JSContext* cx, JS::HandleObject obj, JS::HandleId id, bool* succeeded) {
+bool enumerate(JSContext* cx,
+               JS::HandleObject obj,
+               JS::AutoIdVector& properties,
+               bool enumerableOnly) {
     try {
-        T::delProperty(cx, obj, id, succeeded);
-        return true;
-    } catch (...) {
-        mongoToJSException(cx);
-        return false;
-    }
-};
-
-template <typename T>
-bool enumerate(JSContext* cx, JS::HandleObject obj, JS::AutoIdVector& properties) {
-    try {
-        T::enumerate(cx, obj, properties);
+        T::enumerate(cx, obj, properties, enumerableOnly);
         return true;
     } catch (...) {
         mongoToJSException(cx);
@@ -168,6 +162,12 @@ bool enumerate(JSContext* cx, JS::HandleObject obj, JS::AutoIdVector& properties
 
 template <typename T>
 bool getProperty(JSContext* cx, JS::HandleObject obj, JS::HandleId id, JS::MutableHandleValue vp) {
+    if (JSID_IS_SYMBOL(id)) {
+        // Just default to the SpiderMonkey's standard implementations for Symbol methods
+        vp.setUndefined();
+        return true;
+    }
+
     try {
         T::getProperty(cx, obj, id, vp);
         return true;
@@ -189,10 +189,13 @@ bool hasInstance(JSContext* cx, JS::HandleObject obj, JS::MutableHandleValue vp,
 };
 
 template <typename T>
-bool setProperty(
-    JSContext* cx, JS::HandleObject obj, JS::HandleId id, bool strict, JS::MutableHandleValue vp) {
+bool setProperty(JSContext* cx,
+                 JS::HandleObject obj,
+                 JS::HandleId id,
+                 JS::MutableHandleValue vp,
+                 JS::ObjectOpResult& result) {
     try {
-        T::setProperty(cx, obj, id, strict, vp);
+        T::setProperty(cx, obj, id, vp, result);
         return true;
     } catch (...) {
         mongoToJSException(cx);
@@ -202,6 +205,12 @@ bool setProperty(
 
 template <typename T>
 bool resolve(JSContext* cx, JS::HandleObject obj, JS::HandleId id, bool* resolvedp) {
+    if (JSID_IS_SYMBOL(id)) {
+        // Just default to the SpiderMonkey's standard implementations for Symbol methods
+        *resolvedp = false;
+        return true;
+    }
+
     try {
         T::resolve(cx, obj, id, resolvedp);
         return true;
@@ -219,6 +228,7 @@ public:
     WrapType(JSContext* context)
         : _context(context),
           _proto(),
+          _constructor(),
           _jsclass({T::className,
                     T::classFlags,
                     T::addProperty != BaseInfo::addProperty ? smUtils::addProperty<T> : nullptr,
@@ -228,7 +238,7 @@ public:
                     // We don't use the regular enumerate because we want the fancy new one
                     nullptr,
                     T::resolve != BaseInfo::resolve ? smUtils::resolve<T> : nullptr,
-                    T::convert != BaseInfo::convert ? smUtils::convert<T> : nullptr,
+                    T::mayResolve != BaseInfo::mayResolve ? T::mayResolve : nullptr,
                     T::finalize != BaseInfo::finalize ? T::finalize : nullptr,
                     T::call != BaseInfo::call ? smUtils::call<T> : nullptr,
                     T::hasInstance != BaseInfo::hasInstance ? smUtils::hasInstance<T> : nullptr,
@@ -258,6 +268,7 @@ public:
     ~WrapType() {
         // Persistent globals don't RAII, you have to reset() them manually
         _proto.reset();
+        _constructor.reset();
     }
 
     void install(JS::HandleObject global) {
@@ -279,20 +290,23 @@ public:
      * types without a constructor or inside the constructor
      */
     void newObject(JS::MutableHandleObject out) {
-        // The regular form of JS_NewObject, where we pass proto as the
-        // third param, actually does a global object lookup for some
-        // reason.  This way allows object creation with non-public
-        // prototypes and if someone deletes the symbol up the chain.
-        out.set(_assertPtr(JS_NewObject(_context, &_jsclass, JS::NullPtr())));
-
-        if (!JS_SetPrototype(_context, out, _proto))
-            throwCurrentJSException(
-                _context, ErrorCodes::JSInterpreterFailure, "Failed to set prototype");
+        out.set(_assertPtr(JS_NewObjectWithGivenProto(_context, &_jsclass, _proto)));
     }
 
     void newObject(JS::MutableHandleValue out) {
         JS::RootedObject obj(_context);
         newObject(&obj);
+
+        out.setObjectOrNull(obj);
+    }
+
+    void newObjectWithProto(JS::MutableHandleObject out, JS::HandleObject proto) {
+        out.set(_assertPtr(JS_NewObjectWithGivenProto(_context, &_jsclass, proto)));
+    }
+
+    void newObjectWithProto(JS::MutableHandleValue out, JS::HandleObject proto) {
+        JS::RootedObject obj(_context);
+        newObjectWithProto(&obj, proto);
 
         out.setObjectOrNull(obj);
     }
@@ -311,7 +325,8 @@ public:
     void newInstance(const JS::HandleValueArray& args, JS::MutableHandleObject out) {
         dassert(T::installType == InstallType::OverNative || T::construct != BaseInfo::construct);
 
-        out.set(_assertPtr(JS_New(_context, _proto, args)));
+        out.set(_assertPtr(JS_New(
+            _context, T::installType == InstallType::OverNative ? _constructor : _proto, args)));
     }
 
     void newInstance(JS::MutableHandleValue out) {
@@ -325,7 +340,8 @@ public:
     void newInstance(const JS::HandleValueArray& args, JS::MutableHandleValue out) {
         dassert(T::installType == InstallType::OverNative || T::construct != BaseInfo::construct);
 
-        out.setObjectOrNull(_assertPtr(JS_New(_context, _proto, args)));
+        out.setObjectOrNull(_assertPtr(JS_New(
+            _context, T::installType == InstallType::OverNative ? _constructor : _proto, args)));
     }
 
     // instanceOf doesn't go up the prototype tree.  It's a lower level more specific match
@@ -348,6 +364,10 @@ public:
 
     JS::HandleObject getProto() const {
         return _proto;
+    }
+
+    JS::HandleObject getCtor() const {
+        return _constructor;
     }
 
 private:
@@ -385,7 +405,7 @@ private:
 
         // See newObject() for why we have to do this dance with the explicit
         // SetPrototype
-        _proto.init(_context, _assertPtr(JS_NewObject(_context, &_jsclass, JS::NullPtr())));
+        _proto.init(_context, _assertPtr(JS_NewObject(_context, &_jsclass)));
         if (parent.get() && !JS_SetPrototype(_context, _proto, parent))
             throwCurrentJSException(
                 _context, ErrorCodes::JSInterpreterFailure, "Failed to set prototype");
@@ -404,7 +424,6 @@ private:
         dassert(T::addProperty == BaseInfo::addProperty);
         dassert(T::call == BaseInfo::call);
         dassert(T::construct == BaseInfo::construct);
-        dassert(T::convert == BaseInfo::convert);
         dassert(T::delProperty == BaseInfo::delProperty);
         dassert(T::enumerate == BaseInfo::enumerate);
         dassert(T::finalize == BaseInfo::finalize);
@@ -421,7 +440,25 @@ private:
         if (!value.isObject())
             uasserted(ErrorCodes::BadValue, "className isn't object");
 
-        _proto.init(_context, value.toObjectOrNull());
+        JS::RootedObject classNameObject(_context);
+        if (!JS_ValueToObject(_context, value, &classNameObject))
+            throwCurrentJSException(_context,
+                                    ErrorCodes::JSInterpreterFailure,
+                                    "Couldn't convert className property into an object.");
+
+        JS::RootedValue protoValue(_context);
+        if (!JS_GetPropertyById(_context,
+                                classNameObject,
+                                InternedStringId(_context, InternedString::prototype),
+                                &protoValue))
+            throwCurrentJSException(
+                _context, ErrorCodes::JSInterpreterFailure, "Couldn't get className prototype");
+
+        if (!protoValue.isObject())
+            uasserted(ErrorCodes::BadValue, "className's prototype isn't object");
+
+        _constructor.init(_context, value.toObjectOrNull());
+        _proto.init(_context, protoValue.toObjectOrNull());
 
         _installFunctions(_proto, T::methods);
         _installFunctions(global, T::freeFunctions);
@@ -445,7 +482,7 @@ private:
     // ensure that these two structures are equal.
     //
     // This is a landmine to watch out for during upgrades
-    using enumerateT = bool (*)(JSContext*, JS::HandleObject, JS::AutoIdVector&);
+    using enumerateT = bool (*)(JSContext*, JS::HandleObject, JS::AutoIdVector&, bool);
     void _installEnumerate(enumerateT enumerate) {
         if (!enumerate)
             return;
@@ -486,7 +523,7 @@ private:
         if (!ctor)
             return;
 
-        auto ptr = JS_NewFunction(_context, ctor, 0, JSFUN_CONSTRUCTOR, JS::NullPtr(), nullptr);
+        auto ptr = JS_NewFunction(_context, ctor, 0, JSFUN_CONSTRUCTOR, nullptr);
         if (!ptr) {
             throwCurrentJSException(
                 _context, ErrorCodes::JSInterpreterFailure, "Failed to install constructor");
@@ -510,6 +547,7 @@ private:
 
     JSContext* _context;
     JS::PersistentRootedObject _proto;
+    JS::PersistentRootedObject _constructor;
     JSClass _jsclass;
 };
 

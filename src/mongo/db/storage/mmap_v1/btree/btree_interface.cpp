@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -26,15 +28,18 @@
  *    it in the license file.
  */
 
+#include "mongo/platform/basic.h"
+
 #include <string>
 
-#include "mongo/db/storage/sorted_data_interface.h"
-
+#include "mongo/db/storage/mmap_v1/btree/btree_interface.h"
 
 #include "mongo/db/operation_context.h"
 #include "mongo/db/storage/mmap_v1/btree/btree_logic.h"
 #include "mongo/db/storage/mmap_v1/record_store_v1_base.h"
+#include "mongo/db/storage/sorted_data_interface.h"
 #include "mongo/stdx/memory.h"
+#include "mongo/util/assert_util.h"
 
 namespace mongo {
 namespace {
@@ -42,6 +47,8 @@ namespace {
 using std::unique_ptr;
 using std::string;
 using std::vector;
+
+using IndexVersion = IndexDescriptor::IndexVersion;
 
 template <class OnDiskFormat>
 class BtreeBuilderInterfaceImpl final : public SortedDataBuilderInterface {
@@ -76,58 +83,57 @@ public:
 
     virtual ~BtreeInterfaceImpl() {}
 
-    virtual SortedDataBuilderInterface* getBulkBuilder(OperationContext* txn, bool dupsAllowed) {
-        return new BtreeBuilderInterfaceImpl<OnDiskFormat>(txn,
-                                                           _btree->newBuilder(txn, dupsAllowed));
+    virtual SortedDataBuilderInterface* getBulkBuilder(OperationContext* opCtx, bool dupsAllowed) {
+        return new BtreeBuilderInterfaceImpl<OnDiskFormat>(opCtx,
+                                                           _btree->newBuilder(opCtx, dupsAllowed));
     }
 
-    virtual Status insert(OperationContext* txn,
+    virtual Status insert(OperationContext* opCtx,
                           const BSONObj& key,
                           const RecordId& loc,
                           bool dupsAllowed) {
-        return _btree->insert(txn, key, DiskLoc::fromRecordId(loc), dupsAllowed);
+        return _btree->insert(opCtx, key, DiskLoc::fromRecordId(loc), dupsAllowed);
     }
 
-    virtual void unindex(OperationContext* txn,
+    virtual void unindex(OperationContext* opCtx,
                          const BSONObj& key,
                          const RecordId& loc,
                          bool dupsAllowed) {
-        _btree->unindex(txn, key, DiskLoc::fromRecordId(loc));
+        _btree->unindex(opCtx, key, DiskLoc::fromRecordId(loc));
     }
 
-    virtual void fullValidate(OperationContext* txn,
-                              bool full,
+    virtual void fullValidate(OperationContext* opCtx,
                               long long* numKeysOut,
-                              BSONObjBuilder* output) const {
-        *numKeysOut = _btree->fullValidate(txn, NULL, false, false, 0);
+                              ValidateResults* fullResults) const {
+        *numKeysOut = _btree->fullValidate(opCtx, NULL, false, false, 0);
     }
 
-    virtual bool appendCustomStats(OperationContext* txn,
+    virtual bool appendCustomStats(OperationContext* opCtx,
                                    BSONObjBuilder* output,
                                    double scale) const {
         return false;
     }
 
-    virtual long long getSpaceUsedBytes(OperationContext* txn) const {
-        return _btree->getRecordStore()->dataSize(txn);
+    virtual long long getSpaceUsedBytes(OperationContext* opCtx) const {
+        return _btree->getRecordStore()->dataSize(opCtx);
     }
 
-    virtual Status dupKeyCheck(OperationContext* txn, const BSONObj& key, const RecordId& loc) {
-        return _btree->dupKeyCheck(txn, key, DiskLoc::fromRecordId(loc));
+    virtual Status dupKeyCheck(OperationContext* opCtx, const BSONObj& key, const RecordId& loc) {
+        return _btree->dupKeyCheck(opCtx, key, DiskLoc::fromRecordId(loc));
     }
 
-    virtual bool isEmpty(OperationContext* txn) {
-        return _btree->isEmpty(txn);
+    virtual bool isEmpty(OperationContext* opCtx) {
+        return _btree->isEmpty(opCtx);
     }
 
-    virtual Status touch(OperationContext* txn) const {
-        return _btree->touch(txn);
+    virtual Status touch(OperationContext* opCtx) const {
+        return _btree->touch(opCtx);
     }
 
     class Cursor final : public SortedDataInterface::Cursor {
     public:
-        Cursor(OperationContext* txn, const BtreeLogic<OnDiskFormat>* btree, bool forward)
-            : _txn(txn), _btree(btree), _direction(forward ? 1 : -1), _ofs(0) {}
+        Cursor(OperationContext* opCtx, const BtreeLogic<OnDiskFormat>* btree, bool forward)
+            : _opCtx(opCtx), _btree(btree), _direction(forward ? 1 : -1), _ofs(0) {}
 
         boost::optional<IndexKeyEntry> next(RequestedInfo parts) override {
             if (isEOF())
@@ -136,7 +142,7 @@ public:
                 // Return current position rather than advancing.
                 _lastMoveWasRestore = false;
             } else {
-                _btree->advance(_txn, &_bucket, &_ofs, _direction);
+                _btree->advance(_opCtx, &_bucket, &_ofs, _direction);
             }
 
             if (atEndPoint())
@@ -182,12 +188,12 @@ public:
 
             if (canUseAdvanceTo) {
                 // This takes advantage of current location.
-                _btree->advanceTo(_txn, &_bucket, &_ofs, seekPoint, _direction);
+                _btree->advanceTo(_opCtx, &_bucket, &_ofs, seekPoint, _direction);
             } else {
                 // Start at root.
-                _bucket = _btree->getHead(_txn);
+                _bucket = _btree->getHead(_opCtx);
                 _ofs = 0;
-                _btree->customLocate(_txn, &_bucket, &_ofs, seekPoint, _direction);
+                _btree->customLocate(_opCtx, &_bucket, &_ofs, seekPoint, _direction);
             }
 
             _lastMoveWasRestore = false;
@@ -235,7 +241,8 @@ public:
 
             if (_btree->savedCursors()->unregisterCursor(&_saved)) {
                 // We can use the fast restore mechanism.
-                _btree->restorePosition(_txn, _saved.key, _saved.loc, _direction, &_bucket, &_ofs);
+                _btree->restorePosition(
+                    _opCtx, _saved.key, _saved.loc, _direction, &_bucket, &_ofs);
             } else {
                 // Need to find our position from the root.
                 locate(_saved.key, _saved.loc.toRecordId());
@@ -247,11 +254,11 @@ public:
         }
 
         void detachFromOperationContext() final {
-            _txn = nullptr;
+            _opCtx = nullptr;
         }
 
-        void reattachToOperationContext(OperationContext* txn) final {
-            _txn = txn;
+        void reattachToOperationContext(OperationContext* opCtx) final {
+            _opCtx = opCtx;
         }
 
     private:
@@ -284,7 +291,7 @@ public:
         }
 
         void locate(const BSONObj& key, const RecordId& loc) {
-            _btree->locate(_txn, key, DiskLoc::fromRecordId(loc), _direction, &_ofs, &_bucket);
+            _btree->locate(_opCtx, key, DiskLoc::fromRecordId(loc), _direction, &_ofs, &_bucket);
             if (atOrPastEndPointAfterSeeking())
                 markEOF();
         }
@@ -297,16 +304,16 @@ public:
         }
 
         BSONObj getKey() const {
-            return _btree->getKey(_txn, _bucket, _ofs);
+            return _btree->getKey(_opCtx, _bucket, _ofs);
         }
         DiskLoc getDiskLoc() const {
-            return _btree->getDiskLoc(_txn, _bucket, _ofs);
+            return _btree->getDiskLoc(_opCtx, _bucket, _ofs);
         }
 
         void seekEndCursor() {
             if (!_endState)
                 return;
-            _btree->locate(_txn,
+            _btree->locate(_opCtx,
                            _endState->key,
                            forward() == _endState->inclusive ? DiskLoc::max() : DiskLoc::min(),
                            _direction,
@@ -318,7 +325,7 @@ public:
             return _direction == 1;
         }
 
-        OperationContext* _txn;  // not owned
+        OperationContext* _opCtx;  // not owned
         const BtreeLogic<OnDiskFormat>* const _btree;
         const int _direction;
 
@@ -343,29 +350,29 @@ public:
         SavedCursorRegistry::SavedCursor _saved;
     };
 
-    virtual std::unique_ptr<SortedDataInterface::Cursor> newCursor(OperationContext* txn,
+    virtual std::unique_ptr<SortedDataInterface::Cursor> newCursor(OperationContext* opCtx,
                                                                    bool isForward = true) const {
-        return stdx::make_unique<Cursor>(txn, _btree.get(), isForward);
+        return stdx::make_unique<Cursor>(opCtx, _btree.get(), isForward);
     }
 
     class RandomCursor final : public SortedDataInterface::Cursor {
     public:
-        RandomCursor(OperationContext* txn, const BtreeLogic<OnDiskFormat>* btree)
-            : _txn(txn), _btree(btree) {}
+        RandomCursor(OperationContext* opCtx, const BtreeLogic<OnDiskFormat>* btree)
+            : _opCtx(opCtx), _btree(btree) {}
 
         boost::optional<IndexKeyEntry> next(RequestedInfo parts) override {
-            if (_btree->isEmpty(_txn)) {
+            if (_btree->isEmpty(_opCtx)) {
                 return {};
             }
-            return _btree->getRandomEntry(_txn);
+            return _btree->getRandomEntry(_opCtx);
         }
 
         void detachFromOperationContext() final {
-            _txn = nullptr;
+            _opCtx = nullptr;
         }
 
-        void reattachToOperationContext(OperationContext* txn) final {
-            _txn = txn;
+        void reattachToOperationContext(OperationContext* opCtx) final {
+            _opCtx = opCtx;
         }
 
         //
@@ -392,17 +399,17 @@ public:
         void restore() override {}
 
     private:
-        OperationContext* _txn;
+        OperationContext* _opCtx;
         const BtreeLogic<OnDiskFormat>* const _btree;
     };
 
     virtual std::unique_ptr<SortedDataInterface::Cursor> newRandomCursor(
-        OperationContext* txn) const {
-        return stdx::make_unique<RandomCursor>(txn, _btree.get());
+        OperationContext* opCtx) const {
+        return stdx::make_unique<RandomCursor>(opCtx, _btree.get());
     }
 
-    virtual Status initAsEmpty(OperationContext* txn) {
-        return _btree->initAsEmpty(txn);
+    virtual Status initAsEmpty(OperationContext* opCtx) {
+        return _btree->initAsEmpty(opCtx);
     }
 
 private:
@@ -415,16 +422,18 @@ SortedDataInterface* getMMAPV1Interface(HeadManager* headManager,
                                         SavedCursorRegistry* cursorRegistry,
                                         const Ordering& ordering,
                                         const string& indexName,
-                                        int version,
+                                        IndexVersion version,
                                         bool isUnique) {
-    if (0 == version) {
-        return new BtreeInterfaceImpl<BtreeLayoutV0>(
-            headManager, recordStore, cursorRegistry, ordering, indexName, isUnique);
-    } else {
-        invariant(1 == version);
-        return new BtreeInterfaceImpl<BtreeLayoutV1>(
-            headManager, recordStore, cursorRegistry, ordering, indexName, isUnique);
+    switch (version) {
+        case IndexVersion::kV0:
+            return new BtreeInterfaceImpl<BtreeLayoutV0>(
+                headManager, recordStore, cursorRegistry, ordering, indexName, isUnique);
+        case IndexVersion::kV1:
+        case IndexVersion::kV2:
+            return new BtreeInterfaceImpl<BtreeLayoutV1>(
+                headManager, recordStore, cursorRegistry, ordering, indexName, isUnique);
     }
+    MONGO_UNREACHABLE;
 }
 
 }  // namespace mongo

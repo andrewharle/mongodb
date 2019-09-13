@@ -17,18 +17,18 @@
 
     // Enable sharding.
     assert.commandWorked(db.adminCommand({enableSharding: db.getName()}));
-    st.ensurePrimaryShard(db.getName(), 'shard0001');
+    st.ensurePrimaryShard(db.getName(), st.shard1.shardName);
     db.adminCommand({shardCollection: collSharded.getFullName(), key: {a: 1}});
 
     // Pre-split the collection to ensure that both shards have chunks. Explicitly
     // move chunks since the balancer is disabled.
-    for (var i = 1; i <= 2; i++) {
-        assert.commandWorked(db.adminCommand({split: collSharded.getFullName(), middle: {a: i}}));
+    assert.commandWorked(db.adminCommand({split: collSharded.getFullName(), middle: {a: 1}}));
+    printjson(db.adminCommand(
+        {moveChunk: collSharded.getFullName(), find: {a: 1}, to: st.shard0.shardName}));
 
-        var shardName = "shard000" + (i - 1);
-        printjson(
-            db.adminCommand({moveChunk: collSharded.getFullName(), find: {a: i}, to: shardName}));
-    }
+    assert.commandWorked(db.adminCommand({split: collSharded.getFullName(), middle: {a: 2}}));
+    printjson(db.adminCommand(
+        {moveChunk: collSharded.getFullName(), find: {a: 2}, to: st.shard1.shardName}));
 
     // Put data on each shard.
     for (var i = 0; i < 3; i++) {
@@ -164,8 +164,7 @@
 
     // Explain an upsert operation and verify that it hits only a single shard
     explain = db.runCommand({
-        explain:
-            {update: collSharded.getName(), updates: [{q: {a: 10}, u: {a: 10}, upsert: true}]},
+        explain: {update: collSharded.getName(), updates: [{q: {a: 10}, u: {a: 10}, upsert: true}]},
         verbosity: "allPlansExecution"
     });
     assert.commandWorked(explain, tojson(explain));
@@ -175,8 +174,7 @@
 
     // Explain an upsert operation which cannot be targeted, ensure an error is thrown
     explain = db.runCommand({
-        explain:
-            {update: collSharded.getName(), updates: [{q: {b: 10}, u: {b: 10}, upsert: true}]},
+        explain: {update: collSharded.getName(), updates: [{q: {b: 10}, u: {b: 10}, upsert: true}]},
         verbosity: "allPlansExecution"
     });
     assert.commandFailed(explain, tojson(explain));

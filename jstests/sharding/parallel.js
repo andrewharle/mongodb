@@ -6,19 +6,20 @@
     var s = new ShardingTest({name: "parallel", shards: numShards, mongos: 2});
 
     s.adminCommand({enablesharding: "test"});
-    s.ensurePrimaryShard('test', 'shard0001');
+    s.ensurePrimaryShard('test', s.shard1.shardName);
     s.adminCommand({shardcollection: "test.foo", key: {_id: 1}});
 
     var db = s.getDB("test");
 
     var N = 10000;
+    var shards = [s.shard0.shardName, s.shard1.shardName, s.shard2.shardName];
 
-    for (var i = 0; i < N; i += (N / 12)) {
+    for (var i = 0; i < N; i += (N / 10)) {
         s.adminCommand({split: "test.foo", middle: {_id: i}});
         s.s.getDB('admin').runCommand({
             moveChunk: "test.foo",
             find: {_id: i},
-            to: "shard000" + Math.floor(Math.random() * numShards)
+            to: shards[Math.floor(Math.random() * numShards)]
         });
     }
 

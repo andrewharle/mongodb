@@ -1,52 +1,57 @@
-/* Copyright 2013 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kControl
 
 #include "mongo/util/options_parser/options_parser.h"
 
-#include <boost/program_options.hpp>
 #include <algorithm>
+#include <boost/program_options.hpp>
 #include <cerrno>
 #include <fstream>
 #include <stdio.h>
+#include <yaml-cpp/yaml.h>
 
+#include "mongo/base/init.h"
 #include "mongo/base/parse_number.h"
 #include "mongo/base/status.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/json.h"
-#include "mongo/util/mongoutils/str.h"
 #include "mongo/util/log.h"
+#include "mongo/util/mongoutils/str.h"
 #include "mongo/util/options_parser/constraints.h"
 #include "mongo/util/options_parser/environment.h"
 #include "mongo/util/options_parser/option_description.h"
 #include "mongo/util/options_parser/option_section.h"
 #include "mongo/util/scopeguard.h"
-#include "third_party/yaml-cpp-0.5.1/include/yaml-cpp/yaml.h"
+#include "mongo/util/text.h"
 
 namespace mongo {
 namespace optionenvironment {
@@ -56,7 +61,21 @@ using std::shared_ptr;
 
 namespace po = boost::program_options;
 
+stdx::function<bool()> OptionsParser::useStrict;
+
 namespace {
+
+bool shouldUseStrict() {
+    return true;
+}
+
+MONGO_INITIALIZER_GENERAL(OptionsParseUseStrict,
+                          MONGO_NO_PREREQUISITES,
+                          ("BeginStartupOptionParsing"))
+(InitializerContext* context) {
+    OptionsParser::useStrict = shouldUseStrict;
+    return Status::OK();
+}
 
 // The following section contains utility functions that convert between the various objects
 // we need to deal with while parsing command line options.
@@ -269,6 +288,9 @@ Status YAMLNodeToValue(const YAML::Node& YAMLNode,
     }
 
     if (!isRegistered) {
+        if (!OptionsParser::useStrict()) {
+            return Status::OK();
+        }
         StringBuilder sb;
         sb << "Unrecognized option: " << key;
         return Status(ErrorCodes::BadValue, sb.str());
@@ -403,7 +425,7 @@ Status addBoostVariablesToEnvironment(const po::variables_map& vm,
                 optionValue = Value(mapValue);
             }
 
-            environment->set(iterator->_dottedName, optionValue);
+            environment->set(iterator->_dottedName, optionValue).transitional_ignore();
         }
     }
     return Status::OK();
@@ -592,7 +614,7 @@ Status addConstraints(const OptionSection& options, Environment* dest) {
     std::vector<std::shared_ptr<Constraint>>::const_iterator citerator;
     for (citerator = constraints_vector.begin(); citerator != constraints_vector.end();
          citerator++) {
-        dest->addConstraint(citerator->get());
+        dest->addConstraint(citerator->get()).transitional_ignore();
     }
 
     return Status::OK();
@@ -704,7 +726,7 @@ Status OptionsParser::parseCommandLine(const OptionSection& options,
         }
     } catch (po::multiple_occurrences& e) {
         StringBuilder sb;
-        sb << "Error parsing command line:  Multiple occurrences of option \"--"
+        sb << "Error parsing command line:  Multiple occurrences of option \""
            << e.get_option_name() << "\"";
         return Status(ErrorCodes::BadValue, sb.str());
     } catch (po::error& e) {
@@ -743,7 +765,7 @@ Status OptionsParser::parseINIConfigFile(const OptionSection& options,
 
     std::istringstream is(config);
     try {
-        po::store(po::parse_config_file(is, boostOptions), vm);
+        po::store(po::parse_config_file(is, boostOptions, !OptionsParser::useStrict()), vm);
         ret = addBoostVariablesToEnvironment(vm, options, environment);
         if (!ret.isOK()) {
             return ret;
@@ -883,11 +905,191 @@ Status OptionsParser::readConfigFile(const std::string& filename, std::string* c
         configVector.resize(nread);
     }
 
+    // Config files cannot have null bytes
+    if (end(configVector) != std::find(begin(configVector), end(configVector), '\0')) {
+
+#if defined(_WIN32)
+        // On Windows, it is common for files to be saved by Notepad as UTF-16 with a BOM so convert
+        // it for the user. If the file lacks a BOM, but is UTF-16 encoded we will fail rather then
+        // try to guess the file encoding.
+        const std::array<unsigned char, 2> UTF16LEBOM = {0xff, 0xfe};
+        if (configVector.size() >= UTF16LEBOM.size() &&
+            memcmp(configVector.data(), UTF16LEBOM.data(), UTF16LEBOM.size()) == 0) {
+            auto wstr = std::wstring(configVector.begin() + 2, configVector.end());
+            *contents = toUtf8String(wstr);
+            return Status::OK();
+        }
+#endif
+
+        return Status(
+            ErrorCodes::FailedToParse,
+            "Config file has null bytes, ensure the file is saved as UTF-8 and not UTF-16.");
+    }
+
     // Copy the vector contents into our result string
     *contents = std::string(configVector.begin(), configVector.end());
-
     return Status::OK();
 }
+
+namespace {
+/**
+ * Find implicit options and merge them with "=".
+ * Implicit options in boost 1.59 no longer support
+ * --option value
+ * instead they only support "--option=value", this function
+ * attempts to workound this by translating the former into the later.
+ */
+StatusWith<std::vector<std::string>> transformImplictOptions(
+    const OptionSection& options, const std::vector<std::string>& argvOriginal) {
+    if (argvOriginal.empty()) {
+        return {std::vector<std::string>()};
+    }
+
+    std::vector<OptionDescription> optionDescs;
+    Status ret = options.getAllOptions(&optionDescs);
+    if (!ret.isOK()) {
+        return ret;
+    }
+
+    std::map<string, const OptionDescription*> implicitOptions;
+    for (const auto& opt : optionDescs) {
+        if (opt._implicit.isEmpty()) {
+            continue;
+        }
+
+        // Some options have a short name (a single letter) in addition to a long name.
+        // In this case, the format for the name of the option is "long_name,S" where S is a
+        // single character.
+        // This is validated as such by the boost option parser later in the code.
+        size_t pos = opt._singleName.find(',');
+        if (pos != string::npos) {
+            implicitOptions[opt._singleName.substr(0, pos)] = &opt;
+            implicitOptions[opt._singleName.substr(pos + 1)] = &opt;
+        } else {
+            implicitOptions[opt._singleName] = &opt;
+        }
+    }
+
+    std::vector<std::string> args;
+    args.reserve(argvOriginal.size());
+
+    // If there are no implicit options for this option parser instance, no filtering is needed.
+    if (implicitOptions.empty()) {
+        std::copy(argvOriginal.begin(), argvOriginal.end(), std::back_inserter(args));
+
+        return {args};
+    }
+
+    // Now try to merge the implicit arguments
+    // Candidates to merge:
+    //   -arg value
+    //   --arg value
+    //   -arg ""
+    //   --arg ""
+    // Candidates not to merge:
+    //   -arg=value
+    //   --arg=value
+    for (size_t i = 0; i < argvOriginal.size(); i++) {
+        std::string arg = argvOriginal[i];
+
+        // Enable us to fall through to the default code path of pushing another arg into the vector
+        do {
+            // Skip processing of the last argument in the array since there would be nothing to
+            // merge it with
+            if (i == argvOriginal.size() - 1) {
+                break;
+            }
+
+            // Skip empty strings
+            if (arg.empty()) {
+                break;
+            }
+
+            // All options start with at least one "-"
+            if (arg[0] == '-') {
+                int argPrefix = 1;
+
+                // Is the argument just a single "-", i.e. short form or a disguised long form?
+                if (arg.size() == 1) {
+                    break;
+                }
+
+                if (arg[argPrefix] == '-') {
+                    // Is the argument just a double "--", i.e. long form?
+                    if (arg.size() == 2) {
+                        break;
+                    }
+
+                    ++argPrefix;
+                }
+
+                // Now we strip the prefix, and do a match on the parameter name.
+                // At this point we may have "option=value" which is not in our option list so
+                // we move onto the next option.
+                std::string parameter = arg.substr(argPrefix);
+
+                const auto iterator = implicitOptions.find(parameter);
+                if (iterator == implicitOptions.end()) {
+                    break;
+                }
+
+                // If the next argument is the empty string, just eat the empty string
+                if (argvOriginal[i + 1].empty()) {
+                    const auto& value = iterator->second->_implicit;
+                    std::string defaultStr;
+
+                    Status stringStatus = value.get(&defaultStr);
+
+                    // If the type of the option was a string type with a implicit value other than
+                    // "", then we cannot handle merging these two strings because simply leaving
+                    // just the option name around has a different behavior.
+                    // i.e., it is impossible to have "--option=''" on the command line as some
+                    // non-empty string must follow the equal sign.
+                    // This specific case is only known to affect "verbose" in the long form in
+                    // mongod and mongos which makes it a breaking change for this one specific
+                    // change. Users can get similar behavior by removing both the option and the
+                    // original string in this case.
+                    if (stringStatus.isOK() && !defaultStr.empty()) {
+                        return Status(ErrorCodes::BadValue,
+                                      "The empty string is not supported with the option " +
+                                          parameter);
+                    };
+
+                    // For strings that have an implicit value of "", we just
+                    // disregard the empty string argument since it has the same meaning.
+                    // For other types like integers this is not a problem in non-test code as the
+                    // only options with implicit options are string types.
+                } else {
+                    // Before we decide to merge the arguments, we must see if the next argument
+                    // is actually an option. Boost checks its list of options, but we will just
+                    // guess based on a leading '-' rather then try to match Boost's logic.
+                    if (argvOriginal[i + 1][0] == '-') {
+                        break;
+                    }
+
+                    if (parameter.size() == 1) {
+                        // Merge this short form argument and the next into one.
+                        // Note: we do not support allow_sticky so a simple append works
+                        arg = str::stream() << argvOriginal[i] << argvOriginal[i + 1];
+                    } else {
+                        // Merge this long form argument and the next into one.
+                        arg = str::stream() << argvOriginal[i] << "=" << argvOriginal[i + 1];
+                    }
+                }
+
+                // Advance to the next argument
+                i++;
+            }
+        } while (false);
+
+        // Add the option to the final list, this may be an option that we simply ignore.
+        args.push_back(arg);
+    }
+
+    return {args};
+}
+
+}  // namespace
 
 /**
  * Run the OptionsParser
@@ -902,14 +1104,21 @@ Status OptionsParser::readConfigFile(const std::string& filename, std::string* c
  * 6. Add the results to the output Environment in the proper order to ensure correct precedence
  */
 Status OptionsParser::run(const OptionSection& options,
-                          const std::vector<std::string>& argv,
+                          const std::vector<std::string>& argvOriginal,
                           const std::map<std::string, std::string>& env,  // XXX: Currently unused
                           Environment* environment) {
     Environment commandLineEnvironment;
     Environment configEnvironment;
     Environment composedEnvironment;
 
-    Status ret = parseCommandLine(options, argv, &commandLineEnvironment);
+    auto swTransform = transformImplictOptions(options, argvOriginal);
+    if (!swTransform.isOK()) {
+        return swTransform.getStatus();
+    }
+
+    std::vector<std::string> argvTransformed = std::move(swTransform.getValue());
+
+    Status ret = parseCommandLine(options, argvTransformed, &commandLineEnvironment);
     if (!ret.isOK()) {
         return ret;
     }
@@ -935,22 +1144,9 @@ Status OptionsParser::run(const OptionSection& options,
             return ret;
         }
 
-        YAML::Node YAMLConfig;
-        ret = parseYAMLConfigFile(config_file, &YAMLConfig);
+        ret = parseConfigFile(options, config_file, &configEnvironment);
         if (!ret.isOK()) {
             return ret;
-        }
-
-        if (isYAMLConfig(YAMLConfig)) {
-            ret = addYAMLNodesToEnvironment(YAMLConfig, options, "", &configEnvironment);
-            if (!ret.isOK()) {
-                return ret;
-            }
-        } else {
-            ret = parseINIConfigFile(options, config_file, &configEnvironment);
-            if (!ret.isOK()) {
-                return ret;
-            }
         }
     }
 
@@ -1003,6 +1199,57 @@ Status OptionsParser::run(const OptionSection& options,
     }
 
     return Status::OK();
+}
+
+Status OptionsParser::runConfigFile(
+    const OptionSection& options,
+    const std::string& config,
+    const std::map<std::string, std::string>& env,  // Unused, interface consistent with run()
+    Environment* configEnvironment) {
+    // Add the default values to our resulting environment
+    Status ret = addDefaultValues(options, configEnvironment);
+    if (!ret.isOK()) {
+        return ret;
+    }
+
+    // Add values from the provided config file
+    ret = parseConfigFile(options, config, configEnvironment);
+    if (!ret.isOK()) {
+        return ret;
+    }
+
+    // Add the constraints from our options to the result environment
+    ret = addConstraints(options, configEnvironment);
+    if (!ret.isOK()) {
+        return ret;
+    }
+
+    return ret;
+}
+
+Status OptionsParser::parseConfigFile(const OptionSection& options,
+                                      const std::string& config_file,
+                                      Environment* configEnvironment) {
+    YAML::Node YAMLConfig;
+    Status ret = parseYAMLConfigFile(config_file, &YAMLConfig);
+    if (!ret.isOK()) {
+        return ret;
+    }
+
+    // Check if YAML parsing was successful, if not try to read as INI
+    if (isYAMLConfig(YAMLConfig)) {
+        ret = addYAMLNodesToEnvironment(YAMLConfig, options, "", configEnvironment);
+        if (!ret.isOK()) {
+            return ret;
+        }
+    } else {
+        ret = parseINIConfigFile(options, config_file, configEnvironment);
+        if (!ret.isOK()) {
+            return ret;
+        }
+    }
+
+    return ret;
 }
 
 }  // namespace optionenvironment

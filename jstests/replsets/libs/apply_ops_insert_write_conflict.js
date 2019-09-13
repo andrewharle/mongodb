@@ -4,6 +4,9 @@
 var ApplyOpsInsertWriteConflictTest = function(options) {
     'use strict';
 
+    // Skip db hash check because this test may throw write conflicts and collmod fails.
+    TestData.skipCheckDBHashes = true;
+
     if (!(this instanceof ApplyOpsInsertWriteConflictTest)) {
         return new ApplyOpsInsertWriteConflictTest(options);
     }
@@ -33,20 +36,8 @@ var ApplyOpsInsertWriteConflictTest = function(options) {
 
         var numOps = 1000;
         var ops = Array(numOps).fill('ignored').map((unused, i) => {
-            return {
-                op: 'i',
-                ns: t.getFullName(),
-                o: {_id: i}
-            };
+            return {op: 'i', ns: t.getFullName(), o: {_id: i}};
         });
-
-        if (!options.atomic) {
-            // Adding a command to the list of operations to prevent the applyOps command from
-            // applying
-            // all the operations atomically.
-            ops.push({ns: "test.$cmd", op: "c", o: {applyOps: []}});
-            numOps++;
-        }
 
         // Probabilities for WCE are chosen based on empirical testing.
         // The probability for WCE during an atomic applyOps should be much smaller than that for
@@ -66,7 +57,7 @@ var ApplyOpsInsertWriteConflictTest = function(options) {
         var previousLogLevel =
             assert.commandWorked(primaryDB.setLogLevel(3, 'replication')).was.replication.verbosity;
 
-        var applyOpsResult = primaryDB.adminCommand({applyOps: ops});
+        var applyOpsResult = primaryDB.adminCommand({applyOps: ops, allowAtomic: options.atomic});
 
         // Reset log level.
         primaryDB.setLogLevel(previousLogLevel, 'replication');

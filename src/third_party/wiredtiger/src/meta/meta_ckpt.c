@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -291,7 +291,7 @@ __wt_meta_ckptlist_get(
 	WT_ERR(__wt_realloc_def(session, &allocated, slot + 2, &ckptbase));
 
 	/* Sort in creation-order. */
-	qsort(ckptbase, slot, sizeof(WT_CKPT), __ckpt_compare_order);
+	__wt_qsort(ckptbase, slot, sizeof(WT_CKPT), __ckpt_compare_order);
 
 	/* Return the array to our caller. */
 	*ckptbasep = ckptbase;
@@ -429,7 +429,7 @@ __wt_meta_ckptlist_set(WT_SESSION_IMPL *session,
 		}
 		if (strcmp(ckpt->name, WT_CHECKPOINT) == 0)
 			WT_ERR(__wt_buf_catfmt(session, buf,
-			    "%s%s.%" PRId64 "=(addr=\"%.*s\",order=%" PRIu64
+			    "%s%s.%" PRId64 "=(addr=\"%.*s\",order=%" PRId64
 			    ",time=%" PRIuMAX ",size=%" PRIu64
 			    ",write_gen=%" PRIu64 ")",
 			    sep, ckpt->name, ckpt->order,
@@ -438,7 +438,7 @@ __wt_meta_ckptlist_set(WT_SESSION_IMPL *session,
 			    ckpt->write_gen));
 		else
 			WT_ERR(__wt_buf_catfmt(session, buf,
-			    "%s%s=(addr=\"%.*s\",order=%" PRIu64
+			    "%s%s=(addr=\"%.*s\",order=%" PRId64
 			    ",time=%" PRIuMAX ",size=%" PRIu64
 			    ",write_gen=%" PRIu64 ")",
 			    sep, ckpt->name,
@@ -491,6 +491,48 @@ __wt_meta_checkpoint_free(WT_SESSION_IMPL *session, WT_CKPT *ckpt)
 	__wt_free(session, ckpt->bpriv);
 
 	WT_CLEAR(*ckpt);		/* Clear to prepare for re-use. */
+}
+
+/*
+ * __wt_meta_sysinfo_set --
+ *	Set the system information in the metadata.
+ */
+int
+__wt_meta_sysinfo_set(WT_SESSION_IMPL *session)
+{
+	WT_DECL_ITEM(buf);
+	WT_DECL_RET;
+	char hex_timestamp[2 * sizeof(wt_timestamp_t) + 2];
+
+	WT_ERR(__wt_scr_alloc(session, 0, &buf));
+	hex_timestamp[0] = '0';
+	hex_timestamp[1] = '\0';
+
+	/*
+	 * We need to record the timestamp of the checkpoint in the metadata.
+	 * The timestamp value is set at a higher level, either in checkpoint
+	 * or in recovery.
+	 */
+	__wt_timestamp_to_hex_string(
+	    hex_timestamp, S2C(session)->txn_global.meta_ckpt_timestamp);
+
+	/*
+	 * Don't leave a zero entry in the metadata: remove it.  This avoids
+	 * downgrade issues if the metadata is opened with an older version of
+	 * WiredTiger that does not understand the new entry.
+	 */
+	if (strcmp(hex_timestamp, "0") == 0)
+		WT_ERR_NOTFOUND_OK(
+		    __wt_metadata_remove(session, WT_SYSTEM_CKPT_URI));
+	else {
+		WT_ERR(__wt_buf_catfmt(session, buf,
+		    "checkpoint_timestamp=\"%s\"", hex_timestamp));
+		WT_ERR(__wt_metadata_update(
+		    session, WT_SYSTEM_CKPT_URI, buf->data));
+	}
+
+err:	__wt_scr_free(session, &buf);
+	return (ret);
 }
 
 /*

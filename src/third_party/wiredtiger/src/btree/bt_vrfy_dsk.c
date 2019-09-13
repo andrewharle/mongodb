@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -34,6 +34,7 @@ static int __verify_dsk_row(
 #define	WT_RET_VRFY(session, ...) do {					\
 	if (!(F_ISSET(session, WT_SESSION_QUIET_CORRUPT_FILE)))		\
 		__wt_errx(session, __VA_ARGS__);			\
+	F_SET(S2C(session), WT_CONN_DATA_CORRUPTION);			\
 	return (WT_ERROR);						\
 } while (0)
 
@@ -45,9 +46,9 @@ int
 __wt_verify_dsk_image(WT_SESSION_IMPL *session,
     const char *tag, const WT_PAGE_HEADER *dsk, size_t size, bool empty_page_ok)
 {
+	uint8_t flags;
 	const uint8_t *p, *end;
 	u_int i;
-	uint8_t flags;
 
 	/* Check the page type. */
 	switch (dsk->type) {
@@ -166,7 +167,7 @@ __wt_verify_dsk_image(WT_SESSION_IMPL *session,
 	case WT_PAGE_BLOCK_MANAGER:
 	case WT_PAGE_OVFL:
 		return (__verify_dsk_chunk(session, tag, dsk, dsk->u.datalen));
-	WT_ILLEGAL_VALUE(session);
+	WT_ILLEGAL_VALUE(session, dsk->type);
 	}
 	/* NOTREACHED */
 }
@@ -555,9 +556,9 @@ __verify_dsk_col_var(
 	WT_DECL_RET;
 	size_t last_size;
 	uint32_t cell_num, cell_type, i;
-	bool last_deleted;
-	const uint8_t *last_data;
 	uint8_t *end;
+	const uint8_t *last_data;
+	bool last_deleted;
 
 	btree = S2BT(session);
 	bm = btree->bm;
@@ -699,6 +700,7 @@ static int
 __err_cell_corrupt(
     WT_SESSION_IMPL *session, uint32_t entry_num, const char *tag)
 {
+	F_SET(S2C(session), WT_CONN_DATA_CORRUPTION);
 	WT_RET_VRFY(session,
 	    "item %" PRIu32 " on page at %s is a corrupted cell",
 	    entry_num, tag);

@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-# Public Domain 2014-2016 MongoDB, Inc.
+# Public Domain 2014-2019 MongoDB, Inc.
 # Public Domain 2008-2014 WiredTiger, Inc.
 #
 # This is free and unencumbered software released into the public domain.
@@ -75,6 +75,13 @@ class test_reconfig01(wttest.WiredTigerTestCase):
         self.conn.reconfigure("eviction=(threads_min=2)")
         # Set min and max the same.
         self.conn.reconfigure("eviction=(threads_min=6,threads_max=6)")
+        # Set target and trigger with an absolute value.
+        self.conn.reconfigure("eviction_target=50M,eviction_trigger=100M")
+        # Set dirty target and trigger with an absolute value
+        self.conn.reconfigure("eviction_dirty_target=20M,"
+                              "eviction_dirty_trigger=40M")
+        # Set eviction checkpoint target with an absolute value
+        self.conn.reconfigure("eviction_checkpoint_target=50M")
 
     def test_reconfig_lsm_manager(self):
         # We create and populate a tiny LSM so that we can start off with
@@ -98,6 +105,13 @@ class test_reconfig01(wttest.WiredTigerTestCase):
         self.conn.reconfigure("statistics=(all)")
         self.conn.reconfigure("statistics=(fast)")
         self.conn.reconfigure("statistics=(none)")
+
+    def test_reconfig_capacity(self):
+        self.conn.reconfigure("io_capacity=(total=80M)")
+        self.conn.reconfigure("io_capacity=(total=100M)")
+        msg = '/below minimum/'
+        self.assertRaisesWithMessage(wiredtiger.WiredTigerError,
+            lambda: self.conn.reconfigure("io_capacity=(total=16K)"), msg)
 
     def test_reconfig_checkpoints(self):
         self.conn.reconfigure("checkpoint=(wait=0)")

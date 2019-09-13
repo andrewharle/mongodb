@@ -1,23 +1,25 @@
+
 /**
- *    Copyright 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -40,67 +42,71 @@ namespace mongo {
 
 namespace {
 
+// These tests use router stages, which do not actually use their OperationContext, so rather than
+// going through the trouble of making one, we'll just use nullptr throughout.
+OperationContext* opCtx = nullptr;
+
 TEST(RouterStageLimitTest, LimitIsOne) {
-    auto mockStage = stdx::make_unique<RouterStageMock>();
-    mockStage->queueResult(BSON("a" << 1));
-    mockStage->queueResult(BSON("a" << 2));
-    mockStage->queueResult(BSON("a" << 3));
+    auto mockStage = stdx::make_unique<RouterStageMock>(opCtx);
+    mockStage->queueResult({BSON("a" << 1)});
+    mockStage->queueResult({BSON("a" << 2)});
+    mockStage->queueResult({BSON("a" << 3)});
 
-    auto limitStage = stdx::make_unique<RouterStageLimit>(std::move(mockStage), 1);
+    auto limitStage = stdx::make_unique<RouterStageLimit>(opCtx, std::move(mockStage), 1);
 
-    auto firstResult = limitStage->next();
+    auto firstResult = limitStage->next(RouterExecStage::ExecContext::kInitialFind);
     ASSERT_OK(firstResult.getStatus());
-    ASSERT(firstResult.getValue());
-    ASSERT_EQ(*firstResult.getValue(), BSON("a" << 1));
+    ASSERT(firstResult.getValue().getResult());
+    ASSERT_BSONOBJ_EQ(*firstResult.getValue().getResult(), BSON("a" << 1));
 
-    auto secondResult = limitStage->next();
+    auto secondResult = limitStage->next(RouterExecStage::ExecContext::kInitialFind);
     ASSERT_OK(secondResult.getStatus());
-    ASSERT(!secondResult.getValue());
+    ASSERT(!secondResult.getValue().getResult());
 
-    // Once end-of-stream is reached, the limit stage should keep returning boost::none.
-    auto thirdResult = limitStage->next();
+    // Once end-of-stream is reached, the limit stage should keep returning no results.
+    auto thirdResult = limitStage->next(RouterExecStage::ExecContext::kInitialFind);
     ASSERT_OK(thirdResult.getStatus());
-    ASSERT(!thirdResult.getValue());
+    ASSERT(!thirdResult.getValue().getResult());
 }
 
 TEST(RouterStageLimitTest, LimitIsTwo) {
-    auto mockStage = stdx::make_unique<RouterStageMock>();
+    auto mockStage = stdx::make_unique<RouterStageMock>(opCtx);
     mockStage->queueResult(BSON("a" << 1));
     mockStage->queueResult(BSON("a" << 2));
     mockStage->queueError(Status(ErrorCodes::BadValue, "bad thing happened"));
 
-    auto limitStage = stdx::make_unique<RouterStageLimit>(std::move(mockStage), 2);
+    auto limitStage = stdx::make_unique<RouterStageLimit>(opCtx, std::move(mockStage), 2);
 
-    auto firstResult = limitStage->next();
+    auto firstResult = limitStage->next(RouterExecStage::ExecContext::kInitialFind);
     ASSERT_OK(firstResult.getStatus());
-    ASSERT(firstResult.getValue());
-    ASSERT_EQ(*firstResult.getValue(), BSON("a" << 1));
+    ASSERT(firstResult.getValue().getResult());
+    ASSERT_BSONOBJ_EQ(*firstResult.getValue().getResult(), BSON("a" << 1));
 
-    auto secondResult = limitStage->next();
+    auto secondResult = limitStage->next(RouterExecStage::ExecContext::kInitialFind);
     ASSERT_OK(secondResult.getStatus());
-    ASSERT(secondResult.getValue());
-    ASSERT_EQ(*secondResult.getValue(), BSON("a" << 2));
+    ASSERT(firstResult.getValue().getResult());
+    ASSERT_BSONOBJ_EQ(*secondResult.getValue().getResult(), BSON("a" << 2));
 
-    auto thirdResult = limitStage->next();
+    auto thirdResult = limitStage->next(RouterExecStage::ExecContext::kInitialFind);
     ASSERT_OK(thirdResult.getStatus());
-    ASSERT(!thirdResult.getValue());
+    ASSERT(!thirdResult.getValue().getResult());
 }
 
 TEST(RouterStageLimitTest, LimitStagePropagatesError) {
-    auto mockStage = stdx::make_unique<RouterStageMock>();
+    auto mockStage = stdx::make_unique<RouterStageMock>(opCtx);
     mockStage->queueResult(BSON("a" << 1));
     mockStage->queueError(Status(ErrorCodes::BadValue, "bad thing happened"));
     mockStage->queueResult(BSON("a" << 2));
     mockStage->queueResult(BSON("a" << 3));
 
-    auto limitStage = stdx::make_unique<RouterStageLimit>(std::move(mockStage), 3);
+    auto limitStage = stdx::make_unique<RouterStageLimit>(opCtx, std::move(mockStage), 3);
 
-    auto firstResult = limitStage->next();
+    auto firstResult = limitStage->next(RouterExecStage::ExecContext::kInitialFind);
     ASSERT_OK(firstResult.getStatus());
-    ASSERT(firstResult.getValue());
-    ASSERT_EQ(*firstResult.getValue(), BSON("a" << 1));
+    ASSERT(firstResult.getValue().getResult());
+    ASSERT_BSONOBJ_EQ(*firstResult.getValue().getResult(), BSON("a" << 1));
 
-    auto secondResult = limitStage->next();
+    auto secondResult = limitStage->next(RouterExecStage::ExecContext::kInitialFind);
     ASSERT_NOT_OK(secondResult.getStatus());
     ASSERT_EQ(secondResult.getStatus(), ErrorCodes::BadValue);
     ASSERT_EQ(secondResult.getStatus().reason(), "bad thing happened");
@@ -110,66 +116,66 @@ TEST(RouterStageLimitTest, LimitStageToleratesMidStreamEOF) {
     // Here we're mocking the tailable case, where there may be a boost::none returned before the
     // remote cursor is closed. Our goal is to make sure that the limit stage handles this properly,
     // not counting boost::none towards the limit.
-    auto mockStage = stdx::make_unique<RouterStageMock>();
+    auto mockStage = stdx::make_unique<RouterStageMock>(opCtx);
     mockStage->queueResult(BSON("a" << 1));
     mockStage->queueEOF();
     mockStage->queueResult(BSON("a" << 2));
     mockStage->queueResult(BSON("a" << 3));
 
-    auto limitStage = stdx::make_unique<RouterStageLimit>(std::move(mockStage), 2);
+    auto limitStage = stdx::make_unique<RouterStageLimit>(opCtx, std::move(mockStage), 2);
 
-    auto firstResult = limitStage->next();
+    auto firstResult = limitStage->next(RouterExecStage::ExecContext::kInitialFind);
     ASSERT_OK(firstResult.getStatus());
-    ASSERT(firstResult.getValue());
-    ASSERT_EQ(*firstResult.getValue(), BSON("a" << 1));
+    ASSERT(firstResult.getValue().getResult());
+    ASSERT_BSONOBJ_EQ(*firstResult.getValue().getResult(), BSON("a" << 1));
 
-    auto secondResult = limitStage->next();
+    auto secondResult = limitStage->next(RouterExecStage::ExecContext::kInitialFind);
     ASSERT_OK(secondResult.getStatus());
-    ASSERT(!secondResult.getValue());
+    ASSERT(secondResult.getValue().isEOF());
 
-    auto thirdResult = limitStage->next();
+    auto thirdResult = limitStage->next(RouterExecStage::ExecContext::kInitialFind);
     ASSERT_OK(thirdResult.getStatus());
-    ASSERT(thirdResult.getValue());
-    ASSERT_EQ(*thirdResult.getValue(), BSON("a" << 2));
+    ASSERT(thirdResult.getValue().getResult());
+    ASSERT_BSONOBJ_EQ(*thirdResult.getValue().getResult(), BSON("a" << 2));
 
-    auto fourthResult = limitStage->next();
+    auto fourthResult = limitStage->next(RouterExecStage::ExecContext::kInitialFind);
     ASSERT_OK(fourthResult.getStatus());
-    ASSERT(!fourthResult.getValue());
+    ASSERT(fourthResult.getValue().isEOF());
 }
 
 TEST(RouterStageLimitTest, LimitStageRemotesExhausted) {
-    auto mockStage = stdx::make_unique<RouterStageMock>();
+    auto mockStage = stdx::make_unique<RouterStageMock>(opCtx);
     mockStage->queueResult(BSON("a" << 1));
     mockStage->queueResult(BSON("a" << 2));
     mockStage->markRemotesExhausted();
 
-    auto limitStage = stdx::make_unique<RouterStageLimit>(std::move(mockStage), 100);
+    auto limitStage = stdx::make_unique<RouterStageLimit>(opCtx, std::move(mockStage), 100);
     ASSERT_TRUE(limitStage->remotesExhausted());
 
-    auto firstResult = limitStage->next();
+    auto firstResult = limitStage->next(RouterExecStage::ExecContext::kInitialFind);
     ASSERT_OK(firstResult.getStatus());
-    ASSERT(firstResult.getValue());
-    ASSERT_EQ(*firstResult.getValue(), BSON("a" << 1));
+    ASSERT(firstResult.getValue().getResult());
+    ASSERT_BSONOBJ_EQ(*firstResult.getValue().getResult(), BSON("a" << 1));
     ASSERT_TRUE(limitStage->remotesExhausted());
 
-    auto secondResult = limitStage->next();
+    auto secondResult = limitStage->next(RouterExecStage::ExecContext::kInitialFind);
     ASSERT_OK(secondResult.getStatus());
-    ASSERT(secondResult.getValue());
-    ASSERT_EQ(*secondResult.getValue(), BSON("a" << 2));
+    ASSERT(secondResult.getValue().getResult());
+    ASSERT_BSONOBJ_EQ(*secondResult.getValue().getResult(), BSON("a" << 2));
     ASSERT_TRUE(limitStage->remotesExhausted());
 
-    auto thirdResult = limitStage->next();
+    auto thirdResult = limitStage->next(RouterExecStage::ExecContext::kInitialFind);
     ASSERT_OK(thirdResult.getStatus());
-    ASSERT(!thirdResult.getValue());
+    ASSERT(thirdResult.getValue().isEOF());
     ASSERT_TRUE(limitStage->remotesExhausted());
 }
 
 TEST(RouterStageLimitTest, ForwardsAwaitDataTimeout) {
-    auto mockStage = stdx::make_unique<RouterStageMock>();
+    auto mockStage = stdx::make_unique<RouterStageMock>(opCtx);
     auto mockStagePtr = mockStage.get();
     ASSERT_NOT_OK(mockStage->getAwaitDataTimeout().getStatus());
 
-    auto limitStage = stdx::make_unique<RouterStageLimit>(std::move(mockStage), 100);
+    auto limitStage = stdx::make_unique<RouterStageLimit>(opCtx, std::move(mockStage), 100);
     ASSERT_OK(limitStage->setAwaitDataTimeout(Milliseconds(789)));
 
     auto awaitDataTimeout = mockStagePtr->getAwaitDataTimeout();

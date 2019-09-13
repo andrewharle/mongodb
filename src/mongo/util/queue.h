@@ -1,30 +1,33 @@
 // @file queue.h
 
-/*    Copyright 2009 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
@@ -36,14 +39,10 @@
 #include "mongo/base/disallow_copying.h"
 #include "mongo/stdx/chrono.h"
 #include "mongo/stdx/condition_variable.h"
+#include "mongo/stdx/functional.h"
 #include "mongo/stdx/mutex.h"
 
 namespace mongo {
-
-template <typename T>
-size_t _getSizeDefault(const T& t) {
-    return 1;
-}
 
 /**
  * Simple blocking queue with optional max size (by count or custom sizing function).
@@ -56,13 +55,13 @@ size_t _getSizeDefault(const T& t) {
 template <typename T>
 class BlockingQueue {
     MONGO_DISALLOW_COPYING(BlockingQueue);
-    typedef size_t (*getSizeFunc)(const T& t);
 
 public:
-    BlockingQueue()
-        : _maxSize(std::numeric_limits<std::size_t>::max()), _getSize(&_getSizeDefault) {}
-    BlockingQueue(size_t size) : _maxSize(size), _getSize(&_getSizeDefault) {}
-    BlockingQueue(size_t size, getSizeFunc f) : _maxSize(size), _getSize(f) {}
+    using GetSizeFn = stdx::function<size_t(const T&)>;
+
+    BlockingQueue() : BlockingQueue(std::numeric_limits<std::size_t>::max()) {}
+    BlockingQueue(size_t size) : BlockingQueue(size, [](const T&) { return 1; }) {}
+    BlockingQueue(size_t size, GetSizeFn f) : _maxSize(size), _getSize(f) {}
 
     void pushEvenIfFull(T const& t) {
         stdx::unique_lock<stdx::mutex> lk(_lock);
@@ -82,21 +81,28 @@ public:
      *
      * NOTE: Should only be used in a single producer case.
      */
-    void pushAllNonBlocking(std::vector<T>& objs) {
-        if (objs.empty()) {
+    template <typename Container>
+    void pushAllNonBlocking(const Container& objs) {
+        pushAllNonBlocking(std::begin(objs), std::end(objs));
+    }
+
+    template <typename Iterator>
+    void pushAllNonBlocking(Iterator begin, Iterator end) {
+        if (begin == end) {
             return;
         }
 
         stdx::unique_lock<stdx::mutex> lk(_lock);
         const auto startedEmpty = _queue.empty();
         _clearing = false;
-        std::for_each(objs.begin(),
-                      objs.end(),
-                      [this](T& obj) {
-                          size_t tSize = _getSize(obj);
-                          _queue.push(obj);
-                          _currentSize += tSize;
-                      });
+
+        auto pushOne = [this](const T& obj) {
+            size_t tSize = _getSize(obj);
+            _queue.push(obj);
+            _currentSize += tSize;
+        };
+        std::for_each(begin, end, pushOne);
+
         if (startedEmpty) {
             _cvNoLongerEmpty.notify_one();
         }
@@ -269,7 +275,7 @@ private:
     std::queue<T> _queue;
     const size_t _maxSize;
     size_t _currentSize = 0;
-    getSizeFunc _getSize;
+    GetSizeFn _getSize;
     bool _clearing = false;
 
     stdx::condition_variable _cvNoLongerFull;

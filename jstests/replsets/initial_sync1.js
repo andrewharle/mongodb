@@ -30,7 +30,7 @@ var master = replTest.getPrimary();
 var foo = master.getDB("foo");
 var admin = master.getDB("admin");
 
-var slave1 = replTest.liveNodes.slaves[0];
+var slave1 = replTest._slaves[0];
 var admin_s1 = slave1.getDB("admin");
 var local_s1 = slave1.getDB("local");
 
@@ -57,7 +57,7 @@ var local_s2 = slave2.getDB("local");
 var admin_s2 = slave2.getDB("admin");
 
 var config = replTest.getReplSetConfig();
-config.version = 2;
+config.version = replTest.getReplSetConfigFromNode().version + 1;
 config.members.push({_id: 2, host: slave2.host});
 try {
     admin.runCommand({replSetReconfig: config});
@@ -100,7 +100,7 @@ for (var i = 0; i < 100; i++) {
 assert.writeOK(bulk.execute());
 
 print("11. Everyone happy eventually");
-replTest.awaitReplication(300000);
+replTest.awaitReplication();
 
 MongoRunner.stopMongod(slave2);
 replTest.stopSet();

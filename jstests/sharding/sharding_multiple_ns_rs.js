@@ -1,26 +1,34 @@
+// When checking UUID consistency, the shell attempts to run a command on the node it believes is
+// primary in each shard. However, this test shuts down the primary of the shard. Since whether or
+// not the shell detects the new primary before issuing the command is nondeterministic, skip the
+// consistency check for this test.
+TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
+
 (function() {
+    'use strict';
 
-    var s = new ShardingTest(
-        {name: "Sharding multiple ns", shards: 1, mongos: 1, other: {rs: true, chunkSize: 1}});
+    load("jstests/replsets/rslib.js");
 
-    s.adminCommand({enablesharding: "test"});
-    s.adminCommand({shardcollection: "test.foo", key: {_id: 1}});
+    var s = new ShardingTest({shards: 1, mongos: 1, other: {rs: true, chunkSize: 1}});
 
-    db = s.getDB("test");
+    assert.commandWorked(s.s0.adminCommand({enablesharding: "test"}));
+    assert.commandWorked(s.s0.adminCommand({shardcollection: "test.foo", key: {_id: 1}}));
+
+    var db = s.getDB("test");
 
     var bulk = db.foo.initializeUnorderedBulkOp();
     var bulk2 = db.bar.initializeUnorderedBulkOp();
-    for (i = 0; i < 100; i++) {
+    for (var i = 0; i < 100; i++) {
         bulk.insert({_id: i, x: i});
         bulk2.insert({_id: i, x: i});
     }
     assert.writeOK(bulk.execute());
     assert.writeOK(bulk2.execute());
 
-    sh.splitAt("test.foo", {_id: 50});
+    s.splitAt("test.foo", {_id: 50});
 
-    other = new Mongo(s.s.name);
-    dbother = other.getDB("test");
+    var other = new Mongo(s.s0.name);
+    var dbother = other.getDB("test");
 
     assert.eq(5, db.foo.findOne({_id: 5}).x);
     assert.eq(5, dbother.foo.findOne({_id: 5}).x);
@@ -28,22 +36,20 @@
     assert.eq(5, db.bar.findOne({_id: 5}).x);
     assert.eq(5, dbother.bar.findOne({_id: 5}).x);
 
-    s._rs[0].test.awaitReplication();
-    s._rs[0].test.stopMaster(15);
+    s.rs0.awaitReplication();
+    s.rs0.stopMaster(15);
 
-    // Wait for the primary to come back online...
-    var primary = s._rs[0].test.getPrimary();
-
-    // Wait for the mongos to recognize the new primary...
-    ReplSetTest.awaitRSClientHosts(db.getMongo(), primary, {ismaster: true});
+    // Wait for mongos and the config server primary to recognize the new shard primary
+    awaitRSClientHosts(db.getMongo(), s.rs0.getPrimary(), {ismaster: true});
+    awaitRSClientHosts(db.getMongo(), s.configRS.getPrimary(), {ismaster: true});
 
     assert.eq(5, db.foo.findOne({_id: 5}).x);
     assert.eq(5, db.bar.findOne({_id: 5}).x);
 
-    s.adminCommand({shardcollection: "test.bar", key: {_id: 1}});
-    sh.splitAt("test.bar", {_id: 50});
+    assert.commandWorked(s.s0.adminCommand({shardcollection: "test.bar", key: {_id: 1}}));
+    s.splitAt("test.bar", {_id: 50});
 
-    yetagain = new Mongo(s.s.name);
+    var yetagain = new Mongo(s.s.name);
     assert.eq(5, yetagain.getDB("test").bar.findOne({_id: 5}).x);
     assert.eq(5, yetagain.getDB("test").foo.findOne({_id: 5}).x);
 
@@ -51,5 +57,4 @@
     assert.eq(5, dbother.foo.findOne({_id: 5}).x);
 
     s.stop();
-
 })();

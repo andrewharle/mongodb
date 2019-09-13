@@ -1,30 +1,33 @@
 // assert_util.cpp
 
-/*    Copyright 2009 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kDefault
@@ -32,8 +35,6 @@
 #include "mongo/platform/basic.h"
 
 #include "mongo/util/assert_util.h"
-
-using namespace std;
 
 #ifndef _WIN32
 #include <cxxabi.h>
@@ -44,7 +45,6 @@ using namespace std;
 #include <boost/exception/exception.hpp>
 #include <exception>
 
-#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/config.h"
 #include "mongo/util/debug_util.h"
 #include "mongo/util/debugger.h"
@@ -74,166 +74,134 @@ void AssertionCount::condrollover(int newvalue) {
         rollover();
 }
 
-std::atomic<bool> DBException::traceExceptions(false);  // NOLINT
-
-string DBException::toString() const {
-    stringstream ss;
-    ss << getCode() << " " << what();
-    return ss.str();
-}
+AtomicBool DBException::traceExceptions(false);
 
 void DBException::traceIfNeeded(const DBException& e) {
-    if (traceExceptions) {
-        warning() << "DBException thrown" << causedBy(e) << endl;
+    if (traceExceptions.load()) {
+        warning() << "DBException thrown" << causedBy(e) << std::endl;
         printStackTrace();
     }
 }
 
-ErrorCodes::Error DBException::convertExceptionCode(int exCode) {
-    if (exCode == 0) {
-        return ErrorCodes::UnknownError;
-    }
-    return ErrorCodes::fromInt(exCode);
-}
-
-void ExceptionInfo::append(BSONObjBuilder& b, const char* m, const char* c) const {
-    if (msg.empty())
-        b.append(m, "unknown assertion");
-    else
-        b.append(m, msg);
-
-    if (code)
-        b.append(c, code);
-}
-
-/* "warning" assert -- safe to continue, so we don't throw exception. */
-NOINLINE_DECL void wasserted(const char* expr, const char* file, unsigned line) {
-    static bool rateLimited;
-    static time_t lastWhen;
-    static unsigned lastLine;
-    if (lastLine == line && time(0) - lastWhen < 5) {
-        if (!rateLimited) {
-            rateLimited = true;
-            log() << "rate limiting wassert" << endl;
-        }
-        return;
-    }
-    lastWhen = time(0);
-    lastLine = line;
-
-    log() << "warning assertion failure " << expr << ' ' << file << ' ' << dec << line << endl;
-    logContext();
-    assertionCount.condrollover(++assertionCount.warning);
-#if defined(MONGO_CONFIG_DEBUG_BUILD)
-    // this is so we notice in buildbot
-    log() << "\n\n***aborting after wassert() failure in a debug/test build\n\n" << endl;
-    quickExit(EXIT_ABRUPT);
-#endif
-}
-
 NOINLINE_DECL void verifyFailed(const char* expr, const char* file, unsigned line) {
     assertionCount.condrollover(++assertionCount.regular);
-    log() << "Assertion failure " << expr << ' ' << file << ' ' << dec << line << endl;
+    error() << "Assertion failure " << expr << ' ' << file << ' ' << std::dec << line << std::endl;
     logContext();
-    stringstream temp;
+    std::stringstream temp;
     temp << "assertion " << file << ":" << line;
-    AssertionException e(temp.str(), 0);
+
     breakpoint();
 #if defined(MONGO_CONFIG_DEBUG_BUILD)
     // this is so we notice in buildbot
-    log() << "\n\n***aborting after verify() failure as this is a debug/test build\n\n" << endl;
-    quickExit(EXIT_ABRUPT);
+    severe() << "\n\n***aborting after verify() failure as this is a debug/test build\n\n"
+             << std::endl;
+    std::abort();
 #endif
-    throw e;
+    error_details::throwExceptionForStatus(Status(ErrorCodes::UnknownError, temp.str()));
 }
 
-NOINLINE_DECL void invariantFailed(const char* expr, const char* file, unsigned line) {
-    log() << "Invariant failure " << expr << ' ' << file << ' ' << dec << line << endl;
+NOINLINE_DECL void invariantFailed(const char* expr, const char* file, unsigned line) noexcept {
+    severe() << "Invariant failure " << expr << ' ' << file << ' ' << std::dec << line << std::endl;
     breakpoint();
-    log() << "\n\n***aborting after invariant() failure\n\n" << endl;
+    severe() << "\n\n***aborting after invariant() failure\n\n" << std::endl;
+    std::abort();
+}
+
+NOINLINE_DECL void invariantFailedWithMsg(const char* expr,
+                                          const std::string& msg,
+                                          const char* file,
+                                          unsigned line) noexcept {
+    severe() << "Invariant failure " << expr << " " << msg << " " << file << ' ' << std::dec << line
+             << std::endl;
+    breakpoint();
+    severe() << "\n\n***aborting after invariant() failure\n\n" << std::endl;
     std::abort();
 }
 
 NOINLINE_DECL void invariantOKFailed(const char* expr,
                                      const Status& status,
                                      const char* file,
-                                     unsigned line) {
-    log() << "Invariant failure: " << expr << " resulted in status " << status << " at " << file
-          << ' ' << dec << line;
-    logContext();
+                                     unsigned line) noexcept {
+    severe() << "Invariant failure: " << expr << " resulted in status " << redact(status) << " at "
+             << file << ' ' << std::dec << line;
     breakpoint();
-    log() << "\n\n***aborting after invariant() failure\n\n" << endl;
-    quickExit(EXIT_ABRUPT);
-}
-
-NOINLINE_DECL void fassertFailed(int msgid) {
-    log() << "Fatal Assertion " << msgid << endl;
-    breakpoint();
-    log() << "\n\n***aborting after fassert() failure\n\n" << endl;
+    severe() << "\n\n***aborting after invariant() failure\n\n" << std::endl;
     std::abort();
 }
 
-NOINLINE_DECL void fassertFailedNoTrace(int msgid) {
-    log() << "Fatal Assertion " << msgid << endl;
+NOINLINE_DECL void invariantOKFailedWithMsg(const char* expr,
+                                            const Status& status,
+                                            const std::string& msg,
+                                            const char* file,
+                                            unsigned line) noexcept {
+    severe() << "Invariant failure: " << expr << " " << msg << " resulted in status "
+             << redact(status) << " at " << file << ' ' << std::dec << line;
     breakpoint();
-    log() << "\n\n***aborting after fassert() failure\n\n" << endl;
+    severe() << "\n\n***aborting after invariant() failure\n\n" << std::endl;
+    std::abort();
+}
+
+NOINLINE_DECL void fassertFailedWithLocation(int msgid, const char* file, unsigned line) noexcept {
+    severe() << "Fatal Assertion " << msgid << " at " << file << " " << std::dec << line;
+    breakpoint();
+    severe() << "\n\n***aborting after fassert() failure\n\n" << std::endl;
+    std::abort();
+}
+
+NOINLINE_DECL void fassertFailedNoTraceWithLocation(int msgid,
+                                                    const char* file,
+                                                    unsigned line) noexcept {
+    severe() << "Fatal Assertion " << msgid << " at " << file << " " << std::dec << line;
+    breakpoint();
+    severe() << "\n\n***aborting after fassert() failure\n\n" << std::endl;
     quickExit(EXIT_ABRUPT);
 }
 
-MONGO_COMPILER_NORETURN void fassertFailedWithStatus(int msgid, const Status& status) {
-    log() << "Fatal assertion " << msgid << " " << status;
-    logContext();
+MONGO_COMPILER_NORETURN void fassertFailedWithStatusWithLocation(int msgid,
+                                                                 const Status& status,
+                                                                 const char* file,
+                                                                 unsigned line) noexcept {
+    severe() << "Fatal assertion " << msgid << " " << redact(status) << " at " << file << " "
+             << std::dec << line;
     breakpoint();
-    log() << "\n\n***aborting after fassert() failure\n\n" << endl;
+    severe() << "\n\n***aborting after fassert() failure\n\n" << std::endl;
+    std::abort();
+}
+
+MONGO_COMPILER_NORETURN void fassertFailedWithStatusNoTraceWithLocation(int msgid,
+                                                                        const Status& status,
+                                                                        const char* file,
+                                                                        unsigned line) noexcept {
+    severe() << "Fatal assertion " << msgid << " " << redact(status) << " at " << file << " "
+             << std::dec << line;
+    breakpoint();
+    severe() << "\n\n***aborting after fassert() failure\n\n" << std::endl;
     quickExit(EXIT_ABRUPT);
 }
 
-MONGO_COMPILER_NORETURN void fassertFailedWithStatusNoTrace(int msgid, const Status& status) {
-    log() << "Fatal assertion " << msgid << " " << status;
-    breakpoint();
-    log() << "\n\n***aborting after fassert() failure\n\n" << endl;
-    quickExit(EXIT_ABRUPT);
-}
-
-void uasserted(int msgid, const string& msg) {
-    uasserted(msgid, msg.c_str());
-}
-
-void UserException::appendPrefix(stringstream& ss) const {
-    ss << "userassert:";
-}
-void MsgAssertionException::appendPrefix(stringstream& ss) const {
-    ss << "massert:";
-}
-
-NOINLINE_DECL void uasserted(int msgid, const char* msg) {
+NOINLINE_DECL void uassertedWithLocation(const Status& status, const char* file, unsigned line) {
     assertionCount.condrollover(++assertionCount.user);
-    LOG(1) << "User Assertion: " << msgid << ":" << msg << endl;
-    throw UserException(msgid, msg);
+    LOG(1) << "User Assertion: " << redact(status) << ' ' << file << ' ' << std::dec << line;
+    error_details::throwExceptionForStatus(status);
 }
 
-void msgasserted(int msgid, const string& msg) {
-    msgasserted(msgid, msg.c_str());
-}
-
-NOINLINE_DECL void msgasserted(int msgid, const char* msg) {
+NOINLINE_DECL void msgassertedWithLocation(const Status& status, const char* file, unsigned line) {
     assertionCount.condrollover(++assertionCount.msg);
-    log() << "Assertion: " << msgid << ":" << msg << endl;
-    throw MsgAssertionException(msgid, msg);
+    error() << "Assertion: " << redact(status) << ' ' << file << ' ' << std::dec << line;
+    error_details::throwExceptionForStatus(status);
 }
 
-NOINLINE_DECL void msgassertedNoTrace(int msgid, const char* msg) {
-    assertionCount.condrollover(++assertionCount.msg);
-    log() << "Assertion: " << msgid << ":" << msg << endl;
-    throw MsgAssertionException(msgid, msg);
-}
-
-void msgassertedNoTrace(int msgid, const std::string& msg) {
-    msgassertedNoTrace(msgid, msg.c_str());
+std::string causedBy(StringData e) {
+    constexpr auto prefix = " :: caused by :: "_sd;
+    std::string out;
+    out.reserve(prefix.size() + e.size());
+    out.append(prefix.rawData(), prefix.size());
+    out.append(e.rawData(), e.size());
+    return out;
 }
 
 std::string causedBy(const char* e) {
-    return std::string(" :: caused by :: ") + e;
+    return causedBy(StringData(e));
 }
 
 std::string causedBy(const DBException& e) {
@@ -245,23 +213,14 @@ std::string causedBy(const std::exception& e) {
 }
 
 std::string causedBy(const std::string& e) {
-    return causedBy(e.c_str());
+    return causedBy(StringData(e));
 }
 
 std::string causedBy(const Status& e) {
     return causedBy(e.toString());
 }
 
-string errnoWithPrefix(StringData prefix) {
-    const auto suffix = errnoWithDescription();
-    stringstream ss;
-    if (!prefix.empty())
-        ss << prefix << ": ";
-    ss << suffix;
-    return ss.str();
-}
-
-string demangleName(const type_info& typeinfo) {
+std::string demangleName(const std::type_info& typeinfo) {
 #ifdef _WIN32
     return typeinfo.name();
 #else
@@ -271,13 +230,13 @@ string demangleName(const type_info& typeinfo) {
     if (!niceName)
         return typeinfo.name();
 
-    string s = niceName;
+    std::string s = niceName;
     free(niceName);
     return s;
 #endif
 }
 
-Status exceptionToStatus() {
+Status exceptionToStatus() noexcept {
     try {
         throw;
     } catch (const DBException& ex) {
@@ -285,22 +244,17 @@ Status exceptionToStatus() {
     } catch (const std::exception& ex) {
         return Status(ErrorCodes::UnknownError,
                       str::stream() << "Caught std::exception of type " << demangleName(typeid(ex))
-                                    << ": " << ex.what());
+                                    << ": "
+                                    << ex.what());
     } catch (const boost::exception& ex) {
-        return Status(ErrorCodes::UnknownError,
-                      str::stream() << "Caught boost::exception of type "
-                                    << demangleName(typeid(ex)) << ": "
-                                    << boost::diagnostic_information(ex));
+        return Status(
+            ErrorCodes::UnknownError,
+            str::stream() << "Caught boost::exception of type " << demangleName(typeid(ex)) << ": "
+                          << boost::diagnostic_information(ex));
 
     } catch (...) {
         severe() << "Caught unknown exception in exceptionToStatus()";
         std::terminate();
     }
-}
-
-string ExceptionInfo::toString() const {
-    stringstream ss;
-    ss << "exception: " << code << " " << msg;
-    return ss.str();
 }
 }

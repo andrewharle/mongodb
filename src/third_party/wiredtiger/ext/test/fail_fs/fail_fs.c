@@ -1,5 +1,5 @@
 /*-
- * Public Domain 2014-2016 MongoDB, Inc.
+ * Public Domain 2014-2019 MongoDB, Inc.
  * Public Domain 2008-2014 WiredTiger, Inc.
  *
  * This is free and unencumbered software released into the public domain.
@@ -452,16 +452,14 @@ fail_fs_directory_list(WT_FILE_SYSTEM *file_system,
 		 * matter if the list is a bit longer than necessary.
 		 */
 		if (count >= allocated) {
-			p = realloc(
-			    entries, (allocated + 10) * sizeof(*entries));
-			if (p == NULL) {
+			allocated += 10;
+			if ((p = realloc(
+			    entries, allocated * sizeof(*entries))) == NULL) {
 				ret = ENOMEM;
 				goto err;
 			}
 			entries = p;
-			memset(entries + allocated * sizeof(*entries),
-			    0, 10 * sizeof(*entries));
-			allocated += 10;
+			memset(entries + count, 0, 10 * sizeof(*entries));
 		}
 		entries[count++] = strdup(name);
 	}
@@ -740,12 +738,12 @@ fail_fs_size(WT_FILE_SYSTEM *file_system,
 static int
 fail_fs_terminate(WT_FILE_SYSTEM *file_system, WT_SESSION *session)
 {
-	FAIL_FILE_HANDLE *fail_fh;
+	FAIL_FILE_HANDLE *fail_fh, *fail_fh_tmp;
 	FAIL_FILE_SYSTEM *fail_fs;
 
 	fail_fs = (FAIL_FILE_SYSTEM *)file_system;
 
-	while ((fail_fh = TAILQ_FIRST(&fail_fs->fileq)) != NULL)
+	TAILQ_FOREACH_SAFE(fail_fh, &fail_fs->fileq, q, fail_fh_tmp)
 		fail_file_handle_remove(session, fail_fh);
 
 	fail_fs_destroy_lock(&fail_fs->lock);
@@ -769,8 +767,10 @@ wiredtiger_extension_init(WT_CONNECTION *conn, WT_CONFIG_ARG *config)
 	int64_t argval;
 	int ret;
 
-	ret = 0;
+	config_parser = NULL;
 	wtext = conn->get_extension_api(conn);
+	ret = 0;
+
 	if ((fail_fs = calloc(1, sizeof(FAIL_FILE_SYSTEM))) == NULL) {
 		(void)wtext->err_printf(wtext, NULL,
 		    "fail_file_system extension_init: %s",
@@ -815,7 +815,9 @@ wiredtiger_extension_init(WT_CONNECTION *conn, WT_CONFIG_ARG *config)
 		    wtext->strerror(wtext, NULL, ret));
 		goto err;
 	}
-	if ((ret = config_parser->close(config_parser)) != 0) {
+	ret = config_parser->close(config_parser);
+	config_parser = NULL;
+	if (ret != 0) {
 		(void)wtext->err_printf(wtext, NULL,
 		    "WT_CONFIG_PARSER.close: config: %s",
 		    wtext->strerror(wtext, NULL, ret));
@@ -842,6 +844,8 @@ wiredtiger_extension_init(WT_CONNECTION *conn, WT_CONFIG_ARG *config)
 	}
 	return (0);
 
-err:    free(fail_fs);
+err:	if (config_parser != NULL)
+		(void)config_parser->close(config_parser);
+	free(fail_fs);
 	return (ret);
 }

@@ -1,29 +1,31 @@
+
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
@@ -36,14 +38,15 @@
 #include "mongo/db/query/index_entry.h"
 #include "mongo/db/query/index_tag.h"
 #include "mongo/db/query/query_knobs.h"
+#include "mongo/stdx/unordered_map.h"
 
 namespace mongo {
 
 struct PlanEnumeratorParams {
     PlanEnumeratorParams()
         : intersect(false),
-          maxSolutionsPerOr(internalQueryEnumerationMaxOrSolutions),
-          maxIntersectPerAnd(internalQueryEnumerationMaxIntersectPerAnd) {}
+          maxSolutionsPerOr(internalQueryEnumerationMaxOrSolutions.load()),
+          maxIntersectPerAnd(internalQueryEnumerationMaxIntersectPerAnd.load()) {}
 
     // Do we provide solutions that use more indices than the minimum required to provide
     // an indexed solution?
@@ -92,20 +95,19 @@ public:
     Status init();
 
     /**
-     * Outputs a possible plan.  Leaves in the plan are tagged with an index to use.
-     * Returns true if a plan was outputted, false if no more plans will be outputted.
-     *
-     * 'tree' is set to point to the query tree.  A QueryAssignment is built from this tree.
-     * Caller owns the pointer.  Note that 'tree' itself points into data owned by the
-     * provided CanonicalQuery.
+     * Outputs a possible plan. Leaves in the plan are tagged with an index to use.
+     * Returns a MatchExpression representing a point in the query tree (which can be
+     * used to build a QueryAssignment) or nullptr if no more plans will be outputted.
+     * While owned by the caller, the MatchExpression returned points into data that is
+     * owned elsewhere.
      *
      * Nodes in 'tree' are tagged with indices that should be used to answer the tagged nodes.
-     * Only nodes that have a field name (isLogical() == false) will be tagged.
+     * Only nodes that have a field name (getCategory() != kLogical) will be tagged.
      *
      * The output tree is a clone identical to that used to initialize the enumerator, with tags
      * added in order to indicate index usage.
      */
-    bool getNext(MatchExpression** tree);
+    std::unique_ptr<MatchExpression> getNext();
 
 private:
     //
@@ -124,9 +126,45 @@ private:
     // The position of a field in a possibly compound index.
     typedef size_t IndexPosition;
 
+    /**
+     * Represents the route that an outside predicate has taken during the PlanEnumerator's
+     * recursive descent of the match expression tree.
+     */
+    struct OutsidePredRoute {
+        /**
+         * Whether or not the route has traversed through an $elemMatch object node. This is needed
+         * because it is not correct to push down a predicate through an $elemMatch object.
+         */
+        bool traversedThroughElemMatchObj = false;
+
+        /**
+         * The route of the outside predicate. This starts at the indexed OR sibling of the
+         * predicate.  Each value in 'route' is the index of a child in an indexed OR.
+         *
+         * For example, if the MatchExpression tree is:
+         *         AND
+         *        /    \
+         *   {a: 5}    OR
+         *           /    \
+         *         AND    {e: 9}
+         *       /     \
+         *    {b: 6}   OR
+         *           /    \
+         *       {c: 7}  {d: 8}
+         *
+         * and the predicate is {a: 5}, then the route will be {0, 1} when the recursive descent
+         * reaches {d: 8}.
+         */
+        std::deque<size_t> route;
+    };
+
     struct PrepMemoContext {
         PrepMemoContext() : elemMatchExpr(NULL) {}
         MatchExpression* elemMatchExpr;
+
+        // Maps from indexable predicates that can be pushed into the current node to the route
+        // through ORs that they have taken to get to this node.
+        stdx::unordered_map<MatchExpression*, OutsidePredRoute> outsidePreds;
     };
 
     /**
@@ -162,11 +200,6 @@ private:
      * The PlanEnumerator is interested in matching predicates and indices.  Predicates
      * are leaf nodes in the parse tree.  {x:5}, {x: {$geoWithin:...}} are both predicates.
      *
-     * When we have simple predicates, like {x:5}, the task is easy: any indices prefixed
-     * with 'x' can be used to answer the predicate.  This is where the PredicateAssignment
-     * is used.
-     *
-     * With logical operators, things are more complicated.  Let's start with OR, the simplest.
      * Since the output of an OR is the union of its results, each of its children must be
      * indexed for the entire OR to be indexed.  If each subtree of an OR is indexable, the
      * OR is as well.
@@ -174,20 +207,10 @@ private:
      * For an AND to be indexed, only one of its children must be indexed.  AND is an
      * intersection of its children, so each of its children describes a superset of the
      * produced results.
+     *
+     * Leaf predicates are also given AND assignments, since they may index outside predicates that
+     * have been pushed down through OR nodes.
      */
-
-    struct PredicateAssignment {
-        PredicateAssignment() : indexToAssign(0) {}
-
-        std::vector<IndexID> first;
-        // Not owned here.
-        MatchExpression* expr;
-
-        // Enumeration state.  An indexed predicate's possible states are the indices that the
-        // predicate can directly use (the 'first' indices).  As such this value ranges from 0
-        // to first.size()-1 inclusive.
-        size_t indexToAssign;
-    };
 
     struct OrAssignment {
         OrAssignment() : counter(0) {}
@@ -208,6 +231,15 @@ private:
         std::vector<MatchExpression*> preds;
         std::vector<IndexPosition> positions;
         IndexID index;
+
+        // True if the bounds on 'index' for the leaf expressions in 'preds' can be intersected
+        // and/or compounded, and false otherwise. If 'canCombineBounds' is set to false and
+        // multiple predicates are assigned to the same position of a multikey index, then the
+        // access planner should generate a self-intersection plan.
+        bool canCombineBounds = true;
+
+        // The expressions that should receive an OrPushdownTag when this assignment is made.
+        std::vector<std::pair<MatchExpression*, OrPushdownTag::Destination>> orPushdowns;
     };
 
     struct AndEnumerableState {
@@ -234,7 +266,6 @@ private:
      * Associates indices with predicates.
      */
     struct NodeAssignment {
-        std::unique_ptr<PredicateAssignment> pred;
         std::unique_ptr<OrAssignment> orAssignment;
         std::unique_ptr<AndAssignment> andAssignment;
         std::unique_ptr<ArrayAssignment> arrayAssignment;
@@ -261,19 +292,24 @@ private:
      * context information is stashed in the tags so that we don't lose
      * information due to flattening.
      *
-     * Nodes that cannot be deeply traversed are returned via the output
-     * vectors 'subnodesOut' and 'mandatorySubnodes'. Subnodes are "mandatory"
-     * if they *must* use an index (TEXT and GEO).
-     *
      * Does not take ownership of arguments.
      *
      * Returns false if the AND cannot be indexed. Otherwise returns true.
      */
-    bool partitionPreds(MatchExpression* node,
-                        PrepMemoContext context,
-                        std::vector<MatchExpression*>* indexOut,
-                        std::vector<MemoID>* subnodesOut,
-                        std::vector<MemoID>* mandatorySubnodes);
+    void getIndexedPreds(MatchExpression* node,
+                         PrepMemoContext context,
+                         std::vector<MatchExpression*>* indexOut);
+
+    /**
+     * Recursively traverse 'node', with OR nodes as the base case. The OR nodes are not
+     * explored--instead we call prepMemo() on the OR subnode, and add its assignment to the output.
+     * Subnodes are "mandatory" if they *must* use an index (TEXT and GEO).
+     * Returns a boolean indicating whether all mandatory subnodes can be indexed.
+     */
+    bool prepSubNodes(MatchExpression* node,
+                      PrepMemoContext context,
+                      std::vector<MemoID>* subnodesOut,
+                      std::vector<MemoID>* mandatorySubnodes);
 
     /**
      * Finds a set of predicates that can be safely compounded with the set
@@ -342,6 +378,38 @@ private:
                                       std::vector<MatchExpression*>* out);
 
     /**
+     * Assigns predicates from 'couldAssign' to 'indexAssignment' that can safely be assigned
+     * according to the intersecting and compounding rules for multikey indexes. The rules can
+     * loosely be stated as follows:
+     *
+     *   - It is always safe to assign a predicate on path Y to the index when no prefix of the path
+     *     Y causes the index to be multikey.
+     *
+     *   - For any non-$elemMatch predicate on path X already assigned to the index, it isn't safe
+     *     to assign a predicate on path Y (possibly equal to X) to the index when a shared prefix
+     *     of the paths X and Y causes the index to be multikey.
+     *
+     *   - For any $elemMatch predicate on path X already assigned to the index, it isn't safe to
+     *     assign a predicate on path Y (possibly equal to X) to the index when
+     *       (a) a shared prefix of the paths X and Y causes the index to be multikey and the
+     *           predicates aren't joined by the same $elemMatch context, or
+     *       (b) a shared prefix of the paths X and Y inside the innermost $elemMatch causes the
+     *           index to be multikey.
+     *
+     * If a predicate in 'couldAssign' is also in 'outsidePreds', then it is assumed to be an
+     * outside predicate that was pushed down through an OR. Instead of adding it to
+     * indexAssignment->preds, we add it to indexAssignment->orPushdowns. We create its
+     * OrPushdownTag using the route specified in 'outsidePreds'.
+     *
+     * This function should only be called if the index has path-level multikey information.
+     * Otherwise, getMultikeyCompoundablePreds() and compound() should be used instead.
+     */
+    void assignMultikeySafePredicates(
+        const std::vector<MatchExpression*>& couldAssign,
+        const stdx::unordered_map<MatchExpression*, OutsidePredRoute>& outsidePreds,
+        OneIndexAssignment* indexAssignment);
+
+    /**
      * 'andAssignment' contains assignments that we've already committed to outputting,
      * including both single index assignments and ixisect assignments.
      *
@@ -365,7 +433,7 @@ private:
     /**
      * Output index intersection assignments inside of an AND node.
      */
-    typedef unordered_map<IndexID, std::vector<MatchExpression*>> IndexToPredMap;
+    typedef stdx::unordered_map<IndexID, std::vector<MatchExpression*>> IndexToPredMap;
 
     /**
      * Generate index intersection assignments given the predicate/index structure in idxToFirst
@@ -380,12 +448,14 @@ private:
     /**
      * Generate one-index-at-once assignments given the predicate/index structure in idxToFirst
      * and idxToNotFirst (and the sub-trees in 'subnodes').  Outputs the assignments into
-     * 'andAssignment'.
+     * 'andAssignment'. The predicates in 'outsidePreds' are considered for OrPushdownTags.
      */
-    void enumerateOneIndex(const IndexToPredMap& idxToFirst,
-                           const IndexToPredMap& idxToNotFirst,
-                           const std::vector<MemoID>& subnodes,
-                           AndAssignment* andAssignment);
+    void enumerateOneIndex(
+        IndexToPredMap idxToFirst,
+        IndexToPredMap idxToNotFirst,
+        const std::vector<MemoID>& subnodes,
+        const stdx::unordered_map<MatchExpression*, OutsidePredRoute>& outsidePreds,
+        AndAssignment* andAssignment);
 
     /**
      * Generate single-index assignments for queries which contain mandatory
@@ -402,12 +472,48 @@ private:
                                  AndAssignment* andAssignment);
 
     /**
+     * Assigns predicates in 'predsOverLeadingField' and 'idxToNotFirst' to 'indexAssign'. Assumes
+     * that the index is not multikey. Also assumes that that the index is of a type used to answer
+     * "mandatory predicates" such as text or geoNear.
+     */
+    void assignToNonMultikeyMandatoryIndex(
+        const IndexEntry& index,
+        const std::vector<MatchExpression*>& predsOverLeadingField,
+        const IndexToPredMap& idxToNotFirst,
+        OneIndexAssignment* indexAssign);
+
+    /**
      * Try to assign predicates in 'tryCompound' to 'thisIndex' as compound assignments.
      * Output the assignments in 'assign'.
      */
     void compound(const std::vector<MatchExpression*>& tryCompound,
                   const IndexEntry& thisIndex,
                   OneIndexAssignment* assign);
+
+    /**
+     * Returns the position that 'predicate' can use in the key pattern for 'indexEntry'. It is
+     * illegal to call this if 'predicate' does not have a RelevantTag, or it cannot use the index.
+     */
+    size_t getPosition(const IndexEntry& indexEntry, MatchExpression* predicate);
+
+    /**
+     * Adds 'pred' to 'indexAssignment', using 'position' as its position in the index. If 'pred' is
+     * in 'outsidePreds', then it is assumed to be an outside predicate that was pushed down through
+     * an OR. Instead of adding it to indexAssignment->preds, we add it to
+     * indexAssignment->orPushdowns. We create its OrPushdownTag using the route specified in
+     * 'outsidePreds'. 'pred' must be able to use the index and be multikey-safe to add to
+     * 'indexAssignment'.
+     */
+    void assignPredicate(
+        const stdx::unordered_map<MatchExpression*, OutsidePredRoute>& outsidePreds,
+        MatchExpression* pred,
+        size_t position,
+        OneIndexAssignment* indexAssignment);
+
+    /**
+     * Sets a flag on all outside pred routes that descend through an $elemMatch object node.
+     */
+    void markTraversedThroughElemMatchObj(PrepMemoContext* context);
 
     /**
      * Return the memo entry for 'node'.  Does some sanity checking to ensure that a memo entry
@@ -418,10 +524,10 @@ private:
     std::string dumpMemo();
 
     // Map from expression to its MemoID.
-    unordered_map<MatchExpression*, MemoID> _nodeToId;
+    stdx::unordered_map<MatchExpression*, MemoID> _nodeToId;
 
     // Map from MemoID to its precomputed solution info.
-    unordered_map<MemoID, NodeAssignment*> _memo;
+    stdx::unordered_map<MemoID, NodeAssignment*> _memo;
 
     // If true, there are no further enumeration states, and getNext should return false.
     // We could be _done immediately after init if we're unable to output an indexed plan.

@@ -1,42 +1,41 @@
-/*
- * Copyright (C) 2013 10gen, Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #ifdef _WIN32
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kNetwork
 
-#define SECURITY_WIN32 1  // Required for SSPI support.
-
 #include "mongo/platform/basic.h"
 
 #include <sasl/sasl.h>
 #include <sasl/saslplug.h>
-#include <sspi.h>
 
 #include "mongo/base/init.h"
 #include "mongo/base/status.h"
@@ -51,12 +50,6 @@ extern "C" int plain_client_plug_init(const sasl_utils_t* utils,
                                       int* out_version,
                                       sasl_client_plug_t** pluglist,
                                       int* plugcount);
-
-extern "C" int crammd5_client_plug_init(const sasl_utils_t* utils,
-                                        int maxversion,
-                                        int* out_version,
-                                        sasl_client_plug_t** pluglist,
-                                        int* plugcount);
 
 namespace mongo {
 namespace {
@@ -179,7 +172,7 @@ int sspiClientMechNew(void* glob_context,
     pcctx->userPlusRealm = userPlusRealm;
     TimeStamp ignored;
     SECURITY_STATUS status = AcquireCredentialsHandleW(NULL,  // principal
-                                                       L"kerberos",
+                                                       const_cast<LPWSTR>(L"kerberos"),
                                                        SECPKG_CRED_OUTBOUND,
                                                        NULL,           // LOGON id
                                                        &authIdentity,  // auth data
@@ -487,20 +480,8 @@ MONGO_INITIALIZER_WITH_PREREQUISITES(SaslSspiClientPlugin,
     if (SASL_OK != ret) {
         return Status(ErrorCodes::UnknownError,
                       mongoutils::str::stream() << "could not add SASL Client SSPI plugin "
-                                                << sspiPluginName << ": "
-                                                << sasl_errstring(ret, NULL, NULL));
-    }
-
-    return Status::OK();
-}
-MONGO_INITIALIZER_WITH_PREREQUISITES(SaslCramClientPlugin,
-                                     ("CyrusSaslAllocatorsAndMutexes", "CyrusSaslClientContext"))
-(InitializerContext*) {
-    int ret = sasl_client_add_plugin("CRAMMD5", crammd5_client_plug_init);
-    if (SASL_OK != ret) {
-        return Status(ErrorCodes::UnknownError,
-                      mongoutils::str::stream() << "Could not add SASL Client CRAM-MD5 plugin "
-                                                << sspiPluginName << ": "
+                                                << sspiPluginName
+                                                << ": "
                                                 << sasl_errstring(ret, NULL, NULL));
     }
 
@@ -514,7 +495,8 @@ MONGO_INITIALIZER_WITH_PREREQUISITES(SaslPlainClientPlugin,
     if (SASL_OK != ret) {
         return Status(ErrorCodes::UnknownError,
                       mongoutils::str::stream() << "Could not add SASL Client PLAIN plugin "
-                                                << sspiPluginName << ": "
+                                                << sspiPluginName
+                                                << ": "
                                                 << sasl_errstring(ret, NULL, NULL));
     }
 

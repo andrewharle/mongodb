@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-# Public Domain 2014-2016 MongoDB, Inc.
+# Public Domain 2014-2019 MongoDB, Inc.
 # Public Domain 2008-2014 WiredTiger, Inc.
 #
 # This is free and unencumbered software released into the public domain.
@@ -187,7 +187,7 @@ class test_bulk_load(wttest.WiredTigerTestCase):
         if not wiredtiger.diagnostic_build():
             self.skipTest('requires a diagnostic build')
 
-        # Close explicitly, there's going to be a fallure.
+        # Close explicitly, there's going to be a failure.
         msg = '/are incorrectly sorted/'
         self.assertRaisesWithMessage(wiredtiger.WiredTigerError,
             lambda: self.conn.close(), msg)

@@ -1,3 +1,10 @@
+// @tags: [
+//   assumes_superuser_permissions,
+//   does_not_support_stepdowns,
+//   requires_getmore,
+//   requires_non_retryable_writes,
+// ]
+
 // Tests whether the geospatial search is stable under btree updates
 //
 // Tests the implementation of the 2d search, not the behavior we promise.  MongoDB currently
@@ -25,6 +32,7 @@ coll.ensureIndex({loc: '2d'});
 status("Inserting points...");
 
 var numPoints = 10;
+Random.setRandomSeed();
 for (i = 0; i < numPoints; i++) {
     coll.insert({_id: i, loc: [Random.rand() * 180, Random.rand() * 180], i: i % 2});
 }

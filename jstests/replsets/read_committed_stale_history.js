@@ -15,13 +15,18 @@
 
     var rst = new ReplSetTest({
         name: name,
-        nodes: [{}, {}, {rsConfig: {priority: 0}}, ],
+        nodes: [
+            {},
+            {},
+            {rsConfig: {priority: 0}},
+        ],
         nodeOptions: {enableMajorityReadConcern: ""},
         useBridge: true
     });
 
     if (!startSetIfSupportsReadMajority(rst)) {
         jsTest.log("skipping test since storage engine doesn't support committed reads");
+        rst.stopSet();
         return;
     }
 
@@ -45,8 +50,9 @@
         assert.eq(0, docs.length, tojson(docs));
     }
 
+    // SERVER-20844 ReplSetTest starts up a single node replica set then reconfigures to the correct
+    // size for faster startup, so nodes[0] is always the first primary.
     jsTestLog("Make sure node 0 is primary.");
-    rst.stepUp(nodes[0]);
     var primary = rst.getPrimary();
     var secondaries = rst.getSecondaries();
     assert.eq(nodes[0], primary);
@@ -90,10 +96,6 @@
     // Ensure the new primary still cannot see the write from the old primary.
     assert.eq(null, nodes[1].getDB(dbName).getCollection(collName).findOne({a: 2}));
 
-    // Ensure the stale primary still hasn't committed the write it did that never reached
-    // the other nodes.
-    checkDocNotCommitted(nodes[0], {a: 2});
-
     jsTest.log("Reconnect the old primary to the rest of the nodes");
     nodes[1].reconnect(nodes[0]);
     nodes[2].reconnect(nodes[0]);
@@ -102,11 +104,6 @@
     // heartbeats don't cause the stale primary to incorrectly advance the commit point.
     sleep(10000);
 
-    // Ensure the new primary still cannot see the write from the old primary.
-    assert.eq(null, nodes[1].getDB(dbName).getCollection(collName).findOne({a: 2}));
-
-    // Ensure the stale primary still hasn't committed the write it did that never reached
-    // the other nodes.
     checkDocNotCommitted(nodes[0], {a: 2});
 
     jsTest.log("Allow the old primary to finish stepping down and become secondary");
@@ -131,8 +128,8 @@
     checkDocNotCommitted(nodes[0], {a: 2});
 
     jsTest.log("Allow the original primary to roll back its write and catch up to the new primary");
-    assert.commandWorked(
-        nodes[0].adminCommand({configureFailPoint: 'rollbackHangBeforeStart', mode: 'off'}));
+    assert.adminCommandWorkedAllowingNetworkError(
+        nodes[0], {configureFailPoint: 'rollbackHangBeforeStart', mode: 'off'});
 
     assert.soonNoExcept(function() {
         return null == nodes[0].getDB(dbName).getCollection(collName).findOne({a: 2});
@@ -141,9 +138,16 @@
     rst.awaitReplication();
 
     // Ensure that the old primary got the write that the new primary did and sees it as committed.
-    assert.neq(
-        null,
-        nodes[0].getDB(dbName).getCollection(collName).find({a: 3}).readConcern('majority').next());
+    assert.soonNoExcept(function() {
+        // Without a consistent stream of writes, secondary majority reads are not guaranteed to
+        // complete, since the commit point being stale is not sufficient to establish a sync
+        // source.
+        assert.commandWorked(nodes[1].getDB(dbName).getCollection("dummy").insert({dummy: 1}));
+        res = nodes[0].getDB(dbName).runCommand(
+            {find: collName, filter: {a: 3}, readConcern: {level: "majority"}, maxTimeMS: 10000});
+        assert.commandWorked(res);
+        return res.cursor.firstBatch.length === 1;
+    }, "Original primary never got the new write in its majority committed snapshot");
 
     rst.stopSet();
 }());

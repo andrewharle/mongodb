@@ -7,15 +7,10 @@
  * The indexed field contains unique values.
  * Each thread operates on a separate collection.
  */
-load('jstests/concurrency/fsm_workload_helpers/drop_utils.js');  // for dropCollections
 
 var $config = (function() {
 
-    var data = {
-        numDocs: 1000,
-        prefix: 'distinct_fsm',
-        shardKey: {i: 1}
-    };
+    var data = {numDocs: 1000, prefix: 'distinct_fsm', shardKey: {i: 1}};
 
     var states = (function() {
 
@@ -35,22 +30,11 @@ var $config = (function() {
             assertWhenOwnColl.eq(this.numDocs, db[this.threadCollName].distinct('i').length);
         }
 
-        return {
-            init: init,
-            distinct: distinct
-        };
+        return {init: init, distinct: distinct};
 
     })();
 
-    var transitions = {
-        init: {distinct: 1},
-        distinct: {distinct: 1}
-    };
-
-    function teardown(db, collName, cluster) {
-        var pattern = new RegExp('^' + this.prefix + '_\\d+$');
-        dropCollections(db, pattern);
-    }
+    var transitions = {init: {distinct: 1}, distinct: {distinct: 1}};
 
     return {
         data: data,
@@ -58,7 +42,6 @@ var $config = (function() {
         iterations: 20,
         states: states,
         transitions: transitions,
-        teardown: teardown
     };
 
 })();

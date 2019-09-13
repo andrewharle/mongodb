@@ -1,5 +1,8 @@
 // test --repairpath on another partition
 
+// `--repairpath` is mmap only.
+// @tags: [requires_mmapv1]
+
 var baseName = "jstests_disk_repair3";
 var repairbase = MongoRunner.dataDir + "/repairpartitiontest";
 var repairpath = repairbase + "/dir";
@@ -44,7 +47,7 @@ if (doIt) {
     }
 
     check();
-    MongoRunner.stopMongod(m.port);
+    MongoRunner.stopMongod(m);
 
     resetDbpath(repairpath);
     var rc = runMongoProgram("mongod",
@@ -70,5 +73,5 @@ if (doIt) {
     });
     db = m.getDB(baseName);
     check();
-    MongoRunner.stopMongod(m.port);
+    MongoRunner.stopMongod(m);
 }

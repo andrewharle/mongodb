@@ -1,3 +1,8 @@
+// @tags: [
+//   does_not_support_stepdowns,
+//   uses_testing_only_commands,
+// ]
+
 t = db.stages_and_sorted;
 t.drop();
 var collname = "stages_and_sorted";
@@ -30,6 +35,7 @@ ixscan1 = {
             keyPattern: {foo: 1},
             startKey: {"": 1},
             endKey: {"": 1},
+            startKeyInclusive: true,
             endKeyInclusive: true,
             direction: 1
         }
@@ -44,6 +50,7 @@ ixscan2 = {
             keyPattern: {bar: 1},
             startKey: {"": 1},
             endKey: {"": 1},
+            startKeyInclusive: true,
             endKeyInclusive: true,
             direction: 1
         }
@@ -58,6 +65,7 @@ ixscan3 = {
             keyPattern: {baz: 1},
             startKey: {"": 12},
             endKey: {"": 12},
+            startKeyInclusive: true,
             endKeyInclusive: true,
             direction: 1
         }

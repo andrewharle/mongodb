@@ -4,11 +4,20 @@
  * storage engines, do a bunch of random work, and assert that it replicates the same way on all
  * nodes.
  */
+
+// This test randomly generates operations, which may include direct writes against
+// config.transactions, which are not allowed to run under a session.
+TestData.disableImplicitSessions = true;
+
 load('jstests/libs/parallelTester.js');
+load("jstests/replsets/rslib.js");
 
 // Seed random numbers and print the seed. To reproduce a failed test, look for the seed towards
 // the beginning of the output, and give it as an argument to randomize.
-jsTest.randomize();
+Random.setRandomSeed();
+
+// Version constants.
+const lastStableFCV = "3.6";
 
 /*
  * Namespace for all random operation helpers. Actual tests start below
@@ -78,26 +87,6 @@ var RandomOps = {
         return created;
     },
 
-    /*
-     * Return a random non-system.indexes collection from the 'user created' collections.
-     */
-    getRandomExistingCollection: function(conn) {
-        var dbs = this.getCreatedDatabases(conn);
-        if (dbs.length === 0) {
-            return null;
-        }
-        var dbName = this.randomChoice(dbs);
-        var db = conn.getDB(dbName);
-        if (db.getCollectionNames().length <= 1) {
-            return null;
-        }
-        var coll = this.randomChoice(db.getCollectionNames());
-        while (coll == "system.indexes") {
-            coll = this.randomChoice(db.getCollectionNames());
-        }
-        return db[coll];
-    },
-
     getRandomDoc: function(collection) {
         try {
             var randIndex = Random.randInt(0, collection.find().count());
@@ -108,21 +97,33 @@ var RandomOps = {
     },
 
     /*
-     * Returns a random user defined collection, selecting from only those for which filterFn
-     * returns true, or null if there are none.
+     * Returns a random user defined collection.
+     *
+     * The second parameter is a function that should return false if it wants to filter out
+     * a collection from the list.
+     *
+     * If no collections exist, this returns null.
      */
-    getRandomCollectionWFilter: function(conn, filterFn) {
+    getRandomExistingCollection: function(conn, filterFn) {
         var matched = [];
         var dbs = this.getCreatedDatabases(conn);
         for (var i in dbs) {
             var dbName = dbs[i];
-            var colls = conn.getDB(dbName).getCollectionNames();
-            for (var j in colls) {
-                var coll = colls[j];
-                if (filterFn(dbName, coll)) {
-                    matched.push(coll);
-                }
-            }
+            var colls = conn.getDB(dbName)
+                            .getCollectionNames()
+                            .filter(function(collName) {
+                                if (collName == "system.indexes") {
+                                    return false;
+                                } else if (filterFn && !filterFn(dbName, collName)) {
+                                    return false;
+                                } else {
+                                    return true;
+                                }
+                            })
+                            .map(function(collName) {
+                                return conn.getDB(dbName).getCollection(collName);
+                            });
+            Array.prototype.push.apply(matched, colls);
         }
         if (matched.length === 0) {
             return null;
@@ -157,7 +158,7 @@ var RandomOps = {
         }
         var result =
             conn.getDB(db)[coll].insert(doc, {writeConcern: {w: writeConcern}, journal: journal});
-        assert.eq(result.ok, 1);
+        assert.writeOK(result);
         if (this.verbose) {
             print("done.");
         }
@@ -211,9 +212,7 @@ var RandomOps = {
         }
 
         var field = this.randomChoice(this.fieldNames);
-        var updateDoc = {
-            $set: {}
-        };
+        var updateDoc = {$set: {}};
         updateDoc.$set[field] = this.randomChoice(this.fieldValues);
         if (this.verbose) {
             print("Updating:");
@@ -246,30 +245,12 @@ var RandomOps = {
         if (coll === null) {
             return null;
         }
-        var newName = coll.getDB() + "." + new ObjectId().str;
+        var newName = coll.getDB().getName() + "." + new ObjectId().str;
         if (this.verbose) {
             print("renaming collection " + coll.getFullName() + " to " + newName);
         }
         assert.commandWorked(
             conn.getDB("admin").runCommand({renameCollection: coll.getFullName(), to: newName}));
-        if (this.verbose) {
-            print("done.");
-        }
-    },
-
-    /*
-     * Randomly drop a user created database.
-     */
-    dropDatabase: function(conn) {
-        var dbs = this.getCreatedDatabases(conn);
-        if (dbs.length === 0) {
-            return null;
-        }
-        var dbName = this.randomChoice(dbs);
-        if (this.verbose) {
-            print("Dropping database " + dbName);
-        }
-        assert.commandWorked(conn.getDB(dbName).runCommand({dropDatabase: 1}));
         if (this.verbose) {
             print("done.");
         }
@@ -286,7 +267,7 @@ var RandomOps = {
         if (this.verbose) {
             print("Dropping collection " + coll.getFullName());
         }
-        assert.commandWorked(conn.getDB(coll.getDB()).runCommand({drop: coll.getName()}));
+        assert.commandWorked(coll.runCommand({drop: coll.getName()}));
         if (this.verbose) {
             print("done.");
         }
@@ -345,7 +326,7 @@ var RandomOps = {
             print("Modifying usePowerOf2Sizes to " + toggle + " on collection " +
                   coll.getFullName());
         }
-        conn.getDB(coll.getDB()).runCommand({collMod: coll.getName(), usePowerOf2Sizes: toggle});
+        coll.runCommand({collMod: coll.getName(), usePowerOf2Sizes: toggle});
         if (this.verbose) {
             print("done.");
         }
@@ -358,14 +339,14 @@ var RandomOps = {
         var isCapped = function(dbName, coll) {
             return conn.getDB(dbName)[coll].isCapped();
         };
-        var coll = this.getRandomCollectionWFilter(conn, isCapped);
+        var coll = this.getRandomExistingCollection(conn, isCapped);
         if (coll === null) {
             return null;
         }
         if (this.verbose) {
             print("Emptying capped collection: " + coll.getFullName());
         }
-        assert.commandWorked(conn.getDB(coll.getDB()).runCommand({emptycapped: coll.getName()}));
+        assert.commandWorked(coll.runCommand({emptycapped: coll.getName()}));
         if (this.verbose) {
             print("done.");
         }
@@ -423,18 +404,16 @@ var RandomOps = {
      */
     convertToCapped: function(conn) {
         var isNotCapped = function(dbName, coll) {
-            return conn.getDB(dbName)[coll].isCapped();
+            return !conn.getDB(dbName)[coll].isCapped();
         };
-        var coll = this.getRandomCollectionWFilter(conn, isNotCapped);
+        var coll = this.getRandomExistingCollection(conn, isNotCapped);
         if (coll === null) {
             return null;
         }
         if (this.verbose) {
             print("Converting " + coll.getFullName() + " to a capped collection.");
         }
-        assert.commandWorked(
-            conn.getDB(coll.getDB())
-                .runCommand({convertToCapped: coll.getName(), size: 1024 * 1024}));
+        assert.commandWorked(coll.runCommand({convertToCapped: coll.getName(), size: 1024 * 1024}));
         if (this.verbose) {
             print("done.");
         }
@@ -459,7 +438,12 @@ var RandomOps = {
     doRandomWork: function(conn, numOps, possibleOps) {
         for (var i = 0; i < numOps; i++) {
             op = this.randomChoice(possibleOps);
-            this[op](conn);
+            try {
+                this[op](conn);
+            } catch (ex) {
+                print('doRandomWork - ' + op + ': failed: ' + ex);
+                throw ex;
+            }
         }
     }
 
@@ -540,6 +524,10 @@ function assertDBsEq(db1, db2) {
     } else if (hash1.md5 != hash2.md5) {
         for (var i = 0; i < Math.min(collNames1.length, collNames2.length); i++) {
             var collName = collNames1[i];
+            if (collName.startsWith('system.')) {
+                // Skip system collections. These are not included in the dbhash before 3.3.10.
+                continue;
+            }
             if (hash1.collections[collName] !== hash2.collections[collName]) {
                 if (db1[collName].stats().capped) {
                     if (!db2[collName].stats().capped) {
@@ -587,12 +575,15 @@ function assertSameData(primary, conns) {
  * function to pass to a thread to make it start doing random commands/CRUD operations.
  */
 function startCmds(randomOps, host) {
+    // This test randomly generates operations, which may include direct writes against
+    // config.transactions, which are not allowed to run under a session.
+    TestData = {disableImplicitSessions: true};
+
     var ops = [
         "insert",
         "remove",
         "update",
         "renameCollection",
-        "dropDatabase",
         "dropCollection",
         "createIndex",
         "dropIndex",
@@ -605,6 +596,7 @@ function startCmds(randomOps, host) {
     ];
     var m = new Mongo(host);
     var numOps = 200;
+    Random.setRandomSeed();
     randomOps.doRandomWork(m, numOps, ops);
     return true;
 }
@@ -613,8 +605,13 @@ function startCmds(randomOps, host) {
  * function to pass to a thread to make it start doing random CRUD operations.
  */
 function startCRUD(randomOps, host) {
+    // This test randomly generates operations, which may include direct writes against
+    // config.transactions, which are not allowed to run under a session.
+    TestData = {disableImplicitSessions: true};
+
     var m = new Mongo(host);
     var numOps = 500;
+    Random.setRandomSeed();
     randomOps.doRandomWork(m, numOps, ["insert", "update", "remove"]);
     return true;
 }
@@ -655,37 +652,49 @@ function doMultiThreadedWork(primary, numThreads) {
     // Create a replica set with 2 nodes of each of the types below, plus one arbiter.
     var oldVersion = "last-stable";
     var newVersion = "latest";
+
     var setups = [
         {binVersion: newVersion, storageEngine: 'mmapv1'},
+        {binVersion: newVersion, storageEngine: 'mmapv1'},
         {binVersion: newVersion, storageEngine: 'wiredTiger'},
-        {binVersion: oldVersion}
+        {binVersion: newVersion, storageEngine: 'wiredTiger'},
+        {binVersion: oldVersion},
+        {binVersion: oldVersion},
+        {arbiter: true},
     ];
-    var nodes = {};
-    var node = 0;
-    // Add each one twice.
-    for (var i in setups) {
-        nodes["n" + node] = setups[i];
-        node++;
-        nodes["n" + node] = setups[i];
-        node++;
-    }
-    nodes["n" + 2 * setups.length] = {
-        arbiter: true
-    };
-    var replTest = new ReplSetTest({nodes: nodes, name: name});
-    var conns = replTest.startSet();
-
+    var replTest = new ReplSetTest({nodes: {n0: setups[0]}, name: name});
+    replTest.startSet();
     var config = replTest.getReplSetConfig();
+    // Override the default value -1 in 3.5.
+    config.settings = {catchUpTimeoutMillis: 2000};
+    replTest.initiate(config);
+
+    // We set the featureCompatibilityVersion to lastStableFCV so that last-stable binary version
+    // secondaries can successfully initial sync from a latest binary version primary. We do this
+    // prior to adding any other members to the replica set. This effectively allows us to emulate
+    // upgrading some of our nodes to the latest version while different last-stable version and
+    // latest version mongod processes are being elected primary.
+    assert.commandWorked(
+        replTest.getPrimary().adminCommand({setFeatureCompatibilityVersion: lastStableFCV}));
+
+    for (let i = 1; i < setups.length; ++i) {
+        replTest.add(setups[i]);
+    }
+
+    var newConfig = replTest.getReplSetConfig();
+    config = replTest.getReplSetConfigFromNode();
     // Make sure everyone is syncing from the primary, to ensure we have all combinations of
     // primary/secondary syncing.
-    config.settings = {
-        chainingAllowed: false
-    };
-    config.protocolVersion = 0;
-    replTest.initiate(config);
+    config.members = newConfig.members;
+    config.settings.chainingAllowed = false;
+    config.version += 1;
+    reconfig(replTest, config);
+
     // Ensure all are synced.
     replTest.awaitSecondaryNodes(120000);
     var primary = replTest.getPrimary();
+
+    Random.setRandomSeed();
 
     // Keep track of the indices of different types of primaries.
     // We'll rotate to get a primary of each type.
@@ -705,20 +714,17 @@ function doMultiThreadedWork(primary, numThreads) {
         }
         highestPriority++;
         printjson(config);
-        try {
-            primary.getDB("admin").runCommand({replSetReconfig: config});
-        } catch (e) {
-            // Expected to fail, as we'll have to reconnect.
-        }
-        replTest.awaitReplication(60000);  // 2 times the election period.
-        assert.soon(primaryChanged(conns, replTest, primaryIndex),
+        reconfig(replTest, config);
+        replTest.awaitReplication();
+        assert.soon(primaryChanged(replTest.nodes, replTest, primaryIndex),
                     "waiting for higher priority primary to be elected",
                     100000);
         print("New primary elected, doing a bunch of work");
         primary = replTest.getPrimary();
         doMultiThreadedWork(primary, 10);
-        replTest.awaitReplication(50000);
+        replTest.awaitReplication();
         print("Work done, checking to see all nodes match");
-        assertSameData(primary, conns);
+        assertSameData(primary, replTest.nodes);
     }
+    replTest.stopSet();
 })();

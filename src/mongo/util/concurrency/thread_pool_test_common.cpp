@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -61,7 +63,7 @@ private:
 
 using ThreadPoolTestCaseFactory =
     stdx::function<std::unique_ptr<::mongo::unittest::Test>(ThreadPoolFactory)>;
-using ThreadPoolTestCaseMap = unordered_map<std::string, ThreadPoolTestCaseFactory>;
+using ThreadPoolTestCaseMap = stdx::unordered_map<std::string, ThreadPoolTestCaseFactory>;
 
 static ThreadPoolTestCaseMap& threadPoolTestCaseRegistry() {
     static ThreadPoolTestCaseMap registry;
@@ -99,40 +101,39 @@ public:
     }
 };
 
-#define COMMON_THREAD_POOL_TEST(TEST_NAME)                                                    \
-    class TPT_##TEST_NAME : public CommonThreadPoolTestFixture {                              \
-    public:                                                                                   \
-        TPT_##TEST_NAME(ThreadPoolFactory makeThreadPool)                                     \
-            : CommonThreadPoolTestFixture(std::move(makeThreadPool)) {}                       \
-                                                                                              \
-    private:                                                                                  \
-        void _doTest() override;                                                              \
-        static const TptRegistrationAgent _agent;                                             \
-    };                                                                                        \
-    const TptRegistrationAgent TPT_##TEST_NAME::_agent(#TEST_NAME,                            \
-                                                       [](ThreadPoolFactory makeThreadPool) { \
-        return stdx::make_unique<TPT_##TEST_NAME>(std::move(makeThreadPool));                 \
-                                                       });                                    \
+#define COMMON_THREAD_POOL_TEST(TEST_NAME)                                        \
+    class TPT_##TEST_NAME : public CommonThreadPoolTestFixture {                  \
+    public:                                                                       \
+        TPT_##TEST_NAME(ThreadPoolFactory makeThreadPool)                         \
+            : CommonThreadPoolTestFixture(std::move(makeThreadPool)) {}           \
+                                                                                  \
+    private:                                                                      \
+        void _doTest() override;                                                  \
+        static const TptRegistrationAgent _agent;                                 \
+    };                                                                            \
+    const TptRegistrationAgent TPT_##TEST_NAME::_agent(                           \
+        #TEST_NAME, [](ThreadPoolFactory makeThreadPool) {                        \
+            return stdx::make_unique<TPT_##TEST_NAME>(std::move(makeThreadPool)); \
+        });                                                                       \
     void TPT_##TEST_NAME::_doTest()
 
-#define COMMON_THREAD_POOL_DEATH_TEST(TEST_NAME, MATCH_EXPR)                  \
-    class TPT_##TEST_NAME : public CommonThreadPoolTestFixture {              \
-    public:                                                                   \
-        TPT_##TEST_NAME(ThreadPoolFactory makeThreadPool)                     \
-            : CommonThreadPoolTestFixture(std::move(makeThreadPool)) {}       \
-                                                                              \
-    private:                                                                  \
-        void _doTest() override;                                              \
-        static const TptDeathRegistrationAgent<TPT_##TEST_NAME> _agent;       \
-    };                                                                        \
-    const TptDeathRegistrationAgent<TPT_##TEST_NAME> TPT_##TEST_NAME::_agent( \
-        #TEST_NAME,                                                           \
-        [](ThreadPoolFactory makeThreadPool) {                                \
-        return stdx::make_unique<TPT_##TEST_NAME>(std::move(makeThreadPool)); \
-        });                                                                   \
-    std::string getDeathTestPattern(TPT_##TEST_NAME*) {                       \
-        return MATCH_EXPR;                                                    \
-    }                                                                         \
+#define COMMON_THREAD_POOL_DEATH_TEST(TEST_NAME, MATCH_EXPR)                      \
+    class TPT_##TEST_NAME : public CommonThreadPoolTestFixture {                  \
+    public:                                                                       \
+        TPT_##TEST_NAME(ThreadPoolFactory makeThreadPool)                         \
+            : CommonThreadPoolTestFixture(std::move(makeThreadPool)) {}           \
+                                                                                  \
+    private:                                                                      \
+        void _doTest() override;                                                  \
+        static const TptDeathRegistrationAgent<TPT_##TEST_NAME> _agent;           \
+    };                                                                            \
+    const TptDeathRegistrationAgent<TPT_##TEST_NAME> TPT_##TEST_NAME::_agent(     \
+        #TEST_NAME, [](ThreadPoolFactory makeThreadPool) {                        \
+            return stdx::make_unique<TPT_##TEST_NAME>(std::move(makeThreadPool)); \
+        });                                                                       \
+    std::string getDeathTestPattern(TPT_##TEST_NAME*) {                           \
+        return MATCH_EXPR;                                                        \
+    }                                                                             \
     void TPT_##TEST_NAME::_doTest()
 
 COMMON_THREAD_POOL_TEST(UnusedPool) {

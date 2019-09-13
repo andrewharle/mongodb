@@ -4,13 +4,13 @@
     var s2 = s1._mongos[1];
 
     s1.adminCommand({enablesharding: "test"});
-    s1.ensurePrimaryShard('test', 'shard0001');
+    s1.ensurePrimaryShard('test', s1.shard1.shardName);
     s1.adminCommand({shardcollection: "test.foo", key: {name: 1}});
 
     var db1 = s1.getDB("test").foo;
     var db2 = s2.getDB("test").foo;
 
-    assert.eq(1, s1.config.chunks.count(), "sanity check A");
+    assert.eq(1, s1.config.chunks.count({"ns": "test.foo"}), "sanity check A");
 
     db1.save({name: "aaa"});
     db1.save({name: "bbb"});
@@ -29,7 +29,7 @@
     s1.adminCommand({
         movechunk: "test.foo",
         find: {name: "aaa"},
-        to: s1.getOther(s1.getServer("test")).name,
+        to: s1.getOther(s1.getPrimaryShard("test")).name,
         _waitForDelete: true
     });
 

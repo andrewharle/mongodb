@@ -1,11 +1,12 @@
+// This test fiddles with preallocation, an mmap only behavior.
+// @tags: [requires_mmapv1]
+
 var baseName = "jstests_disk_datafile_options";
 
 load('jstests/libs/command_line/test_parsed_options.js');
 
 jsTest.log("Testing \"noprealloc\" command line option");
-var expectedResult = {
-    "parsed": {"storage": {"mmapv1": {"preallocDataFiles": false}}}
-};
+var expectedResult = {"parsed": {"storage": {"mmapv1": {"preallocDataFiles": false}}}};
 testGetCmdLineOptsMongod({noprealloc: ""}, expectedResult);
 
 jsTest.log("Testing \"storage.mmapv1.preallocDataFiles\" config file option");
@@ -34,5 +35,3 @@ expectedResult = {
 };
 testGetCmdLineOptsMongod({config: "jstests/libs/config_files/disable_noprealloc.ini"},
                          expectedResult);
-
-print(baseName + " succeeded.");

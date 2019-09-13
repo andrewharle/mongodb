@@ -1,19 +1,20 @@
 /**
  * This tests that user defined roles actually grant users the ability to perform the actions they
  * should, and that changing the privileges assigned to roles changes the access granted to the user
+ * @tags: [requires_sharding]
  */
 
 function runTest(conn) {
     var authzErrorCode = 13;
     var hasAuthzError = function(result) {
-        assert(result.hasWriteError());
-        assert.eq(authzErrorCode, result.getWriteError().code);
+        assert(result instanceof WriteCommandError);
+        assert.eq(authzErrorCode, result.code);
     };
 
     conn.getDB('admin').createUser({user: 'admin', pwd: 'pwd', roles: ['root']});
     conn.getDB('admin').auth('admin', 'pwd');
-    conn.getDB('admin')
-        .createUser({user: 'userAdmin', pwd: 'pwd', roles: ['userAdminAnyDatabase']});
+    conn.getDB('admin').createUser(
+        {user: 'userAdmin', pwd: 'pwd', roles: ['userAdminAnyDatabase']});
     conn.getDB('admin').logout();
 
     var userAdminConn = new Mongo(conn.host);
@@ -99,12 +100,11 @@ function runTest(conn) {
         testDB.updateUser('testUser', {customData: {zipCode: 10036}});
     });
     assert.eq(null, testDB.getUser('testUser').customData);
-    testUserAdmin.grantPrivilegesToRole(
-        'testRole1',
-            [{
-               resource: {db: 'test', collection: ''},
-               actions: ['changeOwnPassword', 'changeOwnCustomData']
-            }]);
+    testUserAdmin.grantPrivilegesToRole('testRole1',
+                                        [{
+                                           resource: {db: 'test', collection: ''},
+                                           actions: ['changeOwnPassword', 'changeOwnCustomData']
+                                        }]);
     testDB.changeUserPassword('testUser', 'password');
     assert(!testDB.auth('testUser', 'pwd'));
     assert(testDB.auth('testUser', 'password'));
@@ -124,11 +124,9 @@ function runTest(conn) {
     assert.eq(10036, testDB.getUser('testUser').customData.zipCode);
 
     // Test changeAnyPassword/changeAnyCustomData
-    testUserAdmin.grantPrivilegesToRole('testRole2',
-                                            [{
-                                               resource: {db: 'test', collection: ''},
-                                               actions: ['changePassword', 'changeCustomData']
-                                            }]);
+    testUserAdmin.grantPrivilegesToRole('testRole2', [
+        {resource: {db: 'test', collection: ''}, actions: ['changePassword', 'changeCustomData']}
+    ]);
     testDB.changeUserPassword('testUser', 'pwd');
     assert(!testDB.auth('testUser', 'password'));
     assert(testDB.auth('testUser', 'pwd'));
@@ -137,17 +135,19 @@ function runTest(conn) {
 
     // Test privileges on the cluster resource
     assert.commandFailed(testDB.runCommand({serverStatus: 1}));
-    adminUserAdmin.grantPrivilegesToRole(
-        'adminRole', [{resource: {cluster: true}, actions: ['serverStatus']}]);
+    adminUserAdmin.grantPrivilegesToRole('adminRole',
+                                         [{resource: {cluster: true}, actions: ['serverStatus']}]);
     assert.commandWorked(testDB.serverStatus());
 }
 
 jsTest.log('Test standalone');
 var conn = MongoRunner.runMongod({auth: ''});
 runTest(conn);
-MongoRunner.stopMongod(conn.port);
+MongoRunner.stopMongod(conn);
 
 jsTest.log('Test sharding');
-var st = new ShardingTest({shards: 2, config: 3, keyFile: 'jstests/libs/key1'});
+// TODO: Remove 'shardAsReplicaSet: false' when SERVER-32672 is fixed.
+var st = new ShardingTest(
+    {shards: 2, config: 3, keyFile: 'jstests/libs/key1', other: {shardAsReplicaSet: false}});
 runTest(st.s);
 st.stop();

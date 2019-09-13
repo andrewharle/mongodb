@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -39,7 +41,9 @@
 #include "mongo/db/storage/mmap_v1/dur_stats.h"
 #include "mongo/stdx/functional.h"
 #include "mongo/stdx/thread.h"
+#include "mongo/util/concurrency/idle_thread_block.h"
 #include "mongo/util/log.h"
+#include "mongo/util/timer.h"
 
 namespace mongo {
 namespace dur {
@@ -55,12 +59,14 @@ namespace {
  * (2) TODO should we do this using N threads? Would be quite easy see Hackenberg paper table
  *  5 and 6. 2 threads might be a good balance.
  */
-void WRITETODATAFILES(const JSectHeader& h, const AlignedBuilder& uncompressed) {
+void WRITETODATAFILES(OperationContext* opCtx,
+                      const JSectHeader& h,
+                      const AlignedBuilder& uncompressed) {
     Timer t;
 
     LOG(4) << "WRITETODATAFILES BEGIN";
 
-    RecoveryJob::get().processSection(&h, uncompressed.buf(), uncompressed.len(), NULL);
+    RecoveryJob::get().processSection(opCtx, &h, uncompressed.buf(), uncompressed.len(), NULL);
 
     const long long m = t.micros();
     stats.curr()->_writeToDataFilesMicros += m;
@@ -108,8 +114,8 @@ private:
 // JournalWriter
 //
 
-JournalWriter::JournalWriter(NotifyAll* commitNotify,
-                             NotifyAll* applyToDataFilesNotify,
+JournalWriter::JournalWriter(CommitNotifier* commitNotify,
+                             CommitNotifier* applyToDataFilesNotify,
                              size_t numBuffers)
     : _commitNotify(commitNotify),
       _applyToDataFilesNotify(applyToDataFilesNotify),
@@ -136,7 +142,7 @@ void JournalWriter::start() {
     }
 
     // Start the thread
-    stdx::thread t(stdx::bind(&JournalWriter::_journalWriterThread, this));
+    stdx::thread t([this] { _journalWriterThread(); });
     _journalWriterThreadHandle.swap(t);
 }
 
@@ -179,7 +185,7 @@ JournalWriter::Buffer* JournalWriter::newBuffer() {
     return buffer;
 }
 
-void JournalWriter::writeBuffer(Buffer* buffer, NotifyAll::When commitNumber) {
+void JournalWriter::writeBuffer(Buffer* buffer, CommitNotifier::When commitNumber) {
     invariant(buffer->_commitNumber == 0);
     invariant((commitNumber > _lastCommitNumber) || (buffer->_isShutdown && (commitNumber == 0)));
 
@@ -210,7 +216,11 @@ void JournalWriter::_journalWriterThread() {
 
     try {
         while (true) {
-            Buffer* const buffer = _journalQueue.blockingPop();
+            Buffer* const buffer = [&] {
+                MONGO_IDLE_THREAD_BLOCK;
+                return _journalQueue.blockingPop();
+            }();
+
             BufferGuard bufferGuard(buffer, &_readyQueue);
 
             if (buffer->_isShutdown) {
@@ -243,30 +253,30 @@ void JournalWriter::_journalWriterThread() {
 
             // Apply the journal entries on top of the shared view so that when flush is
             // requested it would write the latest.
-            WRITETODATAFILES(buffer->_header, buffer->_builder);
+            WRITETODATAFILES(cc().makeOperationContext().get(), buffer->_header, buffer->_builder);
 
             // Data is now persisted on the shared view, so notify any potential journal file
             // cleanup waiters.
             _applyToDataFilesNotify->notifyAll(buffer->_commitNumber);
         }
     } catch (const DBException& e) {
-        severe() << "dbexception in journalWriterThread causing immediate shutdown: "
-                 << e.toString();
-        invariant(false);
+        severe() << "dbexception in journalWriterThread causing immediate shutdown: " << redact(e);
+        MONGO_UNREACHABLE;
     } catch (const std::ios_base::failure& e) {
         severe() << "ios_base exception in journalWriterThread causing immediate shutdown: "
                  << e.what();
-        invariant(false);
+        MONGO_UNREACHABLE;
     } catch (const std::bad_alloc& e) {
         severe() << "bad_alloc exception in journalWriterThread causing immediate shutdown: "
                  << e.what();
-        invariant(false);
+        MONGO_UNREACHABLE;
     } catch (const std::exception& e) {
-        severe() << "exception in journalWriterThread causing immediate shutdown: " << e.what();
-        invariant(false);
+        severe() << "exception in journalWriterThread causing immediate shutdown: "
+                 << redact(e.what());
+        MONGO_UNREACHABLE;
     } catch (...) {
         severe() << "unhandled exception in journalWriterThread causing immediate shutdown";
-        invariant(false);
+        MONGO_UNREACHABLE;
     }
 
     log() << "Journal writer thread stopped";

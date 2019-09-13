@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -31,6 +33,7 @@
 #include "mongo/db/exec/scoped_timer.h"
 #include "mongo/db/exec/working_set.h"
 #include "mongo/db/exec/working_set_common.h"
+#include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/util/mongoutils/str.h"
 
@@ -53,8 +56,9 @@ MergeSortStage::MergeSortStage(OperationContext* opCtx,
       _collection(collection),
       _ws(ws),
       _pattern(params.pattern),
+      _collator(params.collator),
       _dedup(params.dedup),
-      _merging(StageWithValueComparison(ws, params.pattern)) {}
+      _merging(StageWithValueComparison(ws, params.pattern, params.collator)) {}
 
 void MergeSortStage::addChild(PlanStage* child) {
     _children.emplace_back(child);
@@ -69,12 +73,7 @@ bool MergeSortStage::isEOF() {
     return _merging.empty() && _noResultToMerge.empty();
 }
 
-PlanStage::StageState MergeSortStage::work(WorkingSetID* out) {
-    ++_commonStats.works;
-
-    // Adds the amount of time taken by work() to executionTimeMillis.
-    ScopedTimer timer(&_commonStats.executionTimeMillis);
-
+PlanStage::StageState MergeSortStage::doWork(WorkingSetID* out) {
     if (isEOF()) {
         return PlanStage::IS_EOF;
     }
@@ -91,22 +90,21 @@ PlanStage::StageState MergeSortStage::work(WorkingSetID* out) {
 
             // If we're deduping...
             if (_dedup) {
-                if (!member->hasLoc()) {
+                if (!member->hasRecordId()) {
                     // Can't dedup data unless there's a RecordId.  We go ahead and use its
                     // result.
                     _noResultToMerge.pop();
                 } else {
                     ++_specificStats.dupsTested;
-                    // ...and there's a diskloc and and we've seen the RecordId before
-                    if (_seen.end() != _seen.find(member->loc)) {
+                    // ...and there's a RecordId and and we've seen the RecordId before
+                    if (_seen.end() != _seen.find(member->recordId)) {
                         // ...drop it.
                         _ws->free(id);
-                        ++_commonStats.needTime;
                         ++_specificStats.dupsDropped;
                         return PlanStage::NEED_TIME;
                     } else {
                         // Otherwise, note that we've seen it.
-                        _seen.insert(member->loc);
+                        _seen.insert(member->recordId);
                         // We're going to use the result from the child, so we remove it from
                         // the queue of children without a result.
                         _noResultToMerge.pop();
@@ -129,34 +127,22 @@ PlanStage::StageState MergeSortStage::work(WorkingSetID* out) {
             // Insert the result (indirectly) into our priority queue.
             _merging.push(_mergingData.begin());
 
-            ++_commonStats.needTime;
             return PlanStage::NEED_TIME;
         } else if (PlanStage::IS_EOF == code) {
             // There are no more results possible from this child.  Don't bother with it
             // anymore.
             _noResultToMerge.pop();
-            ++_commonStats.needTime;
             return PlanStage::NEED_TIME;
         } else if (PlanStage::FAILURE == code || PlanStage::DEAD == code) {
+            // The stage which produces a failure is responsible for allocating a working set member
+            // with error details.
+            invariant(WorkingSet::INVALID_ID != id);
             *out = id;
-            // If a stage fails, it may create a status WSM to indicate why it
-            // failed, in which case 'id' is valid.  If ID is invalid, we
-            // create our own error message.
-            if (WorkingSet::INVALID_ID == id) {
-                mongoutils::str::stream ss;
-                ss << "merge sort stage failed to read in results from child";
-                Status status(ErrorCodes::InternalError, ss);
-                *out = WorkingSetCommon::allocateStatusMember(_ws, status);
-            }
+            return code;
+        } else if (PlanStage::NEED_YIELD == code) {
+            *out = id;
             return code;
         } else {
-            if (PlanStage::NEED_TIME == code) {
-                ++_commonStats.needTime;
-            } else if (PlanStage::NEED_YIELD == code) {
-                *out = id;
-                ++_commonStats.needYield;
-            }
-
             return code;
         }
     }
@@ -178,36 +164,29 @@ PlanStage::StageState MergeSortStage::work(WorkingSetID* out) {
 
     // Return the min.
     *out = idToTest;
-    ++_commonStats.advanced;
-
-    // But don't return it if it's flagged.
-    if (_ws->isFlagged(*out)) {
-        return PlanStage::NEED_TIME;
-    }
 
     return PlanStage::ADVANCED;
 }
 
 
-void MergeSortStage::doInvalidate(OperationContext* txn,
+void MergeSortStage::doInvalidate(OperationContext* opCtx,
                                   const RecordId& dl,
                                   InvalidationType type) {
-    // Go through our data and see if we're holding on to the invalidated loc.
+    // Go through our data and see if we're holding on to the invalidated RecordId.
     for (list<StageWithValue>::iterator valueIt = _mergingData.begin();
          valueIt != _mergingData.end();
          valueIt++) {
         WorkingSetMember* member = _ws->get(valueIt->id);
-        if (member->hasLoc() && (dl == member->loc)) {
-            // Force a fetch and flag.  We could possibly merge this result back in later.
-            WorkingSetCommon::fetchAndInvalidateLoc(txn, member, _collection);
-            _ws->flagForReview(valueIt->id);
+        if (member->hasRecordId() && (dl == member->recordId)) {
+            // Fetch the about-to-be mutated result.
+            WorkingSetCommon::fetchAndInvalidateRecordId(opCtx, member, _collection);
             ++_specificStats.forcedFetches;
         }
     }
 
-    // If we see DL again it is not the same record as it once was so we still want to
-    // return it.
-    if (_dedup) {
+    // If we see the deleted RecordId again it is not the same record as it once was so we still
+    // want to return it.
+    if (_dedup && INVALIDATION_DELETION == type) {
         _seen.erase(dl);
     }
 }
@@ -231,7 +210,7 @@ bool MergeSortStage::StageWithValueComparison::operator()(const MergingRef& lhs,
         verify(rhsMember->getFieldDotted(fn, &rhsElt));
 
         // false means don't compare field name.
-        int x = lhsElt.woCompare(rhsElt, false);
+        int x = lhsElt.woCompare(rhsElt, false, _collator);
         if (-1 == patternElt.number()) {
             x = -x;
         }

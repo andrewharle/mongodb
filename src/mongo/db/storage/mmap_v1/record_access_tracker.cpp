@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -36,8 +38,9 @@
 #include "mongo/config.h"
 #include "mongo/db/storage/mmap_v1/record.h"
 #include "mongo/platform/bits.h"
+#include "mongo/stdx/memory.h"
+#include "mongo/util/clock_source.h"
 #include "mongo/util/debug_util.h"
-#include "mongo/util/net/listen.h"
 #include "mongo/util/processinfo.h"
 
 namespace mongo {
@@ -46,7 +49,7 @@ namespace {
 
 static bool blockSupported = false;
 
-MONGO_INITIALIZER_WITH_PREREQUISITES(RecordBlockSupported, ("SystemInfo"))(InitializerContext* cx) {
+MONGO_INITIALIZER(RecordBlockSupported)(InitializerContext* cx) {
     blockSupported = ProcessInfo::blockCheckSupported();
     return Status::OK();
 }
@@ -91,15 +94,15 @@ struct Data {
     long long _lastReset;  // time in millis
 };
 
-void reset(Data* data) {
+void reset(Data* data, ClockSource* cs) {
     memset(data->_table, 0, sizeof(data->_table));
-    data->_lastReset = Listener::getElapsedTimeMillis();
+    data->_lastReset = cs->now().toMillisSinceEpoch();
 }
 
-inline void resetIfNeeded(Data* data) {
-    const long long now = Listener::getElapsedTimeMillis();
-    if (MONGO_unlikely((now - data->_lastReset) > RecordAccessTracker::RotateTimeSecs * 1000)) {
-        reset(data);
+inline void resetIfNeeded(Data* data, ClockSource* cs) {
+    const long long sinceReset = cs->now().toMillisSinceEpoch() - data->_lastReset;
+    if (MONGO_unlikely(sinceReset > RecordAccessTracker::RotateTimeSecs * 1000)) {
+        reset(data, cs);
     }
 }
 
@@ -124,8 +127,8 @@ inline void markPageSeen(size_t& superpage, size_t ptr) {
 }
 
 /** call this to check a page has been seen yet. */
-inline bool seen(Data* data, size_t ptr) {
-    resetIfNeeded(data);
+inline bool seen(Data* data, size_t ptr, ClockSource* cs) {
+    resetIfNeeded(data, cs);
 
     // A bucket contains 4 superpages each containing 16 contiguous pages
     // See above for a more detailed explanation of superpages
@@ -168,7 +171,6 @@ RecordAccessTracker::Slice::Slice() {
 
 void RecordAccessTracker::Slice::reset() {
     memset(_data, 0, sizeof(_data));
-    _lastReset = time(0);
 }
 
 RecordAccessTracker::State RecordAccessTracker::Slice::get(int regionHash,
@@ -192,10 +194,6 @@ bool RecordAccessTracker::Slice::put(int regionHash, size_t region, short offset
 
     e->value |= 1ULL << offset;
     return true;
-}
-
-time_t RecordAccessTracker::Slice::lastReset() const {
-    return _lastReset;
 }
 
 RecordAccessTracker::Entry* RecordAccessTracker::Slice::_get(int start, size_t region, bool add) {
@@ -222,22 +220,20 @@ RecordAccessTracker::Entry* RecordAccessTracker::Slice::_get(int start, size_t r
 // Rolling
 //
 
-RecordAccessTracker::Rolling::Rolling() {
-    _curSlice = 0;
-    _lastRotate = Listener::getElapsedTimeMillis();
-}
-
-bool RecordAccessTracker::Rolling::access(size_t region, short offset, bool doHalf) {
+bool RecordAccessTracker::Rolling::access(size_t region,
+                                          short offset,
+                                          bool doHalf,
+                                          ClockSource* cs) {
     int regionHash = hash(region);
 
     stdx::lock_guard<SimpleMutex> lk(_lock);
 
     static int rarelyCount = 0;
     if (rarelyCount++ % (2048 / BigHashSize) == 0) {
-        long long now = Listener::getElapsedTimeMillis();
+        Date_t now = cs->now();
 
-        if (now - _lastRotate > (1000 * RotateTimeSecs)) {
-            _rotate();
+        if (now - _lastRotate > Seconds(static_cast<int64_t>(RotateTimeSecs))) {
+            _rotate(cs);
         }
     }
 
@@ -257,47 +253,44 @@ bool RecordAccessTracker::Rolling::access(size_t region, short offset, bool doHa
     // we weren't in any slice
     // so add to cur
     if (!_slices[_curSlice].put(regionHash, region, offset)) {
-        _rotate();
+        _rotate(cs);
         _slices[_curSlice].put(regionHash, region, offset);
     }
     return false;
 }
 
-void RecordAccessTracker::Rolling::_rotate() {
-    _curSlice = (_curSlice + 1) % NumSlices;
-    _slices[_curSlice].reset();
-    _lastRotate = Listener::getElapsedTimeMillis();
+void RecordAccessTracker::Rolling::updateLastRotate(ClockSource* cs) {
+    _lastRotate = cs->now();
 }
 
-// These need to be outside the ps namespace due to the way they are defined
-#if defined(MONGO_CONFIG_HAVE___THREAD)
-__thread PointerTable::Data _pointerTableData;
-PointerTable::Data* PointerTable::getData() {
-    return &_pointerTableData;
+void RecordAccessTracker::Rolling::_rotate(ClockSource* cs) {
+    _curSlice = (_curSlice + 1) % NumSlices;
+    _slices[_curSlice].reset();
+    updateLastRotate(cs);
 }
-#elif defined(MONGO_CONFIG_HAVE___DECLSPEC_THREAD)
-__declspec(thread) PointerTable::Data _pointerTableData;
+
 PointerTable::Data* PointerTable::getData() {
-    return &_pointerTableData;
+    thread_local std::unique_ptr<PointerTable::Data> data;
+    if (!data)
+        data = stdx::make_unique<PointerTable::Data>();
+    return data.get();
 }
-#else
-TSP_DEFINE(PointerTable::Data, _pointerTableData);
-PointerTable::Data* PointerTable::getData() {
-    return _pointerTableData.getMake();
-}
-#endif
 
 //
 // RecordAccessTracker
 //
 
-RecordAccessTracker::RecordAccessTracker() : _blockSupported(blockSupported) {
+RecordAccessTracker::RecordAccessTracker(ClockSource* cs)
+    : _blockSupported(blockSupported), _clock(cs) {
     reset();
 }
 
 void RecordAccessTracker::reset() {
-    PointerTable::reset(PointerTable::getData());
+    PointerTable::reset(PointerTable::getData(), _clock);
     _rollingTable.reset(new Rolling[BigHashSize]);
+    for (int i = 0; i < BigHashSize; i++) {
+        _rollingTable[i].updateLastRotate(_clock);
+    }
 }
 
 void RecordAccessTracker::markAccessed(const void* record) {
@@ -305,9 +298,10 @@ void RecordAccessTracker::markAccessed(const void* record) {
     const size_t region = page >> 6;
     const size_t offset = page & 0x3f;
 
-    const bool seen = PointerTable::seen(PointerTable::getData(), reinterpret_cast<size_t>(record));
+    const bool seen =
+        PointerTable::seen(PointerTable::getData(), reinterpret_cast<size_t>(record), _clock);
     if (!seen) {
-        _rollingTable[bigHash(region)].access(region, offset, true);
+        _rollingTable[bigHash(region)].access(region, offset, true, _clock);
     }
 }
 
@@ -320,12 +314,12 @@ bool RecordAccessTracker::checkAccessedAndMark(const void* record) {
     // This is like the "L1 cache". If we're a miss then we fall through and check the
     // "L2 cache". If we're still a miss, then we defer to a system-specific system
     // call (or give up and return false if deferring to the system call is not enabled).
-    if (PointerTable::seen(PointerTable::getData(), reinterpret_cast<size_t>(record))) {
+    if (PointerTable::seen(PointerTable::getData(), reinterpret_cast<size_t>(record), _clock)) {
         return true;
     }
 
     // We were a miss in the PointerTable. See if we can find 'record' in the Rolling table.
-    if (_rollingTable[bigHash(region)].access(region, offset, false)) {
+    if (_rollingTable[bigHash(region)].access(region, offset, false, _clock)) {
         return true;
     }
 

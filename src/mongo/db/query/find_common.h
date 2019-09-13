@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -26,50 +28,89 @@
  *    it in the license file.
  */
 
+#include "mongo/bson/bsonobj.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/util/fail_point_service.h"
 
 namespace mongo {
 
-class BSONObj;
-class LiteParsedQuery;
+/**
+ * The state associated with tailable cursors.
+ */
+struct AwaitDataState {
+    /**
+     * The deadline for how long we wait on the tail of capped collection before returning IS_EOF.
+     */
+    Date_t waitForInsertsDeadline;
 
-// Enabling this fail point will cause the getMore command to busy wait after pinning the cursor,
-// until the fail point is disabled.
-MONGO_FP_FORWARD_DECLARE(keepCursorPinnedDuringGetMore);
+    /**
+     * If true, when no results are available from a plan, then instead of returning immediately,
+     * the system should wait up to the length of the operation deadline for data to be inserted
+     * which causes results to become available.
+     */
+    bool shouldWaitForInserts;
+};
+
+extern const OperationContext::Decoration<AwaitDataState> awaitDataState;
+
+class BSONObj;
+class QueryRequest;
+
+// Failpoint for making find hang.
+MONGO_FAIL_POINT_DECLARE(waitInFindBeforeMakingBatch);
+
+// Failpoint for making getMore not wait for an awaitdata cursor. Allows us to avoid waiting during
+// tests.
+MONGO_FAIL_POINT_DECLARE(disableAwaitDataForGetMoreCmd);
+
+// Enabling this fail point will cause the getMore command to busy wait after pinning the cursor
+// but before we have started building the batch, until the fail point is disabled.
+MONGO_FAIL_POINT_DECLARE(waitAfterPinningCursorBeforeGetMoreBatch);
+
+// Enabling this failpoint will cause the getMore to wait just before it unpins its cursor after it
+// has completed building the current batch.
+MONGO_FAIL_POINT_DECLARE(waitBeforeUnpinningOrDeletingCursorAfterGetMoreBatch);
 
 /**
  * Suite of find/getMore related functions used in both the mongod and mongos query paths.
  */
 class FindCommon {
 public:
-    // The size threshold at which we stop adding result documents to a getMore response or a find
-    // response that has a batchSize set (i.e. once the sum of the document sizes in bytes exceeds
-    // this value, no further documents are added).
-    static const int kMaxBytesToReturnToClientAtOnce = 4 * 1024 * 1024;
+    // The maximum amount of user data to return to a client in a single batch.
+    //
+    // This max may be exceeded by epsilon for output documents that approach the maximum user
+    // document size. That is, if we must return a BSONObjMaxUserSize document, then the total
+    // response size will be BSONObjMaxUserSize plus the amount of size required for the message
+    // header and the cursor response "envelope". (The envolope contains namespace and cursor id
+    // info.)
+    static const int kMaxBytesToReturnToClientAtOnce = BSONObjMaxUserSize;
 
     // The initial size of the query response buffer.
     static const int kInitReplyBufferSize = 32768;
 
     /**
-     * Returns true if enough results have been prepared to stop adding more to the first batch.
+     * Returns true if the batchSize for the initial find has been satisfied.
      *
-     * If 'pq' does not have a batchSize, the default batchSize is respected.
+     * If 'qr' does not have a batchSize, the default batchSize is respected.
      */
-    static bool enoughForFirstBatch(const LiteParsedQuery& pq,
-                                    long long numDocs,
-                                    int bytesBuffered);
+    static bool enoughForFirstBatch(const QueryRequest& qr, long long numDocs);
 
     /**
-     * Returns true if enough results have been prepared to stop adding more to a getMore batch.
+     * Returns true if the batchSize for the getMore has been satisfied.
      *
-     * An 'effectiveBatchSize' value of zero is interpreted as the absence of a batchSize;
-     * in this case, returns true only once the size threshold is exceeded. If 'effectiveBatchSize'
-     * is positive, returns true once either are added until we have either satisfied the batch size
-     * or exceeded the size threshold.
+     * An 'effectiveBatchSize' value of zero is interpreted as the absence of a batchSize, in which
+     * case this method returns false.
      */
-    static bool enoughForGetMore(long long effectiveBatchSize,
-                                 long long numDocs,
-                                 int bytesBuffered);
+    static bool enoughForGetMore(long long effectiveBatchSize, long long numDocs) {
+        return effectiveBatchSize && numDocs >= effectiveBatchSize;
+    }
+
+    /**
+     * Given the number of docs ('numDocs') and bytes ('bytesBuffered') currently buffered as a
+     * response to a cursor-generating command, returns true if there are enough remaining bytes in
+     * our budget to fit 'nextDoc'.
+     */
+    static bool haveSpaceForNext(const BSONObj& nextDoc, long long numDocs, int bytesBuffered);
 
     /**
      * Transforms the raw sort spec into one suitable for use as the ordering specification in

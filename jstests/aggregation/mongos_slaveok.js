@@ -1,8 +1,14 @@
 /**
  * Tests aggregate command against mongos with slaveOk. For more tests on read preference,
  * please refer to jstests/sharding/read_pref_cmd.js.
+ * @tags: [
+ *   requires_replication,
+ *   requires_sharding,
+ *   requires_spawning_own_processes,
+ * ]
  */
 (function() {
+    load('jstests/replsets/rslib.js');
 
     var NODES = 2;
 
@@ -21,15 +27,13 @@
         secNode.getDB('test').setProfilingLevel(2);
 
         // wait for mongos to recognize that the slave is up
-        ReplSetTest.awaitRSClientHosts(st.s, secNode, {ok: true});
+        awaitRSClientHosts(st.s, secNode, {ok: true});
 
-        var res = testDB.runCommand({aggregate: 'user', pipeline: [{$project: {x: 1}}]});
+        var res =
+            testDB.runCommand({aggregate: 'user', pipeline: [{$project: {x: 1}}], cursor: {}});
         assert(res.ok, 'aggregate command failed: ' + tojson(res));
 
-        var profileQuery = {
-            op: 'command',
-            ns: 'test.user', 'command.aggregate': 'user'
-        };
+        var profileQuery = {op: 'command', ns: 'test.user', 'command.aggregate': 'user'};
         var profileDoc = secNode.getDB('test').system.profile.findOne(profileQuery);
 
         assert(profileDoc != null);

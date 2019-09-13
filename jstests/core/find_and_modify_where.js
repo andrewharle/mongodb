@@ -1,3 +1,12 @@
+// @tags: [
+//     # Cannot implicitly shard accessed collections because of following errmsg: A single
+//     # update/delete on a sharded collection must contain an exact match on _id or contain the
+//     # shard key.
+//     assumes_unsharded_collection,
+//
+//     # Uses $where operator
+//     requires_scripting,
+// ]
 
 t = db.find_and_modify_where;
 t.drop();

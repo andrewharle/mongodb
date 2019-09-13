@@ -1,49 +1,63 @@
 // processinfo_linux2.cpp
 
-/*    Copyright 2009 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kControl
 
-#include <malloc.h>
+#include "mongo/platform/basic.h"
+
+#include "processinfo.h"
+
 #include <iostream>
+#include <malloc.h>
+#include <sched.h>
 #include <stdio.h>
-#include <unistd.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
+#include <sys/time.h>
 #include <sys/utsname.h>
-#ifdef __UCLIBC__
+#include <unistd.h>
+#ifdef __BIONIC__
+#include <android/api-level.h>
+#elif __UCLIBC__
 #include <features.h>
 #else
 #include <gnu/libc-version.h>
 #endif
 
-#include "processinfo.h"
-#include "boost/filesystem.hpp"
-#include <mongo/util/file.h>
+#include <boost/filesystem.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+
+#include "mongo/util/file.h"
 #include "mongo/util/log.h"
 
 using namespace std;
@@ -64,7 +78,7 @@ public:
             stringstream ss;
             ss << "couldn't open [" << name << "] " << errnoWithDescription();
             string s = ss.str();
-            msgassertedNoTrace(13538, s.c_str());
+            msgasserted(13538, s.c_str());
         }
         int found = fscanf(f,
                            "%d %127s %c "
@@ -134,8 +148,8 @@ public:
         return _vsize;
     }
 
-    unsigned long getResidentSize() {
-        return (unsigned long)_rss * 4 * 1024;
+    unsigned long getResidentSizeInPages() {
+        return (unsigned long)_rss;
     }
 
     int _pid;
@@ -269,7 +283,7 @@ public:
         while (fgets(fstr, 1023, f) != NULL && !feof(f)) {
             // until the end of the file
             fstr[strlen(fstr) < 1 ? 0 : strlen(fstr) - 1] = '\0';
-            if (strncmp(fstr, "processor\t:", 11) == 0)
+            if (strncmp(fstr, "processor ", 10) == 0 || strncmp(fstr, "processor\t:", 11) == 0)
                 ++procCount;
             if (strncmp(fstr, "cpu MHz\t\t:", 10) == 0)
                 freq = fstr + 11;
@@ -367,10 +381,13 @@ public:
             if ((nl = name.find('\n', nl)) != string::npos)
                 // stop at first newline
                 name.erase(nl);
-            // no standard format for name and version.  use kernel version
-            version = "Kernel ";
-            version += LinuxSysHelper::readLineFromFile("/proc/sys/kernel/osrelease");
+        } else {
+            name = "unknown";
         }
+
+        // There is no standard format for name and version so use the kernel version.
+        version = "Kernel ";
+        version += LinuxSysHelper::readLineFromFile("/proc/sys/kernel/osrelease");
     }
 
     /**
@@ -394,9 +411,26 @@ public:
             if (mongo::parseNumberFromString(meminfo, &systemMem).isOK()) {
                 return systemMem * 1024;  // convert from kB to bytes
             } else
-                log() << "Unable to collect system memory information" << endl;
+                log() << "Unable to collect system memory information";
         }
         return 0;
+    }
+
+    /**
+    * Get memory limit for the process.
+    * If memory is being limited by the applied control group and it's less
+    * than the OS system memory (default cgroup limit is ulonglong max) let's
+    * return the actual memory we'll have available to the process.
+    */
+    static unsigned long long getMemorySizeLimit() {
+        unsigned long long systemMemBytes = getSystemMemorySize();
+        unsigned long long cgroupMemBytes = 0;
+        std::string cgmemlimit = readLineFromFile("/sys/fs/cgroup/memory/memory.limit_in_bytes");
+        if (!cgmemlimit.empty() &&
+            mongo::parseNumberFromString(cgmemlimit, &cgroupMemBytes).isOK()) {
+            return std::min(systemMemBytes, cgroupMemBytes);
+        }
+        return systemMemBytes;
     }
 };
 
@@ -409,6 +443,26 @@ bool ProcessInfo::supported() {
     return true;
 }
 
+// get the number of CPUs available to the current process
+boost::optional<unsigned long> ProcessInfo::getNumCoresForProcess() {
+    cpu_set_t set;
+
+    if (sched_getaffinity(0, sizeof(cpu_set_t), &set) == 0) {
+#ifdef CPU_COUNT  // glibc >= 2.6 has CPU_COUNT defined
+        return CPU_COUNT(&set);
+#else
+        unsigned long count = 0;
+        for (size_t i = 0; i < CPU_SETSIZE; i++)
+            if (CPU_ISSET(i, &set))
+                count++;
+        if (count > 0)
+            return count;
+#endif
+    }
+
+    return boost::none;
+}
+
 int ProcessInfo::getVirtualMemorySize() {
     LinuxProc p(_pid);
     return (int)(p.getVirtualMemorySize() / (1024.0 * 1024));
@@ -416,7 +470,7 @@ int ProcessInfo::getVirtualMemorySize() {
 
 int ProcessInfo::getResidentSize() {
     LinuxProc p(_pid);
-    return (int)(p.getResidentSize() / (1024.0 * 1024));
+    return (int)((p.getResidentSizeInPages() * getPageSize()) / (1024.0 * 1024));
 }
 
 double ProcessInfo::getSystemMemoryPressurePercentage() {
@@ -424,18 +478,12 @@ double ProcessInfo::getSystemMemoryPressurePercentage() {
 }
 
 void ProcessInfo::getExtraInfo(BSONObjBuilder& info) {
-    // [dm] i don't think mallinfo works. (64 bit.)  ??
-    struct mallinfo malloc_info =
-        mallinfo();  // structure has same name as function that returns it. (see malloc.h)
-    info.append("heap_usage_bytes",
-                malloc_info.uordblks /*main arena*/ + malloc_info.hblkhd /*mmap blocks*/);
-    // docs claim hblkhd is included in uordblks but it isn't
-
-    LinuxProc p(_pid);
-    if (p._maj_flt <= std::numeric_limits<long long>::max())
-        info.appendNumber("page_faults", static_cast<long long>(p._maj_flt));
+    struct rusage ru;
+    getrusage(RUSAGE_SELF, &ru);
+    if (ru.ru_majflt <= std::numeric_limits<long long>::max())
+        info.appendNumber("page_faults", static_cast<long long>(ru.ru_majflt));
     else
-        info.appendNumber("page_faults", static_cast<double>(p._maj_flt));
+        info.appendNumber("page_faults", static_cast<double>(ru.ru_majflt));
 }
 
 /**
@@ -452,13 +500,14 @@ void ProcessInfo::SystemInfo::collectSystemInfo() {
     LinuxSysHelper::getLinuxDistro(distroName, distroVersion);
 
     if (uname(&unameData) == -1) {
-        log() << "Unable to collect detailed system information: " << strerror(errno) << endl;
+        log() << "Unable to collect detailed system information: " << strerror(errno);
     }
 
     osType = "Linux";
     osName = distroName;
     osVersion = distroVersion;
     memSize = LinuxSysHelper::getSystemMemorySize();
+    memLimit = LinuxSysHelper::getMemorySizeLimit();
     addrSize = sizeof(void*) * CHAR_BIT;
     numCores = cpuCount;
     pageSize = static_cast<unsigned long long>(sysconf(_SC_PAGESIZE));
@@ -467,7 +516,11 @@ void ProcessInfo::SystemInfo::collectSystemInfo() {
 
     BSONObjBuilder bExtra;
     bExtra.append("versionString", LinuxSysHelper::readLineFromFile("/proc/version"));
-#ifdef __UCLIBC__
+#ifdef __BIONIC__
+    stringstream ss;
+    ss << "bionic (android api " << __ANDROID_API__ << ")";
+    bExtra.append("libcVersion", ss.str());
+#elif __UCLIBC__
     stringstream ss;
     ss << "uClibc-" << __UCLIBC_MAJOR__ << "." << __UCLIBC_MINOR__ << "." << __UCLIBC_SUBLEVEL__;
     bExtra.append("libcVersion", ss.str());
@@ -525,7 +578,7 @@ bool ProcessInfo::blockCheckSupported() {
 bool ProcessInfo::blockInMemory(const void* start) {
     unsigned char x = 0;
     if (mincore(const_cast<void*>(alignToStartOfPage(start)), getPageSize(), &x)) {
-        log() << "mincore failed: " << errnoWithDescription() << endl;
+        log() << "mincore failed: " << errnoWithDescription();
         return 1;
     }
     return x & 0x1;
@@ -536,7 +589,7 @@ bool ProcessInfo::pagesInMemory(const void* start, size_t numPages, vector<char>
     if (mincore(const_cast<void*>(alignToStartOfPage(start)),
                 numPages * getPageSize(),
                 reinterpret_cast<unsigned char*>(&out->front()))) {
-        log() << "mincore failed: " << errnoWithDescription() << endl;
+        log() << "mincore failed: " << errnoWithDescription();
         return false;
     }
     for (size_t i = 0; i < numPages; ++i) {

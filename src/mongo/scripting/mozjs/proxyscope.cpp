@@ -1,29 +1,31 @@
+
 /**
- * Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- * This program is free software: you can redistribute it and/or  modify
- * it under the terms of the GNU Affero General Public License, version 3,
- * as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
- * As a special exception, the copyright holders give permission to link the
- * code of portions of this program with the OpenSSL library under certain
- * conditions as described in each individual source file and distribute
- * linked combinations including the program with the OpenSSL library. You
- * must comply with the GNU Affero General Public License in all respects
- * for all of the code used other than as permitted herein. If you modify
- * file(s) with this exception, you may extend this exception to your
- * version of the file(s), but you are not obligated to do so. If you do not
- * wish to do so, delete this exception statement from your version. If you
- * delete this exception statement from all source files in the program,
- * then also delete it in the license file.
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/platform/basic.h"
@@ -35,7 +37,10 @@
 #include "mongo/db/service_context.h"
 #include "mongo/platform/decimal128.h"
 #include "mongo/scripting/mozjs/implscope.h"
+#include "mongo/util/concurrency/idle_thread_block.h"
+#include "mongo/util/destructor_guard.h"
 #include "mongo/util/quick_exit.h"
+#include "mongo/util/scopeguard.h"
 
 namespace mongo {
 namespace mozjs {
@@ -84,16 +89,16 @@ bool MozJSProxyScope::isKillPending() const {
     return _implScope->isKillPending();
 }
 
-void MozJSProxyScope::registerOperation(OperationContext* txn) {
-    run([&] { _implScope->registerOperation(txn); });
+void MozJSProxyScope::registerOperation(OperationContext* opCtx) {
+    run([&] { _implScope->registerOperation(opCtx); });
 }
 
 void MozJSProxyScope::unregisterOperation() {
     run([&] { _implScope->unregisterOperation(); });
 }
 
-void MozJSProxyScope::localConnectForDbEval(OperationContext* txn, const char* dbName) {
-    run([&] { _implScope->localConnectForDbEval(txn, dbName); });
+void MozJSProxyScope::localConnectForDbEval(OperationContext* opCtx, const char* dbName) {
+    run([&] { _implScope->localConnectForDbEval(opCtx, dbName); });
 }
 
 void MozJSProxyScope::externalSetup() {
@@ -340,13 +345,19 @@ void MozJSProxyScope::implThread(void* arg) {
         proxy->_status = exceptionToStatus();
     }
 
+    // This is mostly to silence coverity, so that it sees that the
+    // ProxyScope doesn't hold a reference to the ImplScope after it
+    // is deleted by the unique_ptr.
+    const auto unbindImplScope = MakeGuard([&proxy] { proxy->_implScope = nullptr; });
+
     while (true) {
         stdx::unique_lock<stdx::mutex> lk(proxy->_mutex);
-        proxy->_condvar.wait(lk,
-                             [proxy] {
-                                 return proxy->_state == State::ProxyRequest ||
-                                     proxy->_state == State::Shutdown;
-                             });
+        {
+            MONGO_IDLE_THREAD_BLOCK;
+            proxy->_condvar.wait(lk, [proxy] {
+                return proxy->_state == State::ProxyRequest || proxy->_state == State::Shutdown;
+            });
+        }
 
         if (proxy->_state == State::Shutdown)
             break;
@@ -355,12 +366,6 @@ void MozJSProxyScope::implThread(void* arg) {
             proxy->_function();
         } catch (...) {
             proxy->_status = exceptionToStatus();
-        }
-
-        int exitCode;
-        if (proxy->_implScope && proxy->_implScope->getQuickExit(&exitCode)) {
-            scope.reset();
-            quickExit(exitCode);
         }
 
         proxy->_state = State::ImplResponse;

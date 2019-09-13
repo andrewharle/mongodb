@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -34,8 +36,8 @@
 
 #include "mongo/db/client.h"
 #include "mongo/db/commands/server_status_metric.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/instance.h"
 #include "mongo/db/storage/mmap_v1/dur_journal.h"
 #include "mongo/db/storage/mmap_v1/mmap.h"
 #include "mongo/db/storage/mmap_v1/mmap_v1_options.h"
@@ -64,8 +66,7 @@ void DataFileSync::run() {
         LOG(1) << "--syncdelay " << storageGlobalParams.syncdelay.load() << endl;
     }
     int time_flushing = 0;
-    while (!inShutdown()) {
-        _diaglog.flush();
+    while (!globalInShutdownDeprecated()) {
         if (storageGlobalParams.syncdelay == 0) {
             // in case at some point we add an option to change at runtime
             sleepsecs(5);
@@ -75,16 +76,17 @@ void DataFileSync::run() {
         sleepmillis(
             (long long)std::max(0.0, (storageGlobalParams.syncdelay * 1000) - time_flushing));
 
-        if (inShutdown()) {
+        if (globalInShutdownDeprecated()) {
             // occasional issue trying to flush during shutdown when sleep interrupted
             break;
         }
 
+        auto opCtx = cc().makeOperationContext();
         Date_t start = jsTime();
-        StorageEngine* storageEngine = getGlobalServiceContext()->getGlobalStorageEngine();
+        StorageEngine* storageEngine = getGlobalServiceContext()->getStorageEngine();
 
         dur::notifyPreDataFileFlush();
-        int numFiles = storageEngine->flushAllFiles(true);
+        int numFiles = storageEngine->flushAllFiles(opCtx.get(), true);
         dur::notifyPostDataFileFlush();
 
         time_flushing = durationCount<Milliseconds>(jsTime() - start);
@@ -98,7 +100,7 @@ void DataFileSync::run() {
     }
 }
 
-BSONObj DataFileSync::generateSection(OperationContext* txn,
+BSONObj DataFileSync::generateSection(OperationContext* opCtx,
                                       const BSONElement& configElement) const {
     if (!running()) {
         return BSONObj();
@@ -125,7 +127,7 @@ class MemJournalServerStatusMetric : public ServerStatusMetric {
 public:
     MemJournalServerStatusMetric() : ServerStatusMetric(".mem.mapped") {}
     virtual void appendAtLeaf(BSONObjBuilder& b) const {
-        int m = static_cast<int>(MemoryMappedFile::totalMappedLength() / (1024 * 1024));
+        int m = MemoryMappedFile::totalMappedLengthInMB();
         b.appendNumber("mapped", m);
 
         if (storageGlobalParams.dur) {
@@ -133,6 +135,5 @@ public:
             b.appendNumber("mappedWithJournal", m);
         }
     }
-
 } memJournalServerStatusMetric;
 }

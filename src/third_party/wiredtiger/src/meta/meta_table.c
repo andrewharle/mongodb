@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -16,18 +16,41 @@ static bool
 __metadata_turtle(const char *key)
 {
 	switch (key[0]) {
+	case 'C':
+		if (strcmp(key, WT_METADATA_COMPAT) == 0)
+			return (true);
+		break;
 	case 'f':
 		if (strcmp(key, WT_METAFILE_URI) == 0)
 			return (true);
 		break;
 	case 'W':
-		if (strcmp(key, "WiredTiger version") == 0)
+		if (strcmp(key, WT_METADATA_VERSION) == 0)
 			return (true);
-		if (strcmp(key, "WiredTiger version string") == 0)
+		if (strcmp(key, WT_METADATA_VERSION_STR) == 0)
 			return (true);
 		break;
 	}
 	return (false);
+}
+
+/*
+ * __wt_metadata_turtle_rewrite --
+ *	Rewrite the turtle file. We wrap this because the lower functions
+ *	expect a URI key and config value pair for the metadata. This function
+ *	exists to push out the other contents to the turtle file such as a
+ *	change in compatibility information.
+ */
+int
+__wt_metadata_turtle_rewrite(WT_SESSION_IMPL *session)
+{
+	WT_DECL_RET;
+	char *value;
+
+	WT_RET(__wt_metadata_search(session, WT_METAFILE_URI, &value));
+	ret = __wt_metadata_update(session, WT_METAFILE_URI, value);
+	__wt_free(session, value);
+	return (ret);
 }
 
 /*
@@ -62,9 +85,10 @@ __wt_metadata_cursor_open(
 	 * first update is safe because it's single-threaded from
 	 * wiredtiger_open).
 	 */
+#define	WT_EVICT_META_SKEW	10000
 	if (btree->evict_priority == 0)
 		WT_WITH_BTREE(session, btree,
-		    __wt_evict_priority_set(session, WT_EVICT_INT_SKEW));
+		    __wt_evict_priority_set(session, WT_EVICT_META_SKEW));
 	if (F_ISSET(btree, WT_BTREE_NO_LOGGING))
 		F_CLR(btree, WT_BTREE_NO_LOGGING);
 
@@ -230,12 +254,23 @@ __wt_metadata_remove(WT_SESSION_IMPL *session, const char *key)
 		WT_RET_MSG(session, EINVAL,
 		    "%s: remove not supported on the turtle file", key);
 
+	/*
+	 * Take, release, and reacquire the metadata cursor. It's complicated,
+	 * but that way the underlying meta-tracking function doesn't have to
+	 * open a second metadata cursor, it can use the session's cached one.
+	 */
 	WT_RET(__wt_metadata_cursor(session, &cursor));
 	cursor->set_key(cursor, key);
 	WT_ERR(cursor->search(cursor));
+	WT_ERR(__wt_metadata_cursor_release(session, &cursor));
+
 	if (WT_META_TRACKING(session))
 		WT_ERR(__wt_meta_track_update(session, key));
-	WT_ERR(cursor->remove(cursor));
+
+	WT_ERR(__wt_metadata_cursor(session, &cursor));
+	cursor->set_key(cursor, key);
+	ret = cursor->remove(cursor);
+
 err:	WT_TRET(__wt_metadata_cursor_release(session, &cursor));
 	return (ret);
 }
@@ -266,7 +301,9 @@ __wt_metadata_search(WT_SESSION_IMPL *session, const char *key, char **valuep)
 		 * that Coverity complains a lot, add an error check to get some
 		 * peace and quiet.
 		 */
-		if ((ret = __wt_turtle_read(session, key, valuep)) != 0)
+		WT_WITH_TURTLE_LOCK(session,
+		    ret = __wt_turtle_read(session, key, valuep));
+		if (ret != 0)
 			__wt_free(session, *valuep);
 		return (ret);
 	}
@@ -293,4 +330,28 @@ err:	WT_TRET(__wt_metadata_cursor_release(session, &cursor));
 	if (ret != 0)
 		__wt_free(session, *valuep);
 	return (ret);
+}
+
+/*
+ * __wt_metadata_salvage --
+ *	Salvage the metadata file. This is a destructive operation.
+ *	Save a copy of the original metadata.
+ */
+int
+__wt_metadata_salvage(WT_SESSION_IMPL *session)
+{
+	WT_SESSION *wt_session;
+
+	wt_session = &session->iface;
+	/*
+	 * Copy the original metadata.
+	 */
+	WT_RET(__wt_copy_and_sync(wt_session, WT_METAFILE, WT_METAFILE_SLVG));
+
+	/*
+	 * Now salvage the metadata. We know we're in wiredtiger_open and
+	 * single threaded.
+	 */
+	WT_RET(wt_session->salvage(wt_session, WT_METAFILE_URI, NULL));
+	return (0);
 }

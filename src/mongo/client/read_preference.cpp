@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -46,6 +48,7 @@ namespace {
 
 const char kModeFieldName[] = "mode";
 const char kTagsFieldName[] = "tags";
+const char kMaxStalenessSecondsFieldName[] = "maxStalenessSeconds";
 
 const char kPrimaryOnly[] = "primary";
 const char kPrimaryPreferred[] = "primaryPreferred";
@@ -84,9 +87,16 @@ StatusWith<ReadPreference> parseReadPreferenceMode(StringData prefStr) {
     }
     return Status(ErrorCodes::FailedToParse,
                   str::stream() << "Could not parse $readPreference mode '" << prefStr
-                                << "'. Only the modes '" << kPrimaryOnly << "', '"
-                                << kPrimaryPreferred << "', " << kSecondaryOnly << "', '"
-                                << kSecondaryPreferred << "', and '" << kNearest
+                                << "'. Only the modes '"
+                                << kPrimaryOnly
+                                << "', '"
+                                << kPrimaryPreferred
+                                << "', "
+                                << kSecondaryOnly
+                                << "', '"
+                                << kSecondaryPreferred
+                                << "', and '"
+                                << kNearest
                                 << "' are supported.");
 }
 
@@ -105,11 +115,38 @@ TagSet defaultTagSetForMode(ReadPreference mode) {
 
 }  // namespace
 
+
+/**
+ * Replica set refresh period on the task executor.
+ */
+const Seconds ReadPreferenceSetting::kMinimalMaxStalenessValue(90);
+
+const OperationContext::Decoration<ReadPreferenceSetting> ReadPreferenceSetting::get =
+    OperationContext::declareDecoration<ReadPreferenceSetting>();
+
+const BSONObj& ReadPreferenceSetting::secondaryPreferredMetadata() {
+    // This is a static method rather than a static member only because it is used by another TU
+    // during dynamic init.
+    static const auto bson =
+        ReadPreferenceSetting(ReadPreference::SecondaryPreferred).toContainingBSON();
+    return bson;
+}
+
 TagSet::TagSet() : _tags(BSON_ARRAY(BSONObj())) {}
 
 TagSet TagSet::primaryOnly() {
     return TagSet{BSONArray()};
 }
+
+ReadPreferenceSetting::ReadPreferenceSetting(ReadPreference pref,
+                                             TagSet tags,
+                                             Seconds maxStalenessSeconds)
+    : pref(std::move(pref)),
+      tags(std::move(tags)),
+      maxStalenessSeconds(std::move(maxStalenessSeconds)) {}
+
+ReadPreferenceSetting::ReadPreferenceSetting(ReadPreference pref, Seconds maxStalenessSeconds)
+    : ReadPreferenceSetting(pref, defaultTagSetForMode(pref), maxStalenessSeconds) {}
 
 ReadPreferenceSetting::ReadPreferenceSetting(ReadPreference pref, TagSet tags)
     : pref(std::move(pref)), tags(std::move(tags)) {}
@@ -117,7 +154,7 @@ ReadPreferenceSetting::ReadPreferenceSetting(ReadPreference pref, TagSet tags)
 ReadPreferenceSetting::ReadPreferenceSetting(ReadPreference pref)
     : ReadPreferenceSetting(pref, defaultTagSetForMode(pref)) {}
 
-StatusWith<ReadPreferenceSetting> ReadPreferenceSetting::fromBSON(const BSONObj& readPrefObj) {
+StatusWith<ReadPreferenceSetting> ReadPreferenceSetting::fromInnerBSON(const BSONObj& readPrefObj) {
     std::string modeStr;
     auto modeExtractStatus = bsonExtractStringField(readPrefObj, kModeFieldName, &modeStr);
     if (!modeExtractStatus.isOK()) {
@@ -160,20 +197,73 @@ StatusWith<ReadPreferenceSetting> ReadPreferenceSetting::fromBSON(const BSONObj&
         return tagExtractStatus;
     }
 
-    return ReadPreferenceSetting(mode, tags);
+    long long maxStalenessSecondsValue;
+    auto maxStalenessSecondsExtractStatus = bsonExtractIntegerFieldWithDefault(
+        readPrefObj, kMaxStalenessSecondsFieldName, 0, &maxStalenessSecondsValue);
+
+    if (!maxStalenessSecondsExtractStatus.isOK()) {
+        return maxStalenessSecondsExtractStatus;
+    }
+
+    if (maxStalenessSecondsValue && maxStalenessSecondsValue < 0) {
+        return Status(ErrorCodes::BadValue,
+                      str::stream() << kMaxStalenessSecondsFieldName
+                                    << " must be a non-negative integer");
+    }
+
+    if (maxStalenessSecondsValue && maxStalenessSecondsValue >= Seconds::max().count()) {
+        return Status(ErrorCodes::BadValue,
+                      str::stream() << kMaxStalenessSecondsFieldName << " value can not exceed "
+                                    << Seconds::max().count());
+    }
+
+    if (maxStalenessSecondsValue && maxStalenessSecondsValue < kMinimalMaxStalenessValue.count()) {
+        return Status(ErrorCodes::MaxStalenessOutOfRange,
+                      str::stream() << kMaxStalenessSecondsFieldName
+                                    << " value can not be less than "
+                                    << kMinimalMaxStalenessValue.count());
+    }
+
+    if ((mode == ReadPreference::PrimaryOnly) && maxStalenessSecondsValue) {
+        return Status(ErrorCodes::BadValue,
+                      str::stream() << kMaxStalenessSecondsFieldName
+                                    << " can not be set for the primary mode");
+    }
+
+    return ReadPreferenceSetting(mode, tags, Seconds(maxStalenessSecondsValue));
 }
 
-BSONObj ReadPreferenceSetting::toBSON() const {
-    BSONObjBuilder bob;
-    bob.append(kModeFieldName, readPreferenceName(pref));
-    if (tags != defaultTagSetForMode(pref)) {
-        bob.append(kTagsFieldName, tags.getTagBSON());
+StatusWith<ReadPreferenceSetting> ReadPreferenceSetting::fromInnerBSON(const BSONElement& elem) {
+    if (elem.type() != mongo::Object) {
+        return Status(ErrorCodes::TypeMismatch,
+                      str::stream() << "$readPreference has incorrect type: expected "
+                                    << mongo::Object
+                                    << " but got "
+                                    << elem.type());
     }
-    return bob.obj();
+    return fromInnerBSON(elem.Obj());
+}
+
+StatusWith<ReadPreferenceSetting> ReadPreferenceSetting::fromContainingBSON(
+    const BSONObj& obj, ReadPreference defaultReadPref) {
+    if (auto elem = obj["$readPreference"]) {
+        return fromInnerBSON(elem);
+    }
+    return ReadPreferenceSetting(defaultReadPref);
+}
+
+void ReadPreferenceSetting::toInnerBSON(BSONObjBuilder* bob) const {
+    bob->append(kModeFieldName, readPreferenceName(pref));
+    if (tags != defaultTagSetForMode(pref)) {
+        bob->append(kTagsFieldName, tags.getTagBSON());
+    }
+    if (maxStalenessSeconds.count() > 0) {
+        bob->append(kMaxStalenessSecondsFieldName, maxStalenessSeconds.count());
+    }
 }
 
 std::string ReadPreferenceSetting::toString() const {
-    return toBSON().toString();
+    return toInnerBSON().toString();
 }
 
 }  // namespace mongo

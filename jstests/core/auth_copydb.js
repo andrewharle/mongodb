@@ -1,3 +1,11 @@
+// @tags: [
+//   assumes_superuser_permissions,
+//   assumes_write_concern_unchanged,
+//   requires_auth,
+//   requires_fastcount,
+//   requires_non_retryable_commands,
+// ]
+
 a = db.getSisterDB("copydb2-test-a");
 b = db.getSisterDB("copydb2-test-b");
 

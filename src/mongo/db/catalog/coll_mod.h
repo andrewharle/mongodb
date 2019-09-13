@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -28,6 +30,7 @@
 
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
+#include "mongo/db/catalog/collection_options.h"
 
 namespace mongo {
 class BSONObj;
@@ -36,18 +39,45 @@ class Collection;
 class NamespaceString;
 class OperationContext;
 
-struct CollModRequest;
-
-StatusWith<CollModRequest> parseCollModRequest(OperationContext* txn,
-                                               const NamespaceString& nss,
-                                               Collection* coll,
-                                               const BSONObj& cmdObj);
+/**
+ * Adds UUIDs to all replicated collections of all databases if they do not already have UUIDs. If
+ * this function is not necessary for SERVER-33247, it can be removed.
+ */
+void addCollectionUUIDs(OperationContext* opCtx);
 
 /**
  * Performs the collection modification described in "cmdObj" on the collection "ns".
  */
-Status collMod(OperationContext* txn,
+Status collMod(OperationContext* opCtx,
                const NamespaceString& ns,
                const BSONObj& cmdObj,
                BSONObjBuilder* result);
+
+/*
+ * Adds uuid to the collection "ns" if the collection does not already have a UUID.
+ * This is called if a collection failed to be assigned a UUID during upgrade to 3.6.
+ */
+Status collModForUUIDUpgrade(OperationContext* opCtx,
+                             const NamespaceString& ns,
+                             const BSONObj& cmdObj,
+                             CollectionUUID uuid);
+
+/**
+ * Applies the collMod operation and optionally updates formatVersion of unique indexes belonging
+ * to collection "nss".
+ */
+Status collModWithUpgrade(OperationContext* opCtx,
+                          const NamespaceString& nss,
+                          const BSONObj& cmdObj);
+
+/*
+ * Updates the unique indexes to timestamp safe unique index format on setFCV=4.2. It also updates
+ * non-replicated unique indexes indirectly by calling updateNonReplicatedUniqueIndexes().
+ */
+void updateUniqueIndexesOnUpgrade(OperationContext* opCtx);
+
+/*
+ * Updates non-replicated unique indexes to timestamp safe unique index format.
+ */
+Status updateNonReplicatedUniqueIndexes(OperationContext* opCtx);
 }  // namespace mongo

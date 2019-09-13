@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -30,6 +30,49 @@ __wt_hex(int c)
 }
 
 /*
+ * __wt_rdtsc --
+ *      Get a timestamp from CPU registers.
+ */
+static inline uint64_t
+__wt_rdtsc(void) {
+#if defined (__i386)
+	{
+	uint64_t x;
+
+	__asm__ volatile ("rdtsc" : "=A" (x));
+	return (x);
+	}
+#elif defined (__amd64)
+	{
+	uint64_t a, d;
+
+	__asm__ volatile ("rdtsc" : "=a" (a), "=d" (d));
+	return ((d << 32) | a);
+	}
+#else
+	return (0);
+#endif
+}
+
+/*
+ * __wt_clock --
+ *       Obtain a timestamp via either a CPU register or via a system call on
+ *       platforms where obtaining it directly from the hardware register is
+ *       not supported.
+ */
+static inline uint64_t
+__wt_clock(WT_SESSION_IMPL *session)
+{
+	struct timespec tsp;
+
+	if (__wt_process.use_epochtime) {
+		__wt_epoch(session, &tsp);
+		return ((uint64_t)(tsp.tv_sec * WT_BILLION + tsp.tv_nsec));
+	}
+	return (__wt_rdtsc());
+}
+
+/*
  * __wt_strdup --
  *	ANSI strdup function.
  */
@@ -41,75 +84,17 @@ __wt_strdup(WT_SESSION_IMPL *session, const char *str, void *retp)
 }
 
 /*
- * __wt_seconds --
- *	Return the seconds since the Epoch.
+ * __wt_strnlen --
+ *      Determine the length of a fixed-size string
  */
-static inline void
-__wt_seconds(WT_SESSION_IMPL *session, time_t *timep)
+static inline size_t
+__wt_strnlen(const char *s, size_t maxlen)
 {
-	struct timespec t;
+	size_t i;
 
-	__wt_epoch(session, &t);
-
-	*timep = t.tv_sec;
-}
-
-/*
- * __wt_time_check_monotonic --
- *	Check and prevent time running backward.  If we detect that it has, we
- *	set the time structure to the previous values, making time stand still
- *	until we see a time in the future of the highest value seen so far.
- */
-static inline void
-__wt_time_check_monotonic(WT_SESSION_IMPL *session, struct timespec *tsp)
-{
-	/*
-	 * Detect time going backward.  If so, use the last
-	 * saved timestamp.
-	 */
-	if (session == NULL)
-		return;
-
-	if (tsp->tv_sec < session->last_epoch.tv_sec ||
-	     (tsp->tv_sec == session->last_epoch.tv_sec &&
-	     tsp->tv_nsec < session->last_epoch.tv_nsec)) {
-		WT_STAT_CONN_INCR(session, time_travel);
-		*tsp = session->last_epoch;
-	} else
-		session->last_epoch = *tsp;
-}
-
-/*
- * __wt_verbose --
- * 	Verbose message.
- *
- * Inline functions are not parsed for external prototypes, so in cases where we
- * want GCC attributes attached to the functions, we have to do so explicitly.
- */
-static inline void
-__wt_verbose(WT_SESSION_IMPL *session, int flag, const char *fmt, ...)
-WT_GCC_FUNC_DECL_ATTRIBUTE((format (printf, 3, 4)));
-
-/*
- * __wt_verbose --
- * 	Verbose message.
- */
-static inline void
-__wt_verbose(WT_SESSION_IMPL *session, int flag, const char *fmt, ...)
-{
-#ifdef HAVE_VERBOSE
-	va_list ap;
-
-	if (WT_VERBOSE_ISSET(session, flag)) {
-		va_start(ap, fmt);
-		WT_IGNORE_RET(__wt_eventv(session, true, 0, NULL, 0, fmt, ap));
-		va_end(ap);
-	}
-#else
-	WT_UNUSED(session);
-	WT_UNUSED(flag);
-	WT_UNUSED(fmt);
-#endif
+	for (i = 0; i < maxlen && *s != '\0'; i++, s++)
+		;
+	return (i);
 }
 
 /*
@@ -202,3 +187,128 @@ __wt_snprintf_len_incr(
 	va_end(ap);
 	return (ret);
 }
+
+/*
+ * __wt_txn_context_prepare_check --
+ *	Return an error if the current transaction is in the prepare state.
+ */
+static inline int
+__wt_txn_context_prepare_check(WT_SESSION_IMPL *session)
+{
+	if (F_ISSET(&session->txn, WT_TXN_PREPARE))
+		WT_RET_MSG(session, EINVAL,
+		    "%s: not permitted in a prepared transaction",
+		    session->name);
+	return (0);
+}
+
+/*
+ * __wt_txn_context_check --
+ *	Complain if a transaction is/isn't running.
+ */
+static inline int
+__wt_txn_context_check(WT_SESSION_IMPL *session, bool requires_txn)
+{
+	if (requires_txn && !F_ISSET(&session->txn, WT_TXN_RUNNING))
+		WT_RET_MSG(session, EINVAL,
+		    "%s: only permitted in a running transaction",
+		    session->name);
+	if (!requires_txn && F_ISSET(&session->txn, WT_TXN_RUNNING))
+		WT_RET_MSG(session, EINVAL,
+		    "%s: not permitted in a running transaction",
+		    session->name);
+	return (0);
+}
+
+/*
+ * __wt_spin_backoff --
+ *	Back off while spinning for a resource. This is used to avoid busy
+ *	waiting loops that can consume enough CPU to block real work being
+ *	done. The algorithm spins a few times, then yields for a while, then
+ *	falls back to sleeping.
+ */
+static inline void
+__wt_spin_backoff(uint64_t *yield_count, uint64_t *sleep_usecs)
+{
+	if ((*yield_count) < 10) {
+		(*yield_count)++;
+		return;
+	}
+
+	if ((*yield_count) < WT_THOUSAND) {
+		(*yield_count)++;
+		__wt_yield();
+		return;
+	}
+
+	(*sleep_usecs) = WT_MIN((*sleep_usecs) + 100, WT_THOUSAND);
+	__wt_sleep(0, (*sleep_usecs));
+}
+
+				/* Maximum stress delay is 1/10 of a second. */
+#define	WT_TIMING_STRESS_MAX_DELAY	(100000)
+
+/*
+ * __wt_timing_stress --
+ *	Optionally add delay to stress code paths.
+ */
+static inline void
+__wt_timing_stress(WT_SESSION_IMPL *session, u_int flag)
+{
+	uint64_t i;
+
+	/* Optionally only sleep when a specified configuration flag is set. */
+	if (flag != 0 && !FLD_ISSET(S2C(session)->timing_stress_flags, flag))
+		return;
+
+	/*
+	 * We need a fast way to choose a sleep time. We want to sleep a short
+	 * period most of the time, but occasionally wait longer. Divide the
+	 * maximum period of time into 10 buckets (where bucket 0 doesn't sleep
+	 * at all), and roll dice, advancing to the next bucket 50% of the time.
+	 * That means we'll hit the maximum roughly every 1K calls.
+	 */
+	for (i = 0;;)
+		if (__wt_random(&session->rnd) & 0x1 || ++i > 9)
+			break;
+
+	if (i == 0)
+		__wt_yield();
+	else
+		/* The default maximum delay is 1/10th of a second. */
+		__wt_sleep(0, i * (WT_TIMING_STRESS_MAX_DELAY / 10));
+}
+
+/*
+ * The hardware-accelerated checksum code that originally shipped on Windows
+ * did not correctly handle memory that wasn't 8B aligned and a multiple of 8B.
+ * It's likely that calculations were always 8B aligned, but there's some risk.
+ *
+ * What we do is always write the correct checksum, and if a checksum test
+ * fails, check it against the alternate version have before failing.
+ */
+
+#if defined(_M_AMD64) && !defined(HAVE_NO_CRC32_HARDWARE)
+/*
+ * __wt_checksum_match --
+ *	Return if a checksum matches either the primary or alternate values.
+ */
+static inline bool
+__wt_checksum_match(const void *chunk, size_t len, uint32_t v)
+{
+	return (__wt_checksum(chunk, len) == v ||
+	    __wt_checksum_alt_match(chunk, len, v));
+}
+
+#else
+
+/*
+ * __wt_checksum_match --
+ *	Return if a checksum matches.
+ */
+static inline bool
+__wt_checksum_match(const void *chunk, size_t len, uint32_t v)
+{
+	return (__wt_checksum(chunk, len) == v);
+}
+#endif

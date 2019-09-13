@@ -1,4 +1,3 @@
-
 t = db.geo_qo1;
 t.drop();
 

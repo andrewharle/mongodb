@@ -1,30 +1,33 @@
 /** @file dbclient_rs.h Connect to a Replica Set, from C++ */
 
-/*    Copyright 2009 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
@@ -32,6 +35,7 @@
 #include <utility>
 
 #include "mongo/client/dbclientinterface.h"
+#include "mongo/client/mongo_uri.h"
 #include "mongo/util/net/hostandport.h"
 
 namespace mongo {
@@ -59,8 +63,9 @@ public:
      * connections. */
     DBClientReplicaSet(const std::string& name,
                        const std::vector<HostAndPort>& servers,
-                       double so_timeout = 0);
-    virtual ~DBClientReplicaSet();
+                       StringData applicationName,
+                       double so_timeout = 0,
+                       MongoURI uri = {});
 
     /**
      * Returns false if no member of the set were reachable. This object
@@ -105,7 +110,7 @@ public:
 
     virtual void update(const std::string& ns, Query query, BSONObj obj, int flags);
 
-    virtual void killCursor(long long cursorID);
+    virtual void killCursor(const NamespaceString& ns, long long cursorID);
 
     // ---- access raw connections ----
 
@@ -129,9 +134,9 @@ public:
     // ---- callback pieces -------
 
     virtual void say(Message& toSend, bool isRetry = false, std::string* actualServer = 0);
-    virtual bool recv(Message& toRecv);
-    virtual void checkResponse(const char* data,
-                               int nReturned,
+    virtual bool recv(Message& toRecv, int lastRequestId);
+    virtual void checkResponse(const std::vector<BSONObj>& batch,
+                               bool networkError,
                                bool* retry = NULL,
                                std::string* targetHost = NULL);
 
@@ -183,10 +188,11 @@ public:
         return true;
     }
 
-    rpc::UniqueReply runCommandWithMetadata(StringData database,
-                                            StringData command,
-                                            const BSONObj& metadata,
-                                            const BSONObj& commandArgs) final;
+    using DBClientBase::runCommandWithTarget;
+    std::pair<rpc::UniqueReply, DBClientBase*> runCommandWithTarget(OpMsgRequest request) final;
+    std::pair<rpc::UniqueReply, std::shared_ptr<DBClientBase>> runCommandWithTarget(
+        OpMsgRequest request, std::shared_ptr<DBClientBase> me) final;
+    DBClientBase* runFireAndForgetCommand(OpMsgRequest request) final;
 
     void setRequestMetadataWriter(rpc::RequestMetadataWriter writer) final;
 
@@ -215,6 +221,14 @@ public:
      * returning secondary connections to the pool.
      */
     virtual void reset();
+
+    bool isReplicaSetMember() const override {
+        return true;
+    }
+
+    bool isMongos() const override {
+        return false;
+    }
 
     /**
      * @bool setting if true, DBClientReplicaSet connections will make sure that secondary
@@ -287,12 +301,14 @@ private:
     static bool _authPooledSecondaryConn;
 
     // Throws a DBException if the monitor doesn't exist and there isn't a cached seed to use.
-    ReplicaSetMonitorPtr _getMonitor() const;
+    ReplicaSetMonitorPtr _getMonitor();
 
     std::string _setName;
+    std::string _applicationName;
+    std::shared_ptr<ReplicaSetMonitor> _rsm;
 
     HostAndPort _masterHost;
-    std::unique_ptr<DBClientConnection> _master;
+    std::shared_ptr<DBClientConnection> _master;
 
     // Last used host in a slaveOk query (can be a primary).
     HostAndPort _lastSlaveOkHost;
@@ -300,7 +316,7 @@ private:
     // Connection can either be owned here or returned to the connection pool. Note that
     // if connection is primary, it is owned by _master so it is incorrect to return
     // it to the pool.
-    std::unique_ptr<DBClientConnection> _lastSlaveOkConn;
+    std::shared_ptr<DBClientConnection> _lastSlaveOkConn;
     std::shared_ptr<ReadPreferenceSetting> _lastReadPref;
 
     double _so_timeout;
@@ -310,6 +326,8 @@ private:
     // this could be a security issue, as the password is stored in memory
     // not sure if/how we should handle
     std::map<std::string, BSONObj> _auths;  // dbName -> auth parameters
+
+    MongoURI _uri;
 
 protected:
     /**

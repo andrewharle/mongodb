@@ -1,39 +1,40 @@
+
 /**
- * Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- * This program is free software: you can redistribute it and/or  modify
- * it under the terms of the GNU Affero General Public License, version 3,
- * as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
- * As a special exception, the copyright holders give permission to link the
- * code of portions of this program with the OpenSSL library under certain
- * conditions as described in each individual source file and distribute
- * linked combinations including the program with the OpenSSL library. You
- * must comply with the GNU Affero General Public License in all respects
- * for all of the code used other than as permitted herein. If you modify
- * file(s) with this exception, you may extend this exception to your
- * version of the file(s), but you are not obligated to do so. If you do not
- * wish to do so, delete this exception statement from your version. If you
- * delete this exception statement from all source files in the program,
- * then also delete it in the license file.
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/platform/basic.h"
 
 #include <cstddef>
-#include <type_traits>
 #include <jscustomallocator.h>
+#include <type_traits>
 
 #include "mongo/config.h"
-#include "mongo/util/concurrency/threadlocal.h"
 #include "mongo/scripting/mozjs/implscope.h"
 
 #ifdef __linux__
@@ -44,6 +45,10 @@
 #include <malloc.h>
 #else
 #define MONGO_NO_MALLOC_USABLE_SIZE
+#endif
+
+#if !defined(__has_feature)
+#define __has_feature(x) 0
 #endif
 
 /**
@@ -68,8 +73,8 @@ namespace {
  * maximum number of bytes we will consider handing out. They are set by
  * MozJSImplScope on start up.
  */
-MONGO_TRIVIALLY_CONSTRUCTIBLE_THREAD_LOCAL size_t total_bytes;
-MONGO_TRIVIALLY_CONSTRUCTIBLE_THREAD_LOCAL size_t max_bytes;
+thread_local size_t total_bytes = 0;
+thread_local size_t max_bytes = 0;
 
 /**
  * When we don't have malloc_usable_size, we manage by adjusting our pointer by
@@ -114,9 +119,8 @@ void* wrap_alloc(T&& func, void* ptr, size_t bytes) {
 
     if (mb && (tb + bytes > mb)) {
         auto scope = mongo::mozjs::MozJSImplScope::getThreadScope();
-        invariant(scope);
-
-        scope->setOOM();
+        if (scope)
+            scope->setOOM();
 
         // We fall through here because we want to let spidermonkey continue
         // with whatever it was doing.  Calling setOOM will fail the top level
@@ -124,9 +128,39 @@ void* wrap_alloc(T&& func, void* ptr, size_t bytes) {
     }
 
 #ifdef MONGO_NO_MALLOC_USABLE_SIZE
-    void* p = func(ptr ? static_cast<char*>(ptr) - kMaxAlign : nullptr, bytes + kMaxAlign);
+    ptr = ptr ? static_cast<char*>(ptr) - kMaxAlign : nullptr;
+#endif
+
+#ifdef MONGO_NO_MALLOC_USABLE_SIZE
+    void* p = func(ptr, bytes + kMaxAlign);
 #else
     void* p = func(ptr, bytes);
+#endif
+
+#if __has_feature(address_sanitizer)
+    {
+        auto handles = mongo::mozjs::MozJSImplScope::ASANHandles::getThreadASANHandles();
+
+        if (handles) {
+            if (bytes) {
+                if (ptr) {
+                    // realloc
+                    if (ptr != p) {
+                        // actually moved the allocation
+                        handles->removePointer(ptr);
+                        handles->addPointer(p);
+                    }
+                    // else we didn't need to realloc, don't have to register
+                } else {
+                    // malloc/calloc
+                    handles->addPointer(p);
+                }
+            } else {
+                // free
+                handles->removePointer(ptr);
+            }
+        }
+    }
 #endif
 
     if (!p) {
@@ -189,10 +223,13 @@ void js_free(void* p) {
         mongo::sm::total_bytes = tb - current;
     }
 
-    mongo::sm::wrap_alloc([](void* ptr, size_t b) {
-        std::free(ptr);
-        return nullptr;
-    }, p, 0);
+    mongo::sm::wrap_alloc(
+        [](void* ptr, size_t b) {
+            std::free(ptr);
+            return nullptr;
+        },
+        p,
+        0);
 }
 
 void* js_realloc(void* p, size_t bytes) {

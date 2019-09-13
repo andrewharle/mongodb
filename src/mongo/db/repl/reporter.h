@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -31,12 +33,36 @@
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/db/repl/replication_executor.h"
+#include "mongo/db/repl/replication_coordinator.h"
+#include "mongo/executor/task_executor.h"
+#include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/functional.h"
+#include "mongo/stdx/mutex.h"
+#include "mongo/util/time_support.h"
 
 namespace mongo {
 namespace repl {
 
+/**
+ * Once scheduled, the reporter will periodically send the current replication progress, obtained
+ * by invoking "_prepareReplSetUpdatePositionCommandFn", to its sync source until it encounters
+ * an error.
+ *
+ * If the sync source cannot accept the current format (used by server versions 3.2.4 and above) of
+ * the "replSetUpdatePosition" command, the reporter will not abort and instead downgrade the format
+ * of the command it will send upstream.
+ *
+ * While the reporter is active, it will be in one of three states:
+ * 1) triggered and waiting to send command to sync source as soon as possible.
+ * 2) waiting for command response from sync source.
+ * 3) waiting for at least "_keepAliveInterval" ms before sending command to sync source.
+ *
+ * Calling trigger() while the reporter is in state 1 or 2 will cause the reporter to immediately
+ * send a new command upon receiving a successful command response.
+ *
+ * Calling trigger() while it is in state 3 sends a command upstream and cancels the current
+ * keep alive timeout, resetting the keep alive schedule.
+ */
 class Reporter {
     MONGO_DISALLOW_COPYING(Reporter);
 
@@ -49,10 +75,30 @@ public:
      */
     using PrepareReplSetUpdatePositionCommandFn = stdx::function<StatusWith<BSONObj>()>;
 
-    Reporter(ReplicationExecutor* executor,
-             PrepareReplSetUpdatePositionCommandFn prepareOldReplSetUpdatePositionCommandFn,
-             const HostAndPort& target);
+    Reporter(executor::TaskExecutor* executor,
+             PrepareReplSetUpdatePositionCommandFn prepareReplSetUpdatePositionCommandFn,
+             const HostAndPort& target,
+             Milliseconds keepAliveInterval,
+             Milliseconds updatePositionTimeout);
+
     virtual ~Reporter();
+
+    /**
+     * Returns sync target.
+     */
+    HostAndPort getTarget() const;
+
+    /**
+     * Returns an informational string.
+     */
+    std::string toString() const;
+
+    /**
+     * Returns keep alive interval.
+     * Reporter will periodically send replication status to sync source every "_keepAliveInterval"
+     * until an error occurs.
+     */
+    Milliseconds getKeepAliveInterval() const;
 
     /**
      * Returns true if a remote command has been scheduled (but not completed)
@@ -61,22 +107,22 @@ public:
     bool isActive() const;
 
     /**
-     * Returns true if a remote command should be scheduled once the current one returns
-     * from the executor.
+     * Returns true if new data is available while a remote command is in progress.
+     * The reporter will schedule a subsequent remote update immediately upon successful
+     * completion of the previous command instead of when the keep alive callback runs.
      */
-    bool willRunAgain() const;
+    bool isWaitingToSendReport() const;
 
     /**
-     * Cancels remote command request.
+     * Cancels both scheduled and active remote command requests.
      * Returns immediately if the Reporter is not active.
      */
-    void cancel();
+    void shutdown();
 
     /**
-     * Waits for last/current executor handle to finish.
-     * Returns immediately if the handle is invalid.
+     * Waits until Reporter is inactive and returns reporter status.
      */
-    void wait();
+    Status join();
 
     /**
      * Signals to the Reporter that there is new information to be sent to the "_target" server.
@@ -84,46 +130,84 @@ public:
      */
     Status trigger();
 
+    // ================== Test support API ===================
+
     /**
-     * Returns the previous return status so that the owner can decide whether the Reporter
-     * needs a new target to whom it can report.
+     * Returns scheduled time of keep alive timeout handler.
      */
-    Status getStatus() const;
+    Date_t getKeepAliveTimeoutWhen_forTest() const;
+    Status getStatus_forTest() const;
 
 private:
     /**
-     * Schedules remote command to be run by the executor
+     * Returns true if reporter is active.
      */
-    Status _schedule_inlock();
+    bool _isActive_inlock() const;
 
     /**
-     * Callback for remote command.
+     * Prepares remote command to be run by the executor.
      */
-    void _callback(const ReplicationExecutor::RemoteCommandCallbackArgs& rcbd);
+    StatusWith<BSONObj> _prepareCommand();
+
+    /**
+     * Schedules remote command to be run by the executor with the given network timeout.
+     */
+    void _sendCommand_inlock(BSONObj commandRequest, Milliseconds netTimeout);
+
+    /**
+     * Callback for processing response from remote command.
+     */
+    void _processResponseCallback(const executor::TaskExecutor::RemoteCommandCallbackArgs& rcbd);
+
+    /**
+     * Callback for preparing and sending remote command.
+     */
+    void _prepareAndSendCommandCallback(const executor::TaskExecutor::CallbackArgs& args,
+                                        bool fromTrigger);
+
+    /**
+     * Signals end of Reporter work and notifies waiters.
+     */
+    void _onShutdown_inlock();
 
     // Not owned by us.
-    ReplicationExecutor* _executor;
+    executor::TaskExecutor* const _executor;
 
     // Prepares update command object.
-    PrepareReplSetUpdatePositionCommandFn _prepareOldReplSetUpdatePositionCommandFn;
+    const PrepareReplSetUpdatePositionCommandFn _prepareReplSetUpdatePositionCommandFn;
 
     // Host to whom the Reporter sends updates.
-    HostAndPort _target;
+    const HostAndPort _target;
 
-    // Protects member data of this Reporter.
+    // Reporter will send updates every "_keepAliveInterval" ms until the reporter is canceled or
+    // encounters an error.
+    const Milliseconds _keepAliveInterval;
+
+    // The network timeout used when sending an updatePosition command to our sync source.
+    const Milliseconds _updatePositionTimeout;
+
+    // Protects member data of this Reporter declared below.
     mutable stdx::mutex _mutex;
 
-    // Stores the most recent Status returned from the ReplicationExecutor.
-    Status _status;
+    mutable stdx::condition_variable _condition;
 
-    // _willRunAgain is true when Reporter is scheduled to be run by the executor and subsequent
-    // updates have come in.
-    bool _willRunAgain;
-    // _active is true when Reporter is scheduled to be run by the executor.
-    bool _active;
+    // Stores the most recent Status returned from the executor.
+    Status _status = Status::OK();
+
+    // _isWaitingToSendReporter is true when Reporter is scheduled to be run by the executor and
+    // subsequent updates have come in.
+    bool _isWaitingToSendReporter = false;
 
     // Callback handle to the scheduled remote command.
-    ReplicationExecutor::CallbackHandle _remoteCommandCallbackHandle;
+    executor::TaskExecutor::CallbackHandle _remoteCommandCallbackHandle;
+
+    // Callback handle to the scheduled task for preparing and sending the remote command.
+    executor::TaskExecutor::CallbackHandle _prepareAndSendCommandCallbackHandle;
+
+    // Keep alive timeout callback will not run before this time.
+    // If this date is Date_t(), the callback is either unscheduled or canceled.
+    // Used for testing only.
+    Date_t _keepAliveTimeoutWhen;
 };
 
 }  // namespace repl

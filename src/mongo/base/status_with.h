@@ -1,30 +1,31 @@
-// status_with.h
 
-/*    Copyright 2013 10gen Inc.
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
@@ -34,13 +35,38 @@
 #include <type_traits>
 #include <utility>
 
+#include "mongo/base/static_assert.h"
 #include "mongo/base/status.h"
+#include "mongo/platform/compiler.h"
 
 #define MONGO_INCLUDE_INVARIANT_H_WHITELISTED
 #include "mongo/util/invariant.h"
 #undef MONGO_INCLUDE_INVARIANT_H_WHITELISTED
 
+
 namespace mongo {
+
+// Including builder.h here would cause a cycle.
+template <typename Allocator>
+class StringBuilderImpl;
+
+template <typename T>
+class StatusWith;
+
+// Using extern constexpr to prevent the compiler from allocating storage as a poor man's c++17
+// inline constexpr variable.
+// TODO delete extern in c++17 because inline is the default for constexper variables.
+template <typename T>
+extern constexpr bool isStatusWith = false;
+template <typename T>
+extern constexpr bool isStatusWith<StatusWith<T>> = true;
+
+template <typename T>
+extern constexpr bool isStatusOrStatusWith =
+    std::is_same<T, mongo::Status>::value || isStatusWith<T>;
+
+template <typename T>
+using StatusOrStatusWith = std::conditional_t<std::is_void<T>::value, Status, StatusWith<T>>;
 
 /**
  * StatusWith is used to return an error or a value.
@@ -60,20 +86,30 @@ namespace mongo {
  * }
  */
 template <typename T>
-class StatusWith {
-    static_assert(!(std::is_same<T, mongo::Status>::value), "StatusWith<Status> is banned.");
+class MONGO_WARN_UNUSED_RESULT_CLASS StatusWith {
+    MONGO_STATIC_ASSERT_MSG(!isStatusOrStatusWith<T>,
+                            "StatusWith<Status> and StatusWith<StatusWith<T>> are banned.");
 
 public:
-    /**
-     * for the error case
-     */
-    StatusWith(ErrorCodes::Error code, std::string reason, int location = 0)
-        : _status(code, std::move(reason), location) {}
+    using value_type = T;
 
     /**
      * for the error case
      */
-    StatusWith(Status status) : _status(std::move(status)) {
+    MONGO_COMPILER_COLD_FUNCTION StatusWith(ErrorCodes::Error code, StringData reason)
+        : _status(code, reason) {}
+    MONGO_COMPILER_COLD_FUNCTION StatusWith(ErrorCodes::Error code, std::string reason)
+        : _status(code, std::move(reason)) {}
+    MONGO_COMPILER_COLD_FUNCTION StatusWith(ErrorCodes::Error code, const char* reason)
+        : _status(code, reason) {}
+    MONGO_COMPILER_COLD_FUNCTION StatusWith(ErrorCodes::Error code,
+                                            const mongoutils::str::stream& reason)
+        : _status(code, reason) {}
+
+    /**
+     * for the error case
+     */
+    MONGO_COMPILER_COLD_FUNCTION StatusWith(Status status) : _status(std::move(status)) {
         dassert(!isOK());
     }
 
@@ -81,24 +117,6 @@ public:
      * for the OK case
      */
     StatusWith(T t) : _status(Status::OK()), _t(std::move(t)) {}
-
-#if defined(_MSC_VER) && _MSC_VER < 1900
-    StatusWith(const StatusWith& s) : _status(s._status), _t(s._t) {}
-
-    StatusWith(StatusWith&& s) : _status(std::move(s._status)), _t(std::move(s._t)) {}
-
-    StatusWith& operator=(const StatusWith& other) {
-        _status = other._status;
-        _t = other._t;
-        return *this;
-    }
-
-    StatusWith& operator=(StatusWith&& other) {
-        _status = std::move(other._status);
-        _t = std::move(other._t);
-        return *this;
-    }
-#endif
 
     const T& getValue() const {
         dassert(isOK());
@@ -118,6 +136,21 @@ public:
         return _status.isOK();
     }
 
+    /**
+     * This method is a transitional tool, to facilitate transition to compile-time enforced status
+     * checking.
+     *
+     * NOTE: DO NOT ADD NEW CALLS TO THIS METHOD. This method serves the same purpose as
+     * `.getStatus().ignore()`; however, it indicates a situation where the code that presently
+     * ignores a status code has not been audited for correctness. This method will be removed at
+     * some point. If you encounter a compiler error from ignoring the result of a `StatusWith`
+     * returning function be sure to check the return value, or deliberately ignore the return
+     * value. The function is named to be auditable independently from unaudited `Status` ignore
+     * cases.
+     */
+    void status_with_transitional_ignore() && noexcept {};
+    void status_with_transitional_ignore() const& noexcept = delete;
+
 private:
     Status _status;
     boost::optional<T> _t;
@@ -129,7 +162,18 @@ StatusWith<T> makeStatusWith(Args&&... args) {
 }
 
 template <typename T>
-std::ostream& operator<<(std::ostream& stream, const StatusWith<T>& sw) {
+auto operator<<(std::ostream& stream, const StatusWith<T>& sw)
+    -> decltype(stream << sw.getValue())  // SFINAE on T streamability.
+{
+    if (sw.isOK())
+        return stream << sw.getValue();
+    return stream << sw.getStatus();
+}
+
+template <typename Allocator, typename T>
+auto operator<<(StringBuilderImpl<Allocator>& stream, const StatusWith<T>& sw)
+    -> decltype(stream << sw.getValue())  // SFINAE on T streamability.
+{
     if (sw.isOK())
         return stream << sw.getValue();
     return stream << sw.getStatus();

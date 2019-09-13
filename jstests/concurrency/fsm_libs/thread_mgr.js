@@ -53,7 +53,7 @@ var ThreadManager = function(clusterOptions, executionMode = {composed: false}) 
                   'the maximum allowed threads must be an integer');
 
         function computeNumThreads() {
-            // If we don't have any workloads, such as having no background workloads, return 0.
+            // If we don't have any workloads, return 0.
             if (workloads.length === 0) {
                 return 0;
             }
@@ -111,6 +111,8 @@ var ThreadManager = function(clusterOptions, executionMode = {composed: false}) 
                     tid: tid++,
                     data: workloadData,
                     host: cluster.getHost(),
+                    secondaryHost: cluster.getSecondaryHost(),
+                    replSetName: cluster.getReplSetName(),
                     latch: latch,
                     dbName: _context[workload].dbName,
                     collName: _context[workload].collName,
@@ -118,7 +120,9 @@ var ThreadManager = function(clusterOptions, executionMode = {composed: false}) 
                     clusterOptions: clusterOptions,
                     seed: Random.randInt(1e13),  // contains range of Date.getTime()
                     globalAssertLevel: globalAssertLevel,
-                    errorLatch: errorLatch
+                    errorLatch: errorLatch,
+                    sessionOptions: options.sessionOptions,
+                    testData: TestData
                 };
 
                 var t = makeThread(workloads, args, options);
@@ -187,19 +191,6 @@ var ThreadManager = function(clusterOptions, executionMode = {composed: false}) 
 
         return errors;
     };
-
-    this.markAllForTermination = function markAllForTermination() {
-        if (_workloads.length === 0) {
-            return;
-        }
-
-        // Background threads periodically check the 'fsm_background' collection of the
-        // 'config' database for a document specifying { terminate: true }. If such a
-        // document is found the background thread terminates.
-        var coll = _context[_workloads[0]].db.getSiblingDB('config').fsm_background;
-        assert.writeOK(coll.update({terminate: true}, {terminate: true}, {upsert: true}));
-
-    };
 };
 
 /**
@@ -211,22 +202,18 @@ workerThread.fsm = function(workloads, args, options) {
     load('jstests/concurrency/fsm_libs/worker_thread.js');  // for workerThread.main
     load('jstests/concurrency/fsm_libs/fsm.js');            // for fsm.run
 
-    return workerThread.main(workloads,
-                             args,
-                             function(configs) {
-                                 var workloads = Object.keys(configs);
-                                 assert.eq(1, workloads.length);
-                                 fsm.run(configs[workloads[0]]);
-                             });
+    return workerThread.main(workloads, args, function(configs) {
+        var workloads = Object.keys(configs);
+        assert.eq(1, workloads.length);
+        fsm.run(configs[workloads[0]]);
+    });
 };
 
 workerThread.composed = function(workloads, args, options) {
     load('jstests/concurrency/fsm_libs/worker_thread.js');  // for workerThread.main
     load('jstests/concurrency/fsm_libs/composer.js');       // for composer.run
 
-    return workerThread.main(workloads,
-                             args,
-                             function(configs) {
-                                 composer.run(workloads, configs, options);
-                             });
+    return workerThread.main(workloads, args, function(configs) {
+        composer.run(workloads, configs, options);
+    });
 };

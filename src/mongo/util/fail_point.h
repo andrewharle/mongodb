@@ -1,36 +1,40 @@
-/*
- *    Copyright (C) 2012 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
 
 #include "mongo/base/disallow_copying.h"
+#include "mongo/base/status_with.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/platform/atomic_word.h"
+#include "mongo/stdx/functional.h"
 #include "mongo/stdx/mutex.h"
 
 namespace mongo {
@@ -68,8 +72,8 @@ class FailPoint {
 
 public:
     typedef AtomicUInt32::WordType ValType;
-    enum Mode { off, alwaysOn, random, nTimes, numModes };
-    enum RetCode { fastOff = 0, slowOff, slowOn };
+    enum Mode { off, alwaysOn, random, nTimes, skip };
+    enum RetCode { fastOff = 0, slowOff, slowOn, userIgnored };
 
     /**
      * Explicitly resets the seed used for the PRNG in this thread.  If not called on a thread,
@@ -77,15 +81,22 @@ public:
      */
     static void setThreadPRNGSeed(int32_t seed);
 
+    /**
+     * Parses the FailPoint::Mode, FailPoint::ValType, and data BSONObj from the BSON.
+     */
+    static StatusWith<std::tuple<Mode, ValType, BSONObj>> parseBSON(const BSONObj& obj);
+
     FailPoint();
 
     /**
      * Note: This is not side-effect free - it can change the state to OFF after calling.
+     * Note: see MONGO_FAIL_POINT_BLOCK_IF for information on the passed callable
      *
      * @return true if fail point is active.
      */
-    inline bool shouldFail() {
-        RetCode ret = shouldFailOpenBlock();
+    template <typename Callable = std::nullptr_t>
+    inline bool shouldFail(Callable&& cb = nullptr) {
+        RetCode ret = shouldFailOpenBlock(std::forward<Callable>(cb));
 
         if (MONGO_likely(ret == fastOff)) {
             return false;
@@ -100,14 +111,20 @@ public:
      * decrementing it. Must call shouldFailCloseBlock afterwards when the return value
      * is not fastOff. Otherwise, this will remain read-only forever.
      *
-     * @return slowOn if fail point is active.
+     * Note: see MONGO_FAIL_POINT_BLOCK_IF for information on the passed callable
+     *
+     * @return slowOn if its active and needs to be closed
+     *         userIgnored if its active and needs to be closed, but shouldn't be acted on
+     *         slowOff if its disabled and needs to be closed
+     *         fastOff if its disabled and doesn't need to be closed
      */
-    inline RetCode shouldFailOpenBlock() {
+    template <typename Callable = std::nullptr_t>
+    inline RetCode shouldFailOpenBlock(Callable&& cb = nullptr) {
         if (MONGO_likely((_fpInfo.loadRelaxed() & ACTIVE_BIT) == 0)) {
             return fastOff;
         }
 
-        return slowShouldFailOpenBlock();
+        return slowShouldFailOpenBlock(std::forward<Callable>(cb));
     }
 
     /**
@@ -130,6 +147,9 @@ public:
      *           activate.
      *     - nTimes: the number of times this fail point will be active when
      *         #shouldFail or #shouldFailOpenBlock is called.
+     *     - skip: the number of times this failpoint will be inactive when
+     *         #shouldFail or #shouldFailOpenBlock is called. After this number is reached, the
+     *         failpoint will always be active.
      *
      * @param extra arbitrary BSON object that can be stored to this fail point
      *     that can be referenced afterwards with #getData. Defaults to an empty
@@ -149,11 +169,11 @@ private:
     // Bit layout:
     // 31: tells whether this fail point is active.
     // 0~30: unsigned ref counter for active dynamic instances.
-    AtomicUInt32 _fpInfo;
+    AtomicUInt32 _fpInfo{0};
 
     // Invariant: These should be read only if ACTIVE_BIT of _fpInfo is set.
-    Mode _mode;
-    AtomicInt32 _timesOrPeriod;
+    Mode _mode{off};
+    AtomicInt32 _timesOrPeriod{0};
     BSONObj _data;
 
     // protects _mode, _timesOrPeriod, _data
@@ -171,8 +191,11 @@ private:
 
     /**
      * slow path for #shouldFailOpenBlock
+     *
+     * If a callable is passed, and returns false, this will return userIgnored and avoid altering
+     * the mode in any way.  The argument is the fail point payload.
      */
-    RetCode slowShouldFailOpenBlock();
+    RetCode slowShouldFailOpenBlock(stdx::function<bool(const BSONObj&)> cb) noexcept;
 
     /**
      * @return the stored BSONObj in this fail point. Note that this cannot be safely
@@ -192,33 +215,46 @@ class ScopedFailPoint {
     MONGO_DISALLOW_COPYING(ScopedFailPoint);
 
 public:
-    ScopedFailPoint(FailPoint* failPoint);
-    ~ScopedFailPoint();
+    template <typename Callable = std::nullptr_t>
+    ScopedFailPoint(FailPoint* failPoint, Callable&& cb = nullptr) : _failPoint(failPoint) {
+        FailPoint::RetCode ret = _failPoint->shouldFailOpenBlock(std::forward<Callable>(cb));
+        _shouldClose = ret != FailPoint::fastOff;
+        _shouldRun = ret == FailPoint::slowOn;
+    }
+
+    ~ScopedFailPoint() {
+        if (_shouldClose) {
+            _failPoint->shouldFailCloseBlock();
+        }
+    }
 
     /**
      * @return true if fail point is on. This will be true at most once.
      */
     inline bool isActive() {
-        if (_once) {
+        if (!_shouldRun) {
             return false;
         }
 
-        _once = true;
-
-        FailPoint::RetCode ret = _failPoint->shouldFailOpenBlock();
-        _shouldClose = ret != FailPoint::fastOff;
-        return ret == FailPoint::slowOn;
+        // We use this in a for loop to prevent iteration, thus flipping to inactive after the first
+        // time.
+        _shouldRun = false;
+        return true;
     }
 
     /**
      * @return the data stored in the fail point. #isActive must be true
      *     before you can call this.
      */
-    const BSONObj& getData() const;
+    const BSONObj& getData() const {
+        // Assert when attempting to get data without incrementing ref counter.
+        fassert(16445, _shouldClose);
+        return _failPoint->getData();
+    }
 
 private:
     FailPoint* _failPoint;
-    bool _once;
+    bool _shouldRun;
     bool _shouldClose;
 };
 
@@ -237,4 +273,17 @@ private:
  */
 #define MONGO_FAIL_POINT_BLOCK(symbol, blockSymbol) \
     for (mongo::ScopedFailPoint blockSymbol(&symbol); MONGO_unlikely(blockSymbol.isActive());)
-}
+
+/**
+ * Macro for creating a fail point with block context and a pre-flight condition. Also use this when
+ * you want to access the data stored in the fail point.
+ *
+ * Your passed in callable should take a const BSONObj& (the fail point payload) and return bool.
+ * If it returns true, you'll process the block as normal.  If you return false, you'll exit the
+ * block without evaluating it and avoid altering the mode in any way (you won't consume nTimes for
+ * instance).
+ */
+#define MONGO_FAIL_POINT_BLOCK_IF(symbol, blockSymbol, ...)        \
+    for (mongo::ScopedFailPoint blockSymbol(&symbol, __VA_ARGS__); \
+         MONGO_unlikely(blockSymbol.isActive());)
+}  // namespace mongo

@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -40,7 +42,6 @@
 #include "mongo/executor/async_timer_asio.h"
 #include "mongo/executor/network_interface_asio.h"
 #include "mongo/executor/network_interface_asio_test_utils.h"
-#include "mongo/executor/network_interface_impl.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/unittest/integration_test.h"
@@ -76,8 +77,8 @@ int timeNetworkTestMillis(std::size_t operations, NetworkInterface* net) {
 
     const auto bsonObjPing = BSON("ping" << 1);
 
-    const auto callback = [&](StatusWith<RemoteCommandResponse> resp) {
-        uassertStatusOK(resp);
+    const auto callback = [&](RemoteCommandResponse resp) {
+        uassertStatusOK(resp.status);
         if (--remainingOps) {
             return func();
         }
@@ -86,9 +87,9 @@ int timeNetworkTestMillis(std::size_t operations, NetworkInterface* net) {
     };
 
     func = [&]() {
-        net->startCommand(makeCallbackHandle(),
-                          {server, "admin", bsonObjPing, bsonObjPing, Milliseconds(-1)},
-                          callback);
+        RemoteCommandRequest request{
+            server, "admin", bsonObjPing, BSONObj(), nullptr, Milliseconds(-1)};
+        net->startCommand(makeCallbackHandle(), request, callback).transitional_ignore();
     };
 
     func();
@@ -107,14 +108,7 @@ TEST(NetworkInterfaceASIO, SerialPerf) {
 
     int duration = timeNetworkTestMillis(numOperations, &netAsio);
     int result = numOperations * 1000 / duration;
-    log() << "THROUGHPUT asio ping ops/s: " << result << std::endl;
-}
-
-TEST(NetworkInterfaceImpl, SerialPerf) {
-    NetworkInterfaceImpl netImpl{};
-    int duration = timeNetworkTestMillis(numOperations, &netImpl);
-    int result = numOperations * 1000 / duration;
-    log() << "THROUGHPUT impl ping ops/s: " << result << std::endl;
+    log() << "THROUGHPUT asio ping ops/s: " << result;
 }
 
 }  // namespace

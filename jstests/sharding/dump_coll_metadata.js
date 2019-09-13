@@ -9,11 +9,10 @@
     var mongos = st.s0;
     var coll = mongos.getCollection("foo.bar");
     var admin = mongos.getDB("admin");
-    var shards = mongos.getCollection("config.shards").find().toArray();
     var shardAdmin = st.shard0.getDB("admin");
 
     assert.commandWorked(admin.runCommand({enableSharding: coll.getDB() + ""}));
-    st.ensurePrimaryShard(coll.getDB() + "", shards[0]._id);
+    st.ensurePrimaryShard(coll.getDB() + "", st.shard0.shardName);
     assert.commandWorked(admin.runCommand({shardCollection: coll + "", key: {_id: 1}}));
 
     assert.commandWorked(shardAdmin.runCommand({getShardVersion: coll + ""}));
@@ -34,14 +33,18 @@
     assert(shardAdmin.runCommand({getShardVersion: coll + "xyz", fullMetadata: true}).metadata !=
            undefined);
 
-    // Make sure we get multiple chunks after a split
-    assert(admin.runCommand({split: coll + "", middle: {_id: 0}}).ok);
+    // Make sure we get multiple chunks after a split and refresh -- splits by themselves do not
+    // cause the shard to refresh.
+    assert.commandWorked(admin.runCommand({split: coll + "", middle: {_id: 0}}));
+    assert.commandWorked(
+        st.shard0.getDB('admin').runCommand({_flushRoutingTableCacheUpdates: coll + ""}));
 
-    assert(shardAdmin.runCommand({getShardVersion: coll + ""}).ok);
+    assert.commandWorked(shardAdmin.runCommand({getShardVersion: coll + ""}));
     printjson(shardAdmin.runCommand({getShardVersion: coll + "", fullMetadata: true}));
 
     // Make sure we have chunks info
     result = shardAdmin.runCommand({getShardVersion: coll + "", fullMetadata: true});
+    assert.commandWorked(result);
     metadata = result.metadata;
 
     assert.eq(metadata.chunks.length, 2);

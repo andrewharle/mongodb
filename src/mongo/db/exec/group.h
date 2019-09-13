@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -28,8 +30,9 @@
 
 #pragma once
 
-
+#include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/db/exec/plan_stage.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/scripting/engine.h"
 
 namespace mongo {
@@ -41,7 +44,7 @@ class Collection;
  */
 struct GroupRequest {
     // Namespace to operate on (e.g. "foo.bar").
-    std::string ns;
+    NamespaceString ns;
 
     // A predicate describing the set of documents to group.
     BSONObj query;
@@ -53,6 +56,10 @@ struct GroupRequest {
     // A Javascript function that maps a document to a key object.  Alternative to "keyPattern".
     // Empty is "keyPattern" is being used instead.
     std::string keyFunctionCode;
+
+    // The collation used for string comparisons. If empty, simple binary comparison with memcmp()
+    // is used.
+    BSONObj collation;
 
     // A Javascript function that takes a (input document, group result) pair and
     // updates the group result document.
@@ -82,12 +89,12 @@ class GroupStage final : public PlanStage {
     MONGO_DISALLOW_COPYING(GroupStage);
 
 public:
-    GroupStage(OperationContext* txn,
+    GroupStage(OperationContext* opCtx,
                const GroupRequest& request,
                WorkingSet* workingSet,
                PlanStage* child);
 
-    StageState work(WorkingSetID* out) final;
+    StageState doWork(WorkingSetID* out) final;
     bool isEOF() final;
 
     StageType stageType() const final {
@@ -151,7 +158,7 @@ private:
 
     // Map from group key => group index.  The group index is used to index into "$arr", a
     // variable owned by _scope which contains the group data for this key.
-    std::map<BSONObj, int, BSONObjCmp> _groupMap;
+    BSONObjIndexedMap<int> _groupMap;
 };
 
 }  // namespace mongo

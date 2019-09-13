@@ -1,35 +1,37 @@
+
 /**
- * Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- * This program is free software: you can redistribute it and/or  modify
- * it under the terms of the GNU Affero General Public License, version 3,
- * as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
- * As a special exception, the copyright holders give permission to link the
- * code of portions of this program with the OpenSSL library under certain
- * conditions as described in each individual source file and distribute
- * linked combinations including the program with the OpenSSL library. You
- * must comply with the GNU Affero General Public License in all respects
- * for all of the code used other than as permitted herein. If you modify
- * file(s) with this exception, you may extend this exception to your
- * version of the file(s), but you are not obligated to do so. If you do not
- * wish to do so, delete this exception statement from your version. If you
- * delete this exception statement from all source files in the program,
- * then also delete it in the license file.
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/platform/basic.h"
 
-#include <boost/filesystem.hpp>
 #include <algorithm>
+#include <boost/filesystem.hpp>
 #include <iostream>
 #include <string>
 
@@ -50,8 +52,10 @@
 
 namespace mongo {
 
+class FTDCFileManagerTest : public ServiceContextTest {};
+
 // Test a full buffer
-TEST(FTDCFileManagerTest, TestFull) {
+TEST_F(FTDCFileManagerTest, TestFull) {
     Client* client = &cc();
     FTDCConfig c;
     c.maxFileSizeBytes = 300;
@@ -69,38 +73,49 @@ TEST(FTDCFileManagerTest, TestFull) {
 
     // Test a large numbers of zeros, and incremental numbers in a full buffer
     for (int j = 0; j < 10; j++) {
-        ASSERT_OK(
-            mgr->writeSampleAndRotateIfNeeded(client,
-                                              BSON("name"
-                                                   << "joe"
-                                                   << "key1" << 3230792343LL << "key2" << 235135),
-                                              Date_t()));
+        ASSERT_OK(mgr->writeSampleAndRotateIfNeeded(client,
+                                                    BSON("name"
+                                                         << "joe"
+                                                         << "key1"
+                                                         << 3230792343LL
+                                                         << "key2"
+                                                         << 235135),
+                                                    Date_t()));
 
         for (size_t i = 0; i <= FTDCConfig::kMaxSamplesPerArchiveMetricChunkDefault - 2; i++) {
-            ASSERT_OK(mgr->writeSampleAndRotateIfNeeded(
-                client,
-                BSON("name"
-                     << "joe"
-                     << "key1" << static_cast<long long int>(i * j * 37) << "key2"
-                     << static_cast<long long int>(i * (645 << j))),
-                Date_t()));
+            ASSERT_OK(
+                mgr->writeSampleAndRotateIfNeeded(client,
+                                                  BSON("name"
+                                                       << "joe"
+                                                       << "key1"
+                                                       << static_cast<long long int>(i * j * 37)
+                                                       << "key2"
+                                                       << static_cast<long long int>(i *
+                                                                                     (645 << j))),
+                                                  Date_t()));
         }
 
         ASSERT_OK(mgr->writeSampleAndRotateIfNeeded(client,
                                                     BSON("name"
                                                          << "joe"
-                                                         << "key1" << 34 << "key2" << 45),
+                                                         << "key1"
+                                                         << 34
+                                                         << "key2"
+                                                         << 45),
                                                     Date_t()));
 
         // Add Value
         ASSERT_OK(mgr->writeSampleAndRotateIfNeeded(client,
                                                     BSON("name"
                                                          << "joe"
-                                                         << "key1" << 34 << "key2" << 45),
+                                                         << "key1"
+                                                         << 34
+                                                         << "key2"
+                                                         << 45),
                                                     Date_t()));
     }
 
-    mgr->close();
+    mgr->close().transitional_ignore();
 
     auto files = scanDirectory(dir);
 
@@ -138,7 +153,7 @@ void ValidateInterimFileHasData(const boost::filesystem::path& dir, bool hasData
 }
 
 // Test a normal restart
-TEST(FTDCFileManagerTest, TestNormalRestart) {
+TEST_F(FTDCFileManagerTest, TestNormalRestart) {
     Client* client = &cc();
     FTDCConfig c;
     c.maxFileSizeBytes = 1000;
@@ -161,7 +176,9 @@ TEST(FTDCFileManagerTest, TestNormalRestart) {
             ASSERT_OK(mgr->writeSampleAndRotateIfNeeded(client,
                                                         BSON("name"
                                                              << "joe"
-                                                             << "key1" << 3230792343LL << "key2"
+                                                             << "key1"
+                                                             << 3230792343LL
+                                                             << "key2"
                                                              << 235135),
                                                         Date_t()));
 
@@ -171,7 +188,9 @@ TEST(FTDCFileManagerTest, TestNormalRestart) {
                         client,
                         BSON("name"
                              << "joe"
-                             << "key1" << static_cast<long long int>(i * j * 37) << "key2"
+                             << "key1"
+                             << static_cast<long long int>(i * j * 37)
+                             << "key2"
                              << static_cast<long long int>(i * (645 << j))),
                         Date_t()));
             }
@@ -179,18 +198,24 @@ TEST(FTDCFileManagerTest, TestNormalRestart) {
             ASSERT_OK(mgr->writeSampleAndRotateIfNeeded(client,
                                                         BSON("name"
                                                              << "joe"
-                                                             << "key1" << 34 << "key2" << 45),
+                                                             << "key1"
+                                                             << 34
+                                                             << "key2"
+                                                             << 45),
                                                         Date_t()));
 
             // Add Value
             ASSERT_OK(mgr->writeSampleAndRotateIfNeeded(client,
                                                         BSON("name"
                                                              << "joe"
-                                                             << "key1" << 34 << "key2" << 45),
+                                                             << "key1"
+                                                             << 34
+                                                             << "key2"
+                                                             << 45),
                                                         Date_t()));
         }
 
-        mgr->close();
+        mgr->close().transitional_ignore();
 
         // Validate the interim file does not have data
         ValidateInterimFileHasData(dir, false);
@@ -198,7 +223,7 @@ TEST(FTDCFileManagerTest, TestNormalRestart) {
 }
 
 // Test a restart after a crash with a corrupt archive file
-TEST(FTDCFileManagerTest, TestCorruptCrashRestart) {
+TEST_F(FTDCFileManagerTest, TestCorruptCrashRestart) {
     Client* client = &cc();
     FTDCConfig c;
     c.maxFileSizeBytes = 1000;
@@ -221,7 +246,9 @@ TEST(FTDCFileManagerTest, TestCorruptCrashRestart) {
             ASSERT_OK(mgr->writeSampleAndRotateIfNeeded(client,
                                                         BSON("name"
                                                              << "joe"
-                                                             << "key1" << 3230792343LL << "key2"
+                                                             << "key1"
+                                                             << 3230792343LL
+                                                             << "key2"
                                                              << 235135),
                                                         Date_t()));
 
@@ -231,7 +258,9 @@ TEST(FTDCFileManagerTest, TestCorruptCrashRestart) {
                         client,
                         BSON("name"
                              << "joe"
-                             << "key1" << static_cast<long long int>(i * j * 37) << "key2"
+                             << "key1"
+                             << static_cast<long long int>(i * j * 37)
+                             << "key2"
                              << static_cast<long long int>(i * (645 << j))),
                         Date_t()));
             }
@@ -239,18 +268,24 @@ TEST(FTDCFileManagerTest, TestCorruptCrashRestart) {
             ASSERT_OK(mgr->writeSampleAndRotateIfNeeded(client,
                                                         BSON("name"
                                                              << "joe"
-                                                             << "key1" << 34 << "key2" << 45),
+                                                             << "key1"
+                                                             << 34
+                                                             << "key2"
+                                                             << 45),
                                                         Date_t()));
 
             // Add Value
             ASSERT_OK(mgr->writeSampleAndRotateIfNeeded(client,
                                                         BSON("name"
                                                              << "joe"
-                                                             << "key1" << 34 << "key2" << 45),
+                                                             << "key1"
+                                                             << 34
+                                                             << "key2"
+                                                             << 45),
                                                         Date_t()));
         }
 
-        mgr->close();
+        mgr->close().transitional_ignore();
 
         auto swFile = mgr->generateArchiveFileName(dir, "0test-crash");
         ASSERT_OK(swFile);
@@ -265,7 +300,7 @@ TEST(FTDCFileManagerTest, TestCorruptCrashRestart) {
 }
 
 // Test a restart with a good interim file, and validate we have all the data
-TEST(FTDCFileManagerTest, TestNormalCrashInterim) {
+TEST_F(FTDCFileManagerTest, TestNormalCrashInterim) {
     Client* client = &cc();
     FTDCConfig c;
     c.maxSamplesPerInterimMetricChunk = 3;
@@ -277,14 +312,23 @@ TEST(FTDCFileManagerTest, TestNormalCrashInterim) {
 
     BSONObj mdoc1 = BSON("name"
                          << "some_metadata"
-                         << "key1" << 34 << "something" << 98);
+                         << "key1"
+                         << 34
+                         << "something"
+                         << 98);
 
     BSONObj sdoc1 = BSON("name"
                          << "joe"
-                         << "key1" << 34 << "key2" << 45);
+                         << "key1"
+                         << 34
+                         << "key2"
+                         << 45);
     BSONObj sdoc2 = BSON("name"
                          << "joe"
-                         << "key3" << 34 << "key5" << 45);
+                         << "key3"
+                         << 34
+                         << "key5"
+                         << 45);
 
     boost::filesystem::path fileOut;
 
@@ -338,11 +382,11 @@ TEST(FTDCFileManagerTest, TestNormalCrashInterim) {
 
     // Validate old file
     std::vector<BSONObj> docs1 = {mdoc1, sdoc1, sdoc1};
-    ValidateDocumentList(files[0], docs1);
+    ValidateDocumentList(files[0], docs1, FTDCValidationMode::kStrict);
 
     // Validate new file
     std::vector<BSONObj> docs2 = {sdoc2, sdoc2, sdoc2, sdoc2};
-    ValidateDocumentList(files[1], docs2);
+    ValidateDocumentList(files[1], docs2, FTDCValidationMode::kStrict);
 }
 
 }  // namespace mongo

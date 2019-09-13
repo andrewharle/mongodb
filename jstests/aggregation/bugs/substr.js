@@ -1,4 +1,4 @@
-// Aggregation $substr tests.
+// Aggregation $substrBytes tests.
 
 t = db.jstests_aggregation_substr;
 t.drop();
@@ -6,11 +6,12 @@ t.drop();
 t.save({});
 
 function assertSubstring(expected, str, offset, len) {
-    assert.eq(expected, t.aggregate({$project: {a: {$substr: [str, offset, len]}}}).toArray()[0].a);
+    assert.eq(expected,
+              t.aggregate({$project: {a: {$substrBytes: [str, offset, len]}}}).toArray()[0].a);
 }
 
 function assertArgsException(args) {
-    assert.commandFailed(t.runCommand('aggregate', {pipeline: [{$substr: args}]}));
+    assert.commandFailed(t.runCommand('aggregate', {pipeline: [{$substrBytes: args}]}));
 }
 
 function assertException(str, offset, len) {
@@ -26,14 +27,18 @@ assertArgsException(['foo', 1, 1, 1]);
 // Basic offset / length checks.
 assertSubstring('abcd', 'abcd', 0, 4);
 assertSubstring('abcd', 'abcd', 0, 5);
-assertSubstring('', 'abcd', -1 /* unsigned */, 4);
 assertSubstring('a', 'abcd', 0, 1);
 assertSubstring('ab', 'abcd', 0, 2);
 assertSubstring('b', 'abcd', 1, 1);
 assertSubstring('d', 'abcd', 3, 1);
 assertSubstring('', 'abcd', 4, 1);
 assertSubstring('', 'abcd', 3, 0);
-assertSubstring('cd', 'abcd', 2, -1 /* unsigned */);
+assertSubstring('cd', 'abcd', 2, -1);
+
+// Passing a negative number for the start position should return an error.
+assertException('abcd', -1, 4);
+assertException('abcd', -1, 0);
+assertException('abcd', -10, 0);
 
 // See server6186.js for additional offset / length checks.
 
@@ -47,6 +52,12 @@ assertSubstring('bc', 'abcd', NumberLong(1), NumberInt(2));
 // Integer component is used.
 assertSubstring('bc', 'abcd', 1.2, 2.2);
 assertSubstring('bc', 'abcd', 1.9, 2.9);
+assertSubstring('cd', 'abcd', 2, -1);
+assertSubstring('abcd', 'abcd', 0, -1);
+// Any negative number for length will return the rest of the string.
+assertSubstring('cd', 'abcd', 2, -5);
+assertSubstring('', 'abcd', 4, -1);
+assertSubstring('', 'abcd', 10, -1);
 
 // Non numeric types for offset / length.
 assertException('abcd', false, 2);
@@ -104,17 +115,21 @@ assertSubstring('cde', '$z', {$add: ['$b', '$b']}, {$add: ['$c', '$d']});
 assertSubstring('cde', '$z', {$add: ['$b', 1]}, {$add: [2, '$d']});
 
 // Nested.
-assert.eq('e',
-          t.aggregate({
-              $project: {
-                  a: {
-                      $substr: [
-                          {$substr: [{$substr: [{$substr: ['abcdefghij', 1, 6]}, 2, 5]}, 0, 3]},
-                          1,
-                          1
-                      ]
-                  }
-              }
-          })
-              .toArray()[0]
-              .a);
+assert.eq(
+    'e',
+    t.aggregate({
+         $project: {
+             a: {
+                 $substrBytes: [
+                     {
+                       $substrBytes:
+                           [{$substrBytes: [{$substrBytes: ['abcdefghij', 1, 6]}, 2, 5]}, 0, 3]
+                     },
+                     1,
+                     1
+                 ]
+             }
+         }
+     })
+        .toArray()[0]
+        .a);

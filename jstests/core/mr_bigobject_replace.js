@@ -1,3 +1,7 @@
+// Cannot implicitly shard accessed collections because of following errmsg: Cannot output to a
+// non-sharded collection because sharded collection exists already.
+// @tags: [assumes_unsharded_collection, does_not_support_stepdowns]
+
 /**
  * Test that the server returns an error response for map-reduce operations that attempt to insert a
  * document larger than 16MB as a result of the reduce() or finalize() functions and using the
@@ -14,10 +18,7 @@
         // Returns a document of the form { _id: ObjectId(...), value: '...' } with the specified
         // 'targetSize' in bytes.
         function makeDocWithSize(targetSize) {
-            var doc = {
-                _id: new ObjectId(),
-                value: ''
-            };
+            var doc = {_id: new ObjectId(), value: ''};
 
             var size = Object.bsonsize(doc);
             assert.gte(targetSize, size);
@@ -41,13 +42,12 @@
         // Insert a document so the mapper gets run.
         assert.writeOK(db.input.insert({}));
 
-        var res = db.runCommand(Object.extend(
-            {
-              mapReduce: "input",
-              map: mapper,
-              out: {replace: "mr_bigobject_replace"},
-            },
-            testOptions));
+        var res = db.runCommand(Object.extend({
+            mapReduce: "input",
+            map: mapper,
+            out: {replace: "mr_bigobject_replace"},
+        },
+                                              testOptions));
 
         assert.commandFailed(res, "creating a document larger than 16MB didn't fail");
         assert.lte(0,

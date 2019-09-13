@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2013 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -29,13 +31,12 @@
 #pragma once
 
 #include <vector>
-#include <unordered_set>
 
 #include "mongo/base/disallow_copying.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/storage/snapshot.h"
-#include "mongo/platform/unordered_set.h"
+#include "mongo/stdx/unordered_set.h"
 
 namespace mongo {
 
@@ -110,7 +111,7 @@ public:
     /**
      * Return the set of all WSIDs passed to flagForReview.
      */
-    const unordered_set<WorkingSetID>& getFlagged() const;
+    const stdx::unordered_set<WorkingSetID>& getFlagged() const;
 
     /**
      * Removes and deallocates all members of this working set.
@@ -121,19 +122,19 @@ public:
     // WorkingSetMember state transitions
     //
 
-    void transitionToLocAndIdx(WorkingSetID id);
-    void transitionToLocAndObj(WorkingSetID id);
+    void transitionToRecordIdAndIdx(WorkingSetID id);
+    void transitionToRecordIdAndObj(WorkingSetID id);
     void transitionToOwnedObj(WorkingSetID id);
 
     /**
-     * Returns the list of working set ids that have transitioned into the LOC_AND_IDX or
-     * LOC_AND_OBJ state since the last yield. The members corresponding to these ids may have since
+     * Returns the list of working set ids that have transitioned into the RID_AND_IDX or
+     * RID_AND_OBJ state since the last yield. The members corresponding to these ids may have since
      * transitioned to a different state or been freed, so these cases must be handled by the
      * caller. The list may also contain duplicates.
      *
      * Execution stages are *not* responsible for managing this list, as working set ids are added
-     * to the set automatically by WorkingSet::transitionToLocAndIdx() and
-     * WorkingSet::transitionToLocAndObj().
+     * to the set automatically by WorkingSet::transitionToRecordIdAndIdx() and
+     * WorkingSet::transitionToRecordIdAndObj().
      *
      * As a side effect, calling this method clears the list of flagged ids kept by the working set.
      */
@@ -161,7 +162,7 @@ private:
     WorkingSetID _freeList;
 
     // An insert-only set of WorkingSetIDs that have been flagged for review.
-    std::unordered_set<WorkingSetID> _flagged;
+    stdx::unordered_set<WorkingSetID> _flagged;
 
     // Contains ids of WSMs that may need to be adjusted when we next yield.
     std::vector<WorkingSetID> _yieldSensitiveIds;
@@ -232,9 +233,9 @@ private:
 /**
  * The type of the data passed between query stages.  In particular:
  *
- * Index scan stages return a WorkingSetMember in the LOC_AND_IDX state.
+ * Index scan stages return a WorkingSetMember in the RID_AND_IDX state.
  *
- * Collection scan stages return a WorkingSetMember in the LOC_AND_OBJ state.
+ * Collection scan stages return a WorkingSetMember in the RID_AND_OBJ state.
  *
  * A WorkingSetMember may have any of the data above.
  */
@@ -255,11 +256,11 @@ public:
         INVALID,
 
         // Data is from 1 or more indices.
-        LOC_AND_IDX,
+        RID_AND_IDX,
 
         // Data is from a collection scan, or data is from an index scan and was fetched. The
         // BSONObj might be owned or unowned.
-        LOC_AND_OBJ,
+        RID_AND_OBJ,
 
         // RecordId has been invalidated, or the obj doesn't correspond to an on-disk document
         // anymore (e.g. is a computed expression).
@@ -278,20 +279,20 @@ public:
     // Core attributes
     //
 
-    RecordId loc;
+    RecordId recordId;
     Snapshotted<BSONObj> obj;
     std::vector<IndexKeyDatum> keyData;
 
-    // True if this WSM has survived a yield in LOC_AND_IDX state.
+    // True if this WSM has survived a yield in RID_AND_IDX state.
     // TODO consider replacing by tracking SnapshotIds for IndexKeyDatums.
     bool isSuspicious = false;
 
-    bool hasLoc() const;
+    bool hasRecordId() const;
     bool hasObj() const;
     bool hasOwnedObj() const;
 
     /**
-     * Ensures that 'obj' of a WSM in the LOC_AND_OBJ state is owned BSON. It is a no-op if the WSM
+     * Ensures that 'obj' of a WSM in the RID_AND_OBJ state is owned BSON. It is a no-op if the WSM
      * is in a different state or if 'obj' is already owned.
      *
      * It is also a no-op if the active storage engine doesn't support document-level concurrency.

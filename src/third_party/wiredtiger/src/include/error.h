@@ -1,12 +1,13 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
  * See the file LICENSE for redistribution information.
  */
+#define	WT_COMPAT_MSG_PREFIX "Version incompatibility detected: "
 
-#define	WT_DEBUG_POINT	((void *)0xdeadbeef)
+#define	WT_DEBUG_POINT	((void *)(uintptr_t)0xdeadbeef)
 #define	WT_DEBUG_BYTE	(0xab)
 
 /* In DIAGNOSTIC mode, yield in places where we want to encourage races. */
@@ -17,6 +18,13 @@
 #else
 #define	WT_DIAGNOSTIC_YIELD
 #endif
+
+#define	__wt_err(session, error, ...)					\
+	__wt_err_func(session, error, __func__, __LINE__, __VA_ARGS__)
+#define	__wt_errx(session, ...)						\
+	__wt_errx_func(session, __func__, __LINE__, __VA_ARGS__)
+#define	__wt_set_return(session, error)					\
+	__wt_set_return_func(session, __func__, __LINE__, error)
 
 /* Set "ret" and branch-to-err-label tests. */
 #define	WT_ERR(a) do {							\
@@ -46,6 +54,13 @@
 	if ((__ret = (a)) != 0)						\
 		return (__ret);						\
 } while (0)
+#define	WT_RET_TRACK(a) do {						\
+	int __ret;							\
+	if ((__ret = (a)) != 0)	{					\
+		WT_TRACK_OP_END(session);				\
+		return (__ret);						\
+	}								\
+} while (0)
 #define	WT_RET_MSG(session, v, ...) do {				\
 	int __ret = (v);						\
 	__wt_err(session, __ret, __VA_ARGS__);				\
@@ -61,7 +76,6 @@
 } while (0)
 #define	WT_RET_BUSY_OK(a)	WT_RET_ERROR_OK(a, EBUSY)
 #define	WT_RET_NOTFOUND_OK(a)	WT_RET_ERROR_OK(a, WT_NOTFOUND)
-
 /* Set "ret" if not already set. */
 #define	WT_TRET(a) do {							\
 	int __ret;							\
@@ -79,20 +93,21 @@
 	    ret == WT_NOTFOUND || ret == WT_RESTART))			\
 		ret = __ret;						\
 } while (0)
+#define	WT_TRET_BUSY_OK(a)	WT_TRET_ERROR_OK(a, EBUSY)
 #define	WT_TRET_NOTFOUND_OK(a)	WT_TRET_ERROR_OK(a, WT_NOTFOUND)
 
+/* Called on unexpected code path: locate the failure. */
+#define	__wt_illegal_value(session, v)					\
+	__wt_illegal_value_func(session, (uintmax_t)(v), __func__, __LINE__)
+
 /* Return and branch-to-err-label cases for switch statements. */
-#define	WT_ILLEGAL_VALUE(session)					\
+#define	WT_ILLEGAL_VALUE(session, v)					\
 	default:							\
-		return (__wt_illegal_value(session, NULL))
-#define	WT_ILLEGAL_VALUE_ERR(session)					\
+		return (__wt_illegal_value(session, v))
+#define	WT_ILLEGAL_VALUE_ERR(session, v)				\
 	default:							\
-		ret = __wt_illegal_value(session, NULL);		\
+		ret = __wt_illegal_value(session, v);			\
 		goto err
-#define	WT_ILLEGAL_VALUE_SET(session)					\
-	default:							\
-		ret = __wt_illegal_value(session, NULL);		\
-		break
 
 #define	WT_PANIC_MSG(session, v, ...) do {				\
 	__wt_err(session, v, __VA_ARGS__);				\
@@ -117,10 +132,29 @@
  */
 #ifdef HAVE_DIAGNOSTIC
 #define	WT_ASSERT(session, exp) do {					\
-	if (!(exp))							\
-		__wt_assert(session, 0, __FILE__, __LINE__, "%s", #exp);\
+	if (!(exp)) {							\
+		__wt_errx(session, "%s", #exp);				\
+		__wt_abort(session);					\
+	}								\
 } while (0)
 #else
 #define	WT_ASSERT(session, exp)						\
 	WT_UNUSED(session)
 #endif
+
+/*
+ * __wt_verbose --
+ *	Display a verbose message.
+ *
+ * Not an inlined function because you can't inline functions taking variadic
+ * arguments and we don't want to make a function call in production systems
+ * just to find out a verbose flag isn't set.
+ *
+ * The macro must take a format string and at least one additional argument,
+ * there's no portable way to remove the comma before an empty __VA_ARGS__
+ * value.
+ */
+#define	__wt_verbose(session, flag, fmt, ...) do {			\
+	if (WT_VERBOSE_ISSET(session, flag))				\
+		__wt_verbose_worker(session, fmt, __VA_ARGS__);		\
+} while (0)

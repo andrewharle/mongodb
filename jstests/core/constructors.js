@@ -1,6 +1,10 @@
 // Tests to see what validity checks are done for 10gen specific object construction
 //
-// @tags: [requires_eval_command]
+// @tags: [
+//   does_not_support_stepdowns,
+//   requires_eval_command,
+//   requires_non_retryable_commands,
+// ]
 
 // Takes a list of constructors and returns a new list with an extra entry for each constructor with
 // "new" prepended
@@ -14,10 +18,7 @@ function addConstructorsWithNew(constructorList) {
     // We use slice(0) here to make a copy of our lists
     var validWithNew = valid.concat(valid.slice(0).map(prependNew));
     var invalidWithNew = invalid.concat(invalid.slice(0).map(prependNew));
-    return {
-        "valid": validWithNew,
-        "invalid": invalidWithNew
-    };
+    return {"valid": validWithNew, "invalid": invalidWithNew};
 }
 
 function clientEvalConstructorTest(constructorList) {
@@ -37,6 +38,8 @@ function clientEvalConstructorTest(constructorList) {
 }
 
 function dbEvalConstructorTest(constructorList) {
+    assert.writeOK(db.evalConstructors.insert({}), "db must exist for eval to succeed");
+    assert(db.evalConstructors.drop());
     constructorList = addConstructorsWithNew(constructorList);
     constructorList.valid.forEach(function(constructor) {
         try {
@@ -144,12 +147,22 @@ var dbpointerConstructors = {
 };
 
 var objectidConstructors = {
-    "valid": ['ObjectId()', 'ObjectId("FFFFFFFFFFFFFFFFFFFFFFFF")', ],
-    "invalid": ['ObjectId(5)', 'ObjectId("FFFFFFFFFFFFFFFFFFFFFFFQ")', ]
+    "valid": [
+        'ObjectId()',
+        'ObjectId("FFFFFFFFFFFFFFFFFFFFFFFF")',
+    ],
+    "invalid": [
+        'ObjectId(5)',
+        'ObjectId("FFFFFFFFFFFFFFFFFFFFFFFQ")',
+    ]
 };
 
 var timestampConstructors = {
-    "valid": ['Timestamp()', 'Timestamp(0,0)', 'Timestamp(1.0,1.0)', ],
+    "valid": [
+        'Timestamp()',
+        'Timestamp(0,0)',
+        'Timestamp(1.0,1.0)',
+    ],
     "invalid": [
         'Timestamp(0)',
         'Timestamp(0,0,0)',
@@ -159,11 +172,19 @@ var timestampConstructors = {
         'Timestamp(true,true)',
         'Timestamp(true,0)',
         'Timestamp(0,true)',
+        'Timestamp(Math.pow(2,32),Math.pow(2,32))',
+        'Timestamp(0,Math.pow(2,32))',
+        'Timestamp(Math.pow(2,32),0)',
+        'Timestamp(-1,-1)',
+        'Timestamp(-1,0)',
+        'Timestamp(0,-1)'
     ]
 };
 
 var bindataConstructors = {
-    "valid": ['BinData(0,"test")', ],
+    "valid": [
+        'BinData(0,"test")',
+    ],
     "invalid": [
         'BinData(0,"test", "test")',
         'BinData()',
@@ -180,10 +201,17 @@ var bindataConstructors = {
 };
 
 var uuidConstructors = {
-    "valid": ['UUID("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")', ],
+    "valid": [
+        'UUID("0123456789abcdef0123456789ABCDEF")',
+        'UUID("0a1A2b3B-4c5C-6d7D-8e9E-AfBFC0D1E3F4")',
+        'UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")',
+        'UUID()',
+        UUID().toString(),
+    ],
     "invalid": [
         'UUID("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 0)',
-        'UUID()',
+        'UUID("aaaaaaaa-aaaa-aaaa-aaaaaaaa-aaaaaaaa")',
+        'UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaa-aaaaaaa")',
         'UUID("aa")',
         'UUID("invalidhex")',
         'UUID("invalidhexbutstilltherequiredlen")',
@@ -197,7 +225,9 @@ var uuidConstructors = {
 };
 
 var md5Constructors = {
-    "valid": ['MD5("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")', ],
+    "valid": [
+        'MD5("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")',
+    ],
     "invalid": [
         'MD5("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 0)',
         'MD5()',
@@ -240,7 +270,13 @@ var hexdataConstructors = {
 };
 
 var dateConstructors = {
-    "valid": ['Date()', 'Date(0)', 'Date(0,0)', 'Date(0,0,0)', 'Date("foo")', ],
+    "valid": [
+        'Date()',
+        'Date(0)',
+        'Date(0,0)',
+        'Date(0,0,0)',
+        'Date("foo")',
+    ],
     "invalid": []
 };
 

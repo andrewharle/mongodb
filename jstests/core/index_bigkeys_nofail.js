@@ -1,3 +1,10 @@
+// @tags: [
+//   assumes_superuser_permissions,
+//   does_not_support_stepdowns,
+//   requires_fastcount,
+//   requires_non_retryable_writes,
+// ]
+
 // SERVER-16497: Check that failIndexKeyTooLong setting works
 (function() {
     "use strict";
@@ -46,4 +53,8 @@
     assert.writeError(t.update({_id: 3}, {$set: {name: x}}));
 
     db.getSiblingDB('admin').runCommand({setParameter: 1, failIndexKeyTooLong: was});
+
+    // Explicitly drop the collection to avoid failures in post-test hooks that run dbHash and
+    // validate commands.
+    t.drop();
 }());

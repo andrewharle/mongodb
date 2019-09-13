@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-# Public Domain 2014-2016 MongoDB, Inc.
+# Public Domain 2014-2019 MongoDB, Inc.
 # Public Domain 2008-2014 WiredTiger, Inc.
 #
 # This is free and unencumbered software released into the public domain.
@@ -53,7 +53,7 @@ class test_empty(wttest.WiredTigerTestCase):
             name = name + '.wt'
         self.assertEquals(os.stat(name).st_size, 4*1024)
 
-    # Open a new sesssion, add a few rows to an object and then remove them,
+    # Open a new session, add a few rows to an object and then remove them,
     # then close the object.  We open/close the object so it's flushed from
     # the underlying cache each time.
     def empty(self):

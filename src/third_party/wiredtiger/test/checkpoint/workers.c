@@ -1,5 +1,5 @@
 /*-
- * Public Domain 2014-2016 MongoDB, Inc.
+ * Public Domain 2014-2019 MongoDB, Inc.
  * Public Domain 2008-2014 WiredTiger, Inc.
  *
  * This is free and unencumbered software released into the public domain.
@@ -29,7 +29,7 @@
 #include "test_checkpoint.h"
 
 static int real_worker(void);
-static void *worker(void *);
+static WT_THREAD_RET worker(void *);
 
 /*
  * create_table --
@@ -61,12 +61,11 @@ create_table(WT_SESSION *session, COOKIE *cookie)
 int
 start_workers(table_type type)
 {
-	WT_SESSION *session;
 	struct timeval start, stop;
+	WT_SESSION *session;
+	wt_thread_t *tids;
 	double seconds;
-	pthread_t *tids;
 	int i, ret;
-	void *thread_ret;
 
 	ret = 0;
 
@@ -98,17 +97,13 @@ start_workers(table_type type)
 	(void)gettimeofday(&start, NULL);
 
 	/* Create threads. */
-	for (i = 0; i < g.nworkers; ++i) {
-		if ((ret = pthread_create(
-		    &tids[i], NULL, worker, &g.cookies[i])) != 0) {
-			(void)log_print_err("pthread_create", ret, 1);
-			goto err;
-		}
-	}
+	for (i = 0; i < g.nworkers; ++i)
+		testutil_check(__wt_thread_create(
+		    NULL, &tids[i], worker, &g.cookies[i]));
 
 	/* Wait for the threads. */
 	for (i = 0; i < g.nworkers; ++i)
-		(void)pthread_join(tids[i], &thread_ret);
+		testutil_check(__wt_thread_join(NULL, &tids[i]));
 
 	(void)gettimeofday(&stop, NULL);
 	seconds = (stop.tv_sec - start.tv_sec) +
@@ -146,18 +141,18 @@ worker_op(WT_CURSOR *cursor, uint64_t keyno, u_int new_val)
  * worker --
  *	Worker thread start function.
  */
-static void *
+static WT_THREAD_RET
 worker(void *arg)
 {
 	char tid[128];
 
 	WT_UNUSED(arg);
 
-	testutil_check(__wt_thread_id(tid, sizeof(tid)));
+	testutil_check(__wt_thread_str(tid, sizeof(tid)));
 	printf("worker thread starting: tid: %s\n", tid);
 
 	(void)real_worker();
-	return (NULL);
+	return (WT_THREAD_RET_VALUE);
 }
 
 /*
@@ -169,8 +164,8 @@ static int
 real_worker(void)
 {
 	WT_CURSOR **cursors;
-	WT_SESSION *session;
 	WT_RAND_STATE rnd;
+	WT_SESSION *session;
 	u_int i, keyno;
 	int j, ret, t_ret;
 
@@ -212,10 +207,10 @@ real_worker(void)
 				(void)log_print_err(
 				    "real_worker:commit_transaction", ret, 1);
 				goto err;
-			    }
+			}
 		} else if (ret == WT_ROLLBACK) {
 			if ((ret = session->rollback_transaction(
-			   session, NULL)) != 0) {
+			    session, NULL)) != 0) {
 				(void)log_print_err(
 				    "real_worker:rollback_transaction", ret, 1);
 				goto err;

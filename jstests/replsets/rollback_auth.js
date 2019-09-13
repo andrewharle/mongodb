@@ -12,6 +12,17 @@
 
 (function() {
     "use strict";
+
+    // Arbiters don't replicate the admin.system.keys collection, so they can never validate or sign
+    // clusterTime. Gossiping a clusterTime to an arbiter as a user other than __system will fail,
+    // so we skip gossiping for this test.
+    //
+    // TODO SERVER-32639: remove this flag.
+    TestData.skipGossipingClusterTime = true;
+
+    // TODO SERVER-35447: Multiple users cannot be authenticated on one connection within a session.
+    TestData.disableImplicitSessions = true;
+
     // helper function for verifying contents at the end of the test
     var checkFinalResults = function(db) {
         assert.commandWorked(db.runCommand({dbStats: 1}));
@@ -119,21 +130,20 @@
         } catch (e) {
             return false;
         }
-    }, "B didn't become master", 60000, 1000);
+    }, "B didn't become master");
     printjson(b.adminCommand('replSetGetStatus'));
 
     // Modify the the user and role in a way that will be rolled back.
     b.grantPrivilegesToRole(
         'myRole',
-            [{resource: {db: 'test', collection: 'foo'}, actions: ['collStats']}],
+        [{resource: {db: 'test', collection: 'foo'}, actions: ['collStats']}],
         {});  // Default write concern will wait for majority, which will time out.
-    b.createRole(
-        {
-          role: 'temporaryRole',
-          roles: [],
-          privileges: [{resource: {db: 'test', collection: 'bar'}, actions: ['collStats']}]
-        },
-        {});  // Default write concern will wait for majority, which will time out.
+    b.createRole({
+        role: 'temporaryRole',
+        roles: [],
+        privileges: [{resource: {db: 'test', collection: 'bar'}, actions: ['collStats']}]
+    },
+                 {});  // Default write concern will wait for majority, which will time out.
     b.grantRolesToUser('spencer',
                        ['temporaryRole'],
                        {});  // Default write concern will wait for majority, which will time out.
@@ -155,7 +165,7 @@
         } catch (e) {
             return false;
         }
-    }, "A didn't become master", 60000, 1000);
+    }, "A didn't become master");
 
     // A should not have the new data as it was down
     assert.commandWorked(a.runCommand({dbStats: 1}));
@@ -172,13 +182,12 @@
     a.grantPrivilegesToRole(
         'myRole', [{resource: {db: 'test', collection: 'baz'}, actions: ['collStats']}], {});
 
-    a.createRole(
-        {
-          role: 'persistentRole',
-          roles: [],
-          privileges: [{resource: {db: 'test', collection: 'foobar'}, actions: ['collStats']}]
-        },
-        {});
+    a.createRole({
+        role: 'persistentRole',
+        roles: [],
+        privileges: [{resource: {db: 'test', collection: 'foobar'}, actions: ['collStats']}]
+    },
+                 {});
     a.grantRolesToUser('spencer', ['persistentRole'], {});
     A.logout();
     a.auth('spencer', 'pwd');
@@ -191,11 +200,9 @@
     // bring B back in contact with A
     // as A is primary, B will roll back and then catch up
     replTest.restart(1);
-    authutil.asCluster(replTest.nodes,
-                       'jstests/libs/key1',
-                       function() {
-                           replTest.awaitReplication();
-                       });
+    authutil.asCluster(replTest.nodes, 'jstests/libs/key1', function() {
+        replTest.awaitReplication();
+    });
     assert.soon(function() {
         return b.auth('spencer', 'pwd');
     });
@@ -203,5 +210,11 @@
     checkFinalResults(a);
     checkFinalResults(b);
 
+    // Verify data consistency between nodes.
+    authutil.asCluster(replTest.nodes, 'jstests/libs/key1', function() {
+        replTest.checkOplogs();
+    });
+
+    // DB hash check is done in stopSet.
     replTest.stopSet();
 }());

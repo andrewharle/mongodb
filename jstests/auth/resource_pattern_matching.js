@@ -1,6 +1,12 @@
 /*
  * Tests that resource pattern matching rules work as expected.
+ * @tags: [requires_replication, requires_sharding]
  */
+
+// TODO SERVER-35447: This test logs in users on the admin database, but doesn't log them out, which
+// can fail with implicit sessions and ReplSetTest when the fixture attempts to verify data hashes
+// at shutdown by authenticating as the __system user.
+TestData.disableImplicitSessions = true;
 
 function setup_users(granter) {
     var admindb = granter.getSiblingDB("admin");
@@ -135,7 +141,7 @@ function run_tests(granter, verifier) {
     run_test("specific",
              granter,
              verifier,
-                 [{resource: {db: "a", collection: "a"}, actions: ["find"]}],
+             [{resource: {db: "a", collection: "a"}, actions: ["find"]}],
              {
                "a.a": should_find,
                "a.b": should_fail_find,
@@ -143,50 +149,39 @@ function run_tests(granter, verifier) {
                "b.b": should_fail_find
              });
 
-    run_test("glob_collection",
-             granter,
-             verifier,
-                 [{resource: {db: "a", collection: ""}, actions: ["find"]}],
-             {
-               "a.a": should_find,
-               "a.b": should_find,
-               "b.a": should_fail_find,
-               "b.b": should_fail_find
-             });
+    run_test(
+        "glob_collection",
+        granter,
+        verifier,
+        [{resource: {db: "a", collection: ""}, actions: ["find"]}],
+        {"a.a": should_find, "a.b": should_find, "b.a": should_fail_find, "b.b": should_fail_find});
 
-    run_test("glob_database",
-             granter,
-             verifier,
-                 [{resource: {db: "", collection: "a"}, actions: ["find"]}],
-             {
-               "a.a": should_find,
-               "a.b": should_fail_find,
-               "b.a": should_find,
-               "b.b": should_fail_find
-             });
+    run_test(
+        "glob_database",
+        granter,
+        verifier,
+        [{resource: {db: "", collection: "a"}, actions: ["find"]}],
+        {"a.a": should_find, "a.b": should_fail_find, "b.a": should_find, "b.b": should_fail_find});
 
     run_test("glob_all",
              granter,
              verifier,
-                 [{resource: {db: "", collection: ""}, actions: ["find"]}],
+             [{resource: {db: "", collection: ""}, actions: ["find"]}],
              {"a.a": should_find, "a.b": should_find, "b.a": should_find, "b.b": should_find});
 
-    run_test("any_resource",
-             granter,
-             verifier,
-                 [{resource: {anyResource: true}, actions: ["find"]}],
-             {
-               "a.a": should_find,
-               "a.b": should_find,
-               "b.a": should_find,
-               "b.b": should_find,
-               "c.a": should_find
-             });
+    run_test(
+        "any_resource", granter, verifier, [{resource: {anyResource: true}, actions: ["find"]}], {
+            "a.a": should_find,
+            "a.b": should_find,
+            "b.a": should_find,
+            "b.b": should_find,
+            "c.a": should_find
+        });
 
     run_test("no_global_access",
              granter,
              verifier,
-                 [{resource: {db: "$", collection: "cmd"}, actions: ["find"]}],
+             [{resource: {db: "$", collection: "cmd"}, actions: ["find"]}],
              {
                "a.a": function(testdb, testcol) {
                    var r = testdb.stats();
@@ -239,11 +234,8 @@ MongoRunner.stopMongod(conn);
 print('--- done standalone node test ---');
 
 print('--- replica set test ---');
-var rst = new ReplSetTest({
-    name: 'testset',
-    nodes: 2,
-    nodeOptions: {'auth': null, 'httpinterface': null, 'keyFile': keyfile}
-});
+var rst =
+    new ReplSetTest({name: 'testset', nodes: 2, nodeOptions: {'auth': null}, keyFile: keyfile});
 
 rst.startSet();
 rst.initiate();
@@ -255,14 +247,16 @@ rst.stopSet();
 print('--- done with the rs tests ---');
 
 print('--- sharding test ---');
+// TODO: Remove 'shardAsReplicaSet: false' when SERVER-32672 is fixed.
 var st = new ShardingTest({
     mongos: 2,
     shard: 1,
     keyFile: keyfile,
     other: {
-        mongosOptions: {'auth': null, 'httpinterface': null},
-        configOptions: {'auth': null, 'httpinterface': null},
-        shardOptions: {'auth': null, 'httpinterface': null}
+        mongosOptions: {'auth': null},
+        configOptions: {'auth': null},
+        shardOptions: {'auth': null},
+        shardAsReplicaSet: false
     }
 });
 run_tests(st.s0.getDB('admin'), st.s1.getDB('admin'));

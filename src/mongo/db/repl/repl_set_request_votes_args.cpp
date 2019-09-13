@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -31,6 +33,7 @@
 #include "mongo/bson/util/bson_check.h"
 #include "mongo/bson/util/bson_extract.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/db/repl/bson_extract_optime.h"
 
 namespace mongo {
 namespace repl {
@@ -48,6 +51,7 @@ const std::string kReasonFieldName = "reason";
 const std::string kSetNameFieldName = "setName";
 const std::string kTermFieldName = "term";
 const std::string kVoteGrantedFieldName = "voteGranted";
+const std::string kOperationTime = "operationTime";
 
 const std::string kLegalArgsFieldNames[] = {
     kCandidateIndexFieldName,
@@ -57,17 +61,15 @@ const std::string kLegalArgsFieldNames[] = {
     kLastDurableOpTimeFieldName,
     kSetNameFieldName,
     kTermFieldName,
-};
-
-const std::string kLegalResponseFieldNames[] = {
-    kOkFieldName, kReasonFieldName, kTermFieldName, kVoteGrantedFieldName,
+    kOperationTime,
 };
 
 }  // namespace
 
 
 Status ReplSetRequestVotesArgs::initialize(const BSONObj& argsObj) {
-    Status status = bsonCheckOnlyHasFields("ReplSetRequestVotes", argsObj, kLegalArgsFieldNames);
+    Status status =
+        bsonCheckOnlyHasFieldsForCommand("ReplSetRequestVotes", argsObj, kLegalArgsFieldNames);
     if (!status.isOK())
         return status;
 
@@ -133,12 +135,7 @@ void ReplSetRequestVotesArgs::addToBSON(BSONObjBuilder* builder) const {
 }
 
 Status ReplSetRequestVotesResponse::initialize(const BSONObj& argsObj) {
-    Status status =
-        bsonCheckOnlyHasFields("ReplSetRequestVotes", argsObj, kLegalResponseFieldNames);
-    if (!status.isOK())
-        return status;
-
-    status = bsonExtractIntegerField(argsObj, kTermFieldName, &_term);
+    auto status = bsonExtractIntegerField(argsObj, kTermFieldName, &_term);
     if (!status.isOK())
         return status;
 

@@ -1,29 +1,31 @@
+
 /**
- *    Copyright (C) 2010-2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kControl
@@ -37,7 +39,6 @@
 #include <csignal>
 #include <exception>
 #include <iostream>
-#include <fstream>
 #include <memory>
 #include <streambuf>
 #include <typeinfo>
@@ -49,7 +50,6 @@
 #include "mongo/platform/compiler.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/util/concurrency/thread_name.h"
-#include "mongo/util/concurrency/threadlocal.h"
 #include "mongo/util/debug_util.h"
 #include "mongo/util/debugger.h"
 #include "mongo/util/exception_filter_win32.h"
@@ -75,8 +75,7 @@ const char* strsignal(int signalNum) {
 }
 
 void endProcessWithSignal(int signalNum) {
-    doMinidump();
-    quickExit(EXIT_ABRUPT);
+    RaiseException(EXIT_ABRUPT, EXCEPTION_NONCONTINUABLE, 0, NULL);
 }
 
 #else
@@ -158,19 +157,22 @@ public:
 
 private:
     static stdx::mutex _streamMutex;
-    static MONGO_TRIVIALLY_CONSTRUCTIBLE_THREAD_LOCAL int terminateDepth;
+    static thread_local int terminateDepth;
     stdx::unique_lock<stdx::mutex> _lk;
 };
+
 stdx::mutex MallocFreeOStreamGuard::_streamMutex;
-MONGO_TRIVIALLY_CONSTRUCTIBLE_THREAD_LOCAL
-int MallocFreeOStreamGuard::terminateDepth = 0;
+thread_local int MallocFreeOStreamGuard::terminateDepth = 0;
 
 // must hold MallocFreeOStreamGuard to call
 void writeMallocFreeStreamToLog() {
-    logger::globalLogDomain()->append(
-        logger::MessageEventEphemeral(
-            Date_t::now(), logger::LogSeverity::Severe(), getThreadName(), mallocFreeOStream.str())
-            .setIsTruncatable(false));
+    logger::globalLogDomain()
+        ->append(logger::MessageEventEphemeral(Date_t::now(),
+                                               logger::LogSeverity::Severe(),
+                                               getThreadName(),
+                                               mallocFreeOStream.str())
+                     .setIsTruncatable(false))
+        .transitional_ignore();
     mallocFreeOStream.rewind();
 }
 
@@ -275,24 +277,16 @@ void abruptQuitWithAddrSignal(int signalNum, siginfo_t* siginfo, void*) {
 
     printSignalAndBacktrace(signalNum);
     breakpoint();
-
-#if defined(__linux__)
-    // Dump /proc/self/maps if possible to see where the bad address relates to our layout.
-    // We do this last just in case it goes wrong.
-    mallocFreeOStream << "/proc/self/maps:\n";
-    std::ifstream is("/proc/self/maps");
-    std::string str;
-    while (getline(is, str)) {
-        mallocFreeOStream << str;
-        writeMallocFreeStreamToLog();
-    }
-#endif
     endProcessWithSignal(signalNum);
 }
 
 #endif
 
 }  // namespace
+
+#if !defined(__has_feature)
+#define __has_feature(x) 0
+#endif
 
 void setupSynchronousSignalHandlers() {
     std::set_terminate(myTerminate);
@@ -322,7 +316,28 @@ void setupSynchronousSignalHandlers() {
 
         // ^\ is the stronger ^C. Log and quit hard without waiting for cleanup.
         invariant(sigaction(SIGQUIT, &plainSignals, nullptr) == 0);
+
+#if __has_feature(address_sanitizer)
+        // Sanitizers may be configured to call abort(). If so, we should omit our signal handler.
+        bool shouldRegister = true;
+        constexpr std::array<StringData, 5> sanitizerConfigVariable{"ASAN_OPTIONS"_sd,
+                                                                    "TSAN_OPTIONS"_sd,
+                                                                    "MSAN_OPTIONS"_sd,
+                                                                    "UBSAN_OPTIONS"_sd,
+                                                                    "LSAN_OPTIONS"_sd};
+        for (const StringData& option : sanitizerConfigVariable) {
+            StringData configString(getenv(option.rawData()));
+            if (configString.find("abort_on_error=1") != std::string::npos ||
+                configString.find("abort_on_error=true") != std::string::npos) {
+                shouldRegister = false;
+            }
+        }
+        if (shouldRegister) {
+            invariant(sigaction(SIGABRT, &plainSignals, nullptr) == 0);
+        }
+#else
         invariant(sigaction(SIGABRT, &plainSignals, nullptr) == 0);
+#endif
     }
     {
         struct sigaction addrSignals;
@@ -345,5 +360,14 @@ void reportOutOfMemoryErrorAndExit() {
     printStackTrace(mallocFreeOStream << "out of memory.\n");
     writeMallocFreeStreamToLog();
     quickExit(EXIT_ABRUPT);
+}
+
+void clearSignalMask() {
+#ifndef _WIN32
+    // We need to make sure that all signals are unmasked so signals are handled correctly
+    sigset_t unblockSignalMask;
+    invariant(sigemptyset(&unblockSignalMask) == 0);
+    invariant(sigprocmask(SIG_SETMASK, &unblockSignalMask, nullptr) == 0);
+#endif
 }
 }  // namespace mongo

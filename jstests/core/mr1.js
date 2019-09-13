@@ -1,3 +1,4 @@
+// @tags: [does_not_support_stepdowns, requires_getmore, requires_fastcount]
 
 t = db.mr1;
 t.drop();
@@ -34,9 +35,7 @@ r = function(key, values) {
     for (var i = 0; i < values.length; i++) {
         total += values[i].count;
     }
-    return {
-        count: total
-    };
+    return {count: total};
 };
 
 r2 = function(key, values) {
@@ -136,19 +135,14 @@ if (true) {
     printjson(db.runCommand({mapreduce: "mr1", map: m, reduce: r, verbose: true, out: "mr1_out"}));
 }
 
-print("t1: " +
-      Date.timeFunc(
-          function() {
-              var out = db.runCommand({mapreduce: "mr1", map: m, reduce: r, out: "mr1_out"});
-              if (ks == "_id")
-                  assert(out.ok, "XXX : " + tojson(out));
-              db[out.result].drop();
-          },
-          10) +
-      " (~500 on 2.8ghz) - itcount: " +
-      Date.timeFunc(function() {
-          db.mr1.find().itcount();
-      }, 10));
+print("t1: " + Date.timeFunc(function() {
+    var out = db.runCommand({mapreduce: "mr1", map: m, reduce: r, out: "mr1_out"});
+    if (ks == "_id")
+        assert(out.ok, "XXX : " + tojson(out));
+    db[out.result].drop();
+}, 10) + " (~500 on 2.8ghz) - itcount: " + Date.timeFunc(function() {
+    db.mr1.find().itcount();
+}, 10));
 
 // test doesn't exist
 res =
@@ -158,21 +152,22 @@ assert(!res.ok, "should be not ok");
 if (true) {
     correct = {};
 
+    var bulk = t.initializeUnorderedBulkOp();
     for (i = 0; i < 20000; i++) {
         k = "Z" + i % 10000;
         if (correct[k])
             correct[k]++;
         else
             correct[k] = 1;
-        t.save({x: i, tags: [k]});
+        bulk.insert({x: i, tags: [k]});
     }
+    assert.writeOK(bulk.execute());
 
     res = db.runCommand({mapreduce: "mr1", out: "mr1_foo", map: m, reduce: r});
     d(res);
-    print("t2: " + res.timeMillis + " (~3500 on 2.8ghz) - itcount: " +
-          Date.timeFunc(function() {
-              db.mr1.find().itcount();
-          }));
+    print("t2: " + res.timeMillis + " (~3500 on 2.8ghz) - itcount: " + Date.timeFunc(function() {
+        db.mr1.find().itcount();
+    }));
     x = db[res.result];
     z = {};
     x.find().forEach(function(a) {

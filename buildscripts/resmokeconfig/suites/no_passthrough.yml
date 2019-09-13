@@ -1,15 +1,22 @@
+test_kind: js_test
+
 selector:
-  js_test:
-    roots:
-    - jstests/noPassthrough/*.js
-    exclude_files:
-    # Disable inmem_full as per SERVER-27014
-    - jstests/noPassthrough/inmem_full.js
+  roots:
+  - jstests/noPassthrough/*.js
+
+  # Self-tests for the Concurrency testing framework are run as part of this test suite.
+  - jstests/concurrency/*.js
+  exclude_files:
+  # Disable inmem_full as per SERVER-27014
+  - jstests/noPassthrough/inmem_full.js
 
 # noPassthrough tests start their own mongod's.
 executor:
-  js_test:
-    config:
-      shell_options:
-        nodb: ''
-        readMode: commands
+  archive:
+    tests:
+      - jstests/noPassthrough/backup*.js
+      - jstests/noPassthrough/wt_unclean_shutdown.js
+  config:
+    shell_options:
+      nodb: ''
+      readMode: commands

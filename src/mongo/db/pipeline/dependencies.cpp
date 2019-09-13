@@ -1,30 +1,32 @@
+
 /**
-*    Copyright (C) 2014 MongoDB Inc.
-*
-*    This program is free software: you can redistribute it and/or  modify
-*    it under the terms of the GNU Affero General Public License, version 3,
-*    as published by the Free Software Foundation.
-*
-*    This program is distributed in the hope that it will be useful,
-*    but WITHOUT ANY WARRANTY; without even the implied warranty of
-*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*    GNU Affero General Public License for more details.
-*
-*    You should have received a copy of the GNU Affero General Public License
-*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*
-*    As a special exception, the copyright holders give permission to link the
-*    code of portions of this program with the OpenSSL library under certain
-*    conditions as described in each individual source file and distribute
-*    linked combinations including the program with the OpenSSL library. You
-*    must comply with the GNU Affero General Public License in all respects for
-*    all of the code used other than as permitted herein. If you modify file(s)
-*    with this exception, you may extend this exception to your version of the
-*    file(s), but you are not obligated to do so. If you do not wish to do so,
-*    delete this exception statement from your version. If you delete this
-*    exception statement from all source files in the program, then also delete
-*    it in the license file.
-*/
+ *    Copyright (C) 2018-present MongoDB, Inc.
+ *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
+ *
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
+ */
 
 #include "mongo/platform/basic.h"
 
@@ -41,21 +43,38 @@ using std::vector;
 
 namespace str = mongoutils::str;
 
+bool DepsTracker::_appendMetaProjections(BSONObjBuilder* projectionBuilder) const {
+    if (_needTextScore) {
+        projectionBuilder->append(Document::metaFieldTextScore,
+                                  BSON("$meta"
+                                       << "textScore"));
+    }
+    if (_needSortKey) {
+        projectionBuilder->append(Document::metaFieldSortKey,
+                                  BSON("$meta"
+                                       << "sortKey"));
+    }
+    return (_needTextScore || _needSortKey);
+}
+
 BSONObj DepsTracker::toProjection() const {
     BSONObjBuilder bb;
 
-    if (needTextScore)
-        bb.append(Document::metaFieldTextScore,
-                  BSON("$meta"
-                       << "textScore"));
+    const bool needsMetadata = _appendMetaProjections(&bb);
 
-    if (needWholeDocument)
+    if (needWholeDocument) {
         return bb.obj();
+    }
 
     if (fields.empty()) {
-        // Projection language lacks good a way to say no fields needed. This fakes it.
-        bb.append("_id", 0);
-        bb.append("$noFieldsNeeded", 1);
+        if (needsMetadata) {
+            // We only need metadata, but there is no easy way to express this in the query
+            // projection language. We use $noFieldsNeeded with a meta-projection since this is an
+            // inclusion projection which will exclude all existing fields but add the metadata.
+            bb.append("_id", 0);
+            bb.append("$noFieldsNeeded", 1);
+        }
+        // We either need nothing (as we would if this was logically a count), or only the metadata.
         return bb.obj();
     }
 
@@ -96,7 +115,7 @@ BSONObj DepsTracker::toProjection() const {
 boost::optional<ParsedDeps> DepsTracker::toParsedDeps() const {
     MutableDocument md;
 
-    if (needWholeDocument || needTextScore) {
+    if (needWholeDocument || _needTextScore) {
         // can't use ParsedDeps in this case
         return boost::none;
     }
@@ -119,7 +138,7 @@ boost::optional<ParsedDeps> DepsTracker::toParsedDeps() const {
 
 namespace {
 // Mutually recursive with arrayHelper
-Document documentHelper(const BSONObj& bson, const Document& neededFields);
+Document documentHelper(const BSONObj& bson, const Document& neededFields, int nFieldsNeeded = -1);
 
 // Handles array-typed values for ParsedDeps::extractFields
 Value arrayHelper(const BSONObj& bson, const Document& neededFields) {
@@ -142,33 +161,37 @@ Value arrayHelper(const BSONObj& bson, const Document& neededFields) {
 }
 
 // Handles object-typed values including the top-level for ParsedDeps::extractFields
-Document documentHelper(const BSONObj& bson, const Document& neededFields) {
-    MutableDocument md(neededFields.size());
+Document documentHelper(const BSONObj& bson, const Document& neededFields, int nFieldsNeeded) {
+    // We cache the number of top level fields, so don't need to re-compute it every time. For
+    // sub-documents, just scan for the number of fields.
+    if (nFieldsNeeded == -1) {
+        nFieldsNeeded = neededFields.size();
+    }
+    MutableDocument md(nFieldsNeeded);
 
     BSONObjIterator it(bson);
-    while (it.more()) {
-        BSONElement bsonElement(it.next());
+    while (it.more() && nFieldsNeeded > 0) {
+        auto bsonElement = it.next();
         StringData fieldName = bsonElement.fieldNameStringData();
         Value isNeeded = neededFields[fieldName];
 
         if (isNeeded.missing())
             continue;
 
+        --nFieldsNeeded;  // Found a needed field.
         if (isNeeded.getType() == Bool) {
             md.addField(fieldName, Value(bsonElement));
-            continue;
-        }
+        } else {
+            dassert(isNeeded.getType() == Object);
 
-        dassert(isNeeded.getType() == Object);
-
-        if (bsonElement.type() == Object) {
-            Document sub = documentHelper(bsonElement.embeddedObject(), isNeeded.getDocument());
-            md.addField(fieldName, Value(sub));
-        }
-
-        if (bsonElement.type() == Array) {
-            md.addField(fieldName,
-                        arrayHelper(bsonElement.embeddedObject(), isNeeded.getDocument()));
+            if (bsonElement.type() == BSONType::Object) {
+                md.addField(
+                    fieldName,
+                    Value(documentHelper(bsonElement.embeddedObject(), isNeeded.getDocument())));
+            } else if (bsonElement.type() == BSONType::Array) {
+                md.addField(fieldName,
+                            arrayHelper(bsonElement.embeddedObject(), isNeeded.getDocument()));
+            }
         }
     }
 
@@ -177,6 +200,6 @@ Document documentHelper(const BSONObj& bson, const Document& neededFields) {
 }  // namespace
 
 Document ParsedDeps::extractFields(const BSONObj& input) const {
-    return documentHelper(input, _fields);
+    return documentHelper(input, _fields, _nFields);
 }
 }

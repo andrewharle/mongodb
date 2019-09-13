@@ -6,16 +6,25 @@
 
     // Create a new DB object backed by a mock connection.
     function MockMongo() {
+        this.getMinWireVersion = function getMinWireVersion() {
+            return 0;
+        };
+
+        this.getMaxWireVersion = function getMaxWireVersion() {
+            return 0;
+        };
     }
     MockMongo.prototype = Mongo.prototype;
     MockMongo.prototype.runCommand = function(db, cmd, opts) {
         commandsRan.push({db: db, cmd: cmd, opts: opts});
-        return {
-            ok: 1,
-            n: 100
-        };
+        return {ok: 1, n: 100};
     };
-    var db = new DB(new MockMongo(), "test");
+
+    const mockMongo = new MockMongo();
+    var db = new DB(mockMongo, "test");
+
+    // Attach a dummy implicit session because the mock connection cannot create sessions.
+    db._session = new _DummyDriverSession(mockMongo);
 
     assert.eq(commandsRan.length, 0);
 

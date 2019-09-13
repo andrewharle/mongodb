@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -36,9 +38,7 @@
 #include "mongo/base/string_data.h"
 #include "mongo/bson/util/bson_extract.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/db/operation_context.h"
 #include "mongo/db/wire_version.h"
-#include "mongo/util/decorable.h"
 #include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
@@ -49,24 +49,41 @@ namespace {
 /**
  * Protocols supported by order of preference.
  */
-const Protocol kPreferredProtos[] = {Protocol::kOpCommandV1, Protocol::kOpQuery};
+const Protocol kPreferredProtos[] = {Protocol::kOpMsg, Protocol::kOpCommandV1, Protocol::kOpQuery};
 
-const char kNone[] = "none";
-const char kOpQueryOnly[] = "opQueryOnly";
-const char kOpCommandOnly[] = "opCommandOnly";
-const char kAll[] = "all";
+struct ProtocolSetAndName {
+    StringData name;
+    ProtocolSet protocols;
+};
 
-const OperationContext::Decoration<Protocol> operationProtocolDecoration =
-    OperationContext::declareDecoration<Protocol>();
+constexpr ProtocolSetAndName protocolSetNames[] = {
+    // Most common ones go first.
+    {"all"_sd, supports::kAll},                                                     // new mongod.
+    {"opQueryAndOpMsg"_sd, supports::kOpQueryOnly | supports::kOpMsgOnly},          // new mongos.
+    {"opQueryAndOpCommand"_sd, supports::kOpQueryOnly | supports::kOpCommandOnly},  // old mongod.
+    {"opQueryOnly"_sd, supports::kOpQueryOnly},  // old mongos or very old client or mongod.
+
+    // Then the rest (these should never happen in production).
+    {"none"_sd, supports::kNone},
+    {"opCommandOnly"_sd, supports::kOpCommandOnly},
+    {"opMsgOnly"_sd, supports::kOpMsgOnly},
+};
 
 }  // namespace
 
-Protocol getOperationProtocol(OperationContext* txn) {
-    return operationProtocolDecoration(txn);
-}
-
-void setOperationProtocol(OperationContext* txn, Protocol protocol) {
-    operationProtocolDecoration(txn) = protocol;
+Protocol protocolForMessage(const Message& message) {
+    switch (message.operation()) {
+        case mongo::dbMsg:
+            return Protocol::kOpMsg;
+        case mongo::dbQuery:
+            return Protocol::kOpQuery;
+        case mongo::dbCommand:
+            return Protocol::kOpCommandV1;
+        default:
+            uasserted(ErrorCodes::UnsupportedFormat,
+                      str::stream() << "Received a reply message with unexpected opcode: "
+                                    << message.operation());
+    }
 }
 
 StatusWith<Protocol> negotiate(ProtocolSet fst, ProtocolSet snd) {
@@ -75,9 +92,9 @@ StatusWith<Protocol> negotiate(ProtocolSet fst, ProtocolSet snd) {
 
     ProtocolSet common = fst & snd;
 
-    auto it = std::find_if(begin(kPreferredProtos),
-                           end(kPreferredProtos),
-                           [common](Protocol p) { return common & static_cast<ProtocolSet>(p); });
+    auto it = std::find_if(begin(kPreferredProtos), end(kPreferredProtos), [common](Protocol p) {
+        return common & static_cast<ProtocolSet>(p);
+    });
 
     if (it == end(kPreferredProtos)) {
         return Status(ErrorCodes::RPCProtocolNegotiationFailed, "No common protocol found.");
@@ -86,42 +103,26 @@ StatusWith<Protocol> negotiate(ProtocolSet fst, ProtocolSet snd) {
 }
 
 StatusWith<StringData> toString(ProtocolSet protocols) {
-    switch (protocols) {
-        case supports::kNone:
-            return StringData(kNone);
-        case supports::kOpQueryOnly:
-            return StringData(kOpQueryOnly);
-        case supports::kOpCommandOnly:
-            return StringData(kOpCommandOnly);
-        case supports::kAll:
-            return StringData(kAll);
-        default:
-            return Status(ErrorCodes::BadValue,
-                          str::stream() << "Can not convert ProtocolSet " << protocols
-                                        << " to a string, only the predefined ProtocolSet "
-                                        << "constants 'none' (0x0), 'opQueryOnly' (0x1), "
-                                        << "'opCommandOnly' (0x2), and 'all' (0x3) are supported.");
-    }
-}
-
-StatusWith<ProtocolSet> parseProtocolSet(StringData repr) {
-    if (repr == kNone) {
-        return supports::kNone;
-    } else if (repr == kOpQueryOnly) {
-        return supports::kOpQueryOnly;
-    } else if (repr == kOpCommandOnly) {
-        return supports::kOpCommandOnly;
-    } else if (repr == kAll) {
-        return supports::kAll;
+    for (auto& elem : protocolSetNames) {
+        if (elem.protocols == protocols)
+            return elem.name;
     }
     return Status(ErrorCodes::BadValue,
-                  str::stream() << "Can not parse a ProtocolSet from " << repr
-                                << " only the predefined ProtocolSet constants "
-                                << "'none' (0x0), 'opQueryOnly' (0x1), 'opCommandOnly' (0x2), "
-                                << "and 'all' (0x3) are supported.");
+                  str::stream() << "ProtocolSet " << protocols
+                                << " does not match any well-known value.");
 }
 
-StatusWith<ProtocolSet> parseProtocolSetFromIsMasterReply(const BSONObj& isMasterReply) {
+StatusWith<ProtocolSet> parseProtocolSet(StringData name) {
+    for (auto& elem : protocolSetNames) {
+        if (elem.name == name)
+            return elem.protocols;
+    }
+    return Status(ErrorCodes::BadValue,
+                  str::stream() << name << " is not a valid name for a ProtocolSet.");
+}
+
+StatusWith<ProtocolSetAndWireVersionInfo> parseProtocolSetFromIsMasterReply(
+    const BSONObj& isMasterReply) {
     long long maxWireVersion;
     auto maxWireExtractStatus =
         bsonExtractIntegerField(isMasterReply, "maxWireVersion", &maxWireVersion);
@@ -133,7 +134,7 @@ StatusWith<ProtocolSet> parseProtocolSetFromIsMasterReply(const BSONObj& isMaste
     // MongoDB 2.4 and earlier do not have maxWireVersion/minWireVersion in their 'isMaster' replies
     if ((maxWireExtractStatus == minWireExtractStatus) &&
         (maxWireExtractStatus == ErrorCodes::NoSuchKey)) {
-        return supports::kOpQueryOnly;
+        return {{supports::kOpQueryOnly, {0, 0}}};
     } else if (!maxWireExtractStatus.isOK()) {
         return maxWireExtractStatus;
     } else if (!minWireExtractStatus.isOK()) {
@@ -153,28 +154,86 @@ StatusWith<ProtocolSet> parseProtocolSetFromIsMasterReply(const BSONObj& isMaste
         isMongos = (msgField == "isdbgrid");
     }
 
-    return (!isMongos && supportsWireVersionForOpCommandInMongod(minWireVersion, maxWireVersion))
-        ? supports::kAll
-        : supports::kOpQueryOnly;
+    if (minWireVersion < 0 || maxWireVersion < 0 ||
+        minWireVersion >= std::numeric_limits<int>::max() ||
+        maxWireVersion >= std::numeric_limits<int>::max()) {
+        return Status(ErrorCodes::IncompatibleServerVersion,
+                      str::stream() << "Server min and max wire version have invalid values ("
+                                    << minWireVersion
+                                    << ","
+                                    << maxWireVersion
+                                    << ")");
+    }
+
+    WireVersionInfo version{static_cast<int>(minWireVersion), static_cast<int>(maxWireVersion)};
+
+    auto protos = computeProtocolSet(version);
+    if (isMongos) {
+        // Remove support for protocols that mongos doesn't support.
+        protos &= ~supports::kOpCommandOnly;
+    }
+
+    return {{protos, version}};
 }
 
-bool supportsWireVersionForOpCommandInMongod(int minWireVersion, int maxWireVersion) {
-    // FIND_COMMAND versions support OP_COMMAND (in mongod but not mongos).
-    return (minWireVersion <= WireVersion::FIND_COMMAND) &&
-        (maxWireVersion >= WireVersion::FIND_COMMAND);
-}
-
-ProtocolSet computeProtocolSet(int minWireVersion, int maxWireVersion) {
+ProtocolSet computeProtocolSet(const WireVersionInfo version) {
     ProtocolSet result = supports::kNone;
-    if (minWireVersion <= maxWireVersion) {
-        if (maxWireVersion >= WireVersion::FIND_COMMAND) {
+    if (version.minWireVersion <= version.maxWireVersion) {
+        if (version.maxWireVersion >= WireVersion::SUPPORTS_OP_MSG) {
+            result |= supports::kOpMsgOnly;
+        }
+        if (version.maxWireVersion >= WireVersion::FIND_COMMAND &&
+            version.maxWireVersion <= WireVersion::REPLICA_SET_TRANSACTIONS) {
+            // Future versions may remove support for OP_COMMAND.
             result |= supports::kOpCommandOnly;
         }
-        if (minWireVersion <= WireVersion::RELEASE_2_4_AND_BEFORE) {
+        if (version.minWireVersion <= WireVersion::RELEASE_2_4_AND_BEFORE) {
             result |= supports::kOpQueryOnly;
         }
     }
     return result;
+}
+
+Status validateWireVersion(const WireVersionInfo client, const WireVersionInfo server) {
+    // Since this is defined in the code, it should always hold true since this is the versions that
+    // mongos/d wants to connect to.
+    invariant(client.minWireVersion <= client.maxWireVersion);
+
+    // Server may return bad data.
+    if (server.minWireVersion > server.maxWireVersion) {
+        return Status(ErrorCodes::IncompatibleServerVersion,
+                      str::stream() << "Server min and max wire version are incorrect ("
+                                    << server.minWireVersion
+                                    << ","
+                                    << server.maxWireVersion
+                                    << ")");
+    }
+
+    // Determine if the [min, max] tuples overlap.
+    // We assert the invariant that min < max above.
+    if (!(client.minWireVersion <= server.maxWireVersion &&
+          client.maxWireVersion >= server.minWireVersion)) {
+        std::string errmsg = str::stream()
+            << "Server min and max wire version (" << server.minWireVersion << ","
+            << server.maxWireVersion << ") is incompatible with client min wire version ("
+            << client.minWireVersion << "," << client.maxWireVersion << ").";
+        if (client.maxWireVersion < server.minWireVersion) {
+            return Status(ErrorCodes::IncompatibleWithUpgradedServer,
+                          str::stream()
+                              << errmsg
+                              << "You (client) are attempting to connect to a node (server) that "
+                                 "no longer accepts connections with your (client’s) binary "
+                                 "version. Please upgrade the client’s binary version.");
+        }
+        return Status(ErrorCodes::IncompatibleServerVersion,
+                      str::stream() << errmsg
+                                    << "You (client) are attempting to connect to a node "
+                                       "(server) with a binary version with which "
+                                       "you (client) no longer accept connections. Please "
+                                       "upgrade the server’s binary version.");
+    }
+
+    return Status::OK();
 }
 
 }  // namespace rpc

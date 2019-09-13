@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -32,10 +34,10 @@
 
 #include <utility>
 
+#include "mongo/rpc/message.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/mongoutils/str.h"
-#include "mongo/util/net/message.h"
 
 namespace mongo {
 namespace rpc {
@@ -53,40 +55,31 @@ CommandReplyBuilder& CommandReplyBuilder::setRawCommandReply(const BSONObj& comm
     return *this;
 }
 
-BufBuilder& CommandReplyBuilder::getInPlaceReplyBuilder(std::size_t reserveBytes) {
+BSONObjBuilder CommandReplyBuilder::getInPlaceReplyBuilder(std::size_t reserveBytes) {
     invariant(_state == State::kCommandReply);
     // Eagerly allocate reserveBytes bytes.
     _builder.reserveBytes(reserveBytes);
     // Claim our reservation immediately so we can actually write data to it.
     _builder.claimReservedBytes(reserveBytes);
     _state = State::kMetadata;
-    return _builder;
+    return BSONObjBuilder(_builder);
 }
 
 CommandReplyBuilder& CommandReplyBuilder::setMetadata(const BSONObj& metadata) {
     invariant(_state == State::kMetadata);
-    metadata.appendSelfToBufBuilder(_builder);
+    // OP_COMMAND is only used when communicating with 3.4 nodes and they serialize their metadata
+    // fields differently. We do all up- and down-conversion here so that the rest of the code only
+    // has to deal with the current format.
+    BSONObjBuilder bob(_builder);
+    for (auto elem : metadata) {
+        if (elem.fieldNameStringData() == "$configServerState") {
+            bob.appendAs(elem, "configsvr");
+        } else {
+            bob.append(elem);
+        }
+    }
     _state = State::kOutputDocs;
     return *this;
-}
-
-
-Status CommandReplyBuilder::addOutputDocs(DocumentRange outputDocs) {
-    invariant(_state == State::kOutputDocs);
-    auto rangeData = outputDocs.data();
-    auto dataSize = rangeData.length();
-    _builder.appendBuf(rangeData.data(), dataSize);
-    return Status::OK();
-}
-
-Status CommandReplyBuilder::addOutputDoc(const BSONObj& outputDoc) {
-    invariant(_state == State::kOutputDocs);
-    outputDoc.appendSelfToBufBuilder(_builder);
-    return Status::OK();
-}
-
-ReplyBuilderInterface::State CommandReplyBuilder::getState() const {
-    return _state;
 }
 
 Protocol CommandReplyBuilder::getProtocol() const {
@@ -110,8 +103,7 @@ Message CommandReplyBuilder::done() {
     MsgData::View msg = _builder.buf();
     msg.setLen(_builder.len());
     msg.setOperation(dbCommandReply);
-    _builder.decouple();                     // release ownership from BufBuilder
-    _message.setData(msg.view2ptr(), true);  // transfer ownership to Message
+    _message.setData(_builder.release());
     _state = State::kDone;
     return std::move(_message);
 }

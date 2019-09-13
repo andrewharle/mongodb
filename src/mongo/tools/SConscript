@@ -1,6 +1,12 @@
 # -*- mode: python; -*-
 
 Import('env')
+Import('get_option')
+
+env = env.Clone()
+
+yamlEnv = env.Clone()
+yamlEnv.InjectThirdPartyIncludePaths(libraries=['yaml'])
 
 mongobridge = env.Program(
     target="mongobridge",
@@ -11,15 +17,44 @@ mongobridge = env.Program(
         "mongobridge_options_init.cpp"
     ],
     LIBDEPS=[
-        "$BUILD_DIR/mongo/base",
-        "$BUILD_DIR/mongo/client/clientdriver",
-        "$BUILD_DIR/mongo/db/commands/test_commands_enabled",
-        "$BUILD_DIR/mongo/db/service_context",
-        "$BUILD_DIR/mongo/util/net/network",
-        "$BUILD_DIR/mongo/util/ntservice_mock",
-        "$BUILD_DIR/mongo/util/signal_handlers",
-        "$BUILD_DIR/mongo/util/options_parser/options_parser_init",
+        '$BUILD_DIR/mongo/db/dbmessage',
+        '$BUILD_DIR/mongo/rpc/rpc',
+        '$BUILD_DIR/mongo/transport/message_compressor',
+        '$BUILD_DIR/mongo/transport/service_entry_point',
+        '$BUILD_DIR/mongo/transport/service_executor',
+        '$BUILD_DIR/mongo/transport/transport_layer',
+        '$BUILD_DIR/mongo/util/net/network',
+        '$BUILD_DIR/mongo/util/options_parser/options_parser_init',
+        '$BUILD_DIR/mongo/util/signal_handlers',
+    ],
+    INSTALL_ALIAS=[
+        'tools'
     ],
 )
 
-env.Install("#/", mongobridge)
+mongoebench = yamlEnv.Program(
+    target='mongoebench',
+    source=[
+        'mongoebench_main.cpp',
+        'mongoebench_options.cpp',
+        'mongoebench_options_init.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/db/dbdirectclient',
+        '$BUILD_DIR/mongo/embedded/embedded',
+        '$BUILD_DIR/mongo/embedded/embedded_integration_helpers',
+        '$BUILD_DIR/mongo/shell/benchrun',
+        '$BUILD_DIR/mongo/util/signal_handlers',
+    ],
+    INSTALL_ALIAS=[
+        'embedded-test',
+        'tools',
+    ],
+)
+
+hygienic = get_option('install-mode') == 'hygienic'
+if not hygienic:
+    env.Install("#/", mongobridge)
+    env.Install("#/", mongoebench)
+
+env.Alias('all', mongoebench)  # This ensures it compiles and links, but doesn't copy it anywhere.

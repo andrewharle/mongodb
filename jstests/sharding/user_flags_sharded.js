@@ -8,8 +8,8 @@
         var coll = "userFlagsColl";
         var ns = dbname + "." + coll;
 
-        // First create fresh collection on a new standalone mongod
-        var newShardConn = MongoRunner.runMongod({});
+        // First create fresh collection on a new standalone mongod that will become a shard.
+        var newShardConn = MongoRunner.runMongod({"shardsvr": ""});
         var db1 = newShardConn.getDB(dbname);
         var t = db1.getCollection(coll);
         print(t);
@@ -47,7 +47,8 @@
         // other shard to create the collection on that shard
         s.adminCommand({enablesharding: dbname});
         s.adminCommand({shardcollection: ns, key: {_id: 1}});
-        s.adminCommand({moveChunk: ns, find: {_id: 1}, to: "shard0000", _waitForDelete: true});
+        s.adminCommand(
+            {moveChunk: ns, find: {_id: 1}, to: s.shard0.shardName, _waitForDelete: true});
 
         print("*************** Collection Stats On Other Shard ************");
         var shard2 = s._connections[0].getDB(dbname);

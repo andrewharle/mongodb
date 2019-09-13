@@ -1,29 +1,31 @@
+
 /**
- * Copyright (C) 2016 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- * This program is free software: you can redistribute it and/or  modify
- * it under the terms of the GNU Affero General Public License, version 3,
- * as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
- * As a special exception, the copyright holders give permission to link the
- * code of portions of this program with the OpenSSL library under certain
- * conditions as described in each individual source file and distribute
- * linked combinations including the program with the OpenSSL library. You
- * must comply with the GNU Affero General Public License in all respects
- * for all of the code used other than as permitted herein. If you modify
- * file(s) with this exception, you may extend this exception to your
- * version of the file(s), but you are not obligated to do so. If you do not
- * wish to do so, delete this exception statement from your version. If you
- * delete this exception statement from all source files in the program,
- * then also delete it in the license file.
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kFTDC
@@ -92,8 +94,8 @@ StatusWith<std::string> readFileAsString(StringData filename) {
     if (fd == -1) {
         int err = errno;
         return Status(ErrorCodes::FileOpenFailed,
-                      str::stream() << "Failed to open file " << filename
-                                    << " with error: " << errnoWithDescription(err));
+                      str::stream() << "Failed to open file " << filename << " with error: "
+                                    << errnoWithDescription(err));
     }
     auto scopedGuard = MakeGuard([fd] { close(fd); });
 
@@ -104,6 +106,7 @@ StatusWith<std::string> readFileAsString(StringData filename) {
 
     // Read until the end as needed
     do {
+
         // Retry if interrupted
         size_t retry = 0;
 
@@ -120,8 +123,8 @@ StatusWith<std::string> readFileAsString(StringData filename) {
                 }
 
                 return Status(ErrorCodes::FileStreamFailed,
-                              str::stream() << "Failed to read file " << filename
-                                            << " with error: " << errnoWithDescription(err));
+                              str::stream() << "Failed to read file " << filename << " with error: "
+                                            << errnoWithDescription(err));
             }
 
             break;
@@ -219,6 +222,7 @@ Status parseProcStat(const std::vector<StringData>& keys,
              boost::token_finder([](char c) { return c == '\n'; }, boost::token_compress_on));
          lineIt != string_split_iterator();
          ++lineIt) {
+
         StringData line((*lineIt).begin(), (*lineIt).end());
 
         // Split the line by spaces since that is the only delimiter for stat files.
@@ -246,6 +250,7 @@ Status parseProcStat(const std::vector<StringData>& keys,
         // Check if the key is in the list. /proc/stat will have extra keys, and
         // may not have the keys we want.
         if (keys.empty() || std::find(keys.begin(), keys.end(), key) != keys.end()) {
+
             foundKeys = true;
 
             if (key == "cpu") {
@@ -254,6 +259,7 @@ Status parseProcStat(const std::vector<StringData>& keys,
                 for (size_t index = 0;
                      partIt != string_split_iterator() && index < kAdditionCpuFieldCount;
                      ++partIt, ++index) {
+
                     StringData stringValue((*partIt).begin(), (*partIt).end() - (*partIt).begin());
 
                     uint64_t value;
@@ -328,16 +334,17 @@ Status parseProcMemInfo(const std::vector<StringData>& keys,
              boost::token_finder([](char c) { return c == '\n'; }, boost::token_compress_on));
          lineIt != string_split_iterator();
          ++lineIt) {
+
         StringData line((*lineIt).begin(), (*lineIt).end());
 
         // Split the line by spaces and colons since these are the delimiters for meminfo files.
         // token_compress_on means the iterator skips over consecutive ' '. This is needed for
         // every line.
-        string_split_iterator partIt = string_split_iterator(line.begin(),
-                                                             line.end(),
-                                                             boost::token_finder([](char c) {
-                                                                 return c == ' ' || c == ':';
-                                                             }, boost::token_compress_on));
+        string_split_iterator partIt =
+            string_split_iterator(line.begin(),
+                                  line.end(),
+                                  boost::token_finder([](char c) { return c == ' ' || c == ':'; },
+                                                      boost::token_compress_on));
 
         // Skip processing this line if we do not have a key.
         if (partIt == string_split_iterator()) {
@@ -380,6 +387,7 @@ Status parseProcMemInfo(const std::vector<StringData>& keys,
 
                 builder->appendNumber(keyWithSuffix, static_cast<long long>(value));
             } else {
+
                 builder->appendNumber(key, static_cast<long long>(value));
             }
         }
@@ -399,6 +407,102 @@ Status parseProcMemInfoFile(StringData filename,
 
     return parseProcMemInfo(keys, swString.getValue(), builder);
 }
+
+//
+// Here is an example of the type of string it supports (long lines elided for clarity).
+// > cat /proc/net/netstat
+// TcpExt: SyncookiesSent SyncookiesRecv SyncookiesFailed ...
+// TcpExt: 3437 5938 13368 ...
+// IpExt: InNoRoutes InTruncatedPkts InMcastPkts ...
+// IpExt: 999 1 4819969 ...
+//
+// Parser assumes file consists of alternating lines of keys and values
+// key and value lines consist of space-separated tokens
+// first token is a key prefix that is prepended in the output to each key
+// all prefixed keys and corresponding values are copied to output as-is
+//
+
+Status parseProcNetstat(const std::vector<StringData>& keys,
+                        StringData data,
+                        BSONObjBuilder* builder) {
+
+    using string_split_iterator = boost::split_iterator<StringData::const_iterator>;
+
+    string_split_iterator keysIt;
+    bool foundKeys = false;
+
+    // Split the file by lines.
+    uint32_t lineNum = 0;
+    for (string_split_iterator
+             lineIt = string_split_iterator(
+                 data.begin(),
+                 data.end(),
+                 boost::token_finder([](char c) { return c == '\n'; }, boost::token_compress_on));
+         lineIt != string_split_iterator();
+         ++lineIt, ++lineNum) {
+
+        if (lineNum % 2 == 0) {
+
+            // even numbered lines are keys
+            keysIt = string_split_iterator(
+                (*lineIt).begin(),
+                (*lineIt).end(),
+                boost::token_finder([](char c) { return c == ' '; }, boost::token_compress_on));
+
+        } else {
+
+            // odd numbered lines are values
+            string_split_iterator valuesIt = string_split_iterator(
+                (*lineIt).begin(),
+                (*lineIt).end(),
+                boost::token_finder([](char c) { return c == ' '; }, boost::token_compress_on));
+
+            StringData prefix;
+
+            // iterate over the keys and values in parallel
+            for (uint32_t keyNum = 0;
+                 keysIt != string_split_iterator() && valuesIt != string_split_iterator();
+                 ++keysIt, ++valuesIt, ++keyNum) {
+
+                if (keyNum == 0) {
+
+                    // first token is a prefix to be applied to remaining keys
+                    prefix = StringData((*keysIt).begin(), (*keysIt).end());
+
+                    // ignore line if prefix isn't in requested list
+                    if (!keys.empty() && std::find(keys.begin(), keys.end(), prefix) == keys.end())
+                        break;
+
+                } else {
+
+                    // remaining tokens are key/value pairs
+                    StringData key((*keysIt).begin(), (*keysIt).end());
+                    StringData stringValue((*valuesIt).begin(), (*valuesIt).end());
+                    uint64_t value;
+                    if (parseNumberFromString(stringValue, &value).isOK()) {
+                        builder->appendNumber(prefix.toString() + key.toString(),
+                                              static_cast<long long>(value));
+                        foundKeys = true;
+                    }
+                }
+            }
+        }
+    }
+
+    return foundKeys ? Status::OK()
+                     : Status(ErrorCodes::NoSuchKey, "Failed to find any keys in netstats string");
+}
+
+Status parseProcNetstatFile(const std::vector<StringData>& keys,
+                            StringData filename,
+                            BSONObjBuilder* builder) {
+    auto swString = readFileAsString(filename);
+    if (!swString.isOK()) {
+        return swString.getStatus();
+    }
+    return parseProcNetstat(keys, swString.getValue(), builder);
+}
+
 
 // Here is an example of the type of string it supports:
 //
@@ -434,6 +538,7 @@ Status parseProcDiskStats(const std::vector<StringData>& disks,
              boost::token_finder([](char c) { return c == '\n'; }, boost::token_compress_on));
          lineIt != string_split_iterator();
          ++lineIt) {
+
         StringData line((*lineIt).begin(), (*lineIt).end());
 
         // Skip leading whitespace so that the split_iterator starts on non-whitespace otherwise we
@@ -491,6 +596,7 @@ Status parseProcDiskStats(const std::vector<StringData>& disks,
 
             for (size_t index = 0; partIt != string_split_iterator() && index < kDiskFieldCount;
                  ++partIt, ++index) {
+
                 StringData stringValue((*partIt).begin(), (*partIt).end());
 
                 uint64_t value;

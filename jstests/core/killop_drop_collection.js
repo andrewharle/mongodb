@@ -4,19 +4,26 @@
  * This test confirms that killOp won't interrupt a collection drop, and that the drop occurs
  * successfully.
  *
- * @tags: [requires_parallel_shell]
+ * @tags: [
+ *   assumes_superuser_permissions,
+ *   # Uses index building in background
+ *   requires_background_index,
+ * ]
  */
 (function() {
     "use strict";
 
     var collectionName = "killop_drop";
-    var collection = db.getCollection(collectionName);
+    let collection = db.getCollection(collectionName);
     collection.drop();
-    assert.writeOK(collection.insert({x: 1}));
+    for (let i = 0; i < 1000; i++) {
+        assert.writeOK(collection.insert({x: i}));
+    }
+    assert.writeOK(collection.createIndex({x: 1}, {background: true}));
 
     // Attempt to fsyncLock the database, aborting early if the storage engine doesn't support it.
-    var storageEngine = jsTest.options().storageEngine;
-    var fsyncRes = db.fsyncLock();
+    const storageEngine = jsTest.options().storageEngine;
+    let fsyncRes = db.fsyncLock();
     if (!fsyncRes.ok) {
         assert.commandFailedWithCode(fsyncRes, ErrorCodes.CommandNotSupported);
         jsTest.log("Skipping test on storage engine " + storageEngine +
@@ -25,18 +32,29 @@
     }
 
     // Kick off a drop on the collection.
-    var useDefaultPort = null;
-    var noConnect = false;
-    var awaitDropCommand = startParallelShell(function() {
-        assert.commandWorked(db.getSiblingDB("test").runCommand({drop: "killop_drop"}));
+    const useDefaultPort = null;
+    const noConnect = false;
+    // The drop will occasionally, and legitimately be interrupted by killOp (and not succeed).
+    let awaitDropCommand = startParallelShell(function() {
+        let res = db.getSiblingDB("test").runCommand({drop: "killop_drop"});
+        let collectionFound = db.getCollectionNames().includes("killop_drop");
+        if (res.ok == 1) {
+            // Ensure that the collection has been dropped.
+            assert(
+                !collectionFound,
+                "Expected collection to not appear in listCollections output after being dropped");
+        } else {
+            // Ensure that the collection hasn't been dropped.
+            assert(collectionFound,
+                   "Expected collection to appear in listCollections output after drop failed");
+        }
     }, useDefaultPort, noConnect);
 
     // Wait for the drop operation to appear in the db.currentOp() output.
-    var dropCommandOpId = null;
+    let dropCommandOpId = null;
     assert.soon(function() {
-        var dropOpsInProgress = db.currentOp().inprog.filter(function(op) {
-            return op.query && op.query.drop === collection.getName();
-        });
+        let dropOpsInProgress = db.currentOp().inprog.filter(
+            op => op.command && op.command.drop === collection.getName());
         if (dropOpsInProgress.length > 0) {
             dropCommandOpId = dropOpsInProgress[0].opid;
         }
@@ -46,11 +64,11 @@
     // Issue a killOp for the drop command, then unlock the server. We expect that the drop
     // operation was *not* killed, and that the collection was dropped successfully.
     assert.commandWorked(db.killOp(dropCommandOpId));
-    assert.commandWorked(db.fsyncUnlock());
+    let unlockRes = assert.commandWorked(db.fsyncUnlock());
+    assert.eq(0,
+              unlockRes.lockCount,
+              "Expected the number of fsyncLocks to be zero after issuing fsyncUnlock");
+
     awaitDropCommand();
 
-    // Ensure that the collection has been dropped.
-    assert.eq(-1,
-              db.getCollectionNames().indexOf(collectionName),
-              "Expected collection to not appear in listCollections output after being dropped");
 }());

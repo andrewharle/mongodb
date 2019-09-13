@@ -56,6 +56,20 @@ else
 		cat $t
 	fi
 
+	if grep 'sizeof(WT_UPDATE)' $f > $t; then
+		echo "$f: Use WT_UPDATE_SIZE rather than sizeof(WT_UPDATE)"
+		cat $t
+	fi
+
+	if ! expr "$f" : 'examples/c/.*' > /dev/null &&
+	   ! expr "$f" : 'ext/.*' > /dev/null &&
+	   ! expr "$f" : 'src/include/wiredtiger_ext\.h' > /dev/null &&
+	   ! expr "$f" : 'src/txn/txn_ext\.c' > /dev/null &&
+	   grep WT_TXN_ISO_ $f; then
+		echo "$f: WT_TXN_ISO_XXX constants only for the extension API"
+		cat $t
+	fi
+
 	if ! expr "$f" : 'src/include/queue\.h' > /dev/null &&
 	    egrep 'STAILQ_|SLIST_|\bLIST_' $f ; then
 		echo "$f: use TAILQ for all lists"
@@ -86,6 +100,12 @@ else
 		echo "$f: off_t type declaration, use wt_off_t"
 		cat $t
 	}
+
+	if ! expr "$f" : 'src/include/misc.h' > /dev/null &&
+	    grep '[[:space:]]qsort(' $f > $t; then
+		echo "$f: qsort call, use WiredTiger __wt_qsort instead"
+		cat $t
+	fi
 
 	if ! expr "$f" : 'src/.*/os_setvbuf.c' > /dev/null &&
 	    egrep -w 'setvbuf' $f > $t; then
@@ -178,12 +198,6 @@ else
 	    -e 's/\([	 ]\)sizeof (/\1sizeof(/g' \
 	    -e 's/\([	 ]\)switch(/\1switch (/' \
 	    -e 's/\([	 ]\)while(/\1while (/' \
-	    -e 's/\([	 ,]\)uint\([	 ,]\)/\1u_int\2/g' \
-	    -e 's/\([	 ,]\)u_int8_t\([	 ,]\)/\1uint8_t\2/g' \
-	    -e 's/\([	 ,]\)u_int16_t\([	 ,]\)/\1uint16_t\2/g' \
-	    -e 's/\([	 ,]\)u_int32_t\([	 ,]\)/\1uint32_t\2/g' \
-	    -e 's/\([	 ,]\)u_int64_t\([	 ,]\)/\1uint64_t\2/g' \
-	    -e 's/\([	 ,]\)u_quad\([	 ,]\)/\1uint64_t\2/g' \
 	    -e 's/\([|&=+-]\)  *\([^*]\)/\1 \2/' \
 	    -e 's/[	 ](void) \([a-zA-Z_]\)/(void)\1/' \
 	    -e '/for /!s/;;$/;/' \

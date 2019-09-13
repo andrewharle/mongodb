@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -51,23 +53,28 @@ TEST(PrivilegeParserTest, IsValidTest) {
     ASSERT_FALSE(parsedPrivilege.isValid(&errmsg));
 
     // resource can't have cluster as well as db or collection
-    parsedPrivilege.parseBSON(
-        BSON("resource" << BSON("cluster" << true << "db"
-                                          << ""
-                                          << "collection"
-                                          << "") << "actions" << BSON_ARRAY("find")),
-        &errmsg);
+    parsedPrivilege.parseBSON(BSON("resource" << BSON("cluster" << true << "db"
+                                                                << ""
+                                                                << "collection"
+                                                                << "")
+                                              << "actions"
+                                              << BSON_ARRAY("find")),
+                              &errmsg);
     ASSERT_FALSE(parsedPrivilege.isValid(&errmsg));
 
     // resource can't have db without collection
     parsedPrivilege.parseBSON(BSON("resource" << BSON("db"
-                                                      << "") << "actions" << BSON_ARRAY("find")),
+                                                      << "")
+                                              << "actions"
+                                              << BSON_ARRAY("find")),
                               &errmsg);
     ASSERT_FALSE(parsedPrivilege.isValid(&errmsg));
 
     // resource can't have collection without db
     parsedPrivilege.parseBSON(BSON("resource" << BSON("collection"
-                                                      << "") << "actions" << BSON_ARRAY("find")),
+                                                      << "")
+                                              << "actions"
+                                              << BSON_ARRAY("find")),
                               &errmsg);
     ASSERT_FALSE(parsedPrivilege.isValid(&errmsg));
 
@@ -75,7 +82,9 @@ TEST(PrivilegeParserTest, IsValidTest) {
     parsedPrivilege.parseBSON(BSON("resource" << BSON("db"
                                                       << ""
                                                       << "collection"
-                                                      << "") << "actions" << BSON_ARRAY("find")),
+                                                      << "")
+                                              << "actions"
+                                              << BSON_ARRAY("find")),
                               &errmsg);
     ASSERT(parsedPrivilege.isValid(&errmsg));
 
@@ -83,7 +92,9 @@ TEST(PrivilegeParserTest, IsValidTest) {
     parsedPrivilege.parseBSON(BSON("resource" << BSON("db"
                                                       << "test"
                                                       << "collection"
-                                                      << "foo") << "actions" << BSON_ARRAY("find")),
+                                                      << "foo")
+                                              << "actions"
+                                              << BSON_ARRAY("find")),
                               &errmsg);
     ASSERT(parsedPrivilege.isValid(&errmsg));
 
@@ -98,16 +109,21 @@ TEST(PrivilegeParserTest, ConvertBetweenPrivilegeTest) {
     Privilege privilege;
     std::string errmsg;
     std::vector<std::string> actionsVector;
+    std::vector<std::string> unrecognizedActions;
     actionsVector.push_back("find");
 
     // Works with wildcard db and resource
     parsedPrivilege.parseBSON(BSON("resource" << BSON("db"
                                                       << ""
                                                       << "collection"
-                                                      << "") << "actions" << BSON_ARRAY("find")),
+                                                      << "")
+                                              << "actions"
+                                              << BSON_ARRAY("find")),
                               &errmsg);
     ASSERT(parsedPrivilege.isValid(&errmsg));
-    ASSERT(ParsedPrivilege::parsedPrivilegeToPrivilege(parsedPrivilege, &privilege, &errmsg));
+    ASSERT_OK(ParsedPrivilege::parsedPrivilegeToPrivilege(
+        parsedPrivilege, &privilege, &unrecognizedActions));
+    ASSERT(unrecognizedActions.empty());
     ASSERT(privilege.getActions().contains(ActionType::find));
     ASSERT(!privilege.getActions().contains(ActionType::insert));
     ASSERT_EQUALS(privilege.getResourcePattern(), ResourcePattern::forAnyNormalResource());
@@ -127,10 +143,14 @@ TEST(PrivilegeParserTest, ConvertBetweenPrivilegeTest) {
     parsedPrivilege.parseBSON(BSON("resource" << BSON("db"
                                                       << "test"
                                                       << "collection"
-                                                      << "foo") << "actions" << BSON_ARRAY("find")),
+                                                      << "foo")
+                                              << "actions"
+                                              << BSON_ARRAY("find")),
                               &errmsg);
     ASSERT(parsedPrivilege.isValid(&errmsg));
-    ASSERT(ParsedPrivilege::parsedPrivilegeToPrivilege(parsedPrivilege, &privilege, &errmsg));
+    ASSERT_OK(ParsedPrivilege::parsedPrivilegeToPrivilege(
+        parsedPrivilege, &privilege, &unrecognizedActions));
+    ASSERT(unrecognizedActions.empty());
     ASSERT(privilege.getActions().contains(ActionType::find));
     ASSERT(!privilege.getActions().contains(ActionType::insert));
     ASSERT_EQUALS(privilege.getResourcePattern(),
@@ -151,10 +171,14 @@ TEST(PrivilegeParserTest, ConvertBetweenPrivilegeTest) {
     parsedPrivilege.parseBSON(BSON("resource" << BSON("db"
                                                       << "test"
                                                       << "collection"
-                                                      << "") << "actions" << BSON_ARRAY("find")),
+                                                      << "")
+                                              << "actions"
+                                              << BSON_ARRAY("find")),
                               &errmsg);
     ASSERT(parsedPrivilege.isValid(&errmsg));
-    ASSERT(ParsedPrivilege::parsedPrivilegeToPrivilege(parsedPrivilege, &privilege, &errmsg));
+    ASSERT_OK(ParsedPrivilege::parsedPrivilegeToPrivilege(
+        parsedPrivilege, &privilege, &unrecognizedActions));
+    ASSERT(unrecognizedActions.empty());
     ASSERT(privilege.getActions().contains(ActionType::find));
     ASSERT(!privilege.getActions().contains(ActionType::insert));
     ASSERT_EQUALS(privilege.getResourcePattern(), ResourcePattern::forDatabaseName("test"));
@@ -174,10 +198,14 @@ TEST(PrivilegeParserTest, ConvertBetweenPrivilegeTest) {
     parsedPrivilege.parseBSON(BSON("resource" << BSON("db"
                                                       << ""
                                                       << "collection"
-                                                      << "foo") << "actions" << BSON_ARRAY("find")),
+                                                      << "foo")
+                                              << "actions"
+                                              << BSON_ARRAY("find")),
                               &errmsg);
     ASSERT(parsedPrivilege.isValid(&errmsg));
-    ASSERT(ParsedPrivilege::parsedPrivilegeToPrivilege(parsedPrivilege, &privilege, &errmsg));
+    ASSERT_OK(ParsedPrivilege::parsedPrivilegeToPrivilege(
+        parsedPrivilege, &privilege, &unrecognizedActions));
+    ASSERT(unrecognizedActions.empty());
     ASSERT(privilege.getActions().contains(ActionType::find));
     ASSERT(!privilege.getActions().contains(ActionType::insert));
     ASSERT_EQUALS(privilege.getResourcePattern(), ResourcePattern::forCollectionName("foo"));
@@ -197,7 +225,9 @@ TEST(PrivilegeParserTest, ConvertBetweenPrivilegeTest) {
     parsedPrivilege.parseBSON(
         BSON("resource" << BSON("cluster" << true) << "actions" << BSON_ARRAY("find")), &errmsg);
     ASSERT(parsedPrivilege.isValid(&errmsg));
-    ASSERT(ParsedPrivilege::parsedPrivilegeToPrivilege(parsedPrivilege, &privilege, &errmsg));
+    ASSERT_OK(ParsedPrivilege::parsedPrivilegeToPrivilege(
+        parsedPrivilege, &privilege, &unrecognizedActions));
+    ASSERT(unrecognizedActions.empty());
     ASSERT(privilege.getActions().contains(ActionType::find));
     ASSERT(!privilege.getActions().contains(ActionType::insert));
     ASSERT_EQUALS(privilege.getResourcePattern(), ResourcePattern::forClusterResource());
@@ -213,5 +243,30 @@ TEST(PrivilegeParserTest, ConvertBetweenPrivilegeTest) {
     ASSERT(actionsVector == parsedPrivilege.getActions());
 }
 
+TEST(PrivilegeParserTest, ParseInvalidActionsTest) {
+    ParsedPrivilege parsedPrivilege;
+    Privilege privilege;
+    std::string errmsg;
+    std::vector<std::string> actionsVector;
+    std::vector<std::string> unrecognizedActions;
+    actionsVector.push_back("find");
+
+    parsedPrivilege.parseBSON(BSON("resource" << BSON("db"
+                                                      << ""
+                                                      << "collection"
+                                                      << "")
+                                              << "actions"
+                                              << BSON_ARRAY("find"
+                                                            << "fakeAction")),
+                              &errmsg);
+    ASSERT(parsedPrivilege.isValid(&errmsg));
+    ASSERT_OK(ParsedPrivilege::parsedPrivilegeToPrivilege(
+        parsedPrivilege, &privilege, &unrecognizedActions));
+    ASSERT(privilege.getActions().contains(ActionType::find));
+    ASSERT(!privilege.getActions().contains(ActionType::insert));
+    ASSERT_EQUALS(privilege.getResourcePattern(), ResourcePattern::forAnyNormalResource());
+    ASSERT_EQUALS(1U, unrecognizedActions.size());
+    ASSERT_EQUALS("fakeAction", unrecognizedActions[0]);
+}
 }  // namespace
 }  // namespace mongo

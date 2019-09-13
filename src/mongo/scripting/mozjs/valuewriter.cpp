@@ -1,29 +1,31 @@
+
 /**
- * Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- * This program is free software: you can redistribute it and/or  modify
- * it under the terms of the GNU Affero General Public License, version 3,
- * as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
- * As a special exception, the copyright holders give permission to link the
- * code of portions of this program with the OpenSSL library under certain
- * conditions as described in each individual source file and distribute
- * linked combinations including the program with the OpenSSL library. You
- * must comply with the GNU Affero General Public License in all respects
- * for all of the code used other than as permitted herein. If you modify
- * file(s) with this exception, you may extend this exception to your
- * version of the file(s), but you are not obligated to do so. If you do not
- * wish to do so, delete this exception statement from your version. If you
- * delete this exception statement from all source files in the program,
- * then also delete it in the license file.
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/platform/basic.h"
@@ -33,12 +35,14 @@
 #include <js/Conversions.h>
 
 #include "mongo/base/error_codes.h"
+#include "mongo/platform/decimal128.h"
 #include "mongo/scripting/mozjs/exception.h"
 #include "mongo/scripting/mozjs/implscope.h"
 #include "mongo/scripting/mozjs/jsstringwrapper.h"
 #include "mongo/scripting/mozjs/objectwrapper.h"
 #include "mongo/scripting/mozjs/valuereader.h"
 #include "mongo/util/base64.h"
+#include "mongo/util/represent_as.h"
 
 namespace mongo {
 namespace mozjs {
@@ -57,8 +61,15 @@ int ValueWriter::type() {
         return Undefined;
     if (_value.isString())
         return String;
-    if (JS_IsArrayObject(_context, _value))
+
+    bool isArray;
+
+    if (!JS_IsArrayObject(_context, _value, &isArray)) {
+        uasserted(ErrorCodes::BadValue, "unable to check if type is an array");
+    }
+    if (isArray)
         return Array;
+
     if (_value.isBoolean())
         return Bool;
 
@@ -71,8 +82,14 @@ int ValueWriter::type() {
 
     if (_value.isObject()) {
         JS::RootedObject obj(_context, _value.toObjectOrNull());
-        if (JS_ObjectIsDate(_context, obj))
+        bool isDate;
+
+        if (!JS_ObjectIsDate(_context, obj, &isDate)) {
+            uasserted(ErrorCodes::BadValue, "unable to check if type is a date");
+        }
+        if (isDate)
             return Date;
+
         if (JS_ObjectIsFunction(_context, obj))
             return Code;
 
@@ -89,7 +106,14 @@ std::string ValueWriter::typeAsString() {
         return "undefined";
     if (_value.isString())
         return "string";
-    if (JS_IsArrayObject(_context, _value))
+
+    bool isArray;
+
+    if (!JS_IsArrayObject(_context, _value, &isArray)) {
+        uasserted(ErrorCodes::BadValue, "unable to check if type is an array");
+    }
+
+    if (isArray)
         return "array";
     if (_value.isBoolean())
         return "boolean";
@@ -98,10 +122,21 @@ std::string ValueWriter::typeAsString() {
 
     if (_value.isObject()) {
         JS::RootedObject obj(_context, _value.toObjectOrNull());
-        if (JS_IsArrayObject(_context, obj))
+
+        if (!JS_IsArrayObject(_context, obj, &isArray)) {
+            uasserted(ErrorCodes::BadValue, "unable to check if type is an array");
+        }
+        if (isArray)
             return "array";
-        if (JS_ObjectIsDate(_context, obj))
+
+        bool isDate;
+
+        if (!JS_ObjectIsDate(_context, obj, &isDate)) {
+            uasserted(ErrorCodes::BadValue, "unable to check if type is a date");
+        }
+        if (isDate)
             return "date";
+
         if (JS_ObjectIsFunction(_context, obj))
             return "function";
 
@@ -162,23 +197,37 @@ int64_t ValueWriter::toInt64() {
 }
 
 Decimal128 ValueWriter::toDecimal128() {
+    std::uint32_t signalingFlags = 0;
     if (_value.isNumber()) {
-        return Decimal128(toNumber());
+        return Decimal128(toNumber(), Decimal128::kRoundTo15Digits);
     }
-
     if (getScope(_context)->getProto<NumberIntInfo>().instanceOf(_value))
         return Decimal128(NumberIntInfo::ToNumberInt(_context, _value));
 
     if (getScope(_context)->getProto<NumberLongInfo>().instanceOf(_value))
-        return Decimal128(NumberLongInfo::ToNumberLong(_context, _value));
+        return Decimal128(static_cast<int64_t>(NumberLongInfo::ToNumberLong(_context, _value)));
 
     if (getScope(_context)->getProto<NumberDecimalInfo>().instanceOf(_value))
         return NumberDecimalInfo::ToNumberDecimal(_context, _value);
 
     if (_value.isString()) {
-        return Decimal128(toString());
-    }
+        std::string input = toString();
+        Decimal128 decimal = Decimal128(input, &signalingFlags);
+        uassert(ErrorCodes::BadValue,
+                str::stream() << "Input is not a valid Decimal128 value.",
+                !Decimal128::hasFlag(signalingFlags, Decimal128::SignalingFlag::kInvalid));
+        uassert(ErrorCodes::BadValue,
+                str::stream() << "Input out of range of Decimal128 value (inexact).",
+                !Decimal128::hasFlag(signalingFlags, Decimal128::SignalingFlag::kInexact));
+        uassert(ErrorCodes::BadValue,
+                str::stream() << "Input out of range of Decimal128 value (underflow).",
+                !Decimal128::hasFlag(signalingFlags, Decimal128::SignalingFlag::kUnderflow));
+        uassert(ErrorCodes::BadValue,
+                str::stream() << "Input out of range of Decimal128 value (overflow).",
+                !Decimal128::hasFlag(signalingFlags, Decimal128::SignalingFlag::kOverflow));
 
+        return decimal;
+    }
     uasserted(ErrorCodes::BadValue, str::stream() << "Unable to write Decimal128 value.");
 }
 
@@ -203,14 +252,14 @@ void ValueWriter::writeThis(BSONObjBuilder* b,
     } else if (_value.isNumber()) {
         double val = toNumber();
 
-        // if previous type was integer, keep it
-        int intval = static_cast<int>(val);
+        // if previous type was integer, attempt to represent 'val' as an integer
+        auto intval = representAs<int>(val);
 
-        if (val == intval && _originalParent) {
+        if (intval && _originalParent) {
             // This makes copying an object of numbers O(n**2) :(
             BSONElement elmt = _originalParent->getField(sd);
             if (elmt.type() == mongo::NumberInt) {
-                b->append(sd, intval);
+                b->append(sd, *intval);
                 return;
             }
         }
@@ -308,6 +357,8 @@ void ValueWriter::_writeObject(BSONObjBuilder* b,
             if (scope->getProto<BinDataInfo>().getJSClass() == jsclass) {
                 auto str = static_cast<std::string*>(JS_GetPrivate(obj));
 
+                uassert(ErrorCodes::BadValue, "Cannot call getter on BinData prototype", str);
+
                 auto binData = base64::decode(*str);
 
                 b->appendBinData(sd,
@@ -339,7 +390,7 @@ void ValueWriter::_writeObject(BSONObjBuilder* b,
             }
         }
 
-        auto protoKey = JS::IdentifyStandardInstance(obj);
+        auto protoKey = JS::IdentifyStandardInstanceOrPrototype(obj);
 
         switch (protoKey) {
             case JSProto_Function: {
@@ -364,10 +415,15 @@ void ValueWriter::_writeObject(BSONObjBuilder* b,
                 return;
             }
             case JSProto_Date: {
-                JS::RootedValue dateval(_context);
-                o.callMethod("getTime", &dateval);
+                Date_t d;
+                if (JS::IdentifyStandardPrototype(obj) == JSProto_Date) {
+                    d = Date_t::fromMillisSinceEpoch(0);
+                } else {
+                    JS::RootedValue dateval(_context);
+                    o.callMethod("getTime", &dateval);
+                    d = Date_t::fromMillisSinceEpoch(ValueWriter(_context, dateval).toInt64());
+                }
 
-                auto d = Date_t::fromMillisSinceEpoch(ValueWriter(_context, dateval).toNumber());
                 b->appendDate(sd, d);
 
                 return;

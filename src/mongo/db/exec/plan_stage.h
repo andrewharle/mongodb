@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -37,9 +39,10 @@
 
 namespace mongo {
 
+class ClockSource;
 class Collection;
-class RecordId;
 class OperationContext;
+class RecordId;
 
 /**
  * A PlanStage ("stage") is the basic building block of a "Query Execution Plan."  A stage is
@@ -185,7 +188,7 @@ public:
      * Stage returns StageState::ADVANCED if *out is set to the next unit of output.  Otherwise,
      * returns another value of StageState to indicate the stage's status.
      */
-    virtual StageState work(WorkingSetID* out) = 0;
+    StageState work(WorkingSetID* out);
 
     /**
      * Returns true if no more work can be done on the query / out of results.
@@ -258,7 +261,30 @@ public:
      *
      * Propagates to all children, then calls doInvalidate().
      */
-    void invalidate(OperationContext* txn, const RecordId& dl, InvalidationType type);
+    void invalidate(OperationContext* opCtx, const RecordId& dl, InvalidationType type);
+
+    /*
+     * Releases any resources held by this stage. It is an error to use a PlanStage in any way after
+     * calling dispose(). Does not throw exceptions.
+     *
+     * Propagates to all children, then calls doDispose().
+     */
+    void dispose(OperationContext* opCtx) {
+        try {
+            // We may or may not be attached during disposal. We can't call
+            // reattachToOperationContext()
+            // directly, since that will assert that '_opCtx' is not set.
+            _opCtx = opCtx;
+            invariant(!_opCtx || opCtx == opCtx);
+
+            for (auto&& child : _children) {
+                child->dispose(opCtx);
+            }
+            doDispose();
+        } catch (...) {
+            std::terminate();
+        }
+    }
 
     /**
      * Retrieve a list of this stage's children. This stage keeps ownership of
@@ -319,6 +345,11 @@ public:
 
 protected:
     /**
+     * Performs one unit of work.  See comment at work() above.
+     */
+    virtual StageState doWork(WorkingSetID* out) = 0;
+
+    /**
      * Saves any stage-specific state required to resume where it was if the underlying data
      * changes.
      *
@@ -348,9 +379,16 @@ protected:
     virtual void doReattachToOperationContext() {}
 
     /**
+     * Does stage-specific destruction. Must not throw exceptions.
+     */
+    virtual void doDispose() {}
+
+    /**
      * Does the stage-specific invalidation work.
      */
-    virtual void doInvalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) {}
+    virtual void doInvalidate(OperationContext* opCtx, const RecordId& dl, InvalidationType type) {}
+
+    ClockSource* getClock() const;
 
     OperationContext* getOpCtx() const {
         return _opCtx;
