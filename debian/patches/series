@@ -1,3 +1,4 @@
 hardened-build.patch
 strip-test-binaries.patch
 mozjs45-arm.patch
+fix-gcc-and-fpermissive.patch
